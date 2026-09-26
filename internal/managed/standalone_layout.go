@@ -109,8 +109,11 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			DataDir:         root + "/runtime",
 			GuardianAuthDir: root + "/hook-guardian-state",
 			LogDir:          "/Library/Logs/Cisco/DefenseClaw",
-			HookSocketDir:   "/var/run/defenseclaw-hook",
-			HookSocketPath:  "/var/run/defenseclaw-hook/hook.sock",
+			// macOS clears /var/run at boot and launchd socket hand-off
+			// needs cgo, so the gateway binds the hook socket itself in a
+			// lifecycle-created directory that only _defenseclaw can write.
+			HookSocketDir:   root + "/run",
+			HookSocketPath:  root + "/run/hook.sock",
 			SensorSocketDir: "/var/run/defenseclaw-sensor",
 			ServiceUser:     StandaloneDarwinServiceUser,
 			ServiceGroup:    StandaloneDarwinServiceUser,
