@@ -1,0 +1,101 @@
+---
+title: Foreign-hook guard
+description: Stop user- and project-level hooks from rewriting an AI agent's tool call after DefenseClaw inspected it, for agents that have no managed-hooks-only lock.
+keywords:
+  - DefenseClaw foreign hooks
+  - hook rewrite bypass
+  - Cursor hooks.json
+  - Copilot hooks
+  - OpenCode plugins
+  - allowed_hooks
+---
+
+Most agents run every registered hook, and several let any hook change a
+tool call's input: Claude Code and Codex (`updatedInput`), Cursor
+(`updated_input`), Copilot (`modifiedArgs`), Devin (`updatedInput`),
+OpenCode (`tool.execute.before`) and Amp plugins. A hook in the user's or a
+repository's files could therefore run a command DefenseClaw never saw. The
+foreign-hook guard closes that gap for agents without a vendor lock.
+
+{/* verify-after-merge: M5 — guard scanner, guardian cleanup, hook-runtime check */}
+
+## Which connectors it covers
+
+- **Always:** Cursor, GitHub Copilot, Devin, OpenCode, Amp.
+- **Codex and Claude Code:** only when you set `managed_hooks_only:
+  preserve`. By default their vendor locks already stop user and project
+  hooks.
+
+## What it does
+
+1. **Removes foreign hooks from user-level configuration.** The guardian,
+   acting as the user, removes non-DefenseClaw hook entries and plugins from
+   files such as `~/.cursor/hooks.json`, `~/.copilot/hooks/`,
+   `~/.config/devin/config.json`, `~/.config/opencode/plugins/` and
+   `~/.config/amp/plugins/`. Each removed entry is backed up to
+   `~/.defenseclaw/foreign-hooks-backup/<connector>/<timestamp>/` and logged.
+2. **Blocks while a project hook is present.** Repository files are never
+   rewritten. Before each call the hook checks the working directory and its
+   parents up to the repository root for files such as `.cursor/hooks.json`,
+   `.github/hooks/*.json`, `.github/copilot/settings*.json`,
+   `.devin/*.json`, `.opencode/plugins/` and `.amp/plugins/`. While an
+   unapproved hook is present, tool calls are denied.
+3. **Reads Claude-format files too.** Cursor, Copilot and Devin also load
+   `.claude/settings.json` and `.claude/settings.local.json`, so the guard
+   scans those for them.
+
+The guard reads files without following links and bounds their size. A file
+it cannot read or parse counts as unapproved, so a malformed hook file blocks
+rather than slipping through.
+
+## What a blocked user sees
+
+```text
+enterprise_foreign_hook_blocked: your organization blocks cursor hooks it has
+not approved, because they can change a tool call after DefenseClaw checks it.
+The project file /home/alice/repo/.cursor/hooks.json defines a hook
+(digest sha256:3f5c…). Remove it, or ask your administrator to add the digest
+to enterprise.machine_policy.connectors.cursor.allowed_hooks.
+```
+
+## Approving hooks
+
+Approve a specific hook by its digest, or relax a connector:
+
+```yaml
+enterprise:
+  machine_policy:
+    connectors:
+      cursor:
+        allowed_hooks:
+          - sha256:3f5c…            # from the block message or `policy show`
+      copilot:
+        foreign_hooks: report       # log findings, do not block
+      amp:
+        foreign_hooks: allow        # do not scan
+```
+
+| `foreign_hooks` | User-level foreign hooks | Project-level foreign hooks |
+| --- | --- | --- |
+| `remove` (default) | Removed by the guardian | Tool calls denied until removed or approved |
+| `report` | Reported | Reported; calls allowed |
+| `allow` | Ignored | Ignored |
+
+To see what the guard finds for one user and repository:
+
+```bash
+defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
+```
+
+The public summary the hook reads is `machine-policy.json` in the
+DefenseClaw config directory. It lists each connector's route, mode and
+approved digests; it contains no secrets.
+
+## Limits
+
+- The guard knows the locations each vendor documents. A new location in a
+  future agent release is outside the guard until DefenseClaw adds it.
+- Plugins are code. The guard stops them from loading unapproved, but an
+  approved plugin can still do anything the user can.
+- Deploying hooks your developers need through machine policy avoids the
+  guard altogether.

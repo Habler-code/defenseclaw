@@ -1,12 +1,22 @@
 # Windows managed-enterprise threat model
 
-## Target identity and review scope
+This is the Windows part of the [enterprise threat model](ENTERPRISE-THREAT-MODEL.md).
+The cross-platform document defines the two enterprise profiles, the trust
+zones Z0–Z5 and the boundary table; this document carries the Windows threat
+rows `W-01`…
+
+## Review scope
 
 - Repository: `defenseclaw`
-- Baseline commit: `439a01b54632f9a1a13478fda13562693ec2a36f`
-- Review target: the working-tree implementation of native Windows
-  managed-enterprise services, lifecycle commands, protected state, per-user
-  hook reconciliation, and its certification harness
+- Review target: the native Windows managed-enterprise services, lifecycle
+  commands, protected state, per-user hook reconciliation, vendor machine
+  policy, and the certification harness, in both enterprise profiles:
+  - `secure_client` — installed by Cisco Secure Client; in production and
+    unchanged by the standalone work;
+  - `standalone` — installed by any MDM or an administrator, without Secure
+    Client.
+- A certification record must name the exact tree hash it built and tested.
+  This document does not pin a commit.
 - Primary paths:
   - `cmd/defenseclaw`
   - `internal/cli`
@@ -18,9 +28,9 @@
   - `scripts/test-windows-enterprise-hardening.ps1`
 - Security boundary: a supported Windows endpoint on a local fixed NTFS volume
 
-This model covers the uncommitted implementation as a coherent review target.
-The final certification record must identify the exact tree hash or patch
-digest that was built and tested.
+Rows `W-01`…`W-42` describe controls shared by both profiles unless a row
+names one. Rows `W-43` and later cover the standalone profile. Standalone rows
+that describe work still being merged carry a `verify-after-merge` comment.
 
 ## Security objectives
 
@@ -28,9 +38,10 @@ The Windows deployment must provide the same security properties as the Linux
 and macOS managed-enterprise deployments, expressed in Windows-native terms:
 
 1. A standard local user cannot stop, pause, reconfigure, delete, or replace
-   any of the four production SCM services: `DefenseClawGateway`,
-   `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, or
-   `DefenseClawHookEnumerator`.
+   any production SCM service. The Secure Client profile has five:
+   `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawSensorHelper`,
+   `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. The standalone
+   profile has the same services without `DefenseClawCMIDBroker`.
 2. A standard local user cannot change the protected executable, managed
    configuration, mode pin, target manifest, service definition, or guardian
    authorization ledger.
@@ -76,12 +87,79 @@ and macOS managed-enterprise deployments, expressed in Windows-native terms:
     alias fails closed instead of exhausting the guardian or blessing raced
     bytes. Windows targets require an explicit certified agent version and
     never fall back to the target-owned discovery cache.
-14. The restricted gateway cannot load or call the machine credential provider
-    directly. Only `DefenseClawCMIDBroker` may access the pinned provider, and
-    its bounded local IPC contract authenticates the exact live gateway service
-    identity and cryptographically binds each response to its request.
+14. Secure Client profile: the restricted gateway cannot load or call the
+    machine credential provider directly. Only `DefenseClawCMIDBroker` may
+    access the pinned provider, and its bounded local IPC contract
+    authenticates the exact live gateway service identity and
+    cryptographically binds each response to its request.
+15. Standalone profile: no Secure Client component is loaded or trusted. The
+    gateway runs the local policy engine and reads the optional Cisco AI
+    Defense API key only from a protected credential; a missing or failing
+    key leaves the local verdict in force.
+16. Standalone profile: a normal user cannot disable DefenseClaw's hooks
+    through vendor settings. Codex and Claude Code run with their vendor
+    managed-hooks-only locks by default, and connectors without a vendor lock
+    are covered by the foreign-hook guard.
 
 ## System and trust boundaries
+
+### Zones
+
+| Zone | Secure Client profile | Standalone profile |
+| --- | --- | --- |
+| Z0 Trusted platform and administrator | SCM, LSA, Administrators, Secure Client running `DefenseClawSetup-Enterprise-x64.exe` elevated | SCM, LSA, Administrators, the MDM agent as SYSTEM (for example the Intune Management Extension) running Setup `/ensure` or `defenseclaw.exe enterprise windows ensure` |
+| Z1 Privileged DefenseClaw services | `DefenseClawCMIDBroker` (LocalSystem, `SeChangeNotifyPrivilege` only); `DefenseClawSensorHelper` (LocalSystem, `SeChangeNotifyPrivilege` only); `DefenseClawHookGuardian` and `DefenseClawHookEnumerator` (LocalSystem, explicit privilege list) | Same without the broker |
+| Z2 Restricted gateway | `NT SERVICE\DefenseClawGateway`, restricted service SID | Same |
+| Z3 Administrator-owned state | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw`, `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`, `%ProgramData%\OpenAI\Codex`, `C:\Program Files\ClaudeCode`, `%ProgramData%\Cursor` | `C:\Program Files\Cisco\DefenseClaw`, `C:\ProgramData\Cisco\DefenseClaw` (including `secrets\`), the same vendor machine-policy roots plus `%ProgramData%\GitHub\Copilot\policy.d` |
+| Z4 User session (untrusted) | The AI agent, `defenseclaw-hook.exe` running as the user, per-user registrations and scoped tokens | Same, plus the foreign-hook guard in the hook |
+| Z5 External | Cisco AI Defense through the Secure Client Cloud Management identity; managed telemetry | Cisco AI Defense with an API key (optional), judge, telemetry, the MDM cloud |
+
+<!-- verify-after-merge: M6 — standalone roots, service set and Copilot policy.d target -->
+
+```mermaid
+flowchart TB
+  subgraph Z0["Z0 · Trusted platform and administrator"]
+    MDM["Secure Client or MDM agent<br/>SYSTEM"]
+    LC["Setup /ensure · enterprise windows"]
+    MDM --> LC
+  end
+  subgraph Z1["Z1 · Privileged services (LocalSystem)"]
+    BRK["DefenseClawCMIDBroker<br/>Secure Client only"]
+    SNS["DefenseClawSensorHelper"]
+    GRD["DefenseClawHookGuardian"]
+    ENM["DefenseClawHookEnumerator"]
+  end
+  subgraph Z2["Z2 · Restricted gateway"]
+    GW["DefenseClawGateway<br/>NT SERVICE virtual account"]
+  end
+  subgraph Z3["Z3 · Administrator-owned state"]
+    CFG["ProgramData config · policies · secrets"]
+    LED["targets.yaml · authorization ledger"]
+    VP["Codex · Claude · Cursor · Copilot machine policy"]
+  end
+  subgraph Z4["Z4 · Interactive user (medium integrity)"]
+    AG["AI agent"]
+    HK["defenseclaw-hook.exe"]
+    UF["Profile hook files · scoped token"]
+  end
+  LC -->|"SCM · protected DACLs"| Z1
+  ENM -->|"ProfileList → eligible rows"| LED
+  GRD -->|"impersonated target token"| UF
+  GRD -->|"owned entries"| VP
+  GRD -->|"authorize"| LED
+  AG -->|"loads"| VP
+  AG --> HK
+  HK -->|"peer PID = SCM gateway PID"| GW
+  GW -->|"read-only"| CFG
+  BRK -->|"HMAC named pipe"| GW
+  SNS -->|"fixed IPC"| GW
+```
+
+### Service detail (Secure Client profile)
+
+The standalone profile has the same tree without `DefenseClawCMIDBroker`;
+its gateway does not depend on a broker and never loads a credential
+provider.
 
 ```text
 Administrator / endpoint management
@@ -94,9 +172,15 @@ Windows enterprise lifecycle transaction
   |-- ProgramData\OpenAI\Codex: managed requirements + ownership state
   |-- Program Files\ClaudeCode: owned managed-settings drop-in + state
   |-- SCM: DefenseClawGateway
-  |        DefenseClawCMIDBroker
+  |        DefenseClawCMIDBroker (Secure Client profile only)
+  |        DefenseClawSensorHelper
   |        DefenseClawHookGuardian
   |        DefenseClawHookEnumerator
+  |
+  +--> DefenseClawSensorHelper
+  |      identity: LocalSystem; only ChangeNotify retained
+  |      exposes: fixed, fieldless acquisition requests to the gateway
+  |      the gateway has an SCM dependency on it
   |
   +--> DefenseClawCMIDBroker
   |      identity: LocalSystem; only ChangeNotify retained
@@ -106,7 +190,8 @@ Windows enterprise lifecycle transaction
   |
   +--> DefenseClawGateway
   |      identity: NT SERVICE\DefenseClawGateway, restricted service SID
-  |      depends on: DefenseClawCMIDBroker
+  |      depends on: DefenseClawSensorHelper; DefenseClawCMIDBroker
+  |                  (Secure Client profile)
   |      reads: protected config and guardian authorization
   |      writes: runtime tokens/state and gateway log only
   |
@@ -141,19 +226,21 @@ Interactive standard user / agent process
 The administrator and LocalSystem are trusted deployment authorities. A
 compromised or malicious administrator is outside this model. The gateway is
 not an administrator authority even though it is a machine service. The broker
-has a deliberately narrow provider/IPC role; the enumerator is the continuing
-enrollment authority; and the guardian is the per-user repair authority.
+(Secure Client profile) has a deliberately narrow provider/IPC role; the
+sensor helper answers only fixed acquisition requests; the enumerator is the
+continuing enrollment authority; and the guardian is the per-user repair
+authority.
 
 ## Assets
 
 | Asset | Required property |
 |---|---|
-| Broker, gateway, guardian/enumerator host, and hook executables | Administrator-owned, non-reparse, no untrusted writer, recorded integrity |
+| Broker (Secure Client), sensor helper, gateway, guardian/enumerator host, and hook executables | Administrator-owned, non-reparse, no untrusted writer, recorded integrity |
 | Installer and module | Trusted before elevated execution; protected after installation |
 | Managed `config.yaml` | Administrator-controlled, mode pinned, no runtime downgrade |
 | Protected target manifest | Enumerator-maintained enrollment state; authenticated administrator/System ancestry and exact file DACL; bounded regular-file/link/schema checks; atomic replacement; connector eligibility comes from protected config |
-| SCM service objects and registry configuration | All four exact production services are administrator-owned; standard users have query-only access; image, account, dependencies, privileges, environment, start, recovery, and SDDL are verified |
-| Broker authentication key, pipe, and provider binding | Exact broker/gateway/pipe identity tuple; gateway read-only key access; LocalSystem and exact gateway SID only on the local pipe; pinned trusted provider library |
+| SCM service objects and registry configuration | Every exact production service of the profile is administrator-owned; standard users have query-only access; image, account, dependencies, privileges, environment, start, recovery, and SDDL are verified |
+| Broker authentication key, pipe, and provider binding (Secure Client) | Exact broker/gateway/pipe identity tuple; gateway read-only key access; LocalSystem and exact gateway SID only on the local pipe; pinned trusted provider library |
 | Guardian authorization ledger | LocalSystem/Administrators write; exact gateway service SID read-only |
 | Gateway runtime and scoped tokens | Administrators/LocalSystem and exact gateway service SID only; no standard-user read |
 | Per-user hook footprint | Confined to the manifest SID's canonical profile; exact protected OWNER RIGHTS DACL; regular files have one NTFS link; repairable after target-user tamper |
@@ -161,6 +248,8 @@ enrollment authority; and the guardian is the per-user repair authority.
 | Codex machine requirements | Exact `%ProgramData%\OpenAI\Codex\requirements.toml`, ten managed hook groups, protected ownership/ACL preimage records, and guardian-repaired enrollment state |
 | Claude Code managed policy | DefenseClaw-owned protected drop-in and ownership state; effective precedence verified with the real approved Claude client |
 | Agent application-control attestation | Protected schema-v2 evidence for approved-client rules and Claude effective-policy verification |
+| Standalone AI Defense credential | `C:\ProgramData\Cisco\DefenseClaw\secrets\<name>`; exact DACL: SYSTEM and Administrators full control, the gateway service SID read, nobody else |
+| Standalone registration | `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` marker, the Add/Remove Programs entry, the `DefenseClaw Enterprise` event source and `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`; advisory only, never an authority |
 | Broker, gateway, and guardian/enumerator logs | Separate ACL domains keep the less-trusted gateway from altering LocalSystem guardian/enumerator evidence; the enumerator shares the guardian log rail |
 
 ## Threat actors and assumptions
@@ -202,26 +291,30 @@ enrollment authority; and the guardian is the per-user repair authority.
 2. It validates source type, reparse state, ownership, DACL, signature where
    applicable, and content hash.
 3. It acquires an administrator-only lifecycle lock.
-4. It persists a servicing intent, disables and stops all four managed SCM
-   services, and holds that state through a fresh bounded drain of any already
+4. It persists a servicing intent, disables and stops every managed SCM
+   service of the profile, and holds that state through a fresh bounded drain of any already
    queued SCM failure restart before mutating protected files or service
    definitions.
 5. It snapshots the owned deployment, stages same-volume replacements, applies
    protected DACLs, creates or repairs `DefenseClawGateway`,
-   `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and
-   `DefenseClawHookEnumerator`, and pins each service's image, identity,
-   dependencies, privileges, environment, recovery policy, and DACL.
-6. It verifies exact static postconditions while all four services remain
-   disabled. Activation demand-starts the broker first, then the guardian and a
-   fresh successful reconcile while the gateway remains disabled. It next
-   starts the gateway and then the enumerator, proves full readiness, and only
-   then promotes all four services to automatic start. An interrupted
-   activation re-enters a fresh disable/stop/drain cycle.
+   `DefenseClawSensorHelper`, `DefenseClawHookGuardian`,
+   `DefenseClawHookEnumerator` and, in the Secure Client profile,
+   `DefenseClawCMIDBroker`, and pins each service's image, identity,
+   dependencies, privileges, environment (including the
+   `DEFENSECLAW_DEPLOYMENT_MODE` and, for standalone,
+   `DEFENSECLAW_ENTERPRISE_PROFILE` pins), recovery policy, and DACL.
+6. It verifies exact static postconditions while every service remains
+   disabled. Activation demand-starts the broker first (Secure Client
+   profile), then the guardian and a fresh successful reconcile while the
+   gateway remains disabled. It next starts the gateway (SCM starts the
+   sensor helper first as a dependency) and then the enumerator, proves full
+   readiness, and only then promotes every service to automatic start. An
+   interrupted activation re-enters a fresh disable/stop/drain cycle.
 7. `-NoStart` deliberately commits a disabled, stopped deployment. Only a
    complete later `Repair` without `-NoStart` may activate it; raw service
    starts are not an activation API. Failure rolls back and returns non-zero.
 
-### Credential request
+### Credential request (Secure Client profile)
 
 1. `DefenseClawGateway` selects the broker only when the protected service
    environment supplies the complete broker service, gateway service, local
@@ -238,12 +331,28 @@ enrollment authority; and the guardian is the per-user repair authority.
    operation time, and a protected 32-byte key. The gateway accepts a response
    only when its nonce and HMAC match the request.
 
+### Standalone credential and inspection
+
+1. The standalone gateway resolves the Cisco AI Defense API key named by
+   `enterprise.inspection.ai_defense.credential` only from
+   `C:\ProgramData\Cisco\DefenseClaw\secrets\<name>`, after the trusted-path
+   check and an exact reader-DACL check (SYSTEM and Administrators full
+   control, the gateway service SID read-only, no other ACE). The value is a
+   bounded single line and is never logged.
+2. An inline `cisco_ai_defense.api_key` in the managed config is rejected,
+   and `api_key_env` is ignored, so a user environment cannot supply a key.
+3. With no key, or while AI Defense is unreachable, the local engine's
+   verdict stands and the gateway reports inspection as available.
+
 ### Enumerator enrollment and inventory access
 
 1. `DefenseClawHookEnumerator` loads the protected `managed_enterprise` config,
-   walks HKLM ProfileList, and filters to valid interactive `S-1-5-21-...` user
-   SIDs with absolute existing profile directories and reparse-free profile
-   ancestry. Well-known/service SIDs, bare-domain SIDs, duplicate stale rows,
+   walks HKLM ProfileList, and filters to valid interactive user SIDs with
+   absolute existing profile directories and reparse-free profile ancestry.
+   The Secure Client profile accepts local and domain `S-1-5-21-...` SIDs; the
+   standalone profile also accepts Microsoft Entra ID `S-1-12-1-...` SIDs
+   through one interactive-user predicate.
+   <!-- verify-after-merge: M6 — Entra SID acceptance in the Go enumerator --> Well-known/service SIDs, bare-domain SIDs, duplicate stale rows,
    invalid homes, and explicitly excluded SIDs are dropped.
 2. Connector families come from protected guardrail config and are reduced to
    the Windows managed-hook set. For a previously known `(SID, connector)` row,
@@ -307,7 +416,8 @@ enrollment authority; and the guardian is the per-user repair authority.
 3. Before sending a request, the managed hook resolves the exact running
    gateway PID from SCM and verifies that the connected loopback peer PID is
    that same process. A missing, stopped, changed, or mismatched PID is a
-   fail-closed result.
+   fail-closed result. The standalone hook applies the same check, and before
+   the call it also runs the foreign-hook guard (W-50).
 4. Constant-time token comparison authorizes only that connector's hook or
    notification route.
 5. Management, status, configuration, policy, scan, and cross-connector routes
@@ -320,7 +430,7 @@ enrollment authority; and the guardian is the per-user repair authority.
 
 | ID | Threat / attack path | Required control | Required evidence |
 |---|---|---|---|
-| W-01 | Standard user calls SCM stop, pause, user-control, config, failure, SDDL, or delete | Protected service DACL with only query/interrogate rights for `BU`; protected service registry configuration on all four exact production services | Exact non-admin `sc.exe` probes return access denied for `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`, which remain unchanged/running |
+| W-01 | Standard user calls SCM stop, pause, user-control, config, failure, SDDL, or delete | Protected service DACL with only query/interrogate rights for `BU`; protected service registry configuration on every exact production service of the profile | Exact non-admin `sc.exe` probes return access denied for `DefenseClawGateway`, `DefenseClawSensorHelper`, `DefenseClawHookGuardian`, `DefenseClawHookEnumerator` and, in the Secure Client profile, `DefenseClawCMIDBroker`, which remain unchanged/running |
 | W-02 | User replaces an executable, script, config, manifest, metadata, or ledger | Fixed local NTFS roots; no reparse points; trusted owner and ancestor chain; protected DACLs; content hashes/signatures | Write/delete/rename/ACL probes fail; verify catches byte or ACL drift |
 | W-03 | Elevated CLI executes a user-planted PowerShell or installer/module, or gives elevated PowerShell a shared user-writable temp/cache/home root | Resolve the system PowerShell by OS API; ignore `PATH` and poisoned known-folder environment variables; trust-check installer and adjacent module before execution; atomically create a 128-bit-random child under Windows Temp with a protected System/Administrators-only owner/DACL and pin `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `HOME`, `HOMEDRIVE`, and `HOMEPATH` to that exact one-shot child | Poisoned `PATH`, `SystemRoot`, known-folder env, working directory, installer, module, shared-temp-parent, protected-temp-child, PowerShell module-cache location, and cleanup tests |
 | W-04 | User downgrades enterprise mode through user config or environment | SCM-owned environment pins `managed_enterprise`; protected config must agree; runtime PATCH cannot change it | Config conflict and untrusted-config tests; service registry DACL test |
@@ -339,39 +449,58 @@ enrollment authority; and the guardian is the per-user repair authority.
 | W-17 | Normal installations silently change after adding enterprise support | All new enforcement branches require effective `managed_enterprise`; lifecycle install is explicit; the Windows process entry point returns before even consulting SCM service detection unless the protected installer-owned service-name marker is present; existing unmanaged hook self-heal remains active | Entrypoint seam proves the SCM detector and service executor are never called without the marker; full mode matrix, pre-install no-machine-mutation proof, and a disposable normal-mode hook deletion/replacement followed by exact live auto-heal |
 | W-18 | Target owner uses implicit `WRITE_DAC`, an OWNER RIGHTS ACE, or `WRITE_OWNER` to make a permissive/irreparable managed object | Exact protected canonical DACL: files have four direct ACEs; directories have direct OWNER RIGHTS plus direct and OI/CI/inherit-only target, System, and Administrators ACEs (seven total). OWNER RIGHTS gets only `READ_CONTROL`; target gets required read/write/execute/delete rights but no `WRITE_DAC`/`WRITE_OWNER`; System and Administrators get full control. LocalSystem recovery is DACL-only and requires exact owner | Exact ACE mask/inheritance tests for both object types, self-deny recovery, ordinary write/atomic-replace compatibility, owner/DACL tamper repair |
 | W-19 | Target replaces a regular footprint file with an NTFS hard link to a file outside its profile | Require a handle-observed link count of exactly one before accepting a regular file; quarantine only the in-profile link under the target token; rollback uses no-follow/atomic replacement | Outside-sentinel hard-link repair and forced-rollback tests |
-| W-20 | Standard user terminates, suspends, injects into, changes security on, or duplicates a dangerous handle from any managed service process | Service/process token and object DACLs; restricted gateway service SID; no standard-user process or token mutation handles | Explicit OpenProcess, OpenThread, process-DACL/owner, token-duplicate/impersonate/adjust, taskkill, and PID-continuity probes for all four service processes |
-| W-21 | A managed service exits once recovery actions are exhausted, or a planned stop races automatic recovery | All four services use three restart delays with the final action repeated indefinitely; unexpected command exits terminate the host as a base SCM failure; accepted Stop/Shutdown is graceful and returns cleanly | Four consecutive forced terminations for each service plus a clean stop held beyond the longest recovery delay |
+| W-20 | Standard user terminates, suspends, injects into, changes security on, or duplicates a dangerous handle from any managed service process | Service/process token and object DACLs; restricted gateway service SID; no standard-user process or token mutation handles | Explicit OpenProcess, OpenThread, process-DACL/owner, token-duplicate/impersonate/adjust, taskkill, and PID-continuity probes for every service process of the profile |
+| W-21 | A managed service exits once recovery actions are exhausted, or a planned stop races automatic recovery | Every managed service uses three restart delays with the final action repeated indefinitely; unexpected command exits terminate the host as a base SCM failure; accepted Stop/Shutdown is graceful and returns cleanly | Four consecutive forced terminations for each service plus a clean stop held beyond the longest recovery delay |
 | W-22 | User-controlled loader environment, shared temp/cache/home content, PowerShell function, module, or preloaded helper type hijacks elevated lifecycle code | Fixed System32 PowerShell, strict environment/working directory, one unique protected directory for every writable temp/cache/home variable, pre-import module trust, module-qualified built-ins, randomized retained native-helper type | Poisoned loader/environment/module/function/type smokes, PowerShell ModuleAnalysisCache containment, and protected one-shot-directory ACL/use probes in Windows PowerShell 5.1 and PowerShell 7 |
 | W-23 | Authorization remains green with an extra removed/disabled target | Healthy status and verify require exact target-set equality, strict schema/counts, no duplicates, same reconcile identity, and freshness | Extra/stale/removed target tests for status, verify, and gateway readiness |
-| W-24 | A caller uses `-AllowUnsigned` with production names/roots, a near-miss certification scope, a non-install action, or implicit core-only semantics to import or deploy untrusted code | Before module import, accept unsigned artifacts only for `Install`/`Upgrade`/`Repair` with exact case-sensitive same-id certification service names, exact same-id Program Files/ProgramData certification roots, and a required same-id certification CODEX_HOME basename. Select core-only behavior through a separate explicit flag that requires the same scope, rejects production attestations and Codex targets, and is bound into transaction recovery; retain all fixed-NTFS, no-reparse, owner, and DACL source checks | Bootstrap, module, public-CLI, recovery, and live-harness matrix tests: full unsigned uses home/no-core, Claude-only uses home/core, signed production and read-only use neither; negative production, mismatched-id, case-near-miss, nested-root, CODEX_HOME-near-miss, and flag-combination assertions |
+| W-24 | A caller uses `-AllowUnsigned` with production names/roots, a near-miss certification scope, an action outside the lifecycle, or implicit core-only semantics to import or deploy untrusted code | Before module import, accept unsigned artifacts only for the seven lifecycle actions (`Install`, `Upgrade`, `Repair`, `Reconcile`, `Status`, `Verify`, `Uninstall`) and only with exact case-sensitive same-id certification service names, exact same-id Program Files/ProgramData certification roots, and a required same-id certification CODEX_HOME basename. Select core-only behavior through a separate explicit flag that is valid only for `Install`/`Upgrade`/`Repair`, requires the same scope, rejects production attestations and Codex targets, and is bound into transaction recovery; retain all fixed-NTFS, no-reparse, owner, and DACL source checks. The standalone profile's hash-pinned trust (W-45) is a separate production mode, not an extension of this switch | Bootstrap, module, public-CLI, recovery, and live-harness matrix tests: full unsigned uses home/no-core, Claude-only uses home/core, signed production and read-only use neither; negative production, mismatched-id, case-near-miss, nested-root, CODEX_HOME-near-miss, and flag-combination assertions |
 | W-25 | A standard-user fake listener wins the exact API port and returns a valid allow response while the gateway is stopped or restarting | Bind hook trust to both the connector token and the connected server PID; the PID must equal the exact current SCM gateway PID, not merely any process listening on loopback | Stop/crash the gateway, bind the exact port as a non-admin, return valid allow JSON, and race service restart; the hook must deny/fail closed and the fake listener must observe zero authenticated requests |
 | W-26 | Codex managed-hook configuration is removed, redirected, or bypassed | Protect the machine requirements and enrollment state with administrator-owned ACLs, verify the exact ten-event policy, and require end-to-end managed-hook contact or a blocked operation in certification | Invoke the approved Codex client against a bounded local provider and require SessionStart/UserPromptSubmit audit evidence or a causal block |
-| W-27 | An old officially signed or custom unsigned agent avoids a newer managed-hook contract | When an enterprise opts into application control, allow only approved signed clients at or above the minimum versions. **The source of truth is `cli/defenseclaw/inventory/hook_contracts.json` for the tested build** — the certification harness reads the floors from there, and any contract update automatically retunes the check without a threat-model edit. As of this document snapshot, the floors are Codex 0.133.0 and Claude 2.1.152 (fixture values, not authoritative — consult the contract) | In the optional application-control profile, approved clients start and explicitly supplied old signed Codex/Claude and custom unsigned lookalikes fail process creation with an application-control denial |
+| W-27 | An old officially signed or custom unsigned agent avoids a newer managed-hook contract | When an enterprise opts into application control, allow only approved signed clients at or above the minimum versions. The hook-contract floors are the source of truth: `cli/defenseclaw/inventory/hook_contracts.json` (mirrored in `internal/gateway/connector/hook_contract.go`) currently starts Codex at 0.124.0, Claude Code at 2.1.154, Cursor at 2.4.0 and Copilot at 1.0.18. The Secure Client installer's own minimums in `internal/enterprisehooks/install_windows.go` (Codex 0.131.0, Claude Code 2.1.152, Cursor 1.7.0) are tracked for alignment in issue #901; the standalone profile takes its floors from the contract table. Certification records the floors of the tested build rather than this document | In the optional application-control profile, approved clients start and explicitly supplied old signed Codex/Claude and custom unsigned lookalikes fail process creation with an application-control denial |
 | W-28 | An unregistered interactive SID invokes the installed managed hook or reuses another target's state | Exact SID membership in protected connector enrollment state is checked before token use; absence is fail-closed and diagnostic | Run the installed managed hook under a temporary non-admin SID absent from the manifest; require non-zero, causal enrollment text, and byte/security-exact user trees |
 | W-29 | A user removes or weakens Codex machine requirements/enrollment state | Administrator-owned protected DACLs, private ownership/ACL-preimage records, hidden read-only verify, and guardian reconciliation of the exact ten-event canonical document | Standard-user write/delete/DACL attempts fail; administrator-injected deletion, DACL drift, event removal, and state removal are unhealthy until exact auto-heal |
 | W-30 | Uninstall removes a shared vendor tree, another administrator's setting, or a value that changed after install | Record exact ownership and preimages; remove/restore only a current value still equal to the DefenseClaw-owned postimage; preserve shared parents and unrelated content | Install over absent and preexisting shared parents, mutate unrelated values, uninstall and purge, then compare preserved parents/preimages and require only owned Codex/Claude wiring to be absent |
-| W-31 | A certification-only `CODEX_HOME` leaks into the machine environment or a managed service and changes production behavior | Treat `-CertificationCodexHome` only as an exact unsigned-scope marker and pass it solely to a disposable actual-Codex child; machine, coordinator, and all four managed-service environments omit `CODEX_HOME` | Before/after machine-environment snapshot, all four service registry environment inspections, hostile `USERPROFILE` decoys, and exact cleanup of the alternate child without enumerating or mutating live `.codex` |
+| W-31 | A certification-only `CODEX_HOME` leaks into the machine environment or a managed service and changes production behavior | Treat `-CertificationCodexHome` only as an exact unsigned-scope marker and pass it solely to a disposable actual-Codex child; machine, coordinator, and every managed-service environment omit `CODEX_HOME` | Before/after machine-environment snapshot, every service registry environment inspection, hostile `USERPROFILE` decoys, and exact cleanup of the alternate child without enumerating or mutating live `.codex` |
 | W-32 | A disabled, removed, or deleted-account SID remains enrolled in native machine policy and can keep invoking the hook | Reconcile authorization and native connector state to exact enabled-manifest equality. Remove the final owned Claude policy/state transactionally, retain any per-user runtime only as inert data, and reject the stale SID before credential use | Disable the only Claude row (and repeat with an unavailable account/profile), reconcile, require exact zero Claude authorization and absent owned machine policy/state, then invoke as the former SID and require a causal non-enrollment failure with no audit event |
 | W-33 | Valid application-control evidence is reused as proof that Claude's managed hooks are effective | Keep client process control and effective Claude policy as independent fields and transactions. Structural files, hashes, owners, and DACLs cannot set the effective-policy field | Preserve byte-exact application-control evidence while deleting the Claude policy and require effective-policy health to fail independently; run the real client with hostile precedence before accepting a separate manifest-bound Claude attestation |
 | W-34 | Install, a core-only test, or stale evidence claims production security before a live Claude run against the current manifest | Initial install always leaves Claude effective-policy and aggregate security incomplete. Only production `Repair -AttestClaudeEffectivePolicy` after the live hostile-precedence proof may persist schema-v2, manifest-hash-bound evidence; core certification forbids persistence | Assert phase-one Install/Status/Verify remain incomplete, run the real Claude proof, perform the attested Repair, then require aggregate completion. Change the manifest or use `-ClaudeOnly` and require the claim to be absent/incomplete |
 | W-35 | Target races a validated token, sidecar, contract, helper, or hook artifact into a huge sparse file, reparse point, hard link, or changing same-name object while the guardian reads it | Managed-only stable handle readers with no-reparse/single-link validation and format-specific byte ceilings; constant-memory double-pass artifact hashing; managed helpers always overwrite exact embedded bytes; authorized oversized regular obstructions are quarantined and recreated under the target token | One-TiB sparse exact-compare test; managed token/sidecar/contract/digest bounded-read tests; managed-versus-unmanaged helper test; authorized oversized-obstruction auto-heal with quarantine cleanup |
-| W-36 | A planned stop or interrupted activation races an `SC_ACTION_RESTART` that SCM already queued, reviving a service against a partially replaced deployment or the gateway without fresh guardian evidence | Durable servicing intent; all four services disabled before stop; fresh monotonic 65-second drain while disabled; durable activation phase that invalidates old quiescence timestamps; demand-start order broker, guardian/fresh reconcile, gateway, enumerator; readiness before all four become automatic; every recovery path reasserts disabled/stopped and begins a new drain | Executable latent-restart model plus crash injection before and after every activation transition in Windows PowerShell 5.1 and PowerShell 7; no managed service escapes the transaction and no gateway becomes startable before fresh guardian evidence |
+| W-36 | A planned stop or interrupted activation races an `SC_ACTION_RESTART` that SCM already queued, reviving a service against a partially replaced deployment or the gateway without fresh guardian evidence | Durable servicing intent; every managed service disabled before stop; fresh monotonic 65-second drain while disabled; durable activation phase that invalidates old quiescence timestamps; demand-start order broker (Secure Client profile), guardian/fresh reconcile, gateway (with its sensor-helper dependency), enumerator; readiness before every service becomes automatic; every recovery path reasserts disabled/stopped and begins a new drain | Executable latent-restart model plus crash injection before and after every activation transition in Windows PowerShell 5.1 and PowerShell 7; no managed service escapes the transaction and no gateway becomes startable before fresh guardian evidence |
 | W-37 | A crash after committed uninstall or during purge removes the metadata needed to authenticate a retry, or generic dispatcher initialization recreates a deleted Program Files tree | Authenticate and route uninstall/purge recovery before generic layout creation; keep a protected tombstone/purge receipt outside the recursively deleted root until deletion succeeds; remove authentication metadata last; make committed uninstall and partial purge retries idempotent; never initialize the install tree on a tombstone path | Crash injection at each teardown, tombstone, and purge phase; retry with the install root absent and with partially deleted state; exact proof that services/policy stay removed, shared vendor parents survive, and no managed root is recreated |
 | W-38 | Installed-CLI self-uninstall leaves a mapped executable, lets a user race/lock the observable retired tree, loses its only cleanup attempt to a sharing violation, or deadlocks because its detached helper inherits the CLI's captured output pipe | Remove all owned machine command references first; strip Users RX before same-volume atomic retirement; bind a protected prepared/committed receipt to exact caller creation time, file identity, hashes, tombstone, roots, and service absence; use native `CreateProcessW` with no inherited or standard handles, a fixed System32 engine, and a protected receipt-bound temp/cache/home environment; authenticate every survivor and retry bounded sharing violations while releasing the lifecycle lock between attempts; delete the isolated environment, helper, and receipt last. Require already-running clients to reload instead of retaining an enterprise launcher outside the purged root | Transaction crash injection before/after rename and receipt commit; standard-user directory-notification/locker race; captured-parent probe proves the helper remains alive after CLI pipe EOF; hold the installed hook without delete sharing through immediate post-uninstall checks, require canonical root/services/policy already absent, release it, and require exact bounded retirement with no sibling/environment/helper/receipt leak; fresh-client no-policy proof |
 | W-39 | A medium-integrity user creates an unused raw `DefineDosDevice` alias to a trusted local subdirectory. The alias reports `Fixed` and `NTFS`, is absent from `subst.exe`, and redirects an elevated installer source, managed root, certification home, or impersonated profile mutation | Require exact drive-letter syntax, fixed NTFS, a volume GUID from `GetVolumeNameForVolumeMountPointW`, exact root membership in a bounded `GetVolumePathNamesForVolumeNameW` list, and one identical well-formed `QueryDosDeviceW` target for the effective drive, `Global\<drive>`, and volume GUID. Reject volume-folder mounts and every reparse ancestor. Revalidate after transaction locks and adjacent to source import/copy, managed-root mutation, certification-home use, and WTS-profile mutation | Under a real medium token, create a raw unused drive alias to a local NTFS directory; prove legacy `DriveInfo`/filesystem/`subst.exe` predicates would accept it; require Go trust validators and both Windows PowerShell 5.1 and 7 bootstrap/module paths to reject aliased installer, install root, state root, and certification home without creating artifacts. Require the ordinary mounted system drive to pass and remove the alias exactly |
 | W-40 | The tested medium user or another same-user process forges certification stdout, stderr, or a completion marker in a handoff directory, or rewrites the short-lived scheduled task, and causes the elevated coordinator to record a false pass | Never trust user-writable result files. Give the scheduled task an exact Administrators-owned protected DACL with only System/Administrators full control and target-SID read/execute. Start it with `IRegisteredTask.RunEx` using the exact resolved WTS session and user SID, then capture bounded output over an administrator-owned named pipe whose DACL grants only System/Administrators full control and the exact target SID data access. Require `GetNamedPipeClientProcessId` to equal the returned `IRunningTask.EnginePID`, then bind the receipt to the random nonce, exact SID, PID, approved PowerShell image, and active WTS session before sending an acknowledgement | Execute the real exact-session/exact-SID scheduled-task and pipe handshake in 64-bit PowerShell 7; keep Windows PowerShell 5.1 coverage on the fixed production bootstrap/module boundary; re-read and validate the task owner plus exact three-ACE DACL before start; static contract rejects file-backed completion/output; every active-user fixture binds its ready PID to the exact `RunEx` task instance, and every high-stakes result records PID binding and `user_writable_files_trusted=false` |
 | W-41 | A standard user or same-machine process calls the LocalSystem credential provider, impersonates the gateway, replays a broker response, or tricks the restricted gateway into accepting a fake broker | Exact broker/gateway/pipe identity tuple; protected key with gateway read-only access; pipe DACL limited to LocalSystem and the exact gateway SID; pipe-client SID impersonation plus live SCM gateway-PID match; bounded strict protocol, nonce replay rejection, request-bound response HMAC, and all-or-none protected gateway configuration | Unauthorized pipe-open and wrong-SID/PID probes, broker/gateway scope-mismatch tests, key ACL/read-denial checks, replay/tamper/oversize tests, provider-path trust validation, and incomplete-configuration fail-closed tests |
 | W-42 | Automatic enumeration enrolls an ineligible identity, overwrites operator state, corrupts the manifest, or broadens gateway read access across a user profile | ProfileList SID/home/reparse filters; protected-config connector allow-set; supported CLI/version gate for new rows; preservation of existing `enabled`/`deferred`/version state; authenticated bounded manifest and atomic byte-change publication; fixed inventory-dotdir catalog; exact gateway Read+Execute/Traverse ACE merged only into existing non-null directory DACLs; per-path failures logged | Eligible/ineligible profile fixtures, new-row auto-enrollment and no-CLI skip tests, disabled-row preservation, manifest trust/race/atomicity tests, repeated idempotent DACL passes, null/missing-directory handling, and proof that no ACE is added to the profile root or unrelated directories |
+| W-43 | A user or a partial configuration switches the enterprise profile, or a standalone config is applied to Secure Client services (or the reverse) | `DEFENSECLAW_ENTERPRISE_PROFILE` in the protected service environment and `enterprise.profile` in the managed config must agree; a Secure Client config may set only `enterprise.profile`; hot reload refuses a profile change (`enterprise_profile_change`); the lifecycle refuses to install one profile while the other is present (`profile_conflict`) | `internal/managed/profile_test.go`, `internal/config/enterprise_test.go`, the config-manager reload test, and the lifecycle profile-resolution tests in `internal/cli/windows_enterprise_standalone_test.go` <!-- verify-after-merge: M6 --> |
+| W-44 | The standalone lifecycle launches a user-writable or lookalike PowerShell, or .NET and PowerShell loader variables hijack the elevated engine | Resolve the newest stable PowerShell 7 only from `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, require it as a strict descendant of the trusted Program Files root with an administrator-only ancestor chain and a valid Microsoft Authenticode signature on `pwsh.exe`, never consult `PATH` or App Paths, and start it with the protected environment allowlist (loader variables such as `DOTNET_*`, `CORECLR_*`, `COMPlus_*` and `PSModulePath` do not pass). A missing or untrusted engine fails with `powershell7_required` or `powershell7_untrusted`. The Secure Client profile keeps its Windows PowerShell 5.1 launch path | Version-parse, trusted-root, signer, and environment tests in `internal/cli/windows_enterprise_pwsh*_test.go`; a host run with PowerShell 7 absent and with a user-owned `pwsh.exe` earlier on `PATH` <!-- verify-after-merge: M6 --> |
+| W-45 | An unsigned standalone payload is swapped between staging and execution, or an arbitrary signed binary is accepted as DefenseClaw | `trust.mode: hash_pinned` admits an unsigned installer, module and payload only when every leaf matches an administrator-owned SHA-256 manifest (`--payload-manifest`), verified by the CLI before PowerShell starts and recorded for later verification; `trust.mode: authenticode` requires a valid signature and, when `trust.allowed_signers` is set, one of the pinned signer thumbprints, so a customer can re-sign the payload with its own certificate | Payload-manifest parse and mismatch tests; a tampered-leaf run that must fail before any service changes <!-- verify-after-merge: M6 M8 --> |
+| W-46 | Concurrent, retried or repeated MDM runs corrupt the deployment or report a false failure | One protected lifecycle lock; contention returns `1618` so Intune retries; invalid arguments return `1639`; `ensure` installs, upgrades or repairs only when needed and is a true no-op (no service drain) when nothing changed; uninstall on a clean host succeeds as a no-op | Exit-code mapping and no-op tests in `internal/cli/windows_enterprise_standalone_test.go`; two concurrent `ensure` runs on a host <!-- verify-after-merge: M6 --> |
+| W-47 | A detection artifact is forged or deleted to hide or fake a deployment | The marker key `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, the Add/Remove Programs entry, the `DefenseClaw Enterprise` event source and `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` are written only after a successful mutation and removed only after a successful uninstall; HKLM and the log directory are administrator-write only (log SDDL grants users read). They are advisory: enforcement, readiness and `verify` never read them | Registration write/remove tests; a user write attempt on the marker key and log directory must be denied; deleting the marker must not change `verify` <!-- verify-after-merge: M6 --> |
+| W-48 | A user reads or replaces the standalone AI Defense key, or supplies one through config or the environment | Exact reader DACL on `secrets\<name>` (SYSTEM and Administrators full control, gateway service SID read-only, no other ACE) checked by the gateway before reading; bounded single-line value; inline `cisco_ai_defense.api_key` rejected; `api_key_env` cleared; no logging | `internal/managed/credentials_test.go`, `internal/gateway/standalone_inspection_test.go`; a standard-user read attempt must be denied |
+| W-49 | A user disables Codex or Claude Code hooks through user or project settings, profiles or `-c` overrides | Standalone default `managed_hooks_only: enforce`: Codex requirements carry `allow_managed_hooks_only` and always pin `[features] hooks = true`; the Claude drop-in sets `allowManagedHooksOnly`. An administrator may choose `preserve` per connector | Machine-policy target tests in `internal/enterprisepolicy/`; live `enterprise policy verify --live --user <user>` for Codex and Claude Code <!-- verify-after-merge: M5 --> |
+| W-50 | A user or project hook for a connector without a vendor lock (Cursor, Copilot, Devin, OpenCode, Amp) rewrites a tool call after DefenseClaw inspected it | Foreign-hook guard: the guardian removes non-DefenseClaw entries from user-level vendor config (with a backup and an audit event per removal); the hook denies tool calls while an unapproved rewriting hook is present in project files and names the file and the allowlist (`enterprise.machine_policy.connectors.<connector>.allowed_hooks`); `foreign_hooks: remove`, `report` or `allow` per connector | `internal/enterprisepolicy/guard_test.go`; hook-runtime guard tests; a live run with a project-level rewriting hook for each connector <!-- verify-after-merge: M5 M7 --> |
+| W-51 | A higher-precedence Claude Code source (HKLM `SOFTWARE\Policies\ClaudeCode`, server-managed settings) silently shadows DefenseClaw's drop-in in the standalone profile | Detect the higher source; proceed when it sets `managedSourcesBehavior: "merge"` (Claude Code 2.1.242 or later) or embeds DefenseClaw's hooks (`enterprise policy export --connector claudecode --format claude-hklm-json`); otherwise `higher_precedence_sources: fail` (default) or `warn`. The Secure Client profile keeps its existing refusal | `internal/enterprisepolicy/claude_test.go`; a host run with an HKLM policy in each state <!-- verify-after-merge: M5 --> |
+| W-52 | A per-user DefenseClaw install on a managed host takes port 18970 or `%USERPROFILE%\.defenseclaw`, or runs its own hooks next to the managed ones | Per-user `install.ps1`, `defenseclaw upgrade` and the per-user gateway refuse while the marker key exists; `coexistence.per_user_install: migrate` (default) removes only DefenseClaw-owned per-user registrations and autostart after a backup, `block` refuses, `ignore` leaves them. A per-user listener on the port cannot forge an allow (W-25) but can deny availability (residual 5) | Refusal tests for each per-user entry point; a migrate run over an existing per-user install <!-- verify-after-merge: M2 M6 --> |
+| W-53 | The per-user updater replaces managed binaries or a user re-enables self-update | The standalone marker key carries `DisableSelfUpdate=1` unless `coexistence.disable_self_update: false`; the value is DefenseClaw-owned and removed with the marker | Registration tests; `install.ps1` refusal with the value present <!-- verify-after-merge: M6 --> |
+| W-54 | The lifecycle runs in a 32-bit host, under x64 emulation on ARM64, or in Constrained Language Mode and silently misbehaves | Refuse a 32-bit process and native ARM64 like `install.ps1`; Setup checks `IsWow64Process2`; detect Constrained Language Mode early and name the signer to allow (`powershell_constrained_language`) | Guard tests and a SysWOW64 Windows PowerShell launch of the Intune remediation script <!-- verify-after-merge: M6 --> |
+| W-55 | A connector outside the certified Windows set is enrolled with an unverified hook route, or an unsupported one appears protected | Each Windows connector is added to the certified registry one at a time with its machine-policy target or impersonated per-user footprint pointing at `defenseclaw-hook.exe --enterprise-managed`, its version floor, teardown and foreign-hook guard; OpenHands and Omnigent are refused on Windows with a clear reason; Gemini CLI and Windsurf are teardown-only | Per-connector certification runs <!-- verify-after-merge: M7 --> |
 
 ## Security invariants
 
 - `managed_enterprise` is both configuration and authority. Merely setting a
   user environment variable cannot make a user-owned config trusted.
-- Production service identity is the exact four-service tuple:
-  `DefenseClawCMIDBroker` isolates provider access, `DefenseClawGateway`
-  evaluates traffic, `DefenseClawHookGuardian` reconciles enabled manifest
-  rows, and `DefenseClawHookEnumerator` maintains eligible enrollment and
-  inventory access.
+- Production service identity is the exact service tuple of the profile:
+  `DefenseClawGateway` evaluates traffic, `DefenseClawSensorHelper` answers
+  fixed acquisition requests, `DefenseClawHookGuardian` reconciles enabled
+  manifest rows, `DefenseClawHookEnumerator` maintains eligible enrollment and
+  inventory access, and in the Secure Client profile `DefenseClawCMIDBroker`
+  isolates provider access. The standalone profile never creates the broker.
+- The enterprise profile is pinned in the service environment and must agree
+  with the managed config. Nothing a user controls can change it.
+- In the standalone profile, registration artifacts (marker key, Add/Remove
+  Programs entry, event log, lifecycle log) are for detection and support
+  only. They never grant or prove protection.
 - Service `Running` is not readiness.
 - A runtime status file is not authorization.
 - The protected target manifest is dynamic enrollment state, not a permanent
@@ -584,6 +713,22 @@ enrollment authority; and the guardian is the per-user repair authority.
     manifest authorization record. Operators must monitor inventory-DACL
     warnings and include these profile ACEs in de-enrollment/decommission ACL
     review when the gateway service identity should no longer retain access.
+13. Standalone hash-pinned payloads are unsigned. They satisfy DefenseClaw's
+    own trust check but not a WDAC or AppLocker policy that requires a
+    publisher signature. Use Authenticode-signed builds or re-sign the payload
+    with the organization's certificate and pin it in `trust.allowed_signers`.
+14. The foreign-hook guard only recognizes the hook and plugin locations each
+    vendor documents. A connector release that adds a new location, or a
+    plugin that acts outside tool calls, is outside the guard until the
+    location list is updated. The guard can also block a developer's
+    legitimate project hook; administrators approve those by hash in
+    `enterprise.machine_policy.connectors.<connector>.allowed_hooks` or relax the connector to
+    `report`.
+15. The cross-platform vendor residuals in the
+    [enterprise threat model](ENTERPRISE-THREAT-MODEL.md#residual-risks)
+    (Claude Code `--bare`, Amp plugin order, OpenCode plugin order, Hermes and
+    Copilot fail-open behavior, higher-precedence cloud policy) apply to
+    Windows unchanged.
 
 ## Certification gate
 
@@ -595,12 +740,17 @@ artifacts:
 - an elevated install/upgrade/repair/status/verify/uninstall lifecycle;
 - exact configuration, identity, dependency, privilege, environment, DACL,
   recovery, and readiness checks for `DefenseClawGateway`,
-  `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and
-  `DefenseClawHookEnumerator`;
-- activation-order proof that the broker starts before the guardian, the
-  guardian publishes fresh manifest-bound authorization before the gateway,
-  the enumerator starts only after the gateway, and all four become automatic
-  only after full readiness;
+  `DefenseClawSensorHelper`, `DefenseClawHookGuardian`,
+  `DefenseClawHookEnumerator` and, in the Secure Client profile,
+  `DefenseClawCMIDBroker`;
+- activation-order proof that the broker (Secure Client profile) starts before
+  the guardian, the guardian publishes fresh manifest-bound authorization
+  before the gateway, the enumerator starts only after the gateway, and every
+  service becomes automatic only after full readiness;
+- for the standalone profile: the same lifecycle on PowerShell 7 only, with no
+  broker service, a hash-pinned and an Authenticode payload, the `ensure`
+  no-op and busy (`1618`) paths, registration and event-log output, and the
+  W-43…W-55 probes;
 - broker IPC tests covering exact gateway SID/live PID authentication,
   protected-key ACLs, identity-tuple mismatch, replay/tamper/oversize rejection,
   provider-path trust, and incomplete-configuration fail-closed behavior;
@@ -635,7 +785,7 @@ artifacts:
   valid CLI JSON/pipe EOF while the no-handle-inheritance helper remains
   pending, protected retry evidence, bounded post-release finalization, and no
   retired sibling/environment/helper/receipt leak;
-- four forced crashes for each of the four managed services, a clean-stop
+- four forced crashes for each managed service of the profile, a clean-stop
   non-recovery interval, and standard-user service-process/token handle denial
   probes;
 - an exact-port fake-allow listener plus service restart race proving zero

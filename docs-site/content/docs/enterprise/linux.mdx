@@ -1,0 +1,143 @@
+---
+title: Linux standalone deployment
+description: Install DefenseClaw's managed systemd units, activated sockets, and packages on Linux so standard users cannot stop the gateway or impersonate it.
+keywords:
+  - DefenseClaw Linux enterprise
+  - systemd socket activation
+  - managed_enterprise Linux
+  - deb rpm
+  - SSSD LDAP users
+---
+
+Linux supports the standalone profile only. The lifecycle installs a set of
+systemd units under a fixed layout, and PID 1 owns the gateway's sockets so
+no user process can take them over.
+
+{/* verify-after-merge: M2 M4 — units, socket units, packages, NSS enrollment and the per-user worker */}
+
+## Layout
+
+| Path | Owner | Contents |
+| --- | --- | --- |
+| `/opt/defenseclaw/bin` | root | `defenseclaw-gateway`, `defenseclaw-hook`, `defenseclaw-sensor-helper`, and `defenseclaw-acp` when shipped |
+| `/etc/defenseclaw/config.yaml` | root | Managed config |
+| `/etc/defenseclaw/policies/` | root, group `defenseclaw` | Local-engine policy inputs |
+| `/etc/defenseclaw/secrets/` | root | Protected credentials |
+| `/etc/defenseclaw/hook-guardian/targets.yaml` | root | Target manifest (written by the enumerator) |
+| `/etc/defenseclaw/managed-runtime.json` | root, world-readable | Non-secret runtime descriptor the hook trusts |
+| `/var/lib/defenseclaw` | `defenseclaw` | Gateway state |
+| `/var/lib/defenseclaw-hook-guardian` | root, group `defenseclaw` | Authorization ledger |
+| `/var/lib/defenseclaw-enterprise` | root, `0700` | Lifecycle lock, snapshots, deployment record |
+| `/var/log/defenseclaw` | `defenseclaw` | Logs |
+| `/run/defenseclaw-hook/hook.sock` | created by PID 1 | Hook socket |
+
+## Units
+
+| Unit | Runs as | Notes |
+| --- | --- | --- |
+| `defenseclaw-gateway.service` | `defenseclaw`, no capabilities | `Type=notify` with a 60 s watchdog, `Restart=always`, `ProtectSystem=strict`, `ProtectHome=true`, `@system-service` syscall filter; config, policy and ledger read-only |
+| `defenseclaw-gateway-api.socket` | PID 1 | `127.0.0.1:18970` |
+| `defenseclaw-gateway-hook.socket` | PID 1 | `/run/defenseclaw-hook/hook.sock`; every user may connect, the gateway authorizes by uid |
+| `defenseclaw-hook-guardian.service` | root, bounded capabilities, `NoNewPrivileges=true` | Watches and reconciles every minute; runs a per-user worker for each home |
+| `defenseclaw-hook-enumerator.service` | root, read-only homes | Publishes the target manifest every five minutes |
+| `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Own runtime directory; fixed request protocol |
+| `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure` when the config, secrets or policies change |
+| `defenseclaw-enterprise-verify.timer` | PID 1 | Daily `verify` |
+
+<Flow
+  direction="TB"
+  caption="PID 1 binds the API and hook sockets before any user process runs and holds them while the gateway restarts, so a hook connecting mid-restart waits for the real gateway instead of reaching an impostor."
+>
+  <Zone id="l0" label="Z0 · PID 1 and root" tone="trusted">
+    <Node id="sd" kind="operator">{`systemd\nholds both sockets`}</Node>
+  </Zone>
+  <Zone id="l2" label="Z2 · defenseclaw (no caps)" tone="restricted">
+    <Node id="gw" kind="gateway">gateway.service</Node>
+  </Zone>
+  <Zone id="l1" label="Z1 · root services" tone="privileged">
+    <Node id="grd" kind="operator">hook-guardian</Node>
+    <Node id="wrk" kind="operator">{`apply-target worker\nas the user`}</Node>
+  </Zone>
+  <Zone id="l4" label="Z4 · User session" tone="untrusted">
+    <Node id="agent" kind="agent">AI agent</Node>
+    <Node id="hook" kind="connector">defenseclaw-hook</Node>
+  </Zone>
+  <Edge from="sd" to="gw" label="inherited fds" />
+  <Edge from="grd" to="wrk" label="spawns" />
+  <Edge from="wrk" to="hook" label="repairs registration" />
+  <Edge from="agent" to="hook" />
+  <Edge from="hook" to="gw" label="SO_PEERCRED uid" />
+</Flow>
+
+## Requirements
+
+- systemd 239 or later as PID 1. Containers and WSL without systemd are
+  refused. `LoadCredential=` (systemd 247 or later) is used for secrets when
+  available.
+- x86_64 or arm64.
+- Tested on Ubuntu 24.04 and RHEL 9 with SELinux enforcing. The lifecycle
+  relabels its trees with `restorecon` and reports a warning if that fails.
+
+## Install
+
+From a package:
+
+```bash
+sudo apt install ./defenseclaw-enterprise-<version>-linux-amd64.deb
+# RHEL and derivatives:
+# sudo dnf install ./defenseclaw-enterprise-<version>-linux-amd64.rpm
+sudo install -o root -g root -m 0600 config.yaml /root/defenseclaw-config.yaml
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure \
+  --from-package --config /root/defenseclaw-config.yaml --json
+```
+
+From a staged payload directory:
+
+```bash
+sudo /path/to/stage/defenseclaw-gateway enterprise linux ensure \
+  --payload /path/to/stage --config /path/to/stage/config.yaml --json
+```
+
+The package's maintainer scripts never fail the package transaction; they
+call the lifecycle, which reports its own result. Use `--no-start` to stage a
+deployment without starting it and `--adopt-existing` to back up and take over
+an older, hand-built layout.
+
+Exit codes: `0` success or no change, `1` failure (rolled back), `2` invalid
+arguments, `75` another lifecycle run holds the lock.
+
+## AI Defense key
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set \
+  --name ai-defense-api-key --from-stdin < /root/ai-defense.key
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret status --json
+```
+
+Then set `enterprise.inspection.ai_defense.enabled: true`. The apply path unit
+runs `ensure` for you.
+
+## Verify
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+systemctl show defenseclaw-gateway.service -p User -p CapabilityBoundingSet -p NoNewPrivileges
+sudo ss -xlp | grep defenseclaw-hook
+```
+
+## Remove
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json
+# also remove config, secrets, state and logs:
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json
+```
+
+Uninstall removes only DefenseClaw's own vendor machine-policy entries and
+restores the preimages it recorded.
+
+## Users
+
+The enumerator sees directory-backed accounts (LDAP, SSSD, Active Directory,
+NIS, systemd-userdb) through NSS. See [Enrollment](/docs/enterprise/enrollment)
+for filters and how deleted users are handled.

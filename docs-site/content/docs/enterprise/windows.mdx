@@ -1,0 +1,157 @@
+---
+title: Windows standalone deployment
+description: Install, upgrade, repair, and remove the standalone DefenseClaw enterprise services on Windows with PowerShell 7 and a signed or hash-pinned payload.
+keywords:
+  - DefenseClaw Windows enterprise
+  - standalone profile
+  - PowerShell 7
+  - SCM services
+  - Intune Win32 app
+---
+
+The standalone Windows profile installs four Service Control Manager services
+under `C:\Program Files\Cisco\DefenseClaw` and `C:\ProgramData\Cisco\DefenseClaw`.
+It does not need Cisco Secure Client and never creates the Secure Client
+credential broker.
+
+{/* verify-after-merge: M6 — standalone roots, service set, PowerShell 7 launch, ensure, registration */}
+
+## Services
+
+| Service | Identity | Role |
+| --- | --- | --- |
+| `DefenseClawGateway` | `NT SERVICE\DefenseClawGateway` (restricted service SID) | Runs the policy engine and the hook API; reads config and authorization, writes only its runtime state and logs |
+| `DefenseClawSensorHelper` | LocalSystem, `SeChangeNotifyPrivilege` only | Answers fixed AI Discovery acquisition requests; the gateway depends on it |
+| `DefenseClawHookGuardian` | LocalSystem, explicit privilege list | Installs and repairs each enrolled user's hooks under that user's own token; merges DefenseClaw's entries into vendor machine policy |
+| `DefenseClawHookEnumerator` | LocalSystem | Finds eligible interactive profiles (local, domain, and Microsoft Entra ID accounts) and publishes the protected target manifest |
+
+Standard users get query-only access to all four services. Every service
+restarts indefinitely after a failure.
+
+<Flow
+  direction="TB"
+  caption="Standalone Windows. The hook in the user's session sends a request only after it confirms the connected loopback peer is the exact process SCM reports for DefenseClawGateway."
+>
+  <Zone id="w0" label="Z0 · SCM and administrator" tone="trusted">
+    <Node id="setup" kind="operator">{`Setup /ensure\nor enterprise windows`}</Node>
+  </Zone>
+  <Zone id="w1" label="Z1 · LocalSystem services" tone="privileged">
+    <Node id="grd" kind="operator">{`HookGuardian ·\nHookEnumerator`}</Node>
+    <Node id="sns" kind="operator">SensorHelper</Node>
+  </Zone>
+  <Zone id="w2" label="Z2 · Virtual service account" tone="restricted">
+    <Node id="gw" kind="gateway">DefenseClawGateway</Node>
+  </Zone>
+  <Zone id="w4" label="Z4 · Interactive user" tone="untrusted">
+    <Node id="agent" kind="agent">AI agent</Node>
+    <Node id="hook" kind="connector">defenseclaw-hook.exe</Node>
+  </Zone>
+  <Edge from="setup" to="grd" label="SCM + DACLs" />
+  <Edge from="grd" to="hook" label="user token" />
+  <Edge from="agent" to="hook" />
+  <Edge from="hook" to="gw" label="peer PID check" />
+  <Edge from="sns" to="gw" label="fixed IPC" />
+</Flow>
+
+## Requirements
+
+- 64-bit native Windows 10-family or newer, including Windows Server 2019 or
+  later (the same floor as the [per-user package](/docs/get-started/windows/install-lifecycle)).
+  Native ARM64 and 32-bit processes are refused.
+- **PowerShell 7** (stable 7.x) installed machine-wide from Microsoft's MSI.
+  The lifecycle resolves `pwsh.exe` only from
+  `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, requires it under
+  Program Files with administrator-only folders and a valid Microsoft
+  signature, and ignores `PATH`. Without it the lifecycle stops with
+  `powershell7_required`. Windows PowerShell 5.1 is not used by the
+  standalone profile.
+- Full Language Mode for the lifecycle. Under Constrained Language Mode or a
+  WDAC script policy, allow the DefenseClaw signer (or your re-signing
+  certificate) first.
+- An elevated administrator or SYSTEM context (for example the Intune
+  Management Extension).
+
+## Payload trust
+
+Pick one trust mode with `--trust-mode` (or `enterprise.trust.mode`):
+
+| Mode | Use it when | How it works |
+| --- | --- | --- |
+| `authenticode` (default) | You have a signed release, or you re-sign the payload with your own certificate | Every binary and script must carry a valid signature. Add `--allowed-signer <sha256-thumbprint>` (repeatable) to accept only specific signers |
+| `hash_pinned` | You deploy an unsigned build | Pass `--payload-manifest <file>`: an administrator-owned JSON file of SHA-256 digests (`{"schema_version":1,"files":{"<name>":"<sha256>"}}`). The CLI verifies the installer, module and payload before PowerShell starts |
+
+Hash-pinned payloads do not satisfy WDAC or AppLocker rules that require a
+publisher. Sign or re-sign when those rules are in force.
+
+## Install or converge
+
+`ensure` is the one command an MDM needs. It installs when nothing is
+installed, upgrades an older deployment, reconfigures after a config change,
+repairs after a failed verify, and otherwise does nothing.
+
+```powershell title="Elevated PowerShell 7"
+$Stage = 'C:\ProgramData\DefenseClaw-Staging\<version>'
+& "$Stage\defenseclaw.exe" enterprise windows ensure `
+  --profile standalone `
+  --config "$Stage\config.yaml" `
+  --trust-mode hash_pinned `
+  --payload-manifest "$Stage\payload-trust.json" `
+  --json
+```
+
+The stage directory must be administrator-owned and not writable by users.
+The installer enumerates eligible profiles itself; administrators do not
+author `targets.yaml`.
+
+Exit codes follow Windows Installer conventions so MDM retry logic works:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success or no change |
+| `1603` | Failure; the transaction rolled back |
+| `1618` | Another lifecycle run holds the lock; retry later |
+| `1639` | Invalid arguments |
+| `3010` | Reserved for a required restart |
+
+## Detection and support
+
+After every successful mutation the lifecycle writes:
+
+- `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` with the installed version
+  (use it for MDM registry detection rules) and `DisableSelfUpdate`;
+- an Add/Remove Programs entry, `CiscoDefenseClawEnterprise`;
+- events from the `DefenseClaw Enterprise` source in the Application log;
+- `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` and
+  `last-result.json`, readable by users for support.
+
+These are for detection only. Enforcement and `verify` never trust them.
+
+## Verify, repair, remove
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --json
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --json
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --json
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows uninstall --json
+```
+
+A CLI-replacing upgrade must run from the new release's staged CLI, not the
+installed one. Uninstall on a host without DefenseClaw succeeds and changes
+nothing.
+
+## Per-user installs
+
+On a host with the marker key, `install.ps1`, `defenseclaw upgrade` and a
+per-user gateway refuse to run. `coexistence.per_user_install: migrate`
+(the default) removes DefenseClaw-owned per-user hook registrations and
+autostart entries after backing them up; `block` makes `ensure` fail until
+they are removed; `ignore` leaves them.
+
+## Connectors
+
+Codex, Claude Code, Cursor and GitHub Copilot use vendor machine policy (see
+[Machine policy](/docs/enterprise/machine-policy)). Other supported
+connectors are registered per user and point at the administrator-owned
+`defenseclaw-hook.exe --enterprise-managed`. OpenHands and Omnigent are not
+supported on native Windows and are refused with a reason.
+{/* verify-after-merge: M7 — Windows connector expansion beyond Codex, Claude Code and Cursor */}

@@ -1,0 +1,112 @@
+---
+title: macOS standalone deployment
+description: Install DefenseClaw's standalone LaunchDaemons and hidden service user on macOS from a package any MDM can deploy.
+keywords:
+  - DefenseClaw macOS enterprise
+  - LaunchDaemon
+  - _defenseclaw
+  - pkg MDM
+  - managed_enterprise macOS
+---
+
+The standalone macOS profile installs under `/opt/cisco/defenseclaw` with
+LaunchDaemons labeled `com.cisco.defenseclaw.*`. It is separate from the
+Secure Client module (`/opt/cisco/secureclient/defenseclaw`,
+`com.cisco.secureclient.defenseclaw.*`), which it refuses to install over.
+
+{/* verify-after-merge: M2 M4 — plists, package and enrollment */}
+
+## Daemons
+
+| Label | Runs as | Role |
+| --- | --- | --- |
+| `com.cisco.defenseclaw.gateway` | `_defenseclaw` (hidden user and group) | Policy engine and hook API; binds `127.0.0.1:18970` and `/opt/cisco/defenseclaw/run/hook.sock` |
+| `com.cisco.defenseclaw.hook-guardian` | root | Reconciles enrolled users every minute through a per-user worker |
+| `com.cisco.defenseclaw.hook-enumerator` | root | Publishes the target manifest every five minutes |
+| `com.cisco.defenseclaw.sensor-helper` | root | Fixed AI Discovery acquisition requests |
+| `com.cisco.defenseclaw.apply` | root | Runs `ensure` when the config, secrets or policies change |
+| `com.cisco.defenseclaw.verify` | root, daily | Runs `verify` |
+
+Logs go to `/Library/Logs/Cisco/DefenseClaw`.
+
+<Flow
+  direction="TB"
+  caption="Standalone macOS. launchd socket hand-off needs cgo, so the gateway binds its own sockets in /opt/cisco/defenseclaw/run, a directory only the service user can write; the hook checks LOCAL_PEERCRED before sending."
+>
+  <Zone id="m0" label="Z0 · launchd and root" tone="trusted">
+    <Node id="ld" kind="operator">{`launchd\nlifecycle`}</Node>
+  </Zone>
+  <Zone id="m2" label="Z2 · _defenseclaw" tone="restricted">
+    <Node id="gw" kind="gateway">gateway</Node>
+  </Zone>
+  <Zone id="m1" label="Z1 · root services" tone="privileged">
+    <Node id="grd" kind="operator">hook-guardian</Node>
+  </Zone>
+  <Zone id="m4" label="Z4 · User session" tone="untrusted">
+    <Node id="agent" kind="agent">AI agent</Node>
+    <Node id="hook" kind="connector">defenseclaw-hook</Node>
+  </Zone>
+  <Edge from="ld" to="gw" label="starts as _defenseclaw" />
+  <Edge from="grd" to="hook" label="worker as user" />
+  <Edge from="agent" to="hook" />
+  <Edge from="hook" to="gw" label="LOCAL_PEERCRED uid" />
+</Flow>
+
+## Requirements
+
+- macOS on Apple silicon (the package is `darwin-arm64`).
+- An MDM that installs flat packages and runs root shell scripts, or an
+  administrator shell.
+
+## Install
+
+1. Place the administrator config (and, if used, the AI Defense key) before
+   the package runs, or pass it afterwards with `ensure --config`.
+2. Install `defenseclaw-enterprise-<version>-darwin-arm64.pkg`
+   (identifier `com.cisco.defenseclaw.enterprise`). Its postinstall runs
+   `defenseclaw-gateway enterprise macos ensure --from-package`, which creates
+   the `_defenseclaw` account, lays out the files, writes the LaunchDaemons,
+   starts them in order, verifies, and rolls back on any failure. A failed
+   apply fails the package install, so the MDM reports it; the result is in
+   `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`.
+
+```bash
+sudo installer -pkg defenseclaw-enterprise-<version>-darwin-arm64.pkg -target /
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure \
+  --from-package --config /path/to/config.yaml --json
+```
+
+Exit codes: `0`, `1` (rolled back), `2` (invalid arguments), `75` (busy).
+
+## Signing
+
+The package can be built unsigned, or with `Developer ID Application` for the
+binaries (hardened runtime) and `Developer ID Installer` for the package,
+then notarized. Unsigned packages do not satisfy Gatekeeper on hosts that
+require notarization.
+
+## Privacy prompts
+
+The agents' configuration lives in dot-directories in each home, which macOS
+privacy controls (TCC) do not protect, so the guardian needs no Full Disk
+Access. If your organization relocates agent configuration into protected
+folders, deploy a PPPC profile that grants Full Disk Access to
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway`.
+{/* verify-after-merge: M10 — TCC behavior on a real host */}
+
+## Verify and remove
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --purge --remove-service-account --json
+```
+
+## Codex and Claude Code managed preferences
+
+A Codex configuration profile for `com.openai.codex` with
+`requirements_toml_base64`, or a Claude Code profile for
+`com.anthropic.claudecode`, outranks the files DefenseClaw writes.
+`enterprise policy show` reports such a source as higher precedence, and
+`enterprise policy export --connector codex --format plist` produces the
+block to add to your profile. See [Machine policy](/docs/enterprise/machine-policy).

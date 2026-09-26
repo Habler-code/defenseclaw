@@ -1,0 +1,79 @@
+---
+title: Enrollment
+description: How the standalone enterprise profile finds users, enrolls their AI agents automatically, handles directory accounts, and revokes users safely.
+keywords:
+  - DefenseClaw enrollment
+  - hook enumerator
+  - LDAP SSSD Entra ID users
+  - target manifest
+---
+
+The hook enumerator decides which users and connectors the guardian
+protects. It writes the protected target manifest; administrators do not
+author it by hand unless they choose `enrollment.mode: manifest`.
+
+{/* verify-after-merge: M4 M6 — Unix NSS and Directory Services resolution, Windows Entra SIDs, per-user worker */}
+
+## How users are found
+
+| Platform | Accounts | Source |
+| --- | --- | --- |
+| Windows | Local, Active Directory, and Microsoft Entra ID interactive accounts | `HKLM\...\ProfileList`, filtered to interactive user SIDs with a real, reparse-free profile |
+| Linux | Local, LDAP, SSSD, Active Directory, NIS, systemd-userdb | NSS through the root-owned `getent`, logged-in sessions, home owners under the home roots, and `include_users` |
+| macOS | Local, directory-bound and mobile accounts | Open Directory through libSystem, `dscl . -list /Users`, logged-in sessions, home owners under `/Users`, and `include_users` |
+
+A connector row is added automatically when that user has a supported
+version of the agent. On Linux and macOS the version is discovered by a
+worker running as the user, never by root.
+
+## Filters
+
+```yaml
+enterprise:
+  enrollment:
+    mode: auto                 # auto: the enumerator publishes rows; manifest: you supply them
+    include_users: [alice]     # add users even when discovery does not see them
+    exclude_users: [build]     # never enroll
+    include_groups: [developers]
+    exclude_groups: [contractors]   # exclude wins over include
+    exempt_users: [svc-release]     # allowed without enrollment, still inspected and logged
+    unenrolled_users: inspect  # inspect | deny
+    root: inspect              # inspect | deny | exempt
+    uid_min: 1000              # Linux and macOS; 0 reads UID_MIN from login.defs
+    home_roots: [/srv/home]    # extra home parents beyond the defaults
+```
+
+- **`unenrolled_users`** applies to connectors DefenseClaw publishes through
+  vendor machine policy: those hooks run for every user on the machine, so
+  `inspect` (the default) inspects an unenrolled user rather than blocking
+  them. `deny` refuses users without a protected enrollment. Per-user
+  connectors always require enrollment.
+- **`home_roots`** adds home parents beyond the defaults (`/home` and
+  `/var/home` on Linux, `/Users` on macOS). The lifecycle widens the guardian
+  unit to exactly these paths. System directories such as `/`, `/etc`, `/opt`
+  or `/tmp` are rejected, and any home under a world-writable ancestor is
+  refused.
+
+## Unavailable homes
+
+A home that is not mounted, locked (ecryptfs, FileVault before login), on an
+unreachable network share, or denied to root by NFS `root_squash` is
+**deferred**, not failed. The row stays and is retried every cycle. The
+worker reads such homes with the user's own credentials, so `root_squash`
+homes work once they are mounted.
+
+## Deleted and changed users
+
+- Only a definitive "no such user" answer counts. A directory outage, a
+  timeout or an unreachable server never revokes anyone.
+- A row is revoked after several consecutive definitive misses.
+- A reused uid, or a home recreated with a different inode, is treated as a
+  new identity and enrolled from scratch.
+- Windows keeps an existing disabled row disabled across cycles.
+
+## New users
+
+A user created after installation is enrolled on the next enumerator cycle
+(five minutes) once they have a supported agent. Until then, a per-user
+connector's hook fails closed with an enrollment message, and a
+machine-policy connector's hook inspects them (`unenrolled_users: inspect`).

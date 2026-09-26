@@ -1,0 +1,69 @@
+---
+title: Generic MDM scripts
+description: Wrapper, detection, and uninstall scripts that let any MDM or configuration-management tool deploy the standalone DefenseClaw enterprise profile.
+keywords:
+  - DefenseClaw MDM scripts
+  - Jamf
+  - Ansible
+  - detection script
+  - lifecycle result JSON
+---
+
+Every MDM needs the same four things: run the installer as an administrator,
+pass a config and optional secret without exposing them, decide whether the
+app is installed, and map the result to an exit code. The generic scripts
+do exactly that and nothing else; the lifecycle in the DefenseClaw binary does
+the work.
+
+{/* verify-after-merge: M8 — packaging/mdm/{windows,linux,macos} wrappers, detect and uninstall scripts, and packaging/mdm/contract. This page is a skeleton until M8 lands. */}
+
+## Scripts
+
+| Platform | Install or converge | Detect | Remove |
+| --- | --- | --- | --- |
+| Windows (PowerShell 7) | `packaging/mdm/windows/Invoke-DefenseClawEnterprise.ps1` | `Test-DefenseClawEnterprise.ps1` | `Uninstall-DefenseClawEnterprise.ps1` |
+| Linux | `packaging/mdm/linux/defenseclaw-enterprise.sh` | `detect.sh` | `uninstall.sh` |
+| macOS | `packaging/mdm/macos/defenseclaw-enterprise.sh` | `detect.sh` | `uninstall.sh` |
+
+Each wrapper:
+
+1. refuses unless it runs as root or an elevated administrator;
+2. verifies the staged payload (signature, or the SHA-256 manifest for
+   unsigned builds) before anything runs;
+3. reads the config and any secret from standard input or a protected file,
+   never from arguments;
+4. runs `enterprise <os> ensure --json` and writes the result to the
+   platform log;
+5. exits with the lifecycle's exit code.
+
+## Result contract
+
+Every lifecycle action prints one JSON document (schema version 2) with the
+same fields on every OS: `schema_version`, `ok`, `action`, `noop`,
+`noop_reason`, `profile`, `platform`, `product_version`,
+`installed_version`, `installed`, `transaction_pending`, `services`,
+`readiness`, `inspection`, `machine_policy`, `enrollment`,
+`coverage_complete`, `security_complete`, `errors` (each with a stable
+`code`), `warnings`, `log_path` and `exit_code`. It never contains secret
+values. The schema is defined in `internal/enterprisestatus/result.go`.
+
+| Result | Windows | Linux, macOS |
+| --- | --- | --- |
+| Success or no change | `0` | `0` |
+| Failure (rolled back) | `1603` | `1` |
+| Another run holds the lock | `1618` | `75` |
+| Invalid arguments | `1639` | `2` |
+| Restart required (reserved) | `3010` | — |
+
+## Detection
+
+Detect by version, not by the presence of a file:
+
+- Windows: `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` `ProductVersion`.
+- Linux: `dpkg-query -W defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise`,
+  then `enterprise linux status --json`.
+- macOS: `pkgutil --pkg-info com.cisco.defenseclaw.enterprise`, then
+  `enterprise macos status --json`.
+
+A detection script should report "installed" only when `status` returns
+`ok: true` for the expected `product_version`.

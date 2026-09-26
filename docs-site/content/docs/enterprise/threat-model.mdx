@@ -1,0 +1,103 @@
+---
+title: Enterprise threat model
+description: Trust zones, boundaries, invariants, and residual risks for DefenseClaw's managed enterprise deployment on Windows, Linux, and macOS.
+keywords:
+  - DefenseClaw threat model
+  - trust zones
+  - privilege boundaries
+  - managed_enterprise security
+  - residual risk
+---
+
+This page summarizes the enterprise threat model. The full models, with one
+row per threat and the evidence for each control, live in the repository:
+[`docs/ENTERPRISE-THREAT-MODEL.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/ENTERPRISE-THREAT-MODEL.md)
+(cross-platform), and the Windows, Linux and macOS models next to it.
+
+{/* verify-after-merge: M2 M4 M5 M6 */}
+
+## Who is trusted
+
+| Trusted | Not trusted |
+| --- | --- |
+| Administrators, root, LocalSystem, the MDM agent, the signer of the release | A standard user, any AI agent running as that user, a prompt that steers the agent, another local user, a compromised gateway process |
+
+DefenseClaw does not defend a machine from its own administrator. An agent
+given unrestricted sudo or administrator rights is an administrator.
+
+## Zones
+
+<Flow
+  direction="TB"
+  caption="Standalone profile on every OS. Edges that cross a zone are the attack surface; each is listed in the boundary table below."
+>
+  <Zone id="t0" label="Z0 · Platform and admin" tone="trusted">
+    <Node id="lc" kind="operator">{`MDM → lifecycle\nensure`}</Node>
+  </Zone>
+  <Zone id="t1" label="Z1 · Privileged services" tone="privileged">
+    <Node id="grd" kind="operator">{`Guardian\nper-user worker`}</Node>
+    <Node id="snsr" kind="operator">Sensor helper</Node>
+  </Zone>
+  <Zone id="t3" label="Z3 · Admin-owned state" tone="protected">
+    <Node id="state" kind="policy">{`Config · secrets\nmanifest · ledger`}</Node>
+    <Node id="vp" kind="policy">Vendor policy</Node>
+  </Zone>
+  <Zone id="t2" label="Z2 · Restricted gateway" tone="restricted">
+    <Node id="gw" kind="gateway">Gateway</Node>
+  </Zone>
+  <Zone id="t4" label="Z4 · User session" tone="untrusted">
+    <Node id="hook" kind="connector">{`Agent +\ndefenseclaw-hook`}</Node>
+  </Zone>
+  <Zone id="t5" label="Z5 · External" tone="external">
+    <Node id="aid" kind="generic">Cisco AI Defense</Node>
+  </Zone>
+  <Edge from="lc" to="grd" label="installs" />
+  <Edge from="grd" to="vp" label="owned entries" />
+  <Edge from="grd" to="hook" label="repair as user" />
+  <Edge from="hook" to="gw" label="verified peer" />
+  <Edge from="snsr" to="gw" label="fixed IPC" />
+  <Edge from="gw" to="state" label="read-only" />
+  <Edge from="gw" to="aid" label="TLS" />
+</Flow>
+
+## Boundaries
+
+| Crossing | Threat | Control |
+| --- | --- | --- |
+| MDM → services and state | Untrusted payload or engine runs as administrator | Fixed layout; locked, snapshotted transaction with rollback; PowerShell 7 resolved only from HKLM and Microsoft-signed; Authenticode or hash-pinned payloads |
+| User → services | Stop, disable or replace a service | Query-only SCM access; root-owned units and plists; indefinite restart |
+| User → admin state | Edit config, policy, secrets, manifest, ledger | Administrator-only write on every file and parent; untrusted inputs rejected at load |
+| Gateway → admin state | A compromised gateway widens its own policy | Read-only config, policy and ledger for the gateway identity |
+| Hook → gateway | A user impersonates the gateway during a restart | No byte sent before the listener is proven: SCM PID on Windows; `SO_PEERCRED`/`LOCAL_PEERCRED` uid on the hook socket; exact-connection owner uid on Linux TCP; PID 1 holds Linux sockets across restarts |
+| Gateway → caller | An unenrolled user uses a per-user connector | Kernel uid checked against the root-owned authorization ledger |
+| Guardian → user home | Root follows a user-planted link | Windows writes under the user's token; Linux and macOS use a worker running as the user |
+| Enumerator → manifest | Directory outage revokes users; uid reuse | Only a definitive not-found revokes, after several misses; uid and home identity |
+| Guardian → vendor policy | Administrator policy overwritten | DefenseClaw-owned entries only, with ownership records and preimages |
+| User/project hook → agent | A hook rewrites a tool call after inspection | Vendor locks for Codex and Claude Code; the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) elsewhere |
+| Gateway → AI Defense | API key leaks | Protected credential only; never logged; inline keys rejected |
+
+## Invariants
+
+- The gateway never runs as root or LocalSystem.
+- No privileged process writes a user home with its own credentials.
+- A hook sends nothing to an unverified listener.
+- The authorization ledger, not a status file, decides enrollment and
+  readiness.
+- A lookup error never revokes a user.
+- DefenseClaw changes only the policy entries it owns.
+- Secrets are never logged or printed.
+- `Running` is not readiness; partial coverage is reported as incomplete.
+
+## Residual risks
+
+| Risk | Scope |
+| --- | --- |
+| A user can delete their own per-user hook registration until the next repair | Per-user connectors |
+| Claude Code `--bare` / `CLAUDE_CODE_SIMPLE=1` skip managed prompt and session hooks; tool hooks still run | Claude Code |
+| Amp has no machine plugin location and no defined plugin order | Amp |
+| OpenCode's managed-plugin-last order is observed, not documented | OpenCode |
+| Hermes cannot fail closed; Copilot command-hook timeouts fail open | Hermes, Copilot |
+| A user holding the gateway endpoint while it is down can block hooks (they fail closed) but cannot forge an allow | All platforms |
+| Unsigned, hash-pinned builds do not satisfy WDAC, AppLocker or Gatekeeper publisher rules | Windows, macOS |
+| Cloud or MDM vendor policy can override local machine policy | Codex, Claude Code |
+| A compromised privileged DefenseClaw service holds administrator-equivalent power | All platforms |

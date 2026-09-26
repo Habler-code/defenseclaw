@@ -3331,7 +3331,7 @@ def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
     assert "Test-NormalModeLiveAutoHeal" in harness
     assert "normal-mode-live-hook-auto-heal-preserved" in harness
     assert "normal-mode active user did not prove existing hook auto-heal" in harness
-    assert "known-folder APIs" in documentation
+    assert "protected 64-bit machine registration in HKLM" in documentation
     assert "Environment poisoning therefore cannot redirect" in documentation
 
     run_service = service_host[

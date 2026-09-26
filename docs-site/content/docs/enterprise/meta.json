@@ -1,0 +1,16 @@
+{
+  "title": "Enterprise",
+  "pages": [
+    "index",
+    "windows",
+    "linux",
+    "macos",
+    "enrollment",
+    "machine-policy",
+    "foreign-hook-guard",
+    "intune",
+    "generic-scripts",
+    "operations",
+    "threat-model"
+  ]
+}

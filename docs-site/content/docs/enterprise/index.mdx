@@ -1,0 +1,165 @@
+---
+title: Enterprise deployment
+description: Deploy DefenseClaw as administrator-owned system services on Windows, Linux, and macOS with any MDM, so a normal user cannot disable it or its AI-agent hooks.
+keywords:
+  - DefenseClaw enterprise
+  - managed_enterprise
+  - standalone profile
+  - MDM deployment
+  - Intune
+  - AI agent hooks
+  - tamper resistance
+---
+
+Enterprise deployment runs DefenseClaw as operating-system services that
+belong to the administrator, not to the person running Codex, Claude Code,
+Cursor or another AI agent. The agent's hooks still run in the user's
+session, but the gateway that decides on each tool call, the policy it
+enforces, and the service that repairs the hooks are all out of the user's
+reach.
+
+{/* verify-after-merge: M2 M4 M5 M6 — this section documents the standalone profile being merged into the enterprise-hardening branch */}
+
+<Callout title="Two profiles">
+`managed_enterprise` has two profiles. **Secure Client** is installed by Cisco
+Secure Client and uses Cisco AI Defense through Secure Client's cloud
+identity. **Standalone** is installed by any MDM, a package manager or an
+administrator, runs the full local policy engine, and can add Cisco AI Defense
+with an API key. This section covers the standalone profile. The Secure
+Client profile is unchanged; see [Enterprise hardening and deployment](/docs/setup/enterprise-deployment).
+</Callout>
+
+## Profiles
+
+| | Secure Client | Standalone |
+| --- | --- | --- |
+| Installed by | Cisco Secure Client | Intune or any MDM, a `.deb`/`.rpm`/`.pkg`, or an administrator shell |
+| Platforms | Windows, macOS | Windows, Linux, macOS |
+| Decisions | Cisco AI Defense only | Local engine (rule packs, policy, CodeGuard, judge when keyed) plus Cisco AI Defense when an API key is stored |
+| If AI Defense is unreachable | Secure Client posture | The local verdict stands |
+| Windows services | Gateway, CMID broker, sensor helper, guardian, enumerator | Gateway, sensor helper, guardian, enumerator |
+| Lifecycle | Windows PowerShell 5.1 · macOS shell installer | PowerShell 7 on Windows · Go on Linux and macOS |
+
+The profile is set in the administrator's config and pinned in every service
+environment (`DEFENSECLAW_ENTERPRISE_PROFILE`). The two must agree, and the
+profile cannot change without reinstalling. When nothing is set, Windows and
+macOS resolve to Secure Client and Linux resolves to standalone. The two
+profiles never share a host.
+
+## What runs where
+
+<Flow
+  direction="TB"
+  caption="Standalone profile. The MDM and the lifecycle are trusted; the gateway runs as a restricted service identity; everything in the user session is untrusted. Every labeled edge that crosses a zone is protected as described in the threat model."
+>
+  <Zone id="z0" label="Z0 · Platform and admin" tone="trusted">
+    <Node id="mdm" kind="operator">{`MDM → enterprise\n<os> ensure`}</Node>
+  </Zone>
+  <Zone id="z1" label="Z1 · Privileged services" tone="privileged">
+    <Node id="grd" kind="operator">{`Guardian ·\nenumerator`}</Node>
+  </Zone>
+  <Zone id="z3" label="Z3 · Admin-owned state" tone="protected">
+    <Node id="cfg" kind="policy">{`Config · policy\nsecrets`}</Node>
+    <Node id="vp" kind="policy">{`Vendor machine\npolicy`}</Node>
+  </Zone>
+  <Zone id="z2" label="Z2 · Restricted gateway" tone="restricted">
+    <Node id="gw" kind="gateway">DefenseClaw gateway</Node>
+  </Zone>
+  <Zone id="z4" label="Z4 · User session" tone="untrusted">
+    <Node id="agent" kind="agent">AI agent</Node>
+    <Node id="hook" kind="connector">defenseclaw-hook</Node>
+  </Zone>
+  <Edge from="mdm" to="grd" label="installs services" />
+  <Edge from="grd" to="vp" label="owned entries" />
+  <Edge from="agent" to="vp" label="loads hooks" />
+  <Edge from="agent" to="hook" />
+  <Edge from="hook" to="gw" label="verified peer" />
+  <Edge from="gw" to="cfg" label="read-only" />
+</Flow>
+
+| Zone | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Z1 Privileged | Guardian, enumerator, sensor helper as LocalSystem | Guardian, enumerator, sensor helper as root, with bounded capabilities | Guardian, enumerator, sensor helper as root |
+| Z2 Restricted gateway | `NT SERVICE\DefenseClawGateway` | `defenseclaw`, no capabilities, systemd sandbox | `_defenseclaw` |
+| Z3 Admin-owned | `C:\Program Files\Cisco\DefenseClaw`, `C:\ProgramData\Cisco\DefenseClaw` | `/opt/defenseclaw`, `/etc/defenseclaw` | `/opt/cisco/defenseclaw` |
+| Z4 User session | Agent + `defenseclaw-hook.exe` | Agent + `/opt/defenseclaw/bin/defenseclaw-hook` | Agent + `/opt/cisco/defenseclaw/bin/defenseclaw-hook` |
+
+## What a normal user cannot do
+
+- Stop, disable or reconfigure a DefenseClaw service, or replace its binary.
+- Edit the config, policies, secrets, target manifest or authorization
+  ledger, or read the AI Defense key.
+- Turn off DefenseClaw's hooks for Codex or Claude Code through their own
+  settings: DefenseClaw sets the vendors' managed-hooks-only locks.
+- Add a user- or project-level hook that rewrites a tool call after
+  DefenseClaw inspected it: the [foreign-hook guard](/docs/enterprise/foreign-hook-guard)
+  removes or blocks it.
+- Impersonate the gateway: the hook sends nothing until the operating system
+  proves the listener is the DefenseClaw service.
+- Install a per-user DefenseClaw that competes with the managed one.
+
+A user can still delete files they own, such as a per-user hook
+registration. The guardian repairs those within one reconcile cycle; vendor
+machine policy, where it exists, has no such window.
+
+## Configuration
+
+The standalone config uses the same keys on every OS. Only the administrator
+can edit it.
+
+```yaml title="config.yaml (standalone excerpt)"
+deployment_mode: managed_enterprise
+enterprise:
+  profile: standalone
+  inspection:
+    ai_defense:
+      enabled: false                # true after `enterprise secret set`
+      credential: ai-defense-api-key
+  enrollment:
+    mode: auto                      # auto | manifest
+    include_users: []
+    exclude_users: []
+    include_groups: []
+    exclude_groups: []
+    exempt_users: []
+    unenrolled_users: inspect       # inspect | deny
+    root: inspect                   # inspect | deny | exempt
+  machine_policy:
+    default:
+      ownership: merge              # merge | verify_only | off
+      managed_hooks_only: enforce   # enforce | preserve
+      foreign_hooks: remove         # remove | report | allow
+    connectors:
+      claudecode:
+        higher_precedence_sources: fail   # fail | warn
+  trust:
+    mode: authenticode              # authenticode | hash_pinned
+    allowed_signers: []
+  coexistence:
+    per_user_install: migrate       # migrate | block | ignore
+    disable_self_update: true
+  network:
+    https_proxy: ""
+    no_proxy: ""
+guardrail:
+  enabled: true
+  mode: observe
+```
+
+An inline `cisco_ai_defense.api_key` is rejected in the standalone profile.
+Store the key with `defenseclaw-gateway enterprise secret set --name
+ai-defense-api-key --from-stdin`. The value is read from standard input and
+never printed; `enterprise secret status` shows only whether it is present,
+when it changed, and a digest prefix. On Windows the same command writes
+`C:\ProgramData\Cisco\DefenseClaw\secrets\<name>` with the protected DACL.
+{/* verify-after-merge: M6 — Windows `enterprise secret` store */}
+
+## Next steps
+
+<Cards>
+  <Card title="Windows" href="/docs/enterprise/windows" description="Install the four standalone services with PowerShell 7 and a signed or hash-pinned payload." />
+  <Card title="Linux" href="/docs/enterprise/linux" description="Install the systemd units, activated sockets, and package on Ubuntu, Debian, RHEL, and derivatives." />
+  <Card title="macOS" href="/docs/enterprise/macos" description="Install the LaunchDaemons and the hidden service user from a package." />
+  <Card title="Intune" href="/docs/enterprise/intune" description="Deploy, detect, repair, and remove DefenseClaw with Microsoft Intune." />
+  <Card title="Threat model" href="/docs/enterprise/threat-model" description="See every trust zone, boundary, invariant, and residual risk." />
+</Cards>

@@ -16,12 +16,15 @@ quirks live on the [connector pages](/docs/connectors#platform-support), next
 to the equivalent macOS/Linux guidance. A supported availability label does
 not populate validation evidence or certify an official-client run.
 
-For centrally managed endpoints, the separate
-[managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout)
-installs four administrator-owned Windows services: `DefenseClawGateway`,
-`DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and
-`DefenseClawHookEnumerator`. It is explicitly opt-in and does not change this
-per-user package or its existing auto-heal behavior.
+For centrally managed endpoints, the separate managed-enterprise lifecycle
+installs administrator-owned Windows services instead: the
+[Secure Client profile](/docs/setup/enterprise-deployment#windows-system-service-layout)
+installs `DefenseClawGateway`, `DefenseClawCMIDBroker`,
+`DefenseClawSensorHelper`, `DefenseClawHookGuardian`, and
+`DefenseClawHookEnumerator`, and the
+[standalone profile](/docs/enterprise/windows) for any MDM installs the same
+services without the credential broker. Both are explicitly opt-in and do not
+change this per-user package or its existing auto-heal behavior.
 
 <Callout type="warning" title="WSL is not supported">
 This guide is for DefenseClaw, the agent, and its configuration running in the
@@ -93,7 +96,7 @@ the authentication, redaction, and local-storage boundaries.
 | A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
 | OpenShell sandbox and `sandbox` commands | **Unsupported** | The Windows release does not host the Linux sandbox lifecycle. |
 | `systemd`, `launchd`, Unix sockets, and DefenseClaw-provided POSIX hook shells | **Not applicable** | Windows uses native processes and Windows process identity. DefenseClaw uses the packaged hook executable, a managed adapter, or an in-process bridge and does not add WSL or a POSIX shell. A connector page calls out any separate upstream runtime dependency, such as Devin's own Windows hook runner. |
-| Machine services from the per-user install | **Unsupported** | The per-user install never installs services. The separate [managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout) installs `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. |
+| Machine services from the per-user install | **Unsupported** | The per-user install never installs services. The separate managed-enterprise lifecycle installs machine services: see the [Secure Client profile](/docs/setup/enterprise-deployment#windows-system-service-layout) or the [standalone profile](/docs/enterprise/windows). |
 | Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
 
 No roadmap is implied by these classifications.

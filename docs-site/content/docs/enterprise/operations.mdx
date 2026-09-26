@@ -1,0 +1,106 @@
+---
+title: Enterprise operations
+description: Day-2 operations for the standalone DefenseClaw enterprise profile — change policy, rotate the AI Defense key, add users and connectors, upgrade, respond to failures, and decommission.
+keywords:
+  - DefenseClaw operations
+  - enterprise upgrade
+  - hook guardian failures
+  - decommission DefenseClaw
+---
+
+Every change goes through the administrator-owned config, a protected
+secret, or the lifecycle. Users cannot make these changes, and the runtime
+API rejects configuration changes in managed mode.
+
+{/* verify-after-merge: M2 M5 M6 — commands and paths below */}
+
+## Change policy or configuration
+
+Edit the managed config (or the files under the policies directory) through
+your MDM. On Linux the `defenseclaw-enterprise-apply.path` unit, and on
+macOS the `com.cisco.defenseclaw.apply` daemon, run `ensure` when the file
+changes. On Windows, run `ensure` again from the MDM. `ensure` is a no-op
+when nothing changed.
+
+The enterprise profile cannot change in place. To move between Secure
+Client and standalone, uninstall one and install the other.
+
+## Rotate the AI Defense key
+
+```bash
+printf '%s' "$NEW_KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret status --json
+```
+
+If AI Defense is unreachable or the key is removed, the local engine keeps
+deciding and the gateway reports AI Defense as unavailable.
+
+## Add a user or connector
+
+- **Users** are enrolled automatically on the next enumerator cycle (five
+  minutes) once they have a supported agent. Use `include_users` to force
+  one, `exclude_users` or `exclude_groups` to keep one out.
+- **Connectors** are enabled in the managed config under `guardrail`. Run
+  `ensure`; machine-policy connectors are published immediately, per-user
+  connectors on the next reconcile.
+
+## Check health
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json
+```
+
+```powershell title="Windows (elevated)"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --json
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --json
+```
+
+`verify` checks every file, owner, mode, service definition and readiness
+signal and never writes. Linux and macOS also run it daily. `coverage_complete`
+and `security_complete` in the result are the fields to alert on.
+
+## Respond to guardian failures
+
+| Symptom | Likely cause | Action |
+| --- | --- | --- |
+| A target is `deferred` | The home is unmounted, locked or on an unreachable share | Nothing; it is retried. Investigate if it persists after the user signs in |
+| A target failed with a home under a world-writable parent | The home layout is unsafe | Move the home or exclude the user |
+| `higher_precedence` on Claude Code or Codex | Another policy source outranks DefenseClaw | Add `managedSourcesBehavior: merge` or deploy `enterprise policy export` output through that source |
+| `conflicts` on a connector | Your own policy sets a lock to false, or two writers manage one file | Remove the conflicting value, or set `ownership: verify_only` |
+| Users report `enterprise_foreign_hook_blocked` | A repository carries an unapproved hook | Review it; approve by digest or ask the owner to remove it |
+| The hook reports the gateway peer as unverified | The gateway is stopped, restarting, or something else holds its endpoint | Check `status`; find the process holding `127.0.0.1:18970` |
+
+## Upgrade
+
+Deploy the new package or Setup executable and run `ensure`. On Windows, run
+the new release's staged CLI rather than the installed one. A failed upgrade
+rolls back to the previous version; the result's `errors` explain why.
+
+## Contain an incident
+
+To contain a compromised account, disable the account itself, then remove
+it from enrollment. On Windows a removed target can keep its old
+connector-scoped hook token until that connector's token is rotated; the
+token never reaches management routes or other connectors, but rotate it as
+part of decommissioning the user. Treat any sign of root or administrator
+compromise as an endpoint incident and reimage rather than repairing in
+place.
+
+## Decommission
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json          # keep config and state
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json  # remove everything
+```
+
+Uninstall removes DefenseClaw's machine-policy entries and restores the
+preimages it recorded; your own policy stays. Ask users to restart running
+agents afterwards: an agent that cached the hook command before uninstall may
+report a hook launch failure until it restarts.
