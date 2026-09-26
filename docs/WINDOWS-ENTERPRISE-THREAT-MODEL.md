@@ -398,7 +398,9 @@ not an administrator authority even though it is a machine service.
    profile contains a supported CLI (parity with macOS
    `render-targets.sh`; see
    `internal/enterprisehooks/agent_version_windows.go` for the per-connector
-   probe). Managed-enterprise deployments are administrator-controlled at
+   probe). Newly discovered rows are deferred so a signed-out user's target
+   remains pending until a safe active session is available, without blocking
+   enrollment for other users. Managed-enterprise deployments are administrator-controlled at
    the *policy* layer — which connectors are pushed, and which SID scope
    the guardian authorization ledger accepts — not at the per-device
    authorization layer. Three residual sub-risks follow from this posture:
