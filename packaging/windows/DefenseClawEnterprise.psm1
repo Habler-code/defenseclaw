@@ -136,6 +136,15 @@ $script:SchemaVersion = 1
 $script:AgentApplicationControlAttestationSchemaVersion = 3
 $script:LegacyAgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
+# The lowest Claude hook contract (claudecode min_inclusive in
+# cli/defenseclaw/inventory/hook_contracts.json, which a contract test pins
+# this to). The gateway's Windows gate derives the same floor from the
+# contract table: an older client has no hook contract to render policy for.
+$script:ClaudeMinimumClientVersion = '2.1.154'
+# Floors recorded by earlier releases in protected evidence and metadata.
+# They remain readable so an existing deployment is not locked out; every
+# new record carries the current floor.
+$script:LegacyClaudeMinimumClientVersions = @('2.1.152')
 $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
 $script:ProgramFiles = [string]$trustedMachineRoots.ProgramFiles
 $script:ProgramData = [string]$trustedMachineRoots.ProgramData
@@ -2158,15 +2167,12 @@ function Get-DefenseClawSensorHelperImage {
     if ([string]::IsNullOrWhiteSpace([string]$Layout.SensorHelperPath)) {
         throw 'sensor helper path is missing'
     }
-    # --home-dirs is passed by the installer, never by a client. The helper
-    # watches what this line names and takes no instruction over the socket,
-    # which is what keeps a privileged event source from becoming a general
-    # purpose file reader for whoever holds the other end.
-    $homeDirs = ''
-    if (-not [string]::IsNullOrWhiteSpace([string]$Layout.SensorHelperHomeDirs)) {
-        $homeDirs = ' --home-dirs "{0}"' -f $Layout.SensorHelperHomeDirs
-    }
-    return '"{0}" --managed-enterprise{1}' -f $Layout.SensorHelperPath, $homeDirs
+    # No --home-dirs on Windows. Plane C here reads the machine-wide Security
+    # event log and takes no watch roots (plane.NewSource ignores homeDirs on
+    # Windows), so a home list would change nothing the helper acquires. The
+    # service log is set through the protected service environment, not this
+    # line, so the ImagePath keeps one shape across helper versions.
+    return '"{0}" --managed-enterprise' -f $Layout.SensorHelperPath
 }
 
 function Get-DefenseClawManagedServiceNames {
@@ -4090,18 +4096,27 @@ function Set-DefenseClawServiceEnvironment {
 }
 
 function Get-DefenseClawSensorHelperEnvironmentValues {
-    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$LogPath
+    )
     Assert-DefenseClawServiceName -Name $GatewayServiceName
+    # SCM discards a service's stderr. The gateway depends on this service,
+    # so without a log a helper that fails to start leaves nothing on disk
+    # to explain why the gateway and managed hooks are down. Older helper
+    # binaries ignore the variable, so a rollback still starts.
     return [string[]]@(
         "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME=$GatewayServiceName",
-        "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName"
+        "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName",
+        "DEFENSECLAW_WINDOWS_SERVICE_LOG=$LogPath"
     )
 }
 
 function Set-DefenseClawSensorHelperServiceEnvironment {
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$LogPath
     )
     Assert-DefenseClawServiceName -Name $Name
     $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
@@ -4109,7 +4124,8 @@ function Set-DefenseClawSensorHelperServiceEnvironment {
         throw "service registry key is missing: $Name"
     }
     $values = Get-DefenseClawSensorHelperEnvironmentValues `
-        -GatewayServiceName $GatewayServiceName
+        -GatewayServiceName $GatewayServiceName `
+        -LogPath $LogPath
     [void](Microsoft.PowerShell.Management\New-ItemProperty `
         -LiteralPath $serviceKey `
         -Name Environment `
@@ -4599,7 +4615,8 @@ function Set-DefenseClawManagedServices {
         Assert-DefenseClawServiceImagePath -Name $sensorHelperServiceName -ExpectedImage $sensorHelperImage
         Set-DefenseClawSensorHelperServiceEnvironment `
             -Name $sensorHelperServiceName `
-            -GatewayServiceName $GatewayServiceName
+            -GatewayServiceName $GatewayServiceName `
+            -LogPath $Layout.SensorHelperLogPath
         $sensorHelperRegistered = $true
     }
 
@@ -5647,6 +5664,7 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.GatewayLogDirectory -Kind GatewayLogDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GuardianLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.BrokerLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
+    Set-DefenseClawPathAcl -Path $Layout.SensorHelperLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayLogPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayLogPath -Kind RuntimeFile -GatewayServiceSID $gatewaySID
     }
@@ -5655,6 +5673,9 @@ function Set-DefenseClawManagedAcls {
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.BrokerLogPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.BrokerLogPath -Kind AdminFile -GatewayServiceSID $gatewaySID
+    }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.SensorHelperLogPath -PathType Leaf) {
+        Set-DefenseClawPathAcl -Path $Layout.SensorHelperLogPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.MetadataPath -Kind AdminFile -GatewayServiceSID $gatewaySID
@@ -6473,6 +6494,7 @@ function Get-DefenseClawLayout {
     $logDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'logs'
     $gatewayLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'gateway'
     $brokerLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'cmid-broker'
+    $sensorHelperLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'sensor-helper'
     $guardianLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'guardian'
     # The DefenseClaw managed-IPC UDS socket lives under Program Files
     # (not ProgramData) as of the AVC release-26.8.4 integration —
@@ -6560,9 +6582,11 @@ function Get-DefenseClawLayout {
         LogDirectory = $logDirectory
         GatewayLogDirectory = $gatewayLogDirectory
         BrokerLogDirectory = $brokerLogDirectory
+        SensorHelperLogDirectory = $sensorHelperLogDirectory
         GuardianLogDirectory = $guardianLogDirectory
         GatewayLogPath = (Microsoft.PowerShell.Management\Join-Path $gatewayLogDirectory 'gateway.log')
         BrokerLogPath = (Microsoft.PowerShell.Management\Join-Path $brokerLogDirectory 'cmid-broker.log')
+        SensorHelperLogPath = (Microsoft.PowerShell.Management\Join-Path $sensorHelperLogDirectory 'sensor-helper.log')
         GuardianLogPath = (Microsoft.PowerShell.Management\Join-Path $guardianLogDirectory 'hook-guardian.log')
         InstallStateDirectory = $installState
         GatewayPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-gateway.exe')
@@ -6571,10 +6595,6 @@ function Get-DefenseClawLayout {
         BrokerServiceName = (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)
         SensorHelperPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-sensor-helper.exe')
         SensorHelperServiceName = (Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName)
-        # Populated by the profile enumerator, the same eligible-users
-        # enumeration that renders targets.yaml. Empty means the helper
-        # watches nothing, which it reports rather than guessing at a home.
-        SensorHelperHomeDirs = ''
         BrokerPipeName = ('\\.\pipe\{0}' -f (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName))
         ProviderLibraryPath = ''
         HookPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe')
@@ -6707,6 +6727,7 @@ function New-DefenseClawLayoutDirectories {
         $Layout.LogDirectory,
         $Layout.GatewayLogDirectory,
         $Layout.BrokerLogDirectory,
+        $Layout.SensorHelperLogDirectory,
         $Layout.GuardianLogDirectory,
         $Layout.InstallStateDirectory,
         $Layout.TransactionsDirectory
@@ -7070,7 +7091,7 @@ function New-DefenseClawDeploymentMetadata {
         claude_approved_client_enforced = [bool](
             $Installed -and $Layout.AgentApplicationControlAttested
         )
-        claude_minimum_client_version = '2.1.152'
+        claude_minimum_client_version = $script:ClaudeMinimumClientVersion
         approved_agent_clients_enforced = [bool](
             $Installed -and $Layout.AgentApplicationControlAttested
         )
@@ -8458,6 +8479,15 @@ function Initialize-DefenseClawCodexRequirementsAclBackup {
     [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
 }
 
+function Test-DefenseClawClaudeMinimumClientVersion {
+    param([AllowNull()]$Value)
+    $text = [string]$Value
+    return [bool](
+        $text -ceq $script:ClaudeMinimumClientVersion -or
+        $text -cin $script:LegacyClaudeMinimumClientVersions
+    )
+}
+
 function Get-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = [IO.Path]::GetFullPath(
@@ -8531,7 +8561,8 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     if ($null -eq $approvedClient -or
         $approvedClient.Value -isnot [bool] -or
         [bool]$approvedClient.Value -ne [bool]$enforced.Value -or
-        [string]$attestation.minimum_claude_version -cne '2.1.152') {
+        -not (Test-DefenseClawClaudeMinimumClientVersion `
+            -Value $attestation.minimum_claude_version)) {
         throw 'agent application-control evidence has an invalid approved-client result or Claude version floor'
     }
     $claudeEffective = $attestation.PSObject.Properties[
@@ -8743,7 +8774,7 @@ function Write-DefenseClawAgentApplicationControlAttestation {
         agent_application_control_enforced = [bool]$Layout.AgentApplicationControlAttested
         prerequisite = $script:AgentApplicationControlPrerequisite
         approved_agent_clients_enforced = [bool]$Layout.AgentApplicationControlAttested
-        minimum_claude_version = '2.1.152'
+        minimum_claude_version = $script:ClaudeMinimumClientVersion
         claude_effective_policy_verified = [bool]$Layout.ClaudeEffectivePolicyVerified
         claude_effective_policy_managed_policy_sha256 = $claudePolicyHash
         claude_effective_policy_hook_sha256 = $claudeHookHash
@@ -14935,7 +14966,8 @@ function Assert-DefenseClawManagedServiceConfigurations {
         -GatewayServiceName $GatewayServiceName
     $sensorHelperEnvironment = [string[]]@(
         Get-DefenseClawSensorHelperEnvironmentValues `
-            -GatewayServiceName $GatewayServiceName
+            -GatewayServiceName $GatewayServiceName `
+            -LogPath $Layout.SensorHelperLogPath
     )
     Assert-DefenseClawServiceConfiguration `
         -Name $Layout.BrokerServiceName `
@@ -15227,8 +15259,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         $approvedAgentsProperty.Value -isnot [bool] -or
         [bool]$approvedAgentsProperty.Value -ne
             [bool]$applicationControlProperty.Value -or
-        [string]$metadata.claude_minimum_client_version -cne '2.1.152') {
-        throw 'deployment metadata does not attest approved Claude clients at version 2.1.152 or newer'
+        -not (Test-DefenseClawClaudeMinimumClientVersion `
+            -Value $metadata.claude_minimum_client_version)) {
+        throw "deployment metadata does not attest approved Claude clients at version $($script:ClaudeMinimumClientVersion) or newer"
     }
     $claudeTargetProperty = $metadata.PSObject.Properties[
         'claude_target_enabled'
@@ -15392,6 +15425,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     $adminOnlyPaths = [Collections.Generic.List[string]]::new()
     foreach ($path in @(
         $Layout.BrokerLogDirectory,
+        $Layout.SensorHelperLogDirectory,
         $Layout.GuardianDirectory,
         $Layout.InstallStateDirectory,
         $Layout.ManifestPath,
@@ -15606,7 +15640,8 @@ function Assert-DefenseClawEnterpriseDeployment {
         -GatewayServiceName $GatewayServiceName
     $sensorHelperEnvironment = [string[]]@(
         Get-DefenseClawSensorHelperEnvironmentValues `
-            -GatewayServiceName $GatewayServiceName
+            -GatewayServiceName $GatewayServiceName `
+            -LogPath $Layout.SensorHelperLogPath
     )
     # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): the enumerator is a
     # third managed SCM service. Its expected env vars mirror the
@@ -16019,6 +16054,9 @@ function Get-DefenseClawLifecycleStatus {
     $pending = Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf
     $gatewayState = Get-DefenseClawServiceState -Name $GatewayServiceName
     $brokerState = Get-DefenseClawServiceState -Name $Layout.BrokerServiceName
+    # Reported, not gated: the gateway's SCM dependency already keeps it from
+    # starting without the helper, and the helper's own log explains why.
+    $sensorHelperState = Get-DefenseClawServiceState -Name $Layout.SensorHelperServiceName
     $guardianState = Get-DefenseClawServiceState -Name $GuardianServiceName
     $gatewayReady = $false
     $guardianReady = $false
@@ -16142,6 +16180,9 @@ function Get-DefenseClawLifecycleStatus {
         guardian_service = $GuardianServiceName
         gateway_service_state = $gatewayState
         broker_service_state = $brokerState
+        sensor_helper_service = $Layout.SensorHelperServiceName
+        sensor_helper_service_state = $sensorHelperState
+        sensor_helper_log_path = $Layout.SensorHelperLogPath
         guardian_service_state = $guardianState
         gateway_ready = [bool]$gatewayReady
         guardian_ready = [bool]$guardianReady
@@ -16156,7 +16197,7 @@ function Get-DefenseClawLifecycleStatus {
         cursor_target_enabled = [bool]$cursorTargetEnabled
         claude_target_enabled = [bool]$claudeTargetEnabled
         claude_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
-        claude_minimum_client_version = '2.1.152'
+        claude_minimum_client_version = $script:ClaudeMinimumClientVersion
         approved_agent_clients_enforced = [bool]$Layout.AgentApplicationControlAttested
         claude_effective_policy_verified = [bool]$claudeEffectivePolicyVerified
         claude_effective_policy_stale_reason = $(

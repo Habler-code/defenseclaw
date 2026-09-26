@@ -2938,6 +2938,51 @@ func removeExactWindowsManagedRuntimeGenerationSnapshot(
 	}
 }
 
+// TestWindowsEnterpriseManagedAgentMinimumsTrackHookContracts pins the
+// derivation: a contract-rendered connector's Windows floor is never below the
+// lowest registered hook contract, and a platform floor above it is kept.
+func TestWindowsEnterpriseManagedAgentMinimumsTrackHookContracts(t *testing.T) {
+	lowest := func(name string) string {
+		result := ""
+		for _, contract := range connector.KnownHookContracts(name) {
+			floor := connector.NormalizeAgentVersion(name, contract.MinAgentVersion)
+			if floor != "" && (result == "" || compareWindowsEnterpriseVersion(floor, result) < 0) {
+				result = floor
+			}
+		}
+		return result
+	}
+	for name := range windowsEnterpriseContractRenderedConnectors {
+		minimum := windowsEnterpriseManagedAgentMinimum(name)
+		contractMinimum := lowest(name)
+		if contractMinimum == "" {
+			t.Fatalf("%s has no registered hook contract minimum", name)
+		}
+		if compareWindowsEnterpriseVersion(minimum, contractMinimum) < 0 {
+			t.Fatalf("%s Windows floor %s is below its lowest hook contract %s", name, minimum, contractMinimum)
+		}
+		if resolution := connector.ResolveHookContract(name, minimum); resolution.Contract.ContractID == "" {
+			t.Fatalf("%s Windows floor %s does not resolve to a hook contract: %s", name, minimum, resolution.Reason)
+		}
+		if platform := windowsEnterprisePlatformAgentMinimums[name]; platform != "" &&
+			compareWindowsEnterpriseVersion(minimum, platform) < 0 {
+			t.Fatalf("%s Windows floor %s dropped below its platform floor %s", name, minimum, platform)
+		}
+	}
+	if got, want := windowsEnterpriseManagedAgentMinimum("claudecode"), lowest("claudecode"); got != want {
+		t.Fatalf("Claude Windows floor = %s, want the lowest Claude hook contract %s", got, want)
+	}
+	if got := windowsEnterpriseManagedAgentMinimum("codex"); got != "0.131.0" {
+		t.Fatalf("Codex Windows floor = %s, want the Windows platform floor 0.131.0", got)
+	}
+	if got := windowsEnterpriseManagedAgentMinimum("cursor"); got != "1.7.0" {
+		t.Fatalf("Cursor Windows floor = %s, want 1.7.0", got)
+	}
+	if got := windowsEnterpriseManagedAgentMinimum("amp"); got != "" {
+		t.Fatalf("ungated connector floor = %q, want empty", got)
+	}
+}
+
 func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -2948,8 +2993,10 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 		{name: "codex below", connector: "codex", version: "0.130.0", wantErr: true},
 		{name: "codex minimum", connector: "codex", version: "0.131.0"},
 		{name: "codex malformed", connector: "codex", version: "not-a-version", wantErr: true},
-		{name: "claude below", connector: "claudecode", version: "2.1.151", wantErr: true},
-		{name: "claude minimum", connector: "claudecode", version: "2.1.152"},
+		// 2.1.152 and 2.1.153 have no Claude hook contract, so the managed
+		// policy cannot be rendered for them.
+		{name: "claude below contract", connector: "claudecode", version: "2.1.153", wantErr: true},
+		{name: "claude minimum", connector: "claudecode", version: "2.1.154"},
 		{name: "cursor below", connector: "cursor", version: "1.6.9", wantErr: true},
 		{name: "cursor minimum", connector: "cursor", version: "1.7.0"},
 	} {

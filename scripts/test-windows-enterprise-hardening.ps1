@@ -8569,7 +8569,7 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
             [bool]$AttestAgentApplicationControl -or
         [bool]$attestation.approved_agent_clients_enforced -ne
             [bool]$AttestAgentApplicationControl -or
-        [string]$attestation.minimum_claude_version -cne '2.1.152' -or
+        [string]$attestation.minimum_claude_version -cne '2.1.154' -or
         [bool]$attestation.claude_effective_policy_verified -ne
             $expectedClaudeAttestation -or
         ([string]$attestation.claude_effective_policy_managed_policy_sha256 -cmatch

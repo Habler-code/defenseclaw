@@ -332,7 +332,7 @@ artifacts. The public installer continues to reject unsigned production
 binaries by default, and `-AllowUnsigned` never bypasses source trust.
 
 `-AttestAgentApplicationControl` means endpoint application-control rules allow
-only approved agent clients and enforce at least Claude 2.1.152. The harness
+only approved agent clients and enforce at least Claude 2.1.154. The harness
 invokes the approved Codex executable directly with the ordinary
 `codex exec ...` argument shape and requires managed-hook contact or a blocked
 operation.
@@ -590,7 +590,7 @@ even when the listener knows the JSON shape of an allow response.
 The process-creation matrix runs under the exact protected medium user. The
 approved signed Codex 0.144.3 and approved signed Claude 2.1.207 binaries must
 start. Mandatory caller-supplied official signed Codex below 0.133.0, official
-signed Claude below 2.1.152, and custom unsigned lookalikes must be rejected by
+signed Claude below 2.1.154, and custom unsigned lookalikes must be rejected by
 application control at process creation. Both floors are the minimums of the
 current hook contracts in `cli/defenseclaw/inventory/hook_contracts.json`; the
 harness reads them from there, so a published contract change moves the

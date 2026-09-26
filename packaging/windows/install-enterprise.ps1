@@ -2877,17 +2877,21 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     # Windows managed_enterprise's manifest validator refuses any
     # `enabled: true` target without an `agent_version` that also meets
     # the connector's Windows minimum — see
-    # requireWindowsEnterpriseManagedAgentVersion in
+    # windowsEnterpriseManagedAgentMinimum in
     # internal/enterprisehooks/install_windows.go (codex >= 0.131.0,
-    # claudecode >= 2.1.152). When no agent metadata exists yet (the common
-    # state on managed rollouts where AVC pushes DefenseClaw first), use the
-    # exact minimum as a bootstrap placeholder. A detected native package
+    # claudecode >= its lowest hook contract, 2.1.154). A contract test pins
+    # these to that gate and to cli/defenseclaw/inventory/hook_contracts.json:
+    # a placeholder below the Claude contract table would pass manifest
+    # validation and then fail to render any managed policy. When no agent
+    # metadata exists yet (the common state on managed rollouts where AVC
+    # pushes DefenseClaw first), use the exact minimum as a bootstrap
+    # placeholder. A detected native package
     # whose identity/version cannot be authenticated never receives that
     # fallback. A valid below-minimum version remains exact so downstream
     # manifest validation fails closed instead of certifying a placeholder.
     $script:DefenseClawWindowsAgentVersionMinimum = @{
         'codex'      = '0.131.0'
-        'claudecode' = '2.1.152'
+        'claudecode' = '2.1.154'
         'cursor'     = '1.7.0'
     }
     foreach ($u in $users) {

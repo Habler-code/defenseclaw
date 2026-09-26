@@ -44,6 +44,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -53,6 +54,13 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
+)
+
+// Set by the release build's -ldflags -X, so a service log names the exact
+// helper build that wrote it.
+var (
+	version = "dev"
+	commit  = ""
 )
 
 func main() {
@@ -79,14 +87,36 @@ func run() error {
 	)
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// The log destination comes from the protected service environment, not
+	// the command line, so the ImagePath of an installed helper never changes
+	// shape and a rollback to an older helper binary still starts.
+	logger, closeLog := newHelperLogger(serviceLogPath(), os.Stderr)
+	defer closeLog()
+	logger.Info("sensor helper starting", "version", version, "commit", commit)
 
-	path := *socketPath
+	err := runHelper(logger, *socketPath, *homeDirs, *allowUIDs, *socketGID, *dataDir, *managedEnterprise)
+	if err != nil {
+		// Under the Service Control Manager this line is the only record of
+		// why the helper, and therefore the gateway that depends on it,
+		// did not come up.
+		logger.Error("sensor helper exited", "error", err)
+	}
+	return err
+}
+
+func runHelper(
+	logger *slog.Logger,
+	socketPath, homeDirs, allowUIDs string,
+	socketGID int,
+	dataDir string,
+	managedEnterprise bool,
+) error {
+	path := socketPath
 	if path == "" {
-		path = acquire.DefaultSocketPath(*dataDir, *managedEnterprise)
+		path = acquire.DefaultSocketPath(dataDir, managedEnterprise)
 	}
 
-	uids, err := parseUIDs(*allowUIDs)
+	uids, err := parseUIDs(allowUIDs)
 	if err != nil {
 		return err
 	}
@@ -102,8 +132,28 @@ func run() error {
 	// killed with error 1053 -- a helper that can never start, on the one
 	// platform whose gateway most needs it.
 	return runUnderServiceManager(ctx, func(ctx context.Context) error {
-		return serve(ctx, path, uids, *socketGID, splitList(*homeDirs), logger)
+		return serve(ctx, path, uids, socketGID, splitList(homeDirs), logger)
 	})
+}
+
+// newHelperLogger writes to the service log when one is configured and it
+// can be opened safely, and to fallback otherwise. A log that cannot be
+// opened is a diagnostics gap, not a reason to refuse to start: the gateway
+// depends on this service, so failing here would take managed hooks down
+// with it.
+func newHelperLogger(path string, fallback io.Writer) (*slog.Logger, func()) {
+	options := &slog.HandlerOptions{Level: slog.LevelInfo}
+	if strings.TrimSpace(path) == "" {
+		return slog.New(slog.NewTextHandler(fallback, options)), func() {}
+	}
+	file, err := openHelperLog(path)
+	if err != nil {
+		logger := slog.New(slog.NewTextHandler(fallback, options))
+		logger.Warn("sensor helper log is unavailable; logging to stderr",
+			"log", path, "error", err)
+		return logger, func() {}
+	}
+	return slog.New(slog.NewTextHandler(file, options)), func() { _ = file.Close() }
 }
 
 func serve(

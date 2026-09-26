@@ -5891,6 +5891,10 @@
         {
           "location": "cmd/defenseclaw/service_windows.go",
           "description": "Redirects native Windows service stdout and stderr to the configured file"
+        },
+        {
+          "location": "cmd/defenseclaw-sensor-helper/log_windows.go",
+          "description": "Appends the sensor helper's service log to the configured file"
         }
       ],
       "since": "0.8.0",

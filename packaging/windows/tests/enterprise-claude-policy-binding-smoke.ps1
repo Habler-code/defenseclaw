@@ -112,7 +112,7 @@ try {
                 agent_application_control_enforced = $false
                 prerequisite = 'wdac_or_applocker_approved_agent_client_rules'
                 approved_agent_clients_enforced = $false
-                minimum_claude_version = '2.1.152'
+                minimum_claude_version = $script:ClaudeMinimumClientVersion
                 claude_effective_policy_verified = $false
                 claude_effective_policy_managed_policy_sha256 = ''
                 claude_effective_policy_hook_sha256 = ''
@@ -195,6 +195,9 @@ try {
                 (Get-TestSha256 $layout.HookPath) -or
             $null -ne $written.PSObject.Properties['claude_effective_policy_manifest_sha256']) {
             $failures.Add('writer: schema-3 evidence is not bound to the Claude policy and hook digests')
+        }
+        if ([string]$written.minimum_claude_version -cne $script:ClaudeMinimumClientVersion) {
+            $failures.Add("writer: recorded Claude floor $($written.minimum_claude_version), want $script:ClaudeMinimumClientVersion")
         }
         Assert-TestFresh 'freshly attested'
 
@@ -288,6 +291,14 @@ try {
         Assert-TestThrows 'schema-3 evidence with a legacy manifest binding' {
             [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $layout)
         } 'legacy manifest binding'
+        # #901: evidence recorded at the pre-contract Claude floor stays
+        # readable; an unknown floor still fails closed.
+        Set-TestAttestation @{ minimum_claude_version = '2.1.152' }
+        Assert-TestFresh 'legacy Claude floor evidence'
+        Set-TestAttestation @{ minimum_claude_version = '2.1.100' }
+        Assert-TestThrows 'unknown Claude floor' {
+            [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $layout)
+        } 'Claude version floor'
         Set-TestAttestation @{ schema_version = 4 }
         Assert-TestThrows 'unknown schema' {
             [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $layout)

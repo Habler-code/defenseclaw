@@ -96,20 +96,54 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 	return result, true, err
 }
 
+// windowsEnterprisePlatformAgentMinimums are Windows floors that sit above
+// what the hook contracts alone require.
+var windowsEnterprisePlatformAgentMinimums = map[string]string{
+	"codex":  "0.131.0",
+	"cursor": "1.7.0",
+}
+
+// windowsEnterpriseContractRenderedConnectors render their Windows managed
+// hook policy from a resolved hook contract. Their floor therefore never sits
+// below the lowest registered contract: a version this gate accepts must also
+// be one the policy can be rendered for.
+var windowsEnterpriseContractRenderedConnectors = map[string]bool{
+	"claudecode": true,
+	"codex":      true,
+}
+
+// windowsEnterpriseManagedAgentMinimum is the effective Windows floor for a
+// connector: its platform floor, raised to the hook-contract table's lowest
+// minimum for contract-rendered connectors. Empty means ungated.
+func windowsEnterpriseManagedAgentMinimum(name string) string {
+	minimum := windowsEnterprisePlatformAgentMinimums[name]
+	if !windowsEnterpriseContractRenderedConnectors[name] {
+		return minimum
+	}
+	contractMinimum := ""
+	for _, contract := range connector.KnownHookContracts(name) {
+		floor := connector.NormalizeAgentVersion(name, contract.MinAgentVersion)
+		if floor == "" {
+			continue
+		}
+		if contractMinimum == "" || compareWindowsEnterpriseVersion(floor, contractMinimum) < 0 {
+			contractMinimum = floor
+		}
+	}
+	if contractMinimum != "" &&
+		(minimum == "" || compareWindowsEnterpriseVersion(contractMinimum, minimum) > 0) {
+		minimum = contractMinimum
+	}
+	return minimum
+}
+
 func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) error {
 	if err := requireWindowsEnterpriseAgentVersion(raw); err != nil {
 		return err
 	}
 	name := strings.ToLower(strings.TrimSpace(connectorName))
-	minimum := ""
-	switch name {
-	case "codex":
-		minimum = "0.131.0"
-	case "claudecode":
-		minimum = "2.1.152"
-	case "cursor":
-		minimum = "1.7.0"
-	default:
+	minimum := windowsEnterpriseManagedAgentMinimum(name)
+	if minimum == "" {
 		return nil
 	}
 	normalized := connector.NormalizeAgentVersion(name, raw)

@@ -363,7 +363,14 @@ targets:
                     Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-sensor-helper.exe'
                 )
                 SensorHelperServiceName = 'DefenseClawSensorHelper'
-                SensorHelperHomeDirs = ''
+                SensorHelperLogDirectory = (
+                    Microsoft.PowerShell.Management\Join-Path $stateRoot 'logs\sensor-helper'
+                )
+                SensorHelperLogPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $stateRoot `
+                        'logs\sensor-helper\sensor-helper.log'
+                )
                 BrokerPipeName = '\\.\pipe\DefenseClawCMIDBroker'
                 BrokerStateDirectory = $brokerStateDirectory
                 BrokerAuthKeyPath = (

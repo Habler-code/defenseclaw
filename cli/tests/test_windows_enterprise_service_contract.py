@@ -465,6 +465,7 @@ def test_packaging_defaults_to_protected_scm_identities_and_roots() -> None:
     assert (
         "    foreach ($path in @(\n"
         "        $Layout.BrokerLogDirectory,\n"
+        "        $Layout.SensorHelperLogDirectory,\n"
         "        $Layout.GuardianDirectory,\n"
         "        $Layout.InstallStateDirectory,\n"
         "        $Layout.ManifestPath,\n"
