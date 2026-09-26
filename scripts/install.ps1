@@ -83,7 +83,10 @@ $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runt
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
 $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
-$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" })
+# defenseclaw-hook.exe reads its data dir from the state file beside it, never
+# from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
+$HookState = "defenseclaw-hook-state.json"
+$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($HookState)
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold")
@@ -641,6 +644,20 @@ function Write-Shim([string]$Name, [string]$Target) {
     Move-Path "$path.new" $path
 }
 
+function Write-HookState {
+    $root = [IO.Path]::GetFullPath($BinDir).TrimEnd('\')
+    $state = [ordered]@{
+        schema_version = 1; install_kind = "powershell-windows"; install_scope = "user"
+        install_root = $root; command_dir = $root; data_root = [IO.Path]::GetFullPath($DataDir).TrimEnd('\')
+    }
+    $path = Join-Path $BinDir $HookState
+    $text = ($state | ConvertTo-Json -Compress) + "`n"
+    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
+    [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
+    if (Test-Path -LiteralPath $path) { Remove-Aside $path }
+    Move-Path "$path.new" $path
+}
+
 function Copy-BinDir([string]$To) {
     New-Item -ItemType Directory -Path $To -Force | Out-Null
     foreach ($name in $ManagedFiles) {
@@ -721,6 +738,7 @@ function Install-New {
         if (Test-Path -LiteralPath $target) { Write-Shim $name $target }
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
+    Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
         if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0") { Repair-DataOwner }
@@ -814,12 +832,29 @@ function Save-Live([string]$Slot) {
 function Restore-Live([string]$Slot) {
     # Make $Slot the live install again (the inverse of Save-Live).
     Restore-BinDir (Join-Path $Slot "bin")
+    Restore-LiveTree $Slot
+    Restore-ExternalConfig $Slot
+}
+
+function Restore-LiveTree([string]$Slot) {
+    # Move $Slot's data, venv and installer back into place. Alone it undoes a
+    # Save-Live that failed part-way: that one only copied the binaries.
     foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction SilentlyContinue)) {
         Move-Path $entry.FullName (Join-Path $DataDir $entry.Name)
     }
-    if (Test-Path -LiteralPath (Join-Path $Slot "venv")) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
-    if (Test-Path -LiteralPath (Join-Path $Slot "installer")) { Move-Path (Join-Path $Slot "installer") $InstallerDir }
-    Restore-ExternalConfig $Slot
+    if ((Test-Path -LiteralPath (Join-Path $Slot "venv")) -and -not (Test-Path -LiteralPath $Venv)) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
+    if ((Test-Path -LiteralPath (Join-Path $Slot "installer")) -and -not (Test-Path -LiteralPath $InstallerDir)) {
+        Move-Path (Join-Path $Slot "installer") $InstallerDir
+    }
+}
+
+function Move-LiveTo([string]$Slot) {
+    # Move what Restore-Live brought in from $Slot back into it. Only valid
+    # while the install it replaced is set aside in full elsewhere.
+    New-Item -ItemType Directory -Path (Join-Path $Slot "data") -Force | Out-Null
+    foreach ($entry in Get-DataEntries) { Move-Path $entry.FullName (Join-Path $Slot "data\$($entry.Name)") }
+    if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Slot "venv") 60 }
+    if (Test-Path -LiteralPath $InstallerDir) { Move-Path $InstallerDir (Join-Path $Slot "installer") }
 }
 
 function Resume-InterruptedRun {
@@ -848,12 +883,12 @@ function Resume-InterruptedRun {
         [void](Stop-Gateway)
         if (Test-Path -LiteralPath (Join-Path $hold "STASHED")) {
             # The live install was set aside in full, so anything live now came from previous\.
-            New-Item -ItemType Directory -Path (Join-Path $Previous "data") -Force | Out-Null
-            foreach ($entry in Get-DataEntries) { Move-Path $entry.FullName (Join-Path $Previous "data\$($entry.Name)") }
-            if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Previous "venv") 60 }
-            if (Test-Path -LiteralPath $InstallerDir) { Move-Path $InstallerDir (Join-Path $Previous "installer") }
+            Move-LiveTo $Previous
+            Restore-Live $hold
+        } else {
+            # Setting it aside stopped part-way; the live binaries were only copied.
+            Restore-LiveTree $hold
         }
-        Restore-Live $hold
         Remove-Tree $hold
     }
 }
@@ -896,31 +931,39 @@ function Complete-Swap {
 function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning) {
     # Exchange the live install and previous\ by renaming, so a second
     # -Rollback rolls forward again. Each half undoes itself on failure.
+    # Returns 0 when swapped, 1 when the current install is back in place, 2
+    # when it could not be put back (the next run of the installer recovers it).
     $hold = Join-Path $DataDir ".rollback-hold"
     New-InstallDirectory $hold
     try { Save-Live $hold } catch {
         Write-Err $_.Exception.Message
-        Invoke-Quietly { Restore-Live $hold }
+        try { Restore-LiveTree $hold } catch {
+            Write-Err "Could not set the current install aside or put it back; run the installer again to recover it"
+            return 2
+        }
         Invoke-Quietly { Remove-Tree $hold }
         Write-Err "Could not set the current install aside; nothing was changed"
-        return $false
+        return 1
     }
     Set-Content -LiteralPath (Join-Path $hold "STASHED") -Value "" -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $hold "VERSION") -Value $Current -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $hold "GATEWAY_WAS_RUNNING") -Value ([string]$GatewayWasRunning).ToLowerInvariant() -Encoding Ascii
     try { Restore-Live $Previous } catch {
         Write-Err $_.Exception.Message
-        Invoke-Quietly { Save-Live $Previous }
-        Invoke-Quietly { Restore-Live $hold }
+        # Restore-Live only copies previous\bin, so returning the rest restores previous\.
+        try { Move-LiveTo $Previous; Restore-Live $hold } catch {
+            Write-Err "Could not restore the previous install or put the current one back; run the installer again to recover it"
+            return 2
+        }
         Invoke-Quietly { Remove-Tree $hold }
         Write-Err "Could not restore the previous install; the current one is back in place"
-        return $false
+        return 1
     }
     # Its data was written after the upgrade being undone: a later upgrade keeps it.
     Set-Content -LiteralPath (Join-Path $hold "ROLLED_BACK") -Value (Get-Date -Format "yyyyMMddTHHmmss") -Encoding Ascii
     Remove-Tree $Previous
     Move-Path $hold $Previous
-    return $true
+    return 0
 }
 
 # -- First install ------------------------------------------------------------
@@ -1008,8 +1051,10 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $startAfter = $wasRunning -or (Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")) -eq "true"
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
-    if (-not (Switch-WithPrevious $current $wasRunning)) {
-        if ($wasRunning) { [void](Start-Gateway) }
+    $swapped = @(Switch-WithPrevious $current $wasRunning)[-1]
+    if ($swapped -ne 0) {
+        # 1: the swap undid itself, so this install is back and may run again.
+        if ($swapped -eq 1 -and $wasRunning) { [void](Start-Gateway) }
         Die "Rollback failed part-way; see $($Run.Log)"
     }
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
@@ -1262,7 +1307,12 @@ function Invoke-Install {
         Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
     }
     $startRc = 0
-    $startNew = $WasRunning -or ($Setup -and (Test-ConnectorConfigured))
+    # A 0.x import leaves the agent executables its connectors run in a receipt
+    # (see defenseclaw migrate) that the gateway must seal within minutes, so
+    # the new gateway starts even if the old one was stopped; it is stopped
+    # again once it is healthy.
+    $import0x = $PrevVersion -and -not $Setup -and [version]$PrevVersion -lt [version]"1.0.0"
+    $startNew = $WasRunning -or (($Setup -or $import0x) -and (Test-ConnectorConfigured))
     if ($startNew -and -not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) {
         # 0.x gateways ran on defaults without a config; 1.x needs one.
         $startNew = $false
@@ -1276,6 +1326,7 @@ function Invoke-Install {
             Restore-Snapshot
             Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
         }
+        if ($import0x -and -not $WasRunning) { [void](Stop-Gateway) }
     }
     Complete-Swap
     try { [Console]::TreatControlCAsInput = $false } catch { }

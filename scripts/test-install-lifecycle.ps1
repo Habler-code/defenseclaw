@@ -387,6 +387,18 @@ function Test-UpgradePrevious {
     Assert-DataKept
     Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $from) "previous\VERSION is not $from"
 
+    Write-Log "a rollback that cannot restore the previous install puts the current one back"
+    $blocked = Join-Path $DcHome "previous\bin\defenseclaw-gateway.exe"
+    & icacls.exe $blocked /deny "*S-1-1-0:(R)" | Out-Null
+    try {
+        Check ((Invoke-Installer (Join-Path $DcHome "installer\install.ps1") @("-Rollback", "-Yes")) -ne 0) "a rollback whose previous gateway cannot be read succeeded"
+    } finally { & icacls.exe $blocked /remove:d "*S-1-1-0" | Out-Null }
+    Assert-Versions $Target
+    Assert-Healthy
+    Assert-DataKept
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".rollback-hold"))) "the failed rollback left .rollback-hold behind"
+    Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $from) "the failed rollback changed previous\"
+
     Write-Log "defenseclaw rollback --yes (detached installer)"
     $launchDirs = Get-LaunchDirCount
     $code = Invoke-Exe (Join-Path $Bin "defenseclaw.cmd") @("rollback", "--yes")
@@ -434,7 +446,7 @@ function Test-UpgradeLegacy([string]$From) {
         # 0.x resolved its dependencies live; resolve as of the release date, as
         # its users did (today's newest packages may no longer build on Windows).
         $published = (Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/cisco-ai-defense/defenseclaw/releases/tags/$From").published_at
-        $env:UV_EXCLUDE_NEWER = ([datetime]$published).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $env:UV_EXCLUDE_NEWER = ([datetime]$published).ToUniversalTime().ToString("s", [Globalization.CultureInfo]::InvariantCulture) + "Z"
         try {
             $code = Invoke-Exe $shell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $legacy, "-Version", $From, "-Yes", "-NoOpenclaw")
         } finally { Remove-Item Env:UV_EXCLUDE_NEWER -ErrorAction SilentlyContinue }
@@ -524,29 +536,23 @@ function Test-FilesInUse {
             [IO.File]::AppendAllText((Join-Path $Zip "defenseclaw-hook.exe"), "rebuilt")
         }
     }
-    # A hook waiting for its payload, as an agent runs it. The hook looks for
-    # its data dir in the real profile (its Known Folder, not the lane's
-    # USERPROFILE) and exits at once without one, so it gets an empty one
-    # while it runs unless there is a real install.
-    $realData = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".defenseclaw"
-    $madeData = -not (Test-Path -LiteralPath $realData)
-    if ($madeData) { New-Item -ItemType Directory -Path $realData | Out-Null }
-    try {
-        $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
-        Start-Sleep -Seconds 2
-        if ($hook.HasExited) {
-            Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
-        }
-        Write-Log "install $Target while defenseclaw-hook.exe runs"
-        Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
-        Assert-Versions $Target
-        Assert-Healthy
-        Check (-not $hook.HasExited) "the running hook was stopped"
-        Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not renamed aside"
-    } finally {
-        Stop-Held
-        if ($madeData) { Remove-Item -LiteralPath $realData -Recurse -Force -ErrorAction SilentlyContinue }
+    # A hook waiting for its payload, as an agent runs it. The hook ignores
+    # the environment it is given and takes its data dir from the state file
+    # beside it: without the lane's there, it would find no install and exit.
+    $state = Get-Content -Raw -LiteralPath (Join-Path $Bin "defenseclaw-hook-state.json") -ErrorAction SilentlyContinue | ConvertFrom-Json
+    Check ($state -and [IO.Path]::GetFullPath($state.data_root) -eq [IO.Path]::GetFullPath($DcHome)) "defenseclaw-hook-state.json does not bind the hook to $DcHome"
+    $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
+    Start-Sleep -Seconds 2
+    if ($hook.HasExited) {
+        Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
     }
+    Write-Log "install $Target while defenseclaw-hook.exe runs"
+    Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
+    Assert-Versions $Target
+    Assert-Healthy
+    Check (-not $hook.HasExited) "the running hook was stopped"
+    Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not renamed aside"
+    Stop-Held
 
     Write-Log "re-run while the CLI runs from the venv (must stop, nothing changed)"
     $holder = Start-Held (Join-Path $DcHome ".venv\Scripts\python.exe") @("-c", "import time; time.sleep(900)")

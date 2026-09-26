@@ -370,6 +370,10 @@ if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
         if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${candidate}/Contents/Info.plist" 2>/dev/null)" == com.cisco.defenseclaw.macos ]]; then
             if [[ -w "${candidate}" && -w "$(dirname "${candidate}")" ]]; then
                 APP_PATH="${candidate}"
+            elif [[ "${candidate}" == "${DEFENSECLAW_APP_PATH:-}" ]]; then
+                # Asked for by name (the app's own Update runs this), so a CLI
+                # update alone would leave the app offering the same update.
+                die "${candidate} is not writable by $(id -un); nothing was changed (update it from the DMG)"
             else
                 warn "${candidate} is not writable by $(id -un); leaving the app as it is (update it from the DMG)"
             fi
@@ -395,9 +399,11 @@ if [[ "${ROLLBACK}" == true ]]; then
     restart="${was_running}"
     [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
-    if ! swap_with_previous; then
-        # Each half of the swap undoes itself, so this install is back.
-        [[ "${was_running}" == true ]] && { start_gateway || true; }
+    swapped=0
+    swap_with_previous || swapped=$?
+    if [[ "${swapped}" -ne 0 ]]; then
+        # 1: the swap undid itself, so this install is back and may run again.
+        [[ "${swapped}" -eq 1 && "${was_running}" == true ]] && { start_gateway || true; }
         die "Rollback failed part-way; see ${LOG}"
     fi
     if [[ "${restart}" == true ]]; then
@@ -700,14 +706,11 @@ recover_interrupted_run() {
         stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
         if [[ -f "${slot}/STASHED" ]]; then
             # The live install was fully set aside, so anything live now came from previous/.
-            mkdir -p "${PREVIOUS}/data"
-            while IFS= read -r name; do
-                mv "${DEFENSECLAW_HOME}/${name}" "${PREVIOUS}/data/"
-            done < <(data_entries)
-            if [[ -d "${VENV}" ]]; then mv "${VENV}" "${PREVIOUS}/venv"; fi
-            if [[ -d "${INSTALLER_DIR}" ]]; then mv "${INSTALLER_DIR}" "${PREVIOUS}/installer"; fi
+            return_live_to "${PREVIOUS}" && unstash "${slot}" && rm -rf "${slot}"
+        else
+            # Setting it aside stopped part-way; the live binaries were only copied.
+            unstash_tree "${slot}" && rm -rf "${slot}"
         fi
-        unstash "${slot}" && rm -rf "${slot}"
     fi
 }
 
@@ -863,7 +866,7 @@ stash_live() {
 
 # unstash SLOT: make SLOT the live install again (the inverse of stash_live).
 unstash() {
-    local slot="$1" binary link name
+    local slot="$1" binary link
     for binary in ${MANAGED_BINARIES}; do
         if [[ -f "${slot}/bin/${binary}" ]]; then
             cp -p "${slot}/bin/${binary}" "${BIN_DIR}/.${binary}.old" \
@@ -876,31 +879,62 @@ unstash() {
         rm -f "${BIN_DIR:?}/${link}"
         [[ -L "${slot}/bin/${link}" ]] && { cp -P "${slot}/bin/${link}" "${BIN_DIR}/${link}" || return 1; }
     done
+    unstash_tree "${slot}" || return 1
+    restore_external_config "${slot}"
+}
+
+# unstash_tree SLOT: move SLOT's data, venv and installer back into place.
+# Alone it undoes a stash_live that failed part-way: that one only copied
+# the binaries, so the live ones are still in place.
+unstash_tree() {
+    local slot="$1" name
     for name in "${slot}/data"/* "${slot}/data"/.[!.]* "${slot}/data"/..?*; do
         [[ -e "${name}" || -L "${name}" ]] && { mv "${name}" "${DEFENSECLAW_HOME}/" || return 1; }
     done
-    if [[ -d "${slot}/venv" ]]; then mv "${slot}/venv" "${VENV}" || return 1; fi
-    if [[ -d "${slot}/installer" ]]; then mv "${slot}/installer" "${INSTALLER_DIR}" || return 1; fi
-    restore_external_config "${slot}"
+    if [[ -d "${slot}/venv" && ! -e "${VENV}" ]]; then mv "${slot}/venv" "${VENV}" || return 1; fi
+    if [[ -d "${slot}/installer" && ! -e "${INSTALLER_DIR}" ]]; then mv "${slot}/installer" "${INSTALLER_DIR}" || return 1; fi
+}
+
+# return_live_to SLOT: move what unstash brought in from SLOT back into it.
+# Only valid while the install unstash replaced is fully set aside elsewhere.
+return_live_to() {
+    local slot="$1" name
+    mkdir -p "${slot}/data" || return 1
+    while IFS= read -r name; do
+        mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
+    done < <(data_entries)
+    if [[ -d "${VENV}" ]]; then mv "${VENV}" "${slot}/venv" || return 1; fi
+    if [[ -d "${INSTALLER_DIR}" ]]; then mv "${INSTALLER_DIR}" "${slot}/installer" || return 1; fi
 }
 
 swap_with_previous() {
     # Exchange the live install and previous/ by renaming, so a second
     # --rollback rolls forward again. Each half undoes itself on failure.
+    # Returns 1 when the current install is back in place, 2 when it could
+    # not be put back (the next run of the installer finishes the recovery).
     local hold="${DEFENSECLAW_HOME}/.rollback-hold"
     rm -rf "${hold}"
     if ! stash_live "${hold}"; then
-        unstash "${hold}"; rm -rf "${hold}"
-        err "Could not set the current install aside; nothing was changed"
-        return 1
+        if unstash_tree "${hold}"; then
+            rm -rf "${hold}"
+            err "Could not set the current install aside; nothing was changed"
+            return 1
+        fi
+        err "Could not set the current install aside or put it back; re-run the installer to recover it"
+        return 2
     fi
     : > "${hold}/STASHED"
     printf '%s\n' "${current}" > "${hold}/VERSION"
     printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
     if ! unstash "${PREVIOUS}"; then
-        stash_live "${PREVIOUS}"; unstash "${hold}"; rm -rf "${hold}"
-        err "Could not restore the previous install; the current one is back in place"
-        return 1
+        # unstash only copies previous/bin, so returning the rest restores previous/.
+        if return_live_to "${PREVIOUS}" && unstash "${hold}"; then
+            rm -rf "${hold}"
+            err "Could not restore the previous install; the current one is back in place"
+            return 1
+        fi
+        err "Could not restore the previous install or put the current one back; re-run the installer to recover it"
+        return 2
     fi
     if [[ -n "${APP_PATH}" && -d "${PREVIOUS}/DefenseClawMac.app" ]]; then
         mv "${APP_PATH}" "${hold}/DefenseClawMac.app" && mv "${PREVIOUS}/DefenseClawMac.app" "${APP_PATH}" \

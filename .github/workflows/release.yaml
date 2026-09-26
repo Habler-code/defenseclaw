@@ -60,6 +60,10 @@ jobs:
     name: Validate inputs
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Only to list draft releases, which a read-only token cannot see; the
+    # job's steps make no changes.
+    permissions:
+      contents: write
     outputs:
       previous: ${{ steps.check.outputs.previous }}
     steps:

@@ -48,7 +48,8 @@ Run E2E tests only when the required local services, credentials, and platform a
 `scripts/test-install-lifecycle.sh` (macOS and Linux) and
 `scripts/test-install-lifecycle.ps1` (Windows) run the real installers against
 a release-shaped asset directory. Every lane uses its own throwaway `HOME` and
-a free gateway port, so the machine's own install is never touched.
+a free gateway port, so the machine's own install is never touched. (The
+Windows `upgrade-0.X.Y` lanes are the exception noted below.)
 
 ```bash
 # Assets for the host platform, built from the working tree.
@@ -74,7 +75,11 @@ The PowerShell script takes `-Assets`, `-PreviousAssets` and `-Lanes`. Its
 lanes are `fresh`, `setup-import` (replacing a synthetic 0.8.x Setup install),
 `files-in-use`, `failure-drill`, `policy` (the `DisableSelfUpdate` refusal;
 needs an elevated shell), and `upgrade-previous` and `shim`, which need
-`-PreviousAssets`.
+`-PreviousAssets`. `upgrade-0.X.Y` (0.8.0-0.8.3) needs `-CodexExe`, a Codex CLI
+`codex.exe`: 0.x sets up the codex connector, and DefenseClaw on Windows runs
+Codex only from where its installer puts it. Unless Codex is already
+installed there, the lane copies it into the real profile's
+`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` and removes it afterwards.
 
 ## CI Workflows
 

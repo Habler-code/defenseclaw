@@ -461,6 +461,8 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "defenseclaw-hook.exe",
             "skill-scanner.cmd",
             "mcp-scanner.cmd",
+            # Written by install.ps1: binds defenseclaw-hook.exe to the data dir.
+            "defenseclaw-hook-state.json",
         )
     else:
         install_root = os.path.abspath(os.path.expanduser("~/.local/bin"))
@@ -813,6 +815,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "defenseclaw-hook.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
+                "defenseclaw-hook-state.json",
             }
             if plan.platform_name == "win32"
             else {

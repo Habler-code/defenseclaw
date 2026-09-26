@@ -2918,7 +2918,10 @@ def _select_windows_agents(data_dir: str) -> None:
         selections, errors = record_setup_agent_selections(data_dir, connectors)
         if errors and selections:
             # A failed probe records nothing; keep the agents that were found.
-            selections, _ = record_setup_agent_selections(data_dir, list(selections))
+            selections, retry_errors = record_setup_agent_selections(data_dir, list(selections))
+            if retry_errors:
+                errors.update(retry_errors)
+                selections = {}
     except Exception as exc:  # noqa: BLE001 - the gateway start reports what it needs
         ux.warn(f"could not record the agent executables for the imported connectors: {exc}", indent="    ")
         return

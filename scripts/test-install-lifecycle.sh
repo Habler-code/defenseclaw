@@ -250,6 +250,19 @@ upgrade_lane() {
     assert_healthy
     assert_data_kept
     [[ "$(cat "${DC_HOME}/previous/VERSION" 2>/dev/null)" == "${from}" ]] || fail "previous/VERSION is not ${from}"
+    if [[ "${name}" == upgrade-previous && "$(id -u)" != 0 ]]; then
+        log "${name}: a rollback that cannot restore the previous install puts the current one back"
+        chmod 000 "${DC_HOME}/previous/bin/defenseclaw-gateway"
+        if bash "${DC_HOME}/installer/install.sh" --rollback --yes; then
+            fail "a rollback whose previous gateway cannot be read succeeded"
+        fi
+        chmod 755 "${DC_HOME}/previous/bin/defenseclaw-gateway"
+        assert_versions "${TARGET}"
+        assert_healthy
+        assert_data_kept
+        [[ ! -e "${DC_HOME}/.rollback-hold" ]] || fail "the failed rollback left .rollback-hold behind"
+        [[ "$(cat "${DC_HOME}/previous/VERSION" 2>/dev/null)" == "${from}" ]] || fail "the failed rollback changed previous/"
+    fi
     log "${name}: defenseclaw rollback"
     local copies
     copies="$(installer_copies)"

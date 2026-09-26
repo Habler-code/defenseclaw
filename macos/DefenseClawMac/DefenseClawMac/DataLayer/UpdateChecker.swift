@@ -377,9 +377,12 @@ actor UpdateChecker {
     /// holding it must be writable — a mounted disk image or an App
     /// Translocation mount is not.
     nonisolated static func canReplaceBundle(atPath path: String) -> Bool {
-        FileManager.default.isWritableFile(
-            atPath: URL(fileURLWithPath: path).deletingLastPathComponent().path
-        )
+        // The installer moves the bundle aside, so both it and its folder
+        // must be writable (it refuses the update otherwise).
+        FileManager.default.isWritableFile(atPath: path)
+            && FileManager.default.isWritableFile(
+                atPath: URL(fileURLWithPath: path).deletingLastPathComponent().path
+            )
     }
 
     /// The version of the bundle now on disk at `path`, read from Info.plist

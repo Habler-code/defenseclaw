@@ -371,3 +371,31 @@ def test_v8_preflight_converts_without_the_retired_0_5_0_keys(data_dir: Path, mo
 
     assert converted == [b"config_version: 7\nguardrail:\n  mode: observe\n"]
     assert config.read_text() == body
+
+
+def test_windows_agent_selection_reports_nothing_when_the_retry_fails(data_dir: Path, monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+
+    from defenseclaw import agent_selection, config
+
+    monkeypatch.setattr(
+        config,
+        "load",
+        lambda **_kwargs: SimpleNamespace(active_connectors=lambda: ["codex", "hermes"]),
+    )
+    calls: list[list[str]] = []
+
+    def record(_data_dir, connectors):
+        calls.append(list(connectors))
+        found = {"codex": SimpleNamespace(executable=r"C:\\codex\\codex.exe")}
+        return found, ({"hermes": "not installed"} if len(calls) == 1 else {"codex": "changed while probing"})
+
+    monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
+    monkeypatch.setattr(os, "name", "nt")
+
+    migrations._select_windows_agents(str(data_dir))
+
+    out = capsys.readouterr().out
+    assert "selected" not in out
+    assert "run 'defenseclaw setup codex'" in out
+    assert "run 'defenseclaw setup hermes'" in out

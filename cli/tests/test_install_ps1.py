@@ -23,7 +23,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from defenseclaw import upgrade_shim
 from defenseclaw.commands import cmd_uninstall, windows_uninstall_helper
 from defenseclaw.platform_support import ACP_ONLY_CONNECTORS, UNSUPPORTED, WINDOWS_CONNECTOR_SUPPORT
@@ -109,7 +108,9 @@ def test_connector_choices_are_the_windows_supported_connectors() -> None:
 
 
 def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
-    written = set(_list("ManagedBinaries")) | {f"{shim}.cmd" for shim in _list("ManagedShims")}
+    hook_state = re.search(r'\$HookState = "([^"]+)"', _text())
+    assert hook_state is not None
+    written = set(_list("ManagedBinaries")) | {f"{shim}.cmd" for shim in _list("ManagedShims")} | {hook_state.group(1)}
     _root, targets = cmd_uninstall._owned_binary_targets("win32")
     assert written == {re.split(r"[\\/]", target)[-1] for target in targets}
     assert written == windows_uninstall_helper._ALLOWED_BINARIES
@@ -159,3 +160,18 @@ exit $LASTEXITCODE
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "-Rollback" in completed.stdout
     assert not (tmp_path / "home").exists()
+
+
+def test_hook_state_matches_what_the_hook_reads() -> None:
+    # internal/cli/hook_trusted_state_windows.go accepts a PowerShell install's
+    # state only with these values; anything else makes the hook fall back to
+    # the profile's .defenseclaw and ignore a custom DEFENSECLAW_HOME.
+    body = re.search(r"function Write-HookState \{(.*?)\n\}", _text(), re.S)
+    assert body is not None
+    for field in ('schema_version = 1', 'install_kind = "powershell-windows"', 'install_scope = "user"'):
+        assert field in body.group(1)
+    for field in ("install_root = $root", "command_dir = $root", "data_root = "):
+        assert field in body.group(1)
+    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text()
+    assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
+    assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
