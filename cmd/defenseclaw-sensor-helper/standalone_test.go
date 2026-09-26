@@ -18,11 +18,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
 
 func TestManifestHomes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("manifest homes are a unix standalone input; the Windows helper is given no home dirs")
+	}
 	restore := validateManifestTrust
 	validateManifestTrust = func(string) error { return nil }
 	defer func() { validateManifestTrust = restore }()
