@@ -122,6 +122,12 @@ if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
+# Refuse a gateway port held by another local user before the bearer and
+# payload leave this process (see defenseclaw_verify_gateway_listener).
+if ! defenseclaw_verify_gateway_listener "${API_ADDR}"; then
+  fail_unreachable "${DEFENSECLAW_LISTENER_REASON}"
+fi
+
 RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg args "$TOOL_INPUT" \
   '{tool: $tool, args: $args}' | \
   curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool" \

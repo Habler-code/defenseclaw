@@ -734,6 +734,145 @@ defenseclaw_response_failure_reason() {
   esac
 }
 
+# defenseclaw_verify_gateway_listener runs before a hook sends its bearer
+# token. On Linux and macOS every loopback or wildcard listener on the
+# gateway port must belong to this user (the per-user gateway) or to root,
+# so another local user who binds the port while this user's gateway is
+# down never receives the token or the payload. Nothing listening is left
+# to curl, which then fails to connect. Other platforms, and gateway
+# addresses that are not local loopback, are out of scope and return 0.
+# On refusal it returns 1 with DEFENSECLAW_LISTENER_REASON set; callers
+# route that through their transport fail mode.
+#
+# Usage:
+#   defenseclaw_verify_gateway_listener HOST:PORT
+DEFENSECLAW_LISTENER_REASON=""
+defenseclaw_verify_gateway_listener() {
+  local addr="${1:-}" host port self platform owners owner
+  DEFENSECLAW_LISTENER_REASON=""
+  case "$addr" in
+    \[*\]:*) host="${addr%%]:*}"; host="${host#[}"; port="${addr##*]:}" ;;
+    *:*) host="${addr%:*}"; port="${addr##*:}" ;;
+    *) return 0 ;;
+  esac
+  case "$host" in
+    127.0.0.1|localhost|0.0.0.0|::1|"") ;;
+    *) return 0 ;;
+  esac
+  case "$port" in
+    ''|*[!0-9]*)
+      DEFENSECLAW_LISTENER_REASON="gateway address ${addr} has no numeric port"
+      return 1
+      ;;
+  esac
+  platform="$(uname -s 2>/dev/null)"
+  case "$platform" in
+    Linux|Darwin) ;;
+    *) return 0 ;;
+  esac
+  self="$(id -u 2>/dev/null)"
+  case "$self" in
+    ''|*[!0-9]*)
+      DEFENSECLAW_LISTENER_REASON="cannot determine the hook user"
+      return 1
+      ;;
+  esac
+  if [ "$platform" = Linux ]; then
+    owners="$(_defenseclaw_listener_uids_linux "$port")" || owners="!"
+  else
+    owners="$(_defenseclaw_listener_uids_darwin "$port")" || owners="!"
+  fi
+  if [ "$owners" = "!" ]; then
+    DEFENSECLAW_LISTENER_REASON="cannot verify the owner of the gateway listener on port ${port}"
+    return 1
+  fi
+  for owner in $owners; do
+    case "$owner" in
+      "$self"|0) ;;
+      *)
+        DEFENSECLAW_LISTENER_REASON="gateway port ${port} is held by ${owner}, not this user's gateway"
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
+# _defenseclaw_listener_uids_linux PORT [TABLE...] prints the owner uid of
+# every listening socket on PORT bound to 127.0.0.1, ::1, their mapped
+# forms, or a wildcard address. The tables default to /proc/net/tcp (which
+# must be readable) and /proc/net/tcp6 (optional).
+_defenseclaw_listener_uids_linux() {
+  local port="$1" hex
+  shift
+  hex="$(printf '%04X' "$port" 2>/dev/null)" || return 1
+  if [ "$#" -eq 0 ]; then
+    [ -r /proc/net/tcp ] || return 1
+    set -- /proc/net/tcp
+    [ -r /proc/net/tcp6 ] && set -- "$@" /proc/net/tcp6
+  fi
+  awk -v p="$hex" '
+    FNR == 1 { next }
+    $4 == "0A" {
+      if (split($2, a, ":") != 2 || toupper(a[2]) != p) next
+      h = toupper(a[1])
+      if (h == "0100007F" || h == "7F000001" || h == "00000000" ||
+          h == "00000000000000000000000000000000" ||
+          h == "00000000000000000000000001000000" ||
+          h == "00000000000000000000000000000001" ||
+          h == "0000000000000000FFFF00000100007F" ||
+          h == "00000000000000000000FFFF7F000001") print $8
+    }' "$@"
+}
+
+# _defenseclaw_darwin_listener_pids PORT reads `netstat -anv -p tcp` output
+# on stdin and prints the serving pid (and a distinct delegate pid) of
+# every listening socket on PORT bound to 127.0.0.1, ::1 or a wildcard
+# address. It fails when the pid column cannot be located.
+_defenseclaw_darwin_listener_pids() {
+  awk -v p="$1" '
+    $1 == "Proto" {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "pid") col = i - 2
+        if ($i == "epid") ecol = i - 2
+      }
+      next
+    }
+    col && ($1 == "tcp4" || $1 == "tcp6" || $1 == "tcp46") && $6 == "LISTEN" {
+      addr = $4; dot = 0
+      for (i = length(addr); i > 0; i--) if (substr(addr, i, 1) == ".") { dot = i; break }
+      if (!dot || substr(addr, dot + 1) != p) next
+      host = substr(addr, 1, dot - 1)
+      if (host == "127.0.0.1" || host == "*" || host == "::1" || host == "::ffff:127.0.0.1") {
+        print $col
+        if (ecol && $ecol != "0" && $ecol != $col) print $ecol
+      }
+    }
+    END { if (!col) exit 3 }'
+}
+
+# _defenseclaw_listener_uids_darwin PORT prints the uid serving each
+# matching listener (netstat reports every socket's pid without privilege;
+# ps resolves its uid). A socket still held by launchd (pid 1) belongs to a
+# job that has not started yet and prints "launchd".
+_defenseclaw_listener_uids_darwin() {
+  local table pids pid uid
+  table="$(netstat -anv -p tcp 2>/dev/null)" || return 1
+  pids="$(printf '%s\n' "$table" | _defenseclaw_darwin_listener_pids "$1")" || return 1
+  for pid in $pids; do
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$pid" -le 1 ]; then
+      printf '%s\n' launchd
+      continue
+    fi
+    uid="$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    case "$uid" in
+      ''|*[!0-9]*) printf 'pid-%s\n' "$pid" ;;
+      *) printf '%s\n' "$uid" ;;
+    esac
+  done
+}
+
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
 # connector's effective fail mode is closed, for guardian-installed managed
 # hooks, or when strict availability is enabled. Fail mode therefore has one
