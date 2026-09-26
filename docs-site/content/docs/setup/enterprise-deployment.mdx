@@ -333,9 +333,11 @@ The default managed layout is:
 | Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
 | Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. |
 | Sensor-helper IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\sensor-helper.sock` | Installer-owned fixed path. The socket DACL admits LocalSystem, Administrators, and the exact gateway service SID; managed mode ignores `DEFENSECLAW_SENSOR_HELPER_SOCKET`. |
+| Sensor-helper service log | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs\sensor-helper\sensor-helper.log` | Administrator-only directory created by the lifecycle; the path comes from the protected service environment (`DEFENSECLAW_WINDOWS_SERVICE_LOG`). The helper appends its build version and exit error, falls back to stderr when the file cannot be opened safely, and does not rotate the file. |
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
 | Guardian manifest | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml` | Administrators/LocalSystem write; guardian reads. |
 | Trusted authorization ledger | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\protected_targets.json` | LocalSystem/Administrators only; gateway receives the narrow read access required for readiness. |
+| Guardian readiness state | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\.state` | Diagnostic, not authorization. The guardian writes it through the protected writer (LocalSystem/Administrators write, gateway read-only) and the gateway reads the same file. It says `ready` only after a reconcile with no failed targets and a published protected state, is refreshed at least every minute, and a `ready` older than five minutes reads as `waiting_for_targets`. |
 | Deployment metadata | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\deployment.json` | Installer-owned transaction and servicing state. |
 | Shared Codex machine-policy parent | `C:\ProgramData\OpenAI\Codex` | Explicit install/upgrade/repair creates missing `OpenAI` and `Codex` directories atomically with Administrators/System full control and Users read/traverse only. Existing directories are validation-only and are never taken over. |
 | Codex managed requirements | `C:\ProgramData\OpenAI\Codex\requirements.toml`, `.defenseclaw-managed-hooks.state`, and `.defenseclaw-managed-hooks.lock` | DefenseClaw-owned canonical ten-event policy, enrollment state, and protected bounded transaction lock; users can read policy but cannot write it. Ownership and ACL-preimage records are private under the install-state directory. |
@@ -452,6 +454,12 @@ per-user CLI and acceptable version can be discovered. Profiles without a
 discoverable supported CLI are omitted and logged as skipped. Consequently,
 adding a supported CLI to an eligible profile can enroll that user on the next
 five-minute cycle without a separate administrator edit to `targets.yaml`.
+The enumerator writes each new row with `deferred: true`. A signed-in user is
+enrolled at once; a user who is signed out or disconnected is not enrolled until
+their first interactive sign-in. Until then that row is reported as waiting for
+its first sign-in and the guardian stays `waiting_for_targets`, but it no longer
+blocks deferred-policy staging or the protected enrollment set for every other
+user.
 Control which connector families are eligible in the protected managed config,
 and monitor the enumerator log and manifest as security-sensitive enrollment
 state.
@@ -1015,7 +1023,10 @@ The public CLI supports the same upgrade, but a CLI-replacing transaction must
 be launched by the **new release's protected staged CLI**, not by the executable
 currently mapped from the installed `bin` directory. This keeps the destination
 CLI image unlocked and makes the release being activated the transaction
-driver. The command rejects an installed-CLI self-replacement before mutation:
+driver. The command rejects an installed-CLI self-replacement before mutation;
+it recognizes the CLI under the default
+`C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw` install root,
+including a hard-link alias of it:
 
 ```powershell
 $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
@@ -1259,13 +1270,17 @@ policy under `C:\Program Files\ClaudeCode`, so no user or project environment
 can redirect this managed registration.
 
 DefenseClaw refuses to overwrite a foreign drop-in, an administrator-edited
-policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or
-a file policy superseded by `policyHelper`. It also refuses installation when
-an HKLM `Settings` policy has higher precedence. In those environments, merge
-the DefenseClaw hook matrix through the active GPO/MDM/policy-helper source;
-local file installation cannot override it. Remotely delivered policy is an
-external management boundary and must likewise include the hook matrix at its
-authoritative source.
+policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or a
+file policy superseded by `policyHelper`. An HKLM `Settings` policy outranks the
+DefenseClaw drop-in. Enrollment accepts it when it sets
+`"managedSourcesBehavior": "merge"` (honored by Claude Code 2.1.242 and newer,
+which then becomes the approved-client floor) or already carries the exact
+DefenseClaw hook matrix, which the installed CLI prints with `enterprise windows
+export-claude-policy` for the MDM/GPO policy; any other HKLM policy is refused
+with both fixes named. See [Claude Code on
+Windows](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/reference/CLAUDE-CODE-WINDOWS.md)
+for the status fields. Remotely delivered policy is an external management
+boundary and must likewise include the hook matrix at its authoritative source.
 
 Claude managed-source precedence is server-managed, then HKLM/MDM, then the
 Program Files policy, then HKCU; the first authoritative source wins.
@@ -1703,7 +1718,7 @@ sudo env DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml \
 On Windows, use the matching managed-service and guardian checks:
 
 ```powershell
-Get-Service DefenseClawGateway, DefenseClawCMIDBroker, DefenseClawHookGuardian, DefenseClawHookEnumerator
+Get-Service DefenseClawGateway, DefenseClawCMIDBroker, DefenseClawSensorHelper, DefenseClawHookGuardian, DefenseClawHookEnumerator
 
 # Define $PowerShell and $Installer alongside the block-local $Gateway and
 # $Manifest so this section can be copied on its own without depending on

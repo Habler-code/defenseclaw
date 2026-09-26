@@ -12,7 +12,7 @@ windows`, and every one of them requires an elevated caller except `status`.
 
 | Command | Purpose |
 | --- | --- |
-| `install` | Create the protected tree, register all four SCM services, and start them. |
+| `install` | Create the protected tree, register all five SCM services, and start them. |
 | `upgrade` | Replace artifacts and re-register in one transaction. |
 | `repair` | Reapply ACL, service, environment, and recovery invariants. |
 | `reconcile` | Restart the guardian and wait for a fresh reconcile pass. |
@@ -92,19 +92,20 @@ From the exact release commit, on a host with access to
 `cisco-aispg/ai-common`, run:
 
 ```bash
-make packaging-windows-avc-buildkit VERSION=0.9.0-rc1
+make packaging-windows-avc-buildkit VERSION=X.Y.Z
 ```
 
 This invokes `packaging/scripts/build-managed-windows-bundle.sh`, applies the
 private CMID overlay in a restorable snapshot, cross-builds and stamps
-`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and
+`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`,
+`defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`, and
 `defenseclaw-cmid-broker.exe`, and writes:
 
 ```text
-dist/windows-enterprise-buildkit-0.9.0-rc1/
+dist/windows-enterprise-buildkit-X.Y.Z/
 ```
 
-The kit contains the six unsigned files under `payload/`, the trimmed vendored
+The kit contains the eight unsigned files under `payload/`, the trimmed vendored
 Go source needed to build the outer Setup offline, one root-level assembler,
 both shell families' reproducibility/signature/finalize helpers,
 `payload-metadata.json`, and the generated `README-AVC.md`. The bundler also
@@ -133,19 +134,19 @@ ordering is part of the artifact contract:
 
 AVC returns the signed `DefenseClawSetup-Enterprise-x64.exe`, its `.sha256`,
 and `.provenance.json`. The runtime accepts only an exact
-`managed-enterprise` payload with the six-file manifest.
+`managed-enterprise` payload with the eight-file manifest.
 
 ### Local unsigned developer build
 
 For disposable certification only:
 
 ```bash
-make packaging-windows-enterprise-installer VERSION=0.9.0-rc1
+make packaging-windows-enterprise-installer VERSION=X.Y.Z
 ```
 
 This emits the build kit and runs the assembler locally with
 `--allow-unsigned`, producing a runnable artifact below
-`dist/windows-enterprise-buildkit-0.9.0-rc1-unsigned/out/`. It is stamped
+`dist/windows-enterprise-buildkit-X.Y.Z-unsigned/out/`. It is stamped
 `managed-enterprise-unsigned`, requires the exact run-scoped
 `--allow-unsigned` lifecycle contract, and cannot target production names or
 roots. It must not enter a release channel.

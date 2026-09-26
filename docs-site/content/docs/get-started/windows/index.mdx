@@ -18,9 +18,9 @@ not populate validation evidence or certify an official-client run.
 
 For centrally managed endpoints, the separate
 [managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout)
-installs four administrator-owned Windows services: `DefenseClawGateway`,
-`DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and
-`DefenseClawHookEnumerator`. It is explicitly opt-in and does not change this
+installs five administrator-owned Windows services: `DefenseClawGateway`,
+`DefenseClawCMIDBroker`, `DefenseClawSensorHelper`, `DefenseClawHookGuardian`,
+and `DefenseClawHookEnumerator`. It is explicitly opt-in and does not change this
 per-user package or its existing auto-heal behavior.
 
 <Callout type="warning" title="WSL is not supported">

@@ -8,9 +8,11 @@ is not the existing per-user `DefenseClawSetup-x64.exe`.
 
 The executable embeds exact, SHA-256-bound copies of:
 
+- `defenseclaw-acp.exe`;
 - `defenseclaw-cmid-broker.exe`;
 - `defenseclaw-gateway.exe`;
 - `defenseclaw-hook.exe`;
+- `defenseclaw-sensor-helper.exe`;
 - `defenseclaw.exe`, the installed enterprise lifecycle CLI;
 - `install-enterprise.ps1`;
 - `DefenseClawEnterprise.psm1`.
@@ -37,20 +39,20 @@ the exact release commit. The build machine must be able to read
 `cisco-aispg/ai-common`:
 
 ```bash
-make packaging-windows-avc-buildkit VERSION=0.9.0-rc1
+make packaging-windows-avc-buildkit VERSION=X.Y.Z
 ```
 
 The primary output is:
 
 ```text
-dist/windows-enterprise-buildkit-0.9.0-rc1/
+dist/windows-enterprise-buildkit-X.Y.Z/
 ```
 
 DefenseClaw does not produce a signed enterprise Setup locally. Hand the kit to
 AVC using [Windows AVC packaging handoff](WINDOWS-AVC-PACKAGING-HANDOFF.md).
 The required order is:
 
-1. AVC signs the six inner payload files.
+1. AVC signs the eight inner payload files.
 2. AVC runs the kit's `assemble.sh` or `assemble.ps1` to build the outer Setup.
 3. AVC signs `out/DefenseClawSetup-Enterprise-x64.exe`.
 4. AVC runs `finalize.sh` or `finalize.ps1` (or performs the equivalent) to
@@ -67,11 +69,11 @@ out\DefenseClawSetup-Enterprise-x64.exe.provenance.json
 For a local disposable-test artifact only, use the explicitly unsigned target:
 
 ```bash
-make packaging-windows-enterprise-installer VERSION=0.9.0-rc1
+make packaging-windows-enterprise-installer VERSION=X.Y.Z
 ```
 
 That produces
-`dist/windows-enterprise-buildkit-0.9.0-rc1-unsigned/out/DefenseClawSetup-Enterprise-x64.exe`.
+`dist/windows-enterprise-buildkit-X.Y.Z-unsigned/out/DefenseClawSetup-Enterprise-x64.exe`.
 It is stamped as unsigned and the runtime accepts it only with the exact
 run-scoped `--allow-unsigned` certification contract. Never publish or deploy
 that output to production roots.
@@ -106,9 +108,9 @@ config and target files and an explicit application-control attestation:
   JSON=1
 ```
 
-The lifecycle fixes the four production services (`DefenseClawGateway`,
-`DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and
-`DefenseClawHookEnumerator`) and Secure Client roots; the caller cannot redirect
+The lifecycle fixes the five production services (`DefenseClawGateway`,
+`DefenseClawCMIDBroker`, `DefenseClawSensorHelper`, `DefenseClawHookGuardian`,
+and `DefenseClawHookEnumerator`) and Secure Client roots; the caller cannot redirect
 them. Unsigned artifacts additionally require the existing exact
 `DefenseClaw-Cert` roots, paired run-scoped service names, and
 `.codex-defenseclaw-cert-<run-id>` home. Use the official Windows enterprise
