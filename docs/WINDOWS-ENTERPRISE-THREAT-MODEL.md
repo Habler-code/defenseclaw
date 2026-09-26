@@ -223,6 +223,10 @@ not an administrator authority even though it is a machine service.
 9. It publishes service-writable diagnostic state and a separately protected
    authorization ledger. Removed or disabled targets are revoked from the
    ledger.
+10. A newly discovered, deferred target whose user has no active WTS session
+    and has never been protected remains unready. When it has no selected
+    managed runtime, the guardian may stage and publish the other targets
+    without enrolling that SID. Other failures still withhold publication.
 
 ### Hook request
 
@@ -398,9 +402,10 @@ not an administrator authority even though it is a machine service.
    profile contains a supported CLI (parity with macOS
    `render-targets.sh`; see
    `internal/enterprisehooks/agent_version_windows.go` for the per-connector
-   probe). Newly discovered rows are deferred so a signed-out user's target
-   remains pending until a safe active session is available, without blocking
-   enrollment for other users. Managed-enterprise deployments are administrator-controlled at
+   probe). Newly discovered rows are deferred. A signed-out user with no
+   managed runtime may remain a reported failure until first sign-in, while
+   the guardian can stage and publish the other eligible targets.
+   Managed-enterprise deployments are administrator-controlled at
    the *policy* layer — which connectors are pushed, and which SID scope
    the guardian authorization ledger accepts — not at the per-device
    authorization layer. Three residual sub-risks follow from this posture:
