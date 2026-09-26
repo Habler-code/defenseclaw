@@ -11,12 +11,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func codexSystemRequirementsPath() (string, error) {
+	if runtime.GOOS == "darwin" {
+		// /etc is a symbolic link to /private/etc on macOS. Address the real
+		// file so the managed trust checks, which refuse symbolic links in
+		// every ancestor, can validate it.
+		return "/private/etc/codex/requirements.toml", nil
+	}
 	return "/etc/codex/requirements.toml", nil
 }
 

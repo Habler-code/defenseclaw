@@ -263,6 +263,12 @@ CURL_CONFIG_TOKEN=
 unset API_TOKEN PAYLOAD CURL_CONFIG_TOKEN
 
 CURL_STATUS=0
+# Refuse a gateway port held by another local user before the bearer and
+# payload leave this process (see defenseclaw_verify_gateway_listener).
+if ! defenseclaw_verify_gateway_listener "${API_ADDR}"; then
+  fail_unreachable "${DEFENSECLAW_LISTENER_REASON}"
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: codex-hook/1.0" \

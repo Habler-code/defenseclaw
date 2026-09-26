@@ -130,7 +130,13 @@ policy only when the DefenseClaw hooks stay effective:
   `defenseclaw-gateway enterprise windows export-claude-policy` (add
   `--agent-version <x.y.z>` to select a hook contract, `--compact` for a
   single-line `REG_SZ` value, or `--hook-executable` for a non-default
-  install root) and add its `hooks` object to the MDM/GPO policy.
+  install root) and add its `hooks` object to the MDM/GPO policy. Claude then
+  loads only that policy, so add the printed `"allowManagedHooksOnly": true`
+  as well: enrollment refuses a policy that carries the hooks without it
+  unless the DefenseClaw config sets `claude_code.allow_unmanaged_hooks: true`.
+
+While that managed-hooks-only lock is enforced, an HKLM policy that sets
+`allowManagedHooksOnly: false` is refused under either option.
 
 An HKLM policy that sets `disableAllHooks` or `policyHelper` is still refused,
 as is any other HKLM policy, with a message naming both fixes. `enterprise

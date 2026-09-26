@@ -275,6 +275,8 @@ The AI Defense endpoint (`cisco_ai_defense.endpoint` in the emitted `config.yaml
 
 `install.sh` reads only the `cisco_ai_defense_endpoint` field; extra keys are ignored for forward compatibility. The file must be root-owned with no group/other write bits and no write-capable macOS ACL — the installer walks every ancestor and applies the same checks before reading. Override with `--config-file PATH` (fleet-specific staging) or `--override-endpoint URL` (adhoc / preview testing). If the default `env_config.json` is missing or malformed, the installer emits a warning and falls back to the US-production AI Defense endpoint so the enrollment is not blocked; only failed ownership, permission, or ACL trust checks on a present file still fail the installer closed.
 
+In `managed_enterprise`, AI Defense is the only decision-maker. When it cannot inspect a request (Cloud Management not enrolled or offline, the identity library missing, or the service not answering), the request is allowed by default and the condition is reported: `/health` shows `managed_inspection.available: false` and the guardrail `inspection_available`, `inspection_error`, and `inspection_unavailable_action` details, and the Secure Client GUI shows `DEGRADED` with an `availability_reason` of `inspection_unavailable_allowing`. To block those requests instead, set `cisco_ai_defense.unavailable_action: block` in the administrator-owned `config.yaml`. Connectors in `action` mode then deny what AI Defense could not inspect, `observe` mode records it as would-block, and the GUI reason becomes `inspection_unavailable_blocking`. Requests with nothing to inspect are always allowed. Inspection counts as available only while AI Defense returns verdicts: a valid token alone does not clear the state after a failed inspection, and the next inspection that gets a verdict does. While the guardrail is disabled nothing is inspected, so the GUI does not report inspection availability. A guardrail in the error state, including a build without managed-cloud support, also shows `DEGRADED` (`guardrail_error`); such a build can never inspect, so it blocks hook requests that need inspection whatever `unavailable_action` says.
+
 Set ownership and start the service:
 
 ```bash
@@ -331,7 +333,7 @@ The default managed layout is:
 | Broker, gateway/guardian/enumerator host, sensor helper, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
 | Managed config | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
 | Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
-| Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. |
+| Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. Signed-in users can open the socket, but the gateway serves a connection only when the connecting process is `UI\csc_ui.exe` under `Cisco\Cisco Secure Client` in Program Files (x86) or Program Files, and its embedded Authenticode signature is valid and signed by `Cisco Systems, Inc.` Administrators can change either list with `managed.allowed_windows_images` and `managed.allowed_windows_signers` in the managed config. |
 | Sensor-helper IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\sensor-helper.sock` | Installer-owned fixed path. The socket DACL admits LocalSystem, Administrators, and the exact gateway service SID; managed mode ignores `DEFENSECLAW_SENSOR_HELPER_SOCKET`. |
 | Sensor-helper service log | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs\sensor-helper\sensor-helper.log` | Administrator-only directory created by the lifecycle; the path comes from the protected service environment (`DEFENSECLAW_WINDOWS_SERVICE_LOG`). The helper appends its build version and exit error, falls back to stderr when the file cannot be opened safely, and does not rotate the file. |
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
@@ -483,6 +485,25 @@ reparse-free on a fixed non-substituted NTFS volume, owners and replacement
 rights must be administrator-controlled, the module leaf must have no
 untrusted write-like ACE, and Authenticode must be valid unless a disposable
 test run explicitly uses `-AllowUnsigned`.
+
+A valid signature is not sufficient on its own. The module, the installer, and
+every payload executable and library must be signed by a certificate whose
+subject name is exactly `Cisco Systems, Inc.`. An organization that re-signs
+the payload with its own code-signing certificate names that certificate with
+`-AdditionalTrustedSignerSha256 <sha256>[,<sha256>...]` (CLI:
+`--additional-trusted-signer-sha256`, repeatable) on every lifecycle action for
+that deployment, including `Status`, `Repair`, and `Uninstall`. Each value is
+the SHA-256 of the DER-encoded signing certificate, for example
+`(Get-FileHash -Algorithm SHA256 .\signer.cer).Hash`. A 40-character SHA-1
+thumbprint is rejected, and the parameter cannot be combined with
+`-AllowUnsigned`.
+
+The CMID broker service checks `cmidapi.dll` again each time it starts,
+immediately before loading it. WinVerifyTrust must accept the library's
+embedded Authenticode signature, and the signer must be `Cisco Systems, Inc.`.
+The broker holds the file open without write or delete sharing until the
+library has loaded. If the check fails, the broker stops and its log records
+`stage=provider-library-trust success=false` with the reason.
 
 The unsigned exception is itself fail-closed before module import. It is valid
 only for `Install`, `Upgrade`, or `Repair`, and only when the service names are
@@ -1253,6 +1274,29 @@ can use another target's credential. This is distinct from normal/unmanaged
 mode, whose existing per-user hook and auto-heal behavior is unchanged.
 Invalid or tampered ownership metadata also fails closed.
 
+The drop-in also sets `allowManagedHooksOnly: true`, so Claude Code loads only
+administrator-managed hooks on the endpoint and the tool input DefenseClaw
+inspects is the input that runs. User, project, local, and plugin hooks do not
+load. An administrator who must keep them can set
+`claude_code.allow_unmanaged_hooks: true` in the protected DefenseClaw config.
+`defenseclaw enterprise hooks status` and `verify` then print a warning, and
+verify results report `claude_managed_hooks_only: disabled_by_admin`. While the
+lock is enforced, another managed-settings file that sets
+`allowManagedHooksOnly: false` (for example a later-sorting drop-in) is reported
+as a conflict, and install and verify fail until the file is changed or the
+opt-out is set. A managed file that sets `disableAllHooks: true` is always
+reported.
+
+Cursor has no equivalent setting. On Windows managed endpoints the DefenseClaw
+`preToolUse` hook denies the tool call while a user-level
+(`%USERPROFILE%\.cursor\hooks.json`, `%USERPROFILE%\.claude\settings*.json`) or
+workspace-level (`.cursor\hooks.json`, `.claude\settings*.json`) `preToolUse`
+hook is registered that the administrator has not approved. The denial names
+the file and the handler's `sha256` digest. Files that cannot be verified
+(links, files over 1 MiB, invalid JSON) also deny. To approve a handler, add its
+digest to `connector_hooks.cursor.approved_foreign_hooks` and let the guardian
+reconcile; the allowlist is published in the protected Cursor machine state.
+
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
 interactive users on that endpoint; those users are not silently treated as
@@ -1277,7 +1321,10 @@ DefenseClaw drop-in. Enrollment accepts it when it sets
 which then becomes the approved-client floor) or already carries the exact
 DefenseClaw hook matrix, which the installed CLI prints with `enterprise windows
 export-claude-policy` for the MDM/GPO policy; any other HKLM policy is refused
-with both fixes named. See [Claude Code on
+with both fixes named. Claude loads only an HKLM policy that carries the
+matrix, so that policy must also set the printed `allowManagedHooksOnly: true`,
+and while the lock is enforced no HKLM policy may set it to `false`; setting
+`claude_code.allow_unmanaged_hooks: true` waives both. See [Claude Code on
 Windows](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/reference/CLAUDE-CODE-WINDOWS.md)
 for the status fields. Remotely delivered policy is an external management
 boundary and must likewise include the hook matrix at its authoritative source.
@@ -1363,6 +1410,7 @@ The guardian command:
 - rejects proxy/plugin connectors;
 - refuses first-time install when the agent hook config file is missing;
 - rejects hook config paths outside the target home, including unsafe symlink escapes;
+- validates and repairs the user's files only from a worker process running as that user;
 - writes a raw connector-scoped hook token, not the gateway administrator token, into the user's hook runtime;
 - preserves the user's ownership on patched hook files and per-user hook scripts;
 - applies the same action-mode hook-contract validation as gateway startup.
@@ -1380,12 +1428,17 @@ A successful privileged reconcile writes two different records:
 
 The gateway does not treat the service-writable status file as authorization. Managed hook enforcement is reported ready only when the trusted authorization record covers every configured target. Partial coverage remains starting/non-enforcing and includes an actionable health hint.
 
-The guardian units set `NoNewPrivileges=false` deliberately. Each reconcile
-temporarily adopts the target user's effective UID/GID so connector files are
-created with the user's ownership, then returns to root to process the next
-allow-listed target. Linux otherwise prevents the long-lived guardian from
-regaining its bounded `CAP_SETUID` after that credential drop. The units still
-limit capabilities to `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`,
+The guardian itself stays root and never changes its own credentials. For each
+allow-listed target it starts a short-lived worker from its own executable; the
+worker permanently switches to the target user's UID, primary GID, and no other
+groups before it opens any path in that user's home, then validates, installs,
+or repairs the target and exits. Every file change is therefore checked by the
+kernel against the user's own permissions, and connector files keep the user's
+ownership. The worker needs only `CAP_SETUID` and `CAP_SETGID` for that switch;
+it does not depend on the units' `NoNewPrivileges=false`. On macOS the root
+guardian starts a worker only from an executable that no other user can
+replace, such as the packaged `/opt/cisco/secureclient/defenseclaw/bin` binary.
+The units limit capabilities to `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`,
 `CAP_SETGID`, and `CAP_SETUID`, retain the `@system-service` syscall filter,
 deny SUID/SGID creation, and restrict writable paths to user homes and the two
 guardian state directories.
@@ -1405,7 +1458,7 @@ sudo systemctl start defenseclaw-hook-guardian@ubuntu.service
 
 The template unit is useful for a single user/connector bootstrap. For ongoing fleet management, prefer the manifest-driven reconcile and watcher because they produce one aggregate state and authorization record.
 
-Run one guardian invocation per user and connector. The template intentionally has narrower scope than a full root shell: it runs as root so it can repair user-owned files, sets `UMask=0077`, and limits its capability bounding set to ownership, DAC file access, and the credential drop used for per-user setup (`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_SETGID`, `CAP_SETUID`). It needs write access to user homes so it can repair hook files and to `/var/lib/defenseclaw` so the shared CLI startup can open the audit DB and write guardian state. Do not remove `ProtectHome=true` from the always-on gateway service to solve per-user hooks.
+Run one guardian invocation per user and connector. The template intentionally has narrower scope than a full root shell: it runs as root so it can repair user-owned files, sets `UMask=0077`, and limits its capability bounding set to ownership, DAC file access, and the credential switch of its per-target worker (`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_SETGID`, `CAP_SETUID`). It needs write access to user homes so it can repair hook files and to `/var/lib/defenseclaw` so the shared CLI startup can open the audit DB and write guardian state. Do not remove `ProtectHome=true` from the always-on gateway service to solve per-user hooks.
 
 For periodic multi-user repair, create an explicit allow-list at `/etc/defenseclaw/hook-guardian/targets.yaml`:
 
@@ -1519,6 +1572,8 @@ Use `--no-start` when MDM or a package transaction must install and verify the f
 Both LaunchDaemons run as root. `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` is the authorization-record directory selected by `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`; it is distinct from `hook_guardian_state.json`, which the guardian writes under the configured `data_dir`. The hook guardian remains a separate periodic job so its lifecycle stays independent of the gateway. Both jobs pin `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`, and the installer loads both jobs in the system domain unless `--no-start` is selected.
 
 The packaged macOS guardian runs a reconcile every 300 seconds. It is a periodic repair backstop, not the Linux `fsnotify` watcher. For a shorter repair window or prevention, deploy an MDM/EDR policy that monitors or locks the native agent config and DefenseClaw hook footprint.
+
+While the guardian manifest has an enabled Codex target, the guardian also keeps `[features] hooks = true` in the machine Codex requirements, `/etc/codex/requirements.toml` (addressed through its real path `/private/etc/codex/requirements.toml`). With that pin Codex keeps hooks enabled even when a user sets `[features] hooks = false` in `~/.codex/config.toml`, passes `-c features.hooks=false`, or runs `--disable hooks`, and the guardian still repairs DefenseClaw's user-level hooks. DefenseClaw creates the file (`root:wheel`, `0644`) when it is absent. Otherwise it adds one line tagged `# managed by DefenseClaw` to an existing `[features]` table, or one `# BEGIN DefenseClaw managed hooks` block, and leaves every other byte unchanged; an administrator's own `hooks = true` is used as is. It never sets `allow_managed_hooks_only` on macOS, because DefenseClaw's macOS Codex hooks are user-level. If the requirements set `hooks = false`, or use a layout DefenseClaw cannot edit safely (for example an inline `features = { ... }` table), `enterprise hooks verify` and the guardian report the Codex targets as failed until the administrator adds `[features] hooks = true`. When no Codex target remains, and on every `uninstall.sh` run, DefenseClaw removes only its own pin, and deletes the file only if nothing else is left in it. Requirements delivered through MDM (`com.openai.codex` `requirements_toml_base64`) or ChatGPT cloud-managed requirements take precedence over the file; include `[features] hooks = true` there when you use those channels. The pin keeps the hooks feature on; it does not make DefenseClaw's user-level hook definitions machine-managed.
 
 Verify the system-domain jobs and filesystem trust:
 

@@ -63,6 +63,13 @@ type InstallOptions struct {
 	RecoveryHookContractEntryUpdatedAt string
 	WorkspaceDir                       string
 	Registry                           *connector.Registry
+	// ClaudeCodeAllowUnmanagedHooks is the administrator opt-out from the
+	// allowManagedHooksOnly lock in the machine-managed Claude Code policy.
+	ClaudeCodeAllowUnmanagedHooks bool
+	// CursorApprovedForeignHooks is the normalized administrator allowlist of
+	// foreign Cursor hook handler digests published in protected machine
+	// state. nil leaves the currently published allowlist unchanged.
+	CursorApprovedForeignHooks []string
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -86,6 +93,29 @@ type InstallResult struct {
 	HookContractID             string   `json:"hook_contract_id,omitempty"`
 	HookContractLockUpdatedAt  string   `json:"hook_contract_lock_updated_at,omitempty"`
 	HookContractEntryUpdatedAt string   `json:"hook_contract_entry_updated_at,omitempty"`
+	// ClaudeManagedHooksOnly reports the allowManagedHooksOnly lock state of
+	// the machine-managed Claude Code policy: ClaudeManagedHooksOnlyEnforced
+	// or ClaudeManagedHooksOnlyDisabledByAdmin. Empty for other connectors.
+	ClaudeManagedHooksOnly string `json:"claude_managed_hooks_only,omitempty"`
+}
+
+const (
+	// ClaudeManagedHooksOnlyEnforced means user, project, local and plugin
+	// Claude Code hooks are blocked by the managed policy.
+	ClaudeManagedHooksOnlyEnforced = "enforced"
+	// ClaudeManagedHooksOnlyDisabledByAdmin means the administrator set
+	// claude_code.allow_unmanaged_hooks, so non-managed Claude Code hooks can
+	// run beside DefenseClaw's managed hooks.
+	ClaudeManagedHooksOnlyDisabledByAdmin = "disabled_by_admin"
+)
+
+// ClaudeManagedHooksOnlyState maps the administrator opt-out to the reported
+// lock state.
+func ClaudeManagedHooksOnlyState(allowUnmanagedHooks bool) string {
+	if allowUnmanagedHooks {
+		return ClaudeManagedHooksOnlyDisabledByAdmin
+	}
+	return ClaudeManagedHooksOnlyEnforced
 }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor
@@ -816,9 +846,23 @@ func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, connecto
 	return nil
 }
 
+// beforeTargetPathMutation is a test seam invoked after a repair helper has
+// inspected a path and immediately before it changes that path.
+var beforeTargetPathMutation func(path string)
+
+// removeRepairSymlink removes a target-owned symlink during authorized
+// repair. It runs only with the target user's credentials, so a path
+// component replaced after inspection cannot extend the removal to an entry
+// the user could not remove directly.
 func removeRepairSymlink(path string, uid int, label string) error {
+	if err := requireTargetPathCredentials(); err != nil {
+		return err
+	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
 		return fmt.Errorf("enterprise hooks: symlink %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+	}
+	if hook := beforeTargetPathMutation; hook != nil {
+		hook(path)
 	}
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("enterprise hooks: remove symlink %s %s: %w", label, path, err)
@@ -919,7 +963,9 @@ func hardenInstallFootprint(
 			return err
 		}
 	}
-	return lchownInstallFootprint(uid, gid, dataDir, footprint, hookConfigPaths)
+	// Everything above was created by, and is therefore owned by, the
+	// target user this process runs as; no ownership repair is needed.
+	return nil
 }
 
 func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {

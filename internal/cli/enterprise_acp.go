@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -181,20 +182,17 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	); err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
-	var tokenPath string
-	err = enterprisehooks.RunAsTarget(enterprisehooks.TargetCredentials{
-		UserHome: enrollment.target.home, UID: enrollment.target.uid,
-		GID: enrollment.target.gid, SID: enrollment.target.sid,
-	}, func() error {
-		var publishErr error
-		tokenPath, publishErr = acp.PublishEnterpriseUserToken(
-			enrollment.dataDir, enrollment.client, enrollment.agent, credential.Token,
-		)
-		return publishErr
-	})
+	var published enterpriseACPUserTokenResult
+	err = enterprisehooks.RunTargetOperation(
+		enterpriseACPContext(cmd), enrollment.targetCredentials(), enterpriseACPPublishUserTokenOperation,
+		enterpriseACPUserTokenRequest{
+			DataDir: enrollment.dataDir, Client: enrollment.client, Agent: enrollment.agent, Token: credential.Token,
+		}, &published,
+	)
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	tokenPath := published.TokenPath
 	payload := map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
@@ -241,24 +239,14 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
-	err = enterprisehooks.RunAsTarget(enterprisehooks.TargetCredentials{
-		UserHome: enrollment.target.home, UID: enrollment.target.uid,
-		GID: enrollment.target.gid, SID: enrollment.target.sid,
-	}, func() error {
-		if err := safefile.ValidatePrivateFile(tokenPath); err != nil {
-			return err
-		}
-		body, err := safefile.ReadRegularFileBounded(tokenPath, 16<<10)
-		if err != nil {
-			return err
-		}
-		left := sha256.Sum256([]byte(strings.TrimSpace(string(body))))
-		right := sha256.Sum256([]byte(credential.Token))
-		if subtle.ConstantTimeCompare(left[:], right[:]) != 1 {
-			return errors.New("target-user ACP token does not match the protected service enrollment")
-		}
-		return nil
-	})
+	expected := sha256.Sum256([]byte(credential.Token))
+	err = enterprisehooks.RunTargetOperation(
+		enterpriseACPContext(cmd), enrollment.targetCredentials(), enterpriseACPVerifyUserTokenOperation,
+		enterpriseACPUserTokenRequest{
+			DataDir: enrollment.dataDir, Client: enrollment.client, Agent: enrollment.agent,
+			TokenSHA256: hex.EncodeToString(expected[:]),
+		}, nil,
+	)
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
@@ -284,28 +272,147 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
-	err = enterprisehooks.RunAsTarget(enterprisehooks.TargetCredentials{
-		UserHome: enrollment.target.home, UID: enrollment.target.uid,
-		GID: enrollment.target.gid, SID: enrollment.target.sid,
-	}, func() error {
-		info, statErr := os.Lstat(tokenPath)
-		if errors.Is(statErr, os.ErrNotExist) {
-			return nil
-		}
-		if statErr != nil {
-			return statErr
-		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("refusing to remove unsafe ACP user token path")
-		}
-		return os.Remove(tokenPath)
-	})
+	err = enterprisehooks.RunTargetOperation(
+		enterpriseACPContext(cmd), enrollment.targetCredentials(), enterpriseACPRemoveUserTokenOperation,
+		enterpriseACPUserTokenRequest{DataDir: enrollment.dataDir, Client: enrollment.client, Agent: enrollment.agent},
+		nil,
+	)
 	payload := map[string]any{
 		"ok": err == nil, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
 		"centrally_revoked": true,
 	}
 	return enterpriseACPResult(cmd, payload, err)
+}
+
+// Target-user ACP token operations run with the enrolled user's own
+// credentials: in a per-target worker when invoked by root on Unix, and under
+// SID impersonation on Windows. Each derives its path from the enrollment
+// scope inside the target's data directory.
+const (
+	enterpriseACPPublishUserTokenOperation = "acp.publish-user-token"
+	enterpriseACPVerifyUserTokenOperation  = "acp.verify-user-token"
+	enterpriseACPRemoveUserTokenOperation  = "acp.remove-user-token"
+)
+
+type enterpriseACPUserTokenRequest struct {
+	DataDir     string `json:"data_dir"`
+	Client      string `json:"client"`
+	Agent       string `json:"agent"`
+	Token       string `json:"token,omitempty"`
+	TokenSHA256 string `json:"token_sha256,omitempty"`
+}
+
+type enterpriseACPUserTokenResult struct {
+	TokenPath string `json:"token_path"`
+}
+
+func init() {
+	enterprisehooks.RegisterTargetOperation(enterpriseACPPublishUserTokenOperation, publishEnterpriseACPUserToken)
+	enterprisehooks.RegisterTargetOperation(enterpriseACPVerifyUserTokenOperation, verifyEnterpriseACPUserToken)
+	enterprisehooks.RegisterTargetOperation(enterpriseACPRemoveUserTokenOperation, removeEnterpriseACPUserToken)
+}
+
+func (e enterpriseACPEnrollment) targetCredentials() enterprisehooks.TargetCredentials {
+	return enterprisehooks.TargetCredentials{
+		UserHome: e.target.home, UID: e.target.uid, GID: e.target.gid, SID: e.target.sid,
+	}
+}
+
+func enterpriseACPContext(cmd *cobra.Command) context.Context {
+	if cmd != nil && cmd.Context() != nil {
+		return cmd.Context()
+	}
+	return context.Background()
+}
+
+func decodeEnterpriseACPUserTokenRequest(
+	target enterprisehooks.TargetCredentials,
+	payload json.RawMessage,
+) (enterpriseACPUserTokenRequest, string, error) {
+	var request enterpriseACPUserTokenRequest
+	if err := enterprisehooks.DecodeTargetOperationRequest(payload, &request); err != nil {
+		return request, "", fmt.Errorf("decode ACP user token request: %w", err)
+	}
+	home, err := filepath.Abs(target.UserHome)
+	if err != nil {
+		return request, "", err
+	}
+	dataDir, err := filepath.Abs(request.DataDir)
+	if err != nil {
+		return request, "", err
+	}
+	relative, err := filepath.Rel(home, dataDir)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return request, "", errors.New("enterprise ACP per-user data dir must remain inside the target home")
+	}
+	path, err := acp.EnterpriseUserTokenPath(dataDir, request.Client, request.Agent)
+	if err != nil {
+		return request, "", err
+	}
+	return request, path, nil
+}
+
+func publishEnterpriseACPUserToken(
+	_ context.Context, target enterprisehooks.TargetCredentials, payload json.RawMessage,
+) (any, error) {
+	request, _, err := decodeEnterpriseACPUserTokenRequest(target, payload)
+	if err != nil {
+		return nil, err
+	}
+	path, err := acp.PublishEnterpriseUserToken(request.DataDir, request.Client, request.Agent, request.Token)
+	if err != nil {
+		return nil, err
+	}
+	return enterpriseACPUserTokenResult{TokenPath: path}, nil
+}
+
+func verifyEnterpriseACPUserToken(
+	_ context.Context, target enterprisehooks.TargetCredentials, payload json.RawMessage,
+) (any, error) {
+	request, tokenPath, err := decodeEnterpriseACPUserTokenRequest(target, payload)
+	if err != nil {
+		return nil, err
+	}
+	expected, err := hex.DecodeString(request.TokenSHA256)
+	if err != nil || len(expected) != sha256.Size {
+		return nil, errors.New("ACP user token verification requires a SHA-256 digest")
+	}
+	if err := safefile.ValidatePrivateFile(tokenPath); err != nil {
+		return nil, err
+	}
+	body, err := safefile.ReadRegularFileBounded(tokenPath, 16<<10)
+	if err != nil {
+		return nil, err
+	}
+	actual := sha256.Sum256([]byte(strings.TrimSpace(string(body))))
+	if subtle.ConstantTimeCompare(actual[:], expected) != 1 {
+		return nil, errors.New("target-user ACP token does not match the protected service enrollment")
+	}
+	return struct{}{}, nil
+}
+
+func removeEnterpriseACPUserToken(
+	_ context.Context, target enterprisehooks.TargetCredentials, payload json.RawMessage,
+) (any, error) {
+	_, tokenPath, err := decodeEnterpriseACPUserTokenRequest(target, payload)
+	if err != nil {
+		return nil, err
+	}
+	info, statErr := os.Lstat(tokenPath)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return struct{}{}, nil
+	}
+	if statErr != nil {
+		return nil, statErr
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("refusing to remove unsafe ACP user token path")
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		return nil, err
+	}
+	return struct{}{}, nil
 }
 
 func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) error {

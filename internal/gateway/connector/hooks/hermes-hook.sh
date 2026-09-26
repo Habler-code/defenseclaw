@@ -139,6 +139,12 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
+# Refuse a gateway port held by another local user before the bearer and
+# payload leave this process (see defenseclaw_verify_gateway_listener).
+if ! defenseclaw_verify_gateway_listener "${API_ADDR}"; then
+  fail_unreachable "${DEFENSECLAW_LISTENER_REASON}"
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/hermes/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: hermes-hook/1.0" \

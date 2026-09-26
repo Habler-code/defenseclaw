@@ -35,6 +35,10 @@ func claudeOSAdminSettings(t *testing.T, exportOpts SetupOpts, extra map[string]
 		t.Fatal(err)
 	}
 	settings := map[string]interface{}{"model": "managed-by-mdm", "hooks": exported["hooks"]}
+	if locked, exists := exported[claudeCodeManagedHooksOnlyKey]; exists {
+		// The exported managed-hooks-only lock goes with the matrix.
+		settings[claudeCodeManagedHooksOnlyKey] = locked
+	}
 	for key, value := range extra {
 		settings[key] = value
 	}
@@ -125,6 +129,54 @@ func TestClaudeOSAdminPolicyRefusalNamesBothFixes(t *testing.T) {
 	}
 	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks("   ", claudeOSAdminLabel, claudeOSAdminTestOpts(t, "2.1.250")); err != nil {
 		t.Fatalf("empty Settings value = %v, want no policy", err)
+	}
+}
+
+// TestClaudeOSAdminPolicyKeepsTheManagedHooksOnlyLock covers an outranking
+// HKLM policy and the managed-hooks-only lock. The lock lives in the
+// DefenseClaw drop-in, which that policy can override, or replace on a
+// first-wins client, so the policy must not undo it.
+func TestClaudeOSAdminPolicyKeepsTheManagedHooksOnlyLock(t *testing.T) {
+	opts := claudeOSAdminTestOpts(t, "2.1.230")
+	optOut := opts
+	optOut.ClaudeCodeAllowUnmanagedHooks = true
+	// An export with the opt-out renders no lock, so this carries the matrix
+	// without allowManagedHooksOnly.
+	unlocked := claudeOSAdminSettings(t, optOut, nil)
+	if strings.Contains(unlocked, claudeCodeManagedHooksOnlyKey) {
+		t.Fatalf("opt-out export carried the lock: %s", unlocked)
+	}
+	for name, raw := range map[string]string{
+		"matrix without the lock":           unlocked,
+		"matrix and merge without the lock": claudeOSAdminSettings(t, optOut, map[string]interface{}{"managedSourcesBehavior": "merge"}),
+		"matrix that unlocks":               claudeOSAdminSettings(t, opts, map[string]interface{}{claudeCodeManagedHooksOnlyKey: false}),
+		"merge that unlocks":                `{"managedSourcesBehavior":"merge","allowManagedHooksOnly":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, opts)
+			if err == nil {
+				t.Fatal("policy that leaves the managed-hooks-only lock ineffective was accepted")
+			}
+			for _, want := range []string{claudeOSAdminLabel, claudeCodeManagedHooksOnlyKey, "claude_code.allow_unmanaged_hooks"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal %q does not mention %q", err, want)
+				}
+			}
+			if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, optOut); err != nil {
+				t.Fatalf("administrator opt-out still refused the policy: %v", err)
+			}
+		})
+	}
+	for name, raw := range map[string]string{
+		"matrix with the lock":       claudeOSAdminSettings(t, opts, nil),
+		"merge that keeps the lock":  `{"managedSourcesBehavior":"merge","allowManagedHooksOnly":true}`,
+		"merge that leaves it unset": `{"managedSourcesBehavior":"merge"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, opts); err != nil {
+				t.Fatalf("policy that keeps the lock was refused: %v", err)
+			}
+		})
 	}
 }
 

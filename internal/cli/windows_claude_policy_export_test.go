@@ -53,13 +53,17 @@ func TestWindowsClaudePolicyExportRoundTripsThroughTheHKLMGate(t *testing.T) {
 			if err := json.Unmarshal([]byte(out), &exported); err != nil {
 				t.Fatalf("export is not JSON: %v", err)
 			}
-			if len(exported) != 1 || exported["hooks"] == nil {
-				t.Fatalf("export must contain only the hooks matrix, got keys %v", exported)
+			if len(exported) != 2 || exported["hooks"] == nil || exported["allowManagedHooksOnly"] != true {
+				t.Fatalf("export must contain only the hooks matrix and the managed-hooks-only lock, got keys %v", exported)
 			}
 			if strings.Contains(out, "token") {
 				t.Fatal("export leaked credential material")
 			}
-			hklm, err := json.Marshal(map[string]interface{}{"model": "managed-by-mdm", "hooks": exported["hooks"]})
+			hklm, err := json.Marshal(map[string]interface{}{
+				"model":                 "managed-by-mdm",
+				"hooks":                 exported["hooks"],
+				"allowManagedHooksOnly": exported["allowManagedHooksOnly"],
+			})
 			if err != nil {
 				t.Fatal(err)
 			}

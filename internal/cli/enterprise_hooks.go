@@ -458,6 +458,9 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 		RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 	}
+	if err := applyEnterpriseHookMachinePolicyPreferences(&opts); err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
@@ -503,6 +506,7 @@ type enterpriseHookReconcileRun struct {
 	Pending             int
 	Repairs             int `json:"-"`
 	StateErr            error
+	Warnings            []string
 	WatchDirs           []string
 	WatchExclusiveFiles []string // DC-only writers: react to any event
 	WatchSharedFiles    []string // agent + DC writers: react only to Create/Remove/Rename
@@ -563,6 +567,9 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		if run.StateErr != nil {
 			payload["state_error"] = run.StateErr.Error()
 		}
+		if len(run.Warnings) > 0 {
+			payload["warnings"] = run.Warnings
+		}
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 		if run.Failures > 0 || run.StateErr != nil {
 			if run.StateErr != nil {
@@ -588,6 +595,9 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), label, row.Error)
 		}
 	}
+	for _, warning := range run.Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s\n", Style("!", "fg=yellow", "bold"), warning)
+	}
 	if run.StateErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s hook guardian state: %s\n", Style("✗", "fg=red", "bold"), run.StateErr.Error())
 		return fmt.Errorf("enterprise hooks reconcile state write failed: %w", run.StateErr)
@@ -609,6 +619,7 @@ type enterpriseHookStatusReport struct {
 	Verification                  []enterpriseHookReconcileRow         `json:"verification,omitempty"`
 	ClaudeEffectivePolicyVerified bool                                 `json:"claude_effective_policy_verified"`
 	Errors                        []string                             `json:"errors,omitempty"`
+	Warnings                      []string                             `json:"warnings,omitempty"`
 }
 
 func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
@@ -686,6 +697,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			enterpriseHooksClaudeEffectivePolicyVerified(state.Results)
 	}
 	report.OK = len(report.Errors) == 0
+	report.Warnings = enterpriseHookMachinePolicyWarnings(cfg, report.Verification)
 	if enterpriseHookJSON {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
 			return err
@@ -694,6 +706,9 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("enterprise hooks status unhealthy")
 		}
 		return nil
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("!", "fg=yellow", "bold"), warning)
 	}
 	if report.OK {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d verified, %d pending, %d total)\n",
@@ -1035,12 +1050,16 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	ok := run.Failures == 0 && run.AuthorizationErr == nil
+	warnings := enterpriseHookMachinePolicyWarnings(cfg, run.Rows)
 	if enterpriseHookJSON {
 		payload := map[string]any{
 			"ok":                               ok,
 			"manifest":                         run.Manifest,
 			"results":                          run.Rows,
 			"claude_effective_policy_verified": enterpriseHooksClaudeEffectivePolicyVerified(run.Rows),
+		}
+		if len(warnings) > 0 {
+			payload["warnings"] = warnings
 		}
 		if run.AuthorizationErr != nil {
 			payload["authorization_error"] = run.AuthorizationErr.Error()
@@ -1064,6 +1083,9 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 	}
 	if run.AuthorizationErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s protected authorization: %s\n", Style("✗", "fg=red", "bold"), run.AuthorizationErr)
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("!", "fg=yellow", "bold"), warning)
 	}
 	if !ok {
 		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", run.Failures)
@@ -1354,7 +1376,10 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				Registry:      registry,
 			}
 			var result enterprisehooks.InstallResult
-			result, targetErr = enterprisehooks.Verify(ctx, opts)
+			targetErr = applyEnterpriseHookMachinePolicyPreferences(&opts)
+			if targetErr == nil {
+				result, targetErr = enterprisehooks.Verify(ctx, opts)
+			}
 			if targetErr == nil {
 				row.Result = &result
 				row.UserHome = result.UserHome
@@ -1381,6 +1406,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		}
 		run.Rows = append(run.Rows, row)
 	}
+	run.Failures += markEnterpriseHookCodexPinRows(run.Rows, verifyEnterpriseHookCodexPin(manifest))
 	if run.AuthorizationErr == nil && exists && activationExists {
 		if issues := enterpriseHookVerifyDispositionIssues(
 			run,
@@ -1579,6 +1605,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		)
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
+	codexPin := reconcileEnterpriseHookCodexPinOutcome(manifest)
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
@@ -1674,6 +1701,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 			}
+			err = applyEnterpriseHookMachinePolicyPreferences(&opts)
 			if err == nil {
 				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 					for _, dir := range dirs {
@@ -1733,6 +1761,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		rows = append(rows, row)
 	}
+	codexPinWarnings := codexPin.applyToRows(rows, &failures)
 
 	// Stage deferred machine policy and publish the exact protected
 	// enrollment set only when every failure is a never-protected target
@@ -1777,6 +1806,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	run.Pending = pending
 	run.Repairs = repairs
 	run.StateErr = stateErr
+	run.Warnings = codexPinWarnings
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
@@ -1969,6 +1999,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		lastTriggerOp = 0
 		if run.StateErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
+		}
+		for _, warning := range run.Warnings {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] warning: %s\n", warning)
 		}
 		repairRetryNeeded = run.Failures > 0 || run.StateErr != nil
 		if !repairRetryNeeded {

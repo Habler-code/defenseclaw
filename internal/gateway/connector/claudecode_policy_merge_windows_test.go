@@ -132,7 +132,18 @@ func TestClaudeHKLMCarryingTheMatrixIsEffectiveOnWindows(t *testing.T) {
 	if err := json.Unmarshal(document, &exported); err != nil {
 		t.Fatal(err)
 	}
+	// Without the exported lock Claude would load only this policy and
+	// ignore the lock in the DefenseClaw drop-in.
 	claudeHKLMFixture(t, map[string]interface{}{"model": "managed-by-mdm", "hooks": exported["hooks"]})
+	if _, err := NewClaudeCodeConnector().ManagedHookPolicy(opts); err == nil ||
+		!strings.Contains(err.Error(), claudeCodeManagedHooksOnlyKey) {
+		t.Fatalf("HKLM carrying the matrix without the lock = %v, want a lock refusal", err)
+	}
+	claudeHKLMFixture(t, map[string]interface{}{
+		"model":                       "managed-by-mdm",
+		"hooks":                       exported["hooks"],
+		claudeCodeManagedHooksOnlyKey: exported[claudeCodeManagedHooksOnlyKey],
+	})
 	if _, err := NewClaudeCodeConnector().ManagedHookPolicy(opts); err != nil {
 		t.Fatalf("HKLM carrying the exported matrix was refused: %v", err)
 	}

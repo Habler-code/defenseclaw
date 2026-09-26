@@ -4,9 +4,9 @@
 package enterprisehooks
 
 // TargetCredentials identifies one exact interactive user for a bounded
-// privileged mutation. ACP enrollment reuses the hook guardian's hardened
-// setuid/impersonation boundary rather than granting the gateway user-home
-// access.
+// privileged mutation. ACP enrollment reuses the hook guardian's per-target
+// boundary (a worker process on Unix, SID impersonation on Windows) rather
+// than granting the gateway user-home access.
 type TargetCredentials struct {
 	UserHome string
 	UID      int
@@ -14,9 +14,11 @@ type TargetCredentials struct {
 	SID      string
 }
 
-// RunAsTarget validates target identity and executes fn with the target user's
-// effective filesystem identity. Platform implementations fail closed when a
-// privileged process cannot prove the requested identity.
+// RunAsTarget validates target identity and executes fn in this process with
+// the target user's filesystem identity. Platform implementations fail closed
+// when the process cannot prove the requested identity. On Unix fn runs only
+// when the process already is the target user; a root caller must use
+// RunTargetOperation instead.
 func RunAsTarget(target TargetCredentials, fn func() error) error {
 	return runAsTarget(target, fn)
 }

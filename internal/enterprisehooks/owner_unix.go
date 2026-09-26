@@ -9,25 +9,30 @@ package enterprisehooks
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/user"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"syscall"
-
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 var errEnterpriseHooksUnsupportedWindows error
 
-func platformInstall(context.Context, InstallOptions) (InstallResult, bool, error) {
-	return InstallResult{}, false, nil
+// platformInstall hands a root caller's install to the per-target worker;
+// an unprivileged caller installs in-process as itself.
+func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
+	if targetProcessEUID() != 0 {
+		return InstallResult{}, false, nil
+	}
+	result, err := installThroughTargetWorker(ctx, opts, targetOperationInstall)
+	return result, true, err
 }
 
-func platformVerify(context.Context, InstallOptions) (InstallResult, bool, error) {
-	return InstallResult{}, false, nil
+func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
+	if targetProcessEUID() != 0 {
+		return InstallResult{}, false, nil
+	}
+	result, err := installThroughTargetWorker(ctx, opts, targetOperationVerify)
+	return result, true, err
 }
 
 func platformWatchDirs(InstallOptions) ([]string, bool, error) {
@@ -105,65 +110,32 @@ func fileOwnerMatches(path string, uid int) (bool, int) {
 	return int(st.Uid) == uid, int(st.Uid)
 }
 
-func withOwnerCredentials(uid, gid int, fn func() error) (err error) {
+// withOwnerCredentials runs fn only when this process already is the target
+// user. It never changes credentials: a root caller reaches target-user code
+// through the per-target worker, which has permanently become the target
+// before it runs, so every path operation is checked by the kernel against
+// that user's permissions and no other goroutine ever shares a borrowed
+// identity.
+func withOwnerCredentials(uid, gid int, fn func() error) error {
 	if uid < 0 || gid < 0 {
-		return fn()
+		return fmt.Errorf("enterprise hooks: target uid and gid are required")
 	}
-	euid := os.Geteuid()
+	euid := targetProcessEUID()
 	egid := os.Getegid()
-	if euid != 0 {
-		if euid != uid || egid != gid {
-			return fmt.Errorf("enterprise hooks: cannot drop to uid=%d gid=%d from unprivileged euid=%d egid=%d", uid, gid, euid, egid)
-		}
-		oldUmask := syscall.Umask(0o077)
-		defer syscall.Umask(oldUmask)
-		return fn()
+	if euid == 0 {
+		return errRootTargetPathOperation
 	}
-
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	origGroups, groupsErr := syscall.Getgroups()
-	if groupsErr != nil {
-		return fmt.Errorf("enterprise hooks: inspect supplementary groups: %w", groupsErr)
+	if euid != uid || egid != gid {
+		return fmt.Errorf("enterprise hooks: cannot drop to uid=%d gid=%d from unprivileged euid=%d egid=%d", uid, gid, euid, egid)
 	}
 	oldUmask := syscall.Umask(0o077)
 	defer syscall.Umask(oldUmask)
-
-	restore := func() error {
-		var errs []error
-		if setErr := syscall.Seteuid(euid); setErr != nil {
-			errs = append(errs, fmt.Errorf("restore euid %d: %w", euid, setErr))
-		}
-		if setErr := syscall.Setegid(egid); setErr != nil {
-			errs = append(errs, fmt.Errorf("restore egid %d: %w", egid, setErr))
-		}
-		if setErr := syscall.Setgroups(origGroups); setErr != nil {
-			errs = append(errs, fmt.Errorf("restore supplementary groups: %w", setErr))
-		}
-		if len(errs) > 0 {
-			return fmt.Errorf("enterprise hooks: restore credentials: %v", errs)
-		}
-		return nil
-	}
-	defer func() {
-		if restoreErr := restore(); restoreErr != nil && err == nil {
-			err = restoreErr
-		}
-	}()
-
-	if err := syscall.Setgroups([]int{gid}); err != nil {
-		return fmt.Errorf("enterprise hooks: narrow supplementary groups to gid=%d: %w", gid, err)
-	}
-	if err := syscall.Setegid(gid); err != nil {
-		return fmt.Errorf("enterprise hooks: drop egid to %d: %w", gid, err)
-	}
-	if err := syscall.Seteuid(uid); err != nil {
-		return fmt.Errorf("enterprise hooks: drop euid to %d: %w", uid, err)
-	}
 	return fn()
 }
 
+// runAsTarget runs fn in this process, so on Unix it succeeds only when the
+// process already is the target user. Root callers must use
+// RunTargetOperation, which runs a registered operation in a worker.
 func runAsTarget(target TargetCredentials, fn func() error) error {
 	home, err := validateUserHome(target.UserHome)
 	if err != nil {
@@ -176,7 +148,26 @@ func runAsTarget(target TargetCredentials, fn func() error) error {
 	return withOwnerCredentials(uid, gid, fn)
 }
 
+var errRootTargetPathOperation = fmt.Errorf(
+	"enterprise hooks: refusing a target-user path operation in a root process; it must run in the per-target worker",
+)
+
+// requireTargetPathCredentials fails when this process is root: target-user
+// paths are changed only by a process that is the target user.
+func requireTargetPathCredentials() error {
+	if targetProcessEUID() == 0 {
+		return errRootTargetPathOperation
+	}
+	return nil
+}
+
+// chmodOwnedPath normalizes the mode of a target-owned path. It runs only
+// with the target user's credentials, so even if the path is replaced after
+// inspection the kernel refuses to change anything the user does not own.
 func chmodOwnedPath(path string, mode os.FileMode) error {
+	if err := requireTargetPathCredentials(); err != nil {
+		return err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect %s before chmod: %w", path, err)
@@ -188,78 +179,11 @@ func chmodOwnedPath(path string, mode os.FileMode) error {
 	if info.Mode()&relevantMode == mode&relevantMode {
 		return nil
 	}
+	if hook := beforeTargetPathMutation; hook != nil {
+		hook(path)
+	}
 	if err := os.Chmod(path, mode); err != nil {
 		return fmt.Errorf("enterprise hooks: chmod %s: %w", path, err)
 	}
 	return nil
-}
-
-func lchownInstallFootprint(uid, gid int, dataDir string, footprint connector.AgentPaths, hookConfigPaths []string) error {
-	if uid < 0 || gid < 0 {
-		return nil
-	}
-	if os.Geteuid() != 0 {
-		return nil
-	}
-	if err := chownTree(dataDir, uid, gid); err != nil {
-		return err
-	}
-	for _, path := range append(append([]string{}, footprint.PatchedFiles...), hookConfigPaths...) {
-		if path == "" {
-			continue
-		}
-		if err := lchownIfNeeded(path, uid, gid); err != nil {
-			return fmt.Errorf("enterprise hooks: lchown %s: %w", path, err)
-		}
-	}
-	for _, path := range append(append([]string{}, footprint.GeneratedFiles...), footprint.GeneratedExecutables...) {
-		if path == "" {
-			continue
-		}
-		if err := lchownIfNeeded(path, uid, gid); err != nil {
-			return fmt.Errorf("enterprise hooks: lchown %s: %w", path, err)
-		}
-	}
-	for _, path := range footprint.CreatedDirs {
-		if path == "" {
-			continue
-		}
-		if err := chownTree(path, uid, gid); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func chownTree(root string, uid, gid int) error {
-	if _, err := os.Lstat(root); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("enterprise hooks: inspect %s: %w", root, err)
-	}
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return fmt.Errorf("enterprise hooks: walk %s: %w", path, err)
-		}
-		if err := lchownIfNeeded(path, uid, gid); err != nil {
-			return fmt.Errorf("enterprise hooks: chown %s: %w", path, err)
-		}
-		return nil
-	})
-}
-
-func lchownIfNeeded(path string, uid, gid int) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("cannot inspect owner")
-	}
-	if int(st.Uid) == uid && int(st.Gid) == gid {
-		return nil
-	}
-	return os.Lchown(path, uid, gid)
 }

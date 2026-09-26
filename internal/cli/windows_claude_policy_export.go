@@ -37,14 +37,18 @@ func newWindowsClaudePolicyExportCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "export-claude-policy",
 		Short: "Print the DefenseClaw Claude Code managed hook matrix as policy JSON",
-		Long: `Print the exact DefenseClaw Claude Code hook matrix as managed-policy JSON.
+		Long: `Print the exact DefenseClaw Claude Code hook matrix and managed-hooks-only
+lock as managed-policy JSON.
 
 Claude Code applies the highest-ranked managed source. An MDM or GPO policy in
 HKLM\SOFTWARE\Policies\ClaudeCode\Settings outranks the DefenseClaw
 managed-settings.d drop-in, so enrollment refuses it unless that policy either
 sets "managedSourcesBehavior": "merge" (Claude Code ` + connector.ClaudeCodeManagedSourcesMergeMinimumVersion + ` or newer) or
 already contains this hook matrix. Add the printed "hooks" object to that
-policy. The output names the installed hook executable and contains no
+policy, and the printed "allowManagedHooksOnly": true unless the DefenseClaw
+config sets claude_code.allow_unmanaged_hooks: true; Claude then loads only
+that policy, so enrollment refuses one that carries the hooks without the
+lock. The output names the installed hook executable and contains no
 credentials. It is read-only and needs no elevation.`,
 		Hidden:       true,
 		Args:         cobra.NoArgs,

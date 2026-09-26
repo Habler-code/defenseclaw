@@ -52,6 +52,8 @@ func claudeCodeOSAdminRemedy() string {
 // when it opts into merging managed sources, which clients honor from
 // ClaudeCodeManagedSourcesMergeMinimumVersion. A policy that disables hooks
 // defeats both, and anything else fails closed with the two ways to fix it.
+// Either admission also keeps the managed-hooks-only lock effective (see
+// claudeCodeOSAdminKeepsManagedHooksOnly).
 func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts SetupOpts) error {
 	if !source.active() {
 		return nil
@@ -64,9 +66,12 @@ func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts 
 		return err
 	}
 	if carries {
-		return nil
+		return claudeCodeOSAdminKeepsManagedHooksOnly(source, opts, true)
 	}
 	if claudeCodeSourceRequestsManagedMerge(source) {
+		if err := claudeCodeOSAdminKeepsManagedHooksOnly(source, opts, false); err != nil {
+			return err
+		}
 		// Merge makes the DefenseClaw hooks effective on Claude Code
 		// ClaudeCodeManagedSourcesMergeMinimumVersion or newer. The target's
 		// recorded agent_version cannot show which client actually runs: it
@@ -86,6 +91,45 @@ func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts 
 		source.label(),
 		claudeCodeOSAdminRemedy(),
 	)
+}
+
+// claudeCodeOSAdminKeepsManagedHooksOnly keeps the DefenseClaw
+// managed-hooks-only lock effective under an admitted OS-admin policy. The
+// lock is rendered into the DefenseClaw managed-settings.d policy, which the
+// outranking policy can override or replace. An explicit
+// allowManagedHooksOnly=false there conflicts with the lock however the
+// sources combine. A policy that carries the DefenseClaw hooks is the one a
+// first-wins client loads on its own (every client without merge, and a
+// client older than ClaudeCodeManagedSourcesMergeMinimumVersion with it), so
+// it must set allowManagedHooksOnly=true itself. A merge policy that leaves
+// the key unset keeps the drop-in lock. The administrator opt-out
+// (ClaudeCodeAllowUnmanagedHooks) waives both checks.
+func claudeCodeOSAdminKeepsManagedHooksOnly(source *claudeCodeSettingsSource, opts SetupOpts, carriesHooks bool) error {
+	if opts.ClaudeCodeAllowUnmanagedHooks {
+		return nil
+	}
+	const optOut = "or set claude_code.allow_unmanaged_hooks: true in the DefenseClaw config"
+	// validateClaudeCodeManagedHookControls already refused a non-boolean
+	// value, so an error here is an explicit false.
+	locked, err := claudeCodeManagedPolicyLockState(source.settings)
+	if err != nil {
+		return fmt.Errorf(
+			"Claude Code %s sets %s=false, which conflicts with the DefenseClaw managed-hooks-only lock; remove the setting %s",
+			source.label(),
+			claudeCodeManagedHooksOnlyKey,
+			optOut,
+		)
+	}
+	if carriesHooks && !locked {
+		return fmt.Errorf(
+			`Claude Code %s carries the DefenseClaw hooks and outranks the DefenseClaw managed-settings.d policy, so the managed-hooks-only lock in that policy does not apply; add "%s": true (printed by %s) to it, %s`,
+			source.label(),
+			claudeCodeManagedHooksOnlyKey,
+			ClaudeCodeManagedPolicyExportCommand,
+			optOut,
+		)
+	}
+	return nil
 }
 
 // ClaudeCodeOSAdminPolicyAdmitsManagedHooks applies the OS-admin composition

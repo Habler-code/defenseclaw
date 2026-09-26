@@ -71,6 +71,10 @@ param(
     # a DefenseClaw-like name.
     [switch]$Purge,
     [switch]$AllowUnsigned,
+    # SHA-256 fingerprints of code-signing certificates, in addition to the
+    # DefenseClaw publisher, that may sign the payload (for an organization
+    # that re-signs it). Comma-separated when passed through -File.
+    [string[]]$AdditionalTrustedSignerSha256,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
     # Retained for command-line compatibility, but rejected before bootstrap
@@ -1438,10 +1442,89 @@ function New-DefenseClawBootstrapEnvironment {
     }
 }
 
+# Mirrors ConvertTo-DefenseClawTrustedSignerSet in the module, which cannot be
+# imported until its own signer has been checked.
+function ConvertTo-DefenseClawBootstrapTrustedSignerSet {
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Value)
+    $set = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @($Value)) {
+        if ($null -eq $entry) {
+            continue
+        }
+        foreach ($token in ([string]$entry -split '[,;\s]+')) {
+            if ([string]::IsNullOrEmpty($token)) {
+                continue
+            }
+            if ($token -cmatch '^[0-9A-Fa-f]{40}\z') {
+                throw (
+                    "-AdditionalTrustedSignerSha256 entry '$token' is a SHA-1 " +
+                    'thumbprint; supply the 64-hex-character SHA-256 fingerprint ' +
+                    'of the signing certificate'
+                )
+            }
+            if ($token -cnotmatch '^[0-9A-Fa-f]{64}\z') {
+                throw (
+                    "-AdditionalTrustedSignerSha256 entry '$token' is not a " +
+                    '64-hex-character SHA-256 certificate fingerprint'
+                )
+            }
+            $normalized = $token.ToLowerInvariant()
+            if (-not $set.Contains($normalized)) {
+                $set.Add($normalized)
+            }
+        }
+    }
+    if ($set.Count -gt 16) {
+        throw '-AdditionalTrustedSignerSha256 accepts at most 16 fingerprints'
+    }
+    return ,[string[]]$set.ToArray()
+}
+
+function Assert-DefenseClawBootstrapModuleSigner {
+    param(
+        [Parameter(Mandatory)][AllowNull()]$SignerCertificate,
+        [Parameter(Mandatory)][string]$Path,
+        [AllowNull()][AllowEmptyCollection()][string[]]$AdditionalTrustedSignerSha256
+    )
+    if ($null -eq $SignerCertificate) {
+        throw "DefenseClaw enterprise installer module Authenticode signature has no signer certificate: $Path"
+    }
+    $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $SignerCertificate
+    )
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $publisher = $certificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+        $fingerprint = ([BitConverter]::ToString(
+            $hasher.ComputeHash($certificate.GetRawCertData())
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $hasher.Dispose()
+        $certificate.Dispose()
+    }
+    if ([string]::Equals($publisher, 'Cisco Systems, Inc.', [StringComparison]::Ordinal)) {
+        return
+    }
+    if (@($AdditionalTrustedSignerSha256) -ccontains $fingerprint) {
+        return
+    }
+    throw (
+        "DefenseClaw enterprise installer module is signed by '$publisher' " +
+        "(certificate SHA-256 $fingerprint), not the DefenseClaw publisher " +
+        "'Cisco Systems, Inc.'; a payload re-signed by your organization " +
+        "requires that exact certificate in -AdditionalTrustedSignerSha256: $Path"
+    )
+}
+
 function Assert-DefenseClawBootstrapModuleTrust {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [switch]$AllowUnsignedModule
+        [switch]$AllowUnsignedModule,
+        [AllowNull()][AllowEmptyCollection()][string[]]$AdditionalTrustedSignerSha256
     )
     if ([string]::IsNullOrWhiteSpace($Path) -or
         $Path.Contains('"') -or
@@ -1555,6 +1638,10 @@ function Assert-DefenseClawBootstrapModuleTrust {
         if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
             throw "DefenseClaw enterprise installer module Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for protected controlled test staging"
         }
+        Assert-DefenseClawBootstrapModuleSigner `
+            -SignerCertificate $signature.SignerCertificate `
+            -Path $full `
+            -AdditionalTrustedSignerSha256 $AdditionalTrustedSignerSha256
     }
     # Keep the mount-manager authorization adjacent to the import boundary.
     $nativePathType::AssertCanonicalDriveRoot($driveRoot, $driveID)
@@ -3050,10 +3137,16 @@ try {
         $Config = $renderedConfigPath
         $Manifest = $renderedManifestPath
     }
+    $trustedSigners = ConvertTo-DefenseClawBootstrapTrustedSignerSet `
+        -Value $AdditionalTrustedSignerSha256
+    if ($AllowUnsigned -and $trustedSigners.Count -gt 0) {
+        throw '-AdditionalTrustedSignerSha256 applies only to signed payloads and cannot be combined with -AllowUnsigned'
+    }
     try {
         $modulePath = Assert-DefenseClawBootstrapModuleTrust `
             -Path $modulePath `
-            -AllowUnsignedModule:$AllowUnsigned
+            -AllowUnsignedModule:$AllowUnsigned `
+            -AdditionalTrustedSignerSha256 $trustedSigners
     }
     catch {
         throw "DefenseClaw enterprise installer rejected its module before import: $($_.Exception.Message)"
@@ -3097,6 +3190,7 @@ try {
         # The exact service/root/CODEX_HOME grammar scopes this relaxation for
         # every certification lifecycle action, including pre-install Status.
         AllowUnsigned = [bool]$AllowUnsigned
+        AdditionalTrustedSignerSha256 = $trustedSigners
         # Retained in the module invocation shape for CLI compatibility. The
         # entry gate above rejects it before bootstrap creation, and the module
         # repeats that rejection for direct callers.

@@ -12,7 +12,6 @@ import (
 	"math/bits"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -130,28 +129,6 @@ func managedEnterpriseHTTPClient(
 			return http.ErrUseLastResponse
 		},
 	}, nil
-}
-
-func managedGatewayPeerError(format string, args ...interface{}) error {
-	return fmt.Errorf("%w: %s", errManagedGatewayPeerUnverified, fmt.Sprintf(format, args...))
-}
-
-func normalizeManagedGatewayAddress(value string) (string, error) {
-	if value == "" || value != strings.TrimSpace(value) {
-		return "", errors.New("managed gateway address is not canonical")
-	}
-	host, rawPort, err := net.SplitHostPort(value)
-	if err != nil {
-		return "", fmt.Errorf("managed gateway address is not host:port: %w", err)
-	}
-	if host != "127.0.0.1" {
-		return "", errors.New("managed gateway address must use exact canonical 127.0.0.1")
-	}
-	port, err := strconv.Atoi(rawPort)
-	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != rawPort {
-		return "", errors.New("managed gateway port is not canonical")
-	}
-	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
 func validateManagedGatewayServiceName(value string) error {

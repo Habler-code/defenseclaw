@@ -1234,6 +1234,9 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 	if resolution.Contract.ContractID == "" {
 		return false, nil
 	}
+	// Machine requirements that pin [features] hooks = true make a user-level
+	// hooks = false inactive, so it does not count as removal.
+	hooksPinned := codexUserHooksFeaturePinned(opts)
 	userConfigPath := codexConfigPath()
 	data, err := os.ReadFile(userConfigPath)
 	if err != nil {
@@ -1253,7 +1256,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 			for _, key := range []string{"hooks", "codex_hooks"} {
 				if rawEnabled, exists := features[key]; exists {
 					enabled, ok := rawEnabled.(bool)
-					if !ok || !enabled {
+					if !ok || (!enabled && !hooksPinned) {
 						return false, nil
 					}
 				}
@@ -1281,7 +1284,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		for _, key := range []string{"hooks", "codex_hooks"} {
 			if rawEnabled, exists := features[key]; exists {
 				enabled, ok := rawEnabled.(bool)
-				if !ok || !enabled {
+				if !ok || (!enabled && !hooksPinned) {
 					return false, nil
 				}
 			}
@@ -1586,16 +1589,23 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if features == nil {
 			features = map[string]interface{}{}
 		}
-		if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled {
+		// Machine requirements that pin [features] hooks = true keep Codex
+		// hooks on regardless of these user flags, so a managed setup repairs
+		// its hooks and leaves the inactive user flags as they are.
+		hooksPinned := codexUserHooksFeaturePinned(opts)
+		if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled && !hooksPinned {
 			return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector")
 		}
-		if enabled, explicitlySet := features["codex_hooks"].(bool); explicitlySet && !enabled {
+		aliasEnabled, aliasSet := features["codex_hooks"].(bool)
+		if aliasSet && !aliasEnabled && !hooksPinned {
 			return fmt.Errorf("Codex hooks are disabled by deprecated [features].codex_hooks; enable hooks before installing the Codex connector")
 		}
 		// Remove the retired alias when it is enabled. Current Codex accepts the
 		// [features].hooks key (and enables hooks by default) and warns on the old
 		// name.
-		delete(features, "codex_hooks")
+		if !aliasSet || aliasEnabled {
+			delete(features, "codex_hooks")
+		}
 
 		// Native OTel exporter — runs on every install regardless of
 		// enforcement mode. Codex's [otel] block produces structured

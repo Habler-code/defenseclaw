@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 )
 
@@ -36,6 +37,11 @@ var (
 )
 
 func main() {
+	// The per-target worker must start before any CLI, config or native
+	// install-state initialization; it runs one operation and exits.
+	if handled, code := enterprisehooks.RunTargetWorkerIfRequested(); handled {
+		os.Exit(code)
+	}
 	if commandName := releaseCommandNameForExecutable(); commandName != "" {
 		cli.SetCommandName(commandName)
 	}
