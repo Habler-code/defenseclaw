@@ -481,6 +481,21 @@ _scrub_bin() {
 
 SCRUB_BIN="$(_scrub_bin)"
 
+# ---- Codex machine requirements pin -------------------------------------
+#
+# While a Codex target is enabled the hook guardian adds [features]
+# hooks = true to the machine Codex requirements (/etc/codex/
+# requirements.toml). Remove DefenseClaw's pin on every uninstall; only the
+# lines DefenseClaw added are removed and administrator content in the file
+# is preserved. The guardian is already stopped, so it cannot re-add the pin.
+if [[ -n "${SCRUB_BIN}" ]]; then
+  log "removing the DefenseClaw pin from the Codex machine requirements"
+  "${SCRUB_BIN}" enterprise hooks codex-requirements-pin remove \
+    || warn "could not remove the DefenseClaw pin from /etc/codex/requirements.toml; delete the lines marked 'managed by DefenseClaw' (or the DefenseClaw managed hooks block) manually"
+else
+  warn "defenseclaw binary not found; any DefenseClaw pin in /etc/codex/requirements.toml was not removed"
+fi
+
 # python3 resolver — used only by the `amp` connector's scrub path.
 # The other three connectors (codex / claudecode / cursor) route
 # through the Go binary at ${SCRUB_BIN} and do not need python3.

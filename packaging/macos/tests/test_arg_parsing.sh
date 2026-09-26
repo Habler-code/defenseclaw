@@ -123,6 +123,23 @@ t_uninstall_routes_amp_through_backup_authority() {
     "purge supplies Amp's structured backup authority"
 }
 
+t_uninstall_removes_codex_requirements_pin() {
+  local body
+  body="$(cat "${UNINSTALL_SH}")"
+  assert_contains "${body}" 'enterprise hooks codex-requirements-pin remove' \
+    "uninstall removes the DefenseClaw Codex requirements pin"
+  # The pin must be removed after the guardian stops (so it cannot be
+  # re-added) and on every uninstall, not only with --purge.
+  local stop_line pin_line purge_line
+  stop_line="$(grep -n 'stop_daemon "${GUARDIAN_LAUNCHD_LABEL}"' "${UNINSTALL_SH}" | head -1 | cut -d: -f1)"
+  pin_line="$(grep -n 'codex-requirements-pin remove' "${UNINSTALL_SH}" | head -1 | cut -d: -f1)"
+  purge_line="$(grep -n '^if \[\[ "${PURGE}" == "true" \\$' "${UNINSTALL_SH}" | head -1 | cut -d: -f1)"
+  if [[ -z "${stop_line}" || -z "${pin_line}" || -z "${purge_line}" ]] ||
+     (( pin_line < stop_line || pin_line > purge_line )); then
+    _fail "pin removal must run after the guardian stops and outside the --purge block (stop=${stop_line} pin=${pin_line} purge=${purge_line})"
+  fi
+}
+
 t_install_help_documents_env() {
   local out
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
@@ -270,5 +287,6 @@ run_case "install DEFAULT_ENV=prod"       t_install_default_env_is_prod
 run_case "install userspace ownership is descriptor-anchored" t_install_userspace_ownership_stays_descriptor_anchored
 run_case "uninstall --help"               t_uninstall_help
 run_case "uninstall Amp cleanup uses backup authority" t_uninstall_routes_amp_through_backup_authority
+run_case "uninstall removes the Codex requirements pin" t_uninstall_removes_codex_requirements_pin
 run_case "uninstall --bogus"              t_uninstall_unknown_flag
 run_case "uninstall non-root rejected"    t_uninstall_requires_root

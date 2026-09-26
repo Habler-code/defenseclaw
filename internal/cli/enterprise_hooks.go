@@ -495,6 +495,7 @@ type enterpriseHookReconcileRun struct {
 	Pending             int
 	Repairs             int `json:"-"`
 	StateErr            error
+	Warnings            []string
 	WatchDirs           []string
 	WatchExclusiveFiles []string // DC-only writers: react to any event
 	WatchSharedFiles    []string // agent + DC writers: react only to Create/Remove/Rename
@@ -551,6 +552,9 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		if run.StateErr != nil {
 			payload["state_error"] = run.StateErr.Error()
 		}
+		if len(run.Warnings) > 0 {
+			payload["warnings"] = run.Warnings
+		}
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 		if run.Failures > 0 || run.StateErr != nil {
 			if run.StateErr != nil {
@@ -575,6 +579,9 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), label, row.Error)
 		}
+	}
+	for _, warning := range run.Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s\n", Style("!", "fg=yellow", "bold"), warning)
 	}
 	if run.StateErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s hook guardian state: %s\n", Style("✗", "fg=red", "bold"), run.StateErr.Error())
@@ -1384,6 +1391,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		}
 		run.Rows = append(run.Rows, row)
 	}
+	run.Failures += markEnterpriseHookCodexPinRows(run.Rows, verifyEnterpriseHookCodexPin(manifest))
 	if run.AuthorizationErr == nil && exists && activationExists {
 		if issues := enterpriseHookVerifyDispositionIssues(
 			run,
@@ -1582,6 +1590,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		)
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
+	codexPin := reconcileEnterpriseHookCodexPinOutcome(manifest)
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
@@ -1724,6 +1733,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		rows = append(rows, row)
 	}
+	codexPinWarnings := codexPin.applyToRows(rows, &failures)
 
 	var enrollmentErr error
 	if failures == 0 {
@@ -1755,6 +1765,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	run.Pending = pending
 	run.Repairs = repairs
 	run.StateErr = stateErr
+	run.Warnings = codexPinWarnings
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
@@ -1888,6 +1899,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		lastTriggerOp = 0
 		if run.StateErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
+		}
+		for _, warning := range run.Warnings {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] warning: %s\n", warning)
 		}
 		repairRetryNeeded = run.Failures > 0 || run.StateErr != nil
 		if !repairRetryNeeded {
