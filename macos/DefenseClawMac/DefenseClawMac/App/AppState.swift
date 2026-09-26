@@ -1086,6 +1086,8 @@ final class AppState {
         // keep any previously known release rather than clearing it.
         guard let release = await updater.latestRelease() else {
             lastCheckFailed = true
+            // Try again in about 15 minutes rather than waiting out the 6h.
+            lastUpdateCheckTime = Date().timeIntervalSince1970 - 6 * 3600 + 15 * 60
             return
         }
         lastCheckFailed = false

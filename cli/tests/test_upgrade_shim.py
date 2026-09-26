@@ -458,3 +458,52 @@ def test_shim_output_survives_a_console_that_cannot_encode_it(
     monkeypatch.setattr(upgrade_shim, "_latest_version", lambda repo: "1.2.0")
 
     assert upgrade_shim.run(["upgrade"]) == 0
+
+
+def test_an_installer_that_cannot_start_is_an_error_not_a_traceback(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.1")))
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix")
+    monkeypatch.setattr(upgrade_shim.os, "chdir", lambda path: None)
+
+    def execv(path: str, argv: list[str]) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(upgrade_shim.os, "execv", execv)
+
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 1
+    assert "could not run" in capsys.readouterr().err
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_the_signer_pattern_escapes_the_repository_name(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    release = _release_dir(tmp_path, "1.0.1")
+    (release / "checksums.txt.bundle").write_text("{}")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(release))
+    monkeypatch.setenv(upgrade_shim.REPO_ENV, "acme+corp/defense.claw")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(upgrade_shim, "_cosign", lambda: "/usr/bin/cosign")
+
+    def run(argv, **_kwargs):
+        seen.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "run", run)
+
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 0
+    pattern = seen[0][seen[0].index("--certificate-identity-regexp") + 1]
+    assert pattern.startswith("^https://github\\.com/acme\\+corp/defense\\.claw/")
+
+
+def test_the_update_notice_lookup_swallows_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("no network stack")
+
+    monkeypatch.setattr(upgrade_shim, "_latest_from_redirect", broken)
+
+    assert update_notice._lookup_latest() == ""

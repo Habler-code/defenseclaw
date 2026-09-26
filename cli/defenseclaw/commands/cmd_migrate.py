@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import sys
 
 import click
@@ -39,7 +38,10 @@ EXIT_CONFIG_TOO_NEW = 2
 
 
 def _default_data_dir() -> str:
-    return os.environ.get("DEFENSECLAW_HOME") or os.path.expanduser("~/.defenseclaw")
+    # The same resolution every other command uses (DEFENSECLAW_HOME, sudo).
+    from defenseclaw.config import default_data_path
+
+    return str(default_data_path())
 
 
 @click.command("migrate")
