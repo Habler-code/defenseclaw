@@ -12,6 +12,14 @@ keywords:
 DefenseClaw installs per user with `install.ps1`, the same flow as the macOS
 and Linux installer. The installer also upgrades, repairs, and rolls back.
 
+From 1.0 this page replaces the 0.8.x `DefenseClawSetup-x64.exe` flow: that
+installer is retired, and its `/repair`, `/uninstall` and `DELETEUSERDATA=1`
+options do not apply to an `install.ps1` install. Re-running `install.ps1`
+imports an existing Setup install (see
+[Moving from the 0.8.x Setup package](#moving-from-the-08x-setup-package)). Administrator
+deployments use the separate
+[enterprise Setup](/docs/setup/enterprise-deployment).
+
 ## System requirements
 
 | Requirement | Native Windows contract |
