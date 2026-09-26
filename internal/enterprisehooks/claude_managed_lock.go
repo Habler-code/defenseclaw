@@ -27,8 +27,8 @@ import "fmt"
 // administrator decision that differs from DefenseClaw's; both are reported so
 // the administrator resolves the conflict explicitly (remove the key, or opt
 // out with claude_code.allow_unmanaged_hooks) instead of one policy silently
-// winning. Claude treats a non-boolean value as true, so only an explicit false
-// conflicts.
+// winning. Only an explicit false conflicts here; the effective-policy check
+// already rejects a non-boolean value in the merged managed settings.
 func windowsClaudeManagedHooksOnlyConflict(path string, settings map[string]interface{}) error {
 	raw, exists := settings["allowManagedHooksOnly"]
 	if !exists {
