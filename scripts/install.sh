@@ -290,6 +290,8 @@ if ! is_version "${VERSION}"; then
         is_version "${VERSION}" || die "No defenseclaw-X.Y.Z-py3-none-any.whl in ${LOCAL_DIR}"
     elif [[ "${ROLLBACK}" != true ]]; then
         target="${TARGET_VERSION:-$(latest_release)}"
+        version_lt "${target}" 1.0.0 \
+            && die "DefenseClaw ${target} predates this installer; see https://github.com/${REPO}/releases/tag/${target}"
         run_release_installer "${target}" ${FORWARD[@]+"${FORWARD[@]}"}
     fi
 fi

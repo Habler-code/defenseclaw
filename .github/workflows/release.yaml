@@ -367,6 +367,9 @@ jobs:
           cosign verify-blob --bundle checksums.txt.bundle \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+          for name in defenseclaw-upgrade.sh install.sh install.ps1; do
+            grep -q "  $name\$" checksums.txt || { echo "::error::checksums.txt does not list $name"; exit 1; }
+          done
           sha256sum --check --ignore-missing checksums.txt
           [[ "$(tail -n1 defenseclaw-upgrade.sh)" == "# DefenseClaw upgrade resolver complete v1" ]]
           bash -n defenseclaw-upgrade.sh
