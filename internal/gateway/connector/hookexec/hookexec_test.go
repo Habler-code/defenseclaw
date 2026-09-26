@@ -1620,23 +1620,14 @@ func TestCodexNotifyRequestWiring(t *testing.T) {
 }
 
 func TestCodexNotifyManagedEnterpriseRejectsUnverifiedPeer(t *testing.T) {
-	// Managed_enterprise peer verification is Windows-only: it uses the
-	// Windows SCM to resolve "what PID owns this exact registered service
-	// name" and refuses the connection when the owning PID does not match
-	// the SCM-registered DefenseClawGateway. macOS and Linux have no
-	// equivalent primitive on TCP loopback (LOCAL_PEERCRED is UDS-only),
-	// so the non-Windows managedEnterpriseHTTPClient sibling returns a
-	// plain loopback client — the invariants come from a different
-	// mechanism (launchd/systemd bind + trust check on the gateway
-	// binary path). That was the T1.1 code-review fix in 8d6c59f6;
-	// without it every Codex/Claude managed_enterprise hook call was
-	// failing closed on macOS with enterprise_managed_gateway_peer_unverified.
-	//
-	// This test's assertion — that the fake httptest peer is refused —
-	// only holds on Windows. Skip elsewhere; the actual verification
-	// path is exercised by managed_transport_windows_test.go.
-	if runtime.GOOS != "windows" {
-		t.Skip("managed_enterprise peer verification is Windows-only (SCM-based); see managed_transport_windows_test.go")
+	// Every managed transport verifies the process behind the connected
+	// loopback listener before writing a byte: Windows compares the SCM
+	// service PID, macOS and Linux check the kernel's owner record for the
+	// listener (root or the packaged service account). The httptest peer
+	// below is owned by the test account, so it must be refused unless the
+	// test itself runs as a trusted gateway owner.
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
+		t.Skip("a root-owned test listener is a trusted managed gateway owner")
 	}
 	home := t.TempDir()
 	hookDir := filepath.Join(home, "hooks")
