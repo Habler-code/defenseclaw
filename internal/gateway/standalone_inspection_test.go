@@ -13,6 +13,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -111,5 +112,34 @@ func TestStandaloneMultiConnectorBootNeedsNoCloudProvider(t *testing.T) {
 	}
 	if !conn.credsSet {
 		t.Fatal("standalone boot must register the connector for hook evaluation")
+	}
+}
+
+func TestStandaloneEgressTransportHonorsTheEnterpriseProxy(t *testing.T) {
+	cfg := standaloneConfig(t)
+	cfg.Enterprise.Network = config.EnterpriseNetworkConfig{HTTPSProxy: "http://proxy.corp:3128", NoProxy: "internal.corp"}
+	transport, err := standaloneEgressTransport(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for target, want := range map[string]string{
+		"https://us.api.inspect.aidefense.security.cisco.com/api/v1/inspect/chat": "http://proxy.corp:3128",
+		"https://aid.internal.corp/api/v1/inspect/chat":                           "",
+	} {
+		req, err := http.NewRequest(http.MethodPost, target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := transport.Proxy(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (got == nil && want != "") || (got != nil && got.String() != want) {
+			t.Fatalf("proxy(%s) = %v, want %q", target, got, want)
+		}
+	}
+	cfg.Enterprise.Network.HTTPSProxy = "http://user:secret@proxy.corp:3128"
+	if _, err := standaloneEgressTransport(cfg); err == nil {
+		t.Fatal("a proxy URL with credentials must be refused")
 	}
 }

@@ -1,0 +1,247 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package enterprisehooks
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/sys/windows/registry"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+)
+
+// windowsNativeClaudeMaxVersionEntries bounds the native installer's
+// versions directory walk; a hostile profile cannot make the LocalSystem
+// enumerator iterate an unbounded directory.
+const windowsNativeClaudeMaxVersionEntries = 64
+
+// windowsWinGetUninstallKey is the machine-wide ARP root where WinGet records
+// machine-scope portable packages as "<PackageIdentifier>_<SourceIdentifier>"
+// subkeys with a DisplayVersion. Only administrators can write it.
+const windowsWinGetUninstallKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`
+
+// windowsWinGetPackageIDs maps a connector to the WinGet package identifiers
+// that ship its CLI.
+var windowsWinGetPackageIDs = map[string][]string{
+	"claudecode": {"Anthropic.ClaudeCode"},
+	"codex":      {"OpenAI.Codex"},
+}
+
+// windowsMachineWinGetPackageVersion is the registry seam for machine-scope
+// WinGet discovery so tests do not depend on HKLM contents.
+var windowsMachineWinGetPackageVersion = readWindowsMachineWinGetPackageVersion
+
+// applyStandaloneRowState is the standalone profile's row policy. A row that
+// already exists in the manifest keeps its state exactly as in
+// applyPreviousRowState. A newly discovered (SID, Connector) row is emitted
+// only when standalone discovery finds the connector's CLI, and then as an
+// enabled, deferred row at the discovered version: the ProfileList walk also
+// finds signed-out and disconnected users, and a deferred row lets the
+// guardian report such a user as pending instead of counting a reconcile
+// failure that would withhold enrollment publication for every other user. A
+// deferred row whose user is signed in installs immediately.
+func applyStandaloneRowState(row *ManifestTarget, previous map[string]ManifestTarget, logf EnumerationLogger) bool {
+	if row == nil {
+		return false
+	}
+	if _, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
+		return applyPreviousRowState(row, previous, logf)
+	}
+	version, reason := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
+	if version == "" {
+		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
+		return false
+	}
+	// A client below the lowest hook contract cannot be protected; writing
+	// its row would only produce a guardian failure for this user.
+	if minimum := windowsEnterpriseStandaloneAgentMinimum(row.Connector); minimum != "" {
+		normalized := connector.NormalizeAgentVersion(row.Connector, version)
+		if normalized == "" || compareWindowsEnterpriseVersion(normalized, minimum) < 0 {
+			logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: version %s is below the lowest hook contract %s", row.Connector, version, minimum))
+			return false
+		}
+	}
+	enabled := true
+	row.AgentVersion = version
+	row.Enabled = &enabled
+	row.Deferred = true
+	logfSafely(
+		logf,
+		row.SID,
+		fmt.Sprintf(
+			"newly-discovered (SID, %s) row auto-authorized (deferred until an active session) at version %s",
+			row.Connector,
+			version,
+		),
+	)
+	return true
+}
+
+// standaloneWindowsAgentVersionExplain is the standalone profile's single
+// agent discovery: the per-user package-manager probes shared with the
+// Secure Client profile, then the native Claude installer
+// (%USERPROFILE%\.local\bin\claude.exe), then machine-scope WinGet packages.
+// Every source is static filesystem or registry inspection; no discovered
+// binary is executed.
+func standaloneWindowsAgentVersionExplain(profileHome, connectorName string) (string, string) {
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	version, reason := windowsAgentVersionExplain(profileHome, connectorName)
+	if version != "" {
+		return version, ""
+	}
+	reasons := []string{reason}
+	if connectorName == "claudecode" && filepath.IsAbs(strings.TrimSpace(profileHome)) {
+		native, nativeReason := discoverWindowsNativeClaudeVersion(filepath.Clean(strings.TrimSpace(profileHome)))
+		if native != "" {
+			return native, ""
+		}
+		reasons = append(reasons, nativeReason)
+	}
+	for _, packageID := range windowsWinGetPackageIDs[connectorName] {
+		machine, machineReason := windowsMachineWinGetPackageVersion(packageID)
+		if machine != "" {
+			return machine, ""
+		}
+		reasons = append(reasons, machineReason)
+	}
+	return "", strings.Join(nonEmptyStrings(reasons), "; ")
+}
+
+// discoverWindowsNativeClaudeVersion reads the version of a Claude Code
+// native install. The installer copies the active build to
+// .local\bin\claude.exe and keeps each build as
+// .local\share\claude\versions\<version>; the active version is the entry
+// whose size matches the launcher (the highest such version when several
+// match). The profile owner controls these files, so the result is only a
+// version claim, bounded and validated exactly like a package.json probe.
+func discoverWindowsNativeClaudeVersion(profileHome string) (string, string) {
+	binDir := filepath.Join(profileHome, ".local", "bin")
+	versionsDir := filepath.Join(profileHome, ".local", "share", "claude", "versions")
+	launcher := filepath.Join(binDir, "claude.exe")
+	for _, directory := range []string{binDir, versionsDir} {
+		if err := winpath.RejectReparseChain(directory); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return "", "no native Claude install under this profile"
+			}
+			return "", "native Claude install has a refused reparse chain"
+		}
+	}
+	launcherInfo, err := os.Lstat(launcher)
+	if err != nil {
+		return "", "no native Claude launcher under this profile"
+	}
+	if !launcherInfo.Mode().IsRegular() {
+		return "", "native Claude launcher is not a regular file"
+	}
+	entries, err := os.ReadDir(versionsDir)
+	if err != nil {
+		return "", "native Claude versions directory is unreadable"
+	}
+	if len(entries) > windowsNativeClaudeMaxVersionEntries {
+		return "", "native Claude versions directory exceeds the bounded entry count"
+	}
+	best := ""
+	for _, entry := range entries {
+		name := entry.Name()
+		if !isValidWindowsAgentVersion(name) || !windowsNativeClaudeVersionName(name) {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(versionsDir, name))
+		if err != nil || !info.Mode().IsRegular() || info.Size() != launcherInfo.Size() {
+			continue
+		}
+		if best == "" || compareWindowsEnterpriseVersion(name, best) > 0 {
+			best = name
+		}
+	}
+	if best == "" {
+		return "", "native Claude launcher matches no recorded version"
+	}
+	return best, ""
+}
+
+// windowsNativeClaudeVersionName accepts dotted numeric release names
+// (e.g. 2.1.283), the only shape the native installer writes.
+func windowsNativeClaudeVersionName(name string) bool {
+	parts := strings.Split(name, ".")
+	if len(parts) < 2 || len(parts) > 4 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || len(part) > 9 {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// readWindowsMachineWinGetPackageVersion returns the DisplayVersion of a
+// machine-scope WinGet package. WinGet names the ARP subkey
+// "<PackageIdentifier>_<SourceIdentifier>"; the machine-wide 64-bit view is
+// administrator-only, so the value is an administrator's install record,
+// shared by every user on the device.
+func readWindowsMachineWinGetPackageVersion(packageID string) (string, string) {
+	root, err := registry.OpenKey(registry.LOCAL_MACHINE, windowsWinGetUninstallKey, registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
+	if err != nil {
+		return "", "machine uninstall registry is unavailable"
+	}
+	defer root.Close()
+	names, err := root.ReadSubKeyNames(-1)
+	if err != nil {
+		return "", "machine uninstall registry is unreadable"
+	}
+	prefix := strings.ToLower(packageID) + "_"
+	best := ""
+	for _, name := range names {
+		if !strings.HasPrefix(strings.ToLower(name), prefix) {
+			continue
+		}
+		key, err := registry.OpenKey(registry.LOCAL_MACHINE, windowsWinGetUninstallKey+`\`+name, registry.QUERY_VALUE|registry.WOW64_64KEY)
+		if err != nil {
+			continue
+		}
+		version, _, err := key.GetStringValue("DisplayVersion")
+		_ = key.Close()
+		version = strings.TrimSpace(version)
+		if err != nil || !isValidWindowsAgentVersion(version) {
+			continue
+		}
+		if best == "" || compareWindowsEnterpriseVersion(version, best) > 0 {
+			best = version
+		}
+	}
+	if best == "" {
+		return "", fmt.Sprintf("no machine-scope WinGet package %s", packageID)
+	}
+	return best, ""
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}

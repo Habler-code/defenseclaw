@@ -109,7 +109,10 @@ type EnumerateOptions struct {
 //     Anonymous S-1-5-7, SYSTEM S-1-5-18, Authenticated Users
 //     S-1-5-11, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by
 //     construction. Belt-and-braces on top of the CLI-input filter
-//     at spec 005 REQ-15.
+//     at spec 005 REQ-15. The standalone profile applies
+//     winpath.IsInteractiveUserSID, which also admits Microsoft Entra
+//     ID users (`S-1-12-1-a-b-c-d`); the Secure Client profile keeps
+//     the S-1-5-21 filter exactly.
 //  3. ProfileImagePath registry value must resolve to an absolute
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
@@ -135,6 +138,10 @@ type EnumerateOptions struct {
 // targets.yaml with a real AgentVersion. This preserves the security
 // posture: a new user profile is DISCOVERED by the enumerator but
 // only receives hooks when the admin explicitly promotes it.
+//
+// The standalone profile uses applyStandaloneRowState instead: new rows
+// are written deferred, and discovery also covers the native Claude
+// installer and machine-scope WinGet packages.
 //
 // Rows sorted by (SID, Connector) for deterministic YAML output —
 // the byte-identical-no-op-no-write invariant in
@@ -175,7 +182,11 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 
 	previous := loadPreviousManifestForEnumeration(opts.ExistingManifestPath, opts.Logger)
 
-	profiles, err := listWindowsUserProfiles(ctx, opts.Logger)
+	// The standalone profile admits Microsoft Entra ID accounts and writes
+	// newly discovered rows as deferred; the Secure Client profile keeps its
+	// historical filter and row state exactly.
+	standalone := cfg.StandaloneEnterprise()
+	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, standalone)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -205,7 +216,13 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				Connector: conn,
 				DataDir:   dataDir,
 			}
-			if !applyPreviousRowState(&row, previous, opts.Logger) {
+			emit := false
+			if standalone {
+				emit = applyStandaloneRowState(&row, previous, opts.Logger)
+			} else {
+				emit = applyPreviousRowState(&row, previous, opts.Logger)
+			}
+			if !emit {
 				// New (SID, Connector) row with no discoverable per-user
 				// agent-version — dropped for macOS parity. The
 				// enumerator's audit-complete summary reflects the
@@ -511,20 +528,10 @@ type windowsUserProfile struct {
 // ctx bounds the walk: a per-subkey ctx.Err() check ensures a
 // wedged os.Stat on one profile cannot starve the interval-loop's
 // cycle timeout (spec 005 REQ-19).
-func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger) ([]windowsUserProfile, error) {
-	rootKey, err := registry.OpenKey(
-		registry.LOCAL_MACHINE,
-		profileListRegistryKey,
-		registry.ENUMERATE_SUB_KEYS,
-	)
+func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool) ([]windowsUserProfile, error) {
+	subkeyNames, err := windowsProfileListSubkeyReader()
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: open ProfileList registry: %w", err)
-	}
-	defer rootKey.Close()
-
-	subkeyNames, err := rootKey.ReadSubKeyNames(-1)
-	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: enumerate ProfileList subkeys: %w", err)
+		return nil, err
 	}
 
 	byCanonSID := make(map[string]windowsUserProfile, len(subkeyNames))
@@ -537,11 +544,16 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger) ([]win
 			logfSafely(logf, name, fmt.Sprintf("not a syntactically-valid SID: %v", err))
 			continue
 		}
-		if !sidIsInteractiveUser(sid) {
+		if standalone {
+			if !winpath.IsInteractiveUserSID(sid.String(), winpath.InteractiveUserSIDOptions{AllowEntraID: true}) {
+				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-… or Entra ID S-1-12-1-…); refusing well-known / machine-scoped principals")
+				continue
+			}
+		} else if !sidIsInteractiveUser(sid) {
 			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…); refusing well-known / machine-scoped principals")
 			continue
 		}
-		home, err := readAndExpandProfileImagePath(name)
+		home, err := windowsProfileImagePathReader(name)
 		if err != nil {
 			logfSafely(logf, name, fmt.Sprintf("ProfileImagePath unresolvable: %v", err))
 			continue
@@ -602,6 +614,32 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger) ([]win
 // (the caller already did) and does NOT enforce interactive-user
 // filtering (the caller applies that separately for consistent error
 // reporting).
+// windowsProfileListSubkeyReader and windowsProfileImagePathReader are the
+// registry seams of the ProfileList walk, so tests can inject rows (for
+// example Entra ID SIDs) without editing HKLM.
+var (
+	windowsProfileListSubkeyReader = readProfileListSubkeyNames
+	windowsProfileImagePathReader  = readAndExpandProfileImagePath
+)
+
+func readProfileListSubkeyNames() ([]string, error) {
+	rootKey, err := registry.OpenKey(
+		registry.LOCAL_MACHINE,
+		profileListRegistryKey,
+		registry.ENUMERATE_SUB_KEYS,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: open ProfileList registry: %w", err)
+	}
+	defer rootKey.Close()
+
+	subkeyNames, err := rootKey.ReadSubKeyNames(-1)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: enumerate ProfileList subkeys: %w", err)
+	}
+	return subkeyNames, nil
+}
+
 func readAndExpandProfileImagePath(sidString string) (string, error) {
 	key, err := registry.OpenKey(
 		registry.LOCAL_MACHINE,

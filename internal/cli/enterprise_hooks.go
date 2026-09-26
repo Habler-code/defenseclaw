@@ -42,7 +42,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
+
+// enterpriseHookWatchSessionSettle is the delay between a Windows sign-in
+// notification (standalone service host only) and the reconcile it triggers,
+// long enough for the new session's user token to become the exact active
+// token the guardian impersonates.
+var enterpriseHookWatchSessionSettle = 5 * time.Second
 
 // enterpriseHookTargetsWaitTimeout is the bounded window the hook-guardian
 // will fsnotify-wait for a missing targets.yaml before returning a
@@ -2094,6 +2101,16 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				scheduleRepairRetry()
 			} else {
 				cancelRepairRetry()
+			}
+		case <-winsession.Logons():
+			// A sign-in forwarded by the standalone Windows service host
+			// (never fires otherwise) can make a deferred row's exact
+			// active session available; reconcile after the same
+			// debounce instead of waiting for the interval tick.
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchSessionSettle)
+			debouncePending = true
+			if debounceReason == "" {
+				debounceReason = "session sign-in"
 			}
 		case <-ticker.C:
 			if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {

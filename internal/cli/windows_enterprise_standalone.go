@@ -819,6 +819,23 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 			return "config", nil
 		}
 	}
+	// An administrator-supplied manifest is drift when the installed
+	// guardian manifest no longer carries one of its rows with the same
+	// enrollment state (a row edited or removed by hand, or never applied).
+	// Rows the enumerator added are not drift.
+	if path := strings.TrimSpace(opts.manifestPath); path != "" {
+		required, err := enterprisehooks.LoadManifest(path)
+		if err != nil {
+			return "", fmt.Errorf("read the supplied guardian manifest: %w", err)
+		}
+		installed, err := enterprisehooks.LoadManifest(layout.ManifestPath)
+		if err != nil {
+			return "manifest", nil
+		}
+		if len(windowsEnterpriseManifestUncoveredRows(required.Targets, installed.Targets)) != 0 {
+			return "manifest", nil
+		}
+	}
 	return "", nil
 }
 

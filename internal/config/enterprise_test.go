@@ -41,6 +41,9 @@ func TestResolveEnterpriseConfigProfiles(t *testing.T) {
 		{name: "bad home root", goos: "linux", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Enrollment: EnterpriseEnrollmentConfig{HomeRoots: []string{"/tmp"}}}}, wantErr: "home parent"},
 		{name: "bad signer", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone", Trust: EnterpriseTrustConfig{AllowedSigners: []string{"abc"}}}}, wantErr: "thumbprint"},
 		{name: "bad connector key", goos: "linux", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{MachinePolicy: EnterpriseMachinePolicyConfig{Connectors: map[string]EnterpriseConnectorPolicy{"Bad Name": {}}}}}, wantErr: "connector name"},
+		{name: "proxy with credentials", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone", Network: EnterpriseNetworkConfig{HTTPSProxy: "http://u:p@proxy.corp:3128"}}}, wantErr: "enterprise.network.https_proxy"},
+		{name: "proxy without scheme", goos: "linux", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Network: EnterpriseNetworkConfig{HTTPSProxy: "proxy.corp:3128"}}}, wantErr: "enterprise.network.https_proxy"},
+		{name: "valid proxy", goos: "linux", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Network: EnterpriseNetworkConfig{HTTPSProxy: "http://proxy.corp:3128", NoProxy: "internal.corp"}}}, want: managed.ProfileStandalone},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

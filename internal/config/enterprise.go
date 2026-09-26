@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
 
 // EnterpriseConfig selects and tunes the managed_enterprise profile. It is
@@ -389,7 +390,22 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return fmt.Errorf("config: enterprise.network.%s is malformed", proxy.name)
 		}
 	}
+	if strings.TrimSpace(e.Network.HTTPSProxy) != "" {
+		if _, err := netguard.ParseEgressProxyURL(e.Network.HTTPSProxy); err != nil {
+			return fmt.Errorf("config: enterprise.network.https_proxy: %w", err)
+		}
+	}
 	return nil
+}
+
+// EgressProxy returns the administrator's outbound proxy for this managed
+// deployment (enterprise.network). The zero value keeps the
+// process-environment proxy behavior.
+func (e EnterpriseConfig) EgressProxy() netguard.EgressProxy {
+	return netguard.EgressProxy{
+		HTTPSProxy: strings.TrimSpace(e.Network.HTTPSProxy),
+		NoProxy:    strings.TrimSpace(e.Network.NoProxy),
+	}
 }
 
 func validateConnectorPolicy(prefix string, p EnterpriseConnectorPolicy) error {

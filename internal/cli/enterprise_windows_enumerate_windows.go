@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
 
 // enterpriseWindowsEnumerateDefaultInterval is the SCM-service
@@ -53,6 +54,11 @@ const enterpriseWindowsEnumerateInitialCycleDelay = 30 * time.Second
 // cycle so a wedged registry walk / IO can't starve subsequent
 // ticks. Spec 005 REQ-19.
 const enterpriseWindowsEnumerateCycleTimeout = 60 * time.Second
+
+// enterpriseWindowsEnumerateSessionSettle delays the extra cycle a sign-in
+// triggers (standalone profile only) so Windows finishes creating a first
+// profile, and a burst of session events runs one cycle.
+var enterpriseWindowsEnumerateSessionSettle = 15 * time.Second
 
 // enterpriseWindowsEnumerateOptions carries the CLI flags for the
 // `enterprise windows enumerate` subcommand. Parsed in
@@ -96,7 +102,8 @@ func newEnterpriseWindowsEnumerateCommand() *cobra.Command {
 		Use:   "enumerate",
 		Short: "Publish Windows managed-enterprise hook enrollment on every tick",
 		Long: `Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList to
-discover local user profiles, filter to interactive users (S-1-5-21-…), and
+discover local user profiles, filter to interactive users (S-1-5-21-…; the
+standalone profile also admits Microsoft Entra ID users, S-1-12-1-…), and
 publish an updated hook-guardian targets.yaml.
 
 Two modes:
@@ -383,10 +390,33 @@ func runEnterpriseWindowsEnumerateInterval(
 
 	ticker := time.NewTicker(opts.interval)
 	defer ticker.Stop()
+	// A sign-in (forwarded by the standalone service host through
+	// internal/winsession; never fires otherwise) runs one extra cycle after
+	// a settle delay, so a newly signed-in user is enrolled without waiting
+	// for the next interval tick.
+	session := time.NewTimer(time.Hour)
+	if !session.Stop() {
+		<-session.C
+	}
+	defer session.Stop()
+	sessionPending := false
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-winsession.Logons():
+			if !sessionPending {
+				session.Reset(enterpriseWindowsEnumerateSessionSettle)
+				sessionPending = true
+			}
+		case <-session.C:
+			sessionPending = false
+			fmt.Fprintf(stderr, "[hook-enumerator] session sign-in: running an extra cycle\n")
+			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
+				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
+					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
+				}
+			}
 		case <-ticker.C:
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {

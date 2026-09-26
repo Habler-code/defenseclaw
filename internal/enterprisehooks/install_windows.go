@@ -42,6 +42,9 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 	); err != nil {
 		return InstallResult{}, true, err
 	}
+	if err := requireWindowsEnterpriseStandaloneAgentFloor(opts.ConnectorName, opts.AgentVersion); err != nil {
+		return InstallResult{}, true, err
+	}
 	unlockRuntime, err := lockWindowsUserRuntimeTransaction(opts.OwnerSID)
 	if err != nil {
 		return InstallResult{}, true, err
@@ -79,6 +82,9 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 		opts.ConnectorName,
 		opts.AgentVersion,
 	); err != nil {
+		return InstallResult{}, true, err
+	}
+	if err := requireWindowsEnterpriseStandaloneAgentFloor(opts.ConnectorName, opts.AgentVersion); err != nil {
 		return InstallResult{}, true, err
 	}
 	var result InstallResult

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -70,5 +71,22 @@ func newStandaloneCiscoInspectClient(cfg *config.Config) (*CiscoInspectClient, e
 	if client == nil {
 		return nil, errors.New("cisco ai defense client could not be constructed")
 	}
+	transport, err := standaloneEgressTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
+	client.client.Transport = transport
 	return client, nil
+}
+
+// standaloneEgressTransport is the outbound transport of the standalone
+// profile's cloud clients: it honors the administrator's egress proxy
+// (enterprise.network) and, without one, keeps the environment proxy the
+// default transport uses.
+func standaloneEgressTransport(cfg *config.Config) (*http.Transport, error) {
+	transport, err := cfg.Enterprise.EgressProxy().Transport()
+	if err != nil {
+		return nil, fmt.Errorf("enterprise.network: %w", err)
+	}
+	return transport, nil
 }
