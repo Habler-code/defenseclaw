@@ -24,10 +24,15 @@ irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/ins
 ```
 
 When it finishes, run [`defenseclaw init`](/docs/get-started/quickstart) to
-configure DefenseClaw. To pick an agent during the install, pass options: with
-`bash -s -- --connector codex --quickstart` on macOS/Linux, or
-`& ([scriptblock]::Create((irm <install.ps1 URL>))) -Connector codex -Quickstart`
-on Windows.
+configure DefenseClaw. To pick an agent during the install, pass options:
+
+```bash
+curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector codex --quickstart
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart
+```
 
 The installer downloads the release's gateway, CLI wheel, and a hash-pinned
 list of the CLI's Python dependencies, and checks each file against the
