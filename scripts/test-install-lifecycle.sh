@@ -271,6 +271,11 @@ upgrade_lane() {
     assert_versions "${from}"
     assert_healthy
     assert_data_kept
+    if [[ "${name}" == upgrade-previous ]]; then
+        # As if the rollback had stopped just before renaming its hold to previous/.
+        log "${name}: the next run finishes a rollback interrupted at its last step"
+        mv "${DC_HOME}/previous" "${DC_HOME}/.rollback-hold"
+    fi
     log "${name}: roll forward again"
     # After rolling back to 0.8.x the 1.x installer is only in previous/.
     local forward="${DC_HOME}/installer/install.sh"

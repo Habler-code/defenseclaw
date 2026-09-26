@@ -1172,10 +1172,11 @@ final class AppState {
             return
         }
         let appPath = Bundle.main.bundlePath
-        guard UpdateChecker.canReplaceBundle(atPath: appPath) else {
+        // Only another version replaces the app; this version installs the runtime alone.
+        guard version == UpdateChecker.currentVersion || UpdateChecker.canReplaceBundle(atPath: appPath) else {
             installerState = .failed(
                 version: version,
-                detail: "DefenseClaw can't replace itself at \(appPath). Move it to your Applications folder, reopen it from there, and try again."
+                detail: "DefenseClaw can't replace itself at \(appPath): this account can't write the app or its folder. Update it from the DMG, or move it to a folder you can write to and reopen it from there."
             )
             return
         }

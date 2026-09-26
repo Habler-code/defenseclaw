@@ -352,8 +352,10 @@ def test_windows_agent_selection_keeps_the_agents_it_found(data_dir: Path, monke
 
 
 def test_v8_preflight_converts_without_the_retired_0_5_0_keys(data_dir: Path, monkeypatch) -> None:
-    body = "config_version: 7\nguardrail:\n  mode: observe\n  codex_enforcement_enabled: true\n  claudecode_enforcement_enabled: false\n"
-    config = _write_config(data_dir, body)
+    body = b"config_version: 7\nguardrail:\n  mode: observe\n  codex_enforcement_enabled: true\n  claudecode_enforcement_enabled: false\n"
+    # Bytes, so Windows does not translate the newlines.
+    config = data_dir / "config.yaml"
+    config.write_bytes(body)
     converted: list[bytes] = []
 
     class StopError(Exception):
@@ -370,7 +372,7 @@ def test_v8_preflight_converts_without_the_retired_0_5_0_keys(data_dir: Path, mo
         migrations._preflight_observability_v8(ctx, str(data_dir / "scratch"))
 
     assert converted == [b"config_version: 7\nguardrail:\n  mode: observe\n"]
-    assert config.read_text() == body
+    assert config.read_bytes() == body
 
 
 def test_windows_agent_selection_reports_nothing_when_the_retry_fails(data_dir: Path, monkeypatch, capsys) -> None:

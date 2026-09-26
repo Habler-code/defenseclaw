@@ -878,12 +878,22 @@ function Resume-InterruptedRun {
         }
     }
     $hold = Join-Path $DataDir ".rollback-hold"
-    if (Test-Path -LiteralPath $hold) {
+    if (Test-Path -LiteralPath (Join-Path $hold "ROLLED_BACK")) {
+        # The rollback itself had finished; only renaming its hold was left.
+        Write-Warn "An earlier rollback was interrupted; finishing it"
+        Remove-Tree $Previous
+        Move-Path $hold $Previous
+    } elseif (Test-Path -LiteralPath $hold) {
         Write-Warn "An earlier rollback was interrupted; restoring the install it started from"
         [void](Stop-Gateway)
         if (Test-Path -LiteralPath (Join-Path $hold "STASHED")) {
-            # The live install was set aside in full, so anything live now came from previous\.
-            Move-LiveTo $Previous
+            # The live install was set aside in full, so anything live now came
+            # from previous\, unless the undo had already returned it (RETURNED).
+            $returned = Join-Path $hold "RETURNED"
+            if (-not (Test-Path -LiteralPath $returned)) {
+                Move-LiveTo $Previous
+                Set-Content -LiteralPath $returned -Value "" -Encoding Ascii
+            }
             Restore-Live $hold
         } else {
             # Setting it aside stopped part-way; the live binaries were only copied.
@@ -951,7 +961,8 @@ function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning) {
     try { Restore-Live $Previous } catch {
         Write-Err $_.Exception.Message
         # Restore-Live only copies previous\bin, so returning the rest restores previous\.
-        try { Move-LiveTo $Previous; Restore-Live $hold } catch {
+        # RETURNED tells an interrupted run's recovery that previous\ is whole again.
+        try { Move-LiveTo $Previous; Set-Content -LiteralPath (Join-Path $hold "RETURNED") -Value "" -Encoding Ascii; Restore-Live $hold } catch {
             Write-Err "Could not restore the previous install or put the current one back; run the installer again to recover it"
             return 2
         }
@@ -1309,10 +1320,12 @@ function Invoke-Install {
     $startRc = 0
     # A 0.x import leaves the agent executables its connectors run in a receipt
     # (see defenseclaw migrate) that the gateway must seal within minutes, so
-    # the new gateway starts even if the old one was stopped; it is stopped
-    # again once it is healthy.
-    $import0x = $PrevVersion -and -not $Setup -and [version]$PrevVersion -lt [version]"1.0.0"
-    $startNew = $WasRunning -or (($Setup -or $import0x) -and (Test-ConnectorConfigured))
+    # the new gateway starts once even if the old one was stopped, and stops
+    # again. The old gateway was not running, so that start is not a health
+    # gate for the install.
+    $sealOnly = -not $WasRunning -and -not $Setup -and $PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0" -and
+        (Test-Path -LiteralPath (Join-Path $DataDir "agent_selection.json"))
+    $startNew = $WasRunning -or $sealOnly -or ($Setup -and (Test-ConnectorConfigured))
     if ($startNew -and -not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) {
         # 0.x gateways ran on defaults without a config; 1.x needs one.
         $startNew = $false
@@ -1320,13 +1333,18 @@ function Invoke-Install {
     }
     if ($startNew) {
         $startRc = Start-Gateway
-        if ($startRc -ne 0 -and $startRc -ne 3) {
+        if ($sealOnly) {
+            [void](Stop-Gateway)
+            if ($startRc -ne 0 -and $startRc -ne 3) {
+                Write-Warn "The $Ver gateway did not start (see above); fix what it reports, then run 'defenseclaw-gateway start'"
+                $startRc = 0
+            }
+        } elseif ($startRc -ne 0 -and $startRc -ne 3) {
             Write-Err "The $Ver gateway did not become healthy; restoring $previousLabel"
             [void](Stop-Gateway)
             Restore-Snapshot
             Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
         }
-        if ($import0x -and -not $WasRunning) { [void](Stop-Gateway) }
     }
     Complete-Swap
     try { [Console]::TreatControlCAsInput = $false } catch { }

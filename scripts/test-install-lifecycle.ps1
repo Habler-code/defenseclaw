@@ -410,6 +410,9 @@ function Test-UpgradePrevious {
     Assert-Healthy
     Assert-DataKept
 
+    # As if the rollback had stopped just before renaming its hold to previous\.
+    Write-Log "the next run finishes a rollback interrupted at its last step"
+    Move-Item -LiteralPath (Join-Path $DcHome "previous") -Destination (Join-Path $DcHome ".rollback-hold")
     Write-Log "roll forward with install.ps1 -Rollback"
     Check ((Invoke-Installer (Join-Path $DcHome "installer\install.ps1") @("-Rollback", "-Yes")) -eq 0) "roll forward failed"
     Assert-Versions $Target

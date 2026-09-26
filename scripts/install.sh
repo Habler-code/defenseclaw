@@ -372,7 +372,8 @@ if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
         if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${candidate}/Contents/Info.plist" 2>/dev/null)" == com.cisco.defenseclaw.macos ]]; then
             if [[ -w "${candidate}" && -w "$(dirname "${candidate}")" ]]; then
                 APP_PATH="${candidate}"
-            elif [[ "${candidate}" == "${DEFENSECLAW_APP_PATH:-}" ]]; then
+            elif [[ "${candidate}" == "${DEFENSECLAW_APP_PATH:-}" \
+                && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${candidate}/Contents/Info.plist" 2>/dev/null)" != "${VERSION}" ]]; then
                 # Asked for by name (the app's own Update runs this), so a CLI
                 # update alone would leave the app offering the same update.
                 die "${candidate} is not writable by $(id -un); nothing was changed (update it from the DMG)"
@@ -703,17 +704,31 @@ recover_interrupted_run() {
         fi
     done
     slot="${DEFENSECLAW_HOME}/.rollback-hold"
-    if [[ -d "${slot}" ]]; then
+    if [[ -f "${slot}/ROLLED_BACK" ]]; then
+        # The rollback itself had finished; only renaming its hold was left.
+        warn "An earlier rollback was interrupted; finishing it"
+        rm -rf "${PREVIOUS}" && mv "${slot}" "${PREVIOUS}"
+    elif [[ -d "${slot}" ]]; then
         warn "An earlier rollback was interrupted; restoring the install it started from"
         stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
         if [[ -f "${slot}/STASHED" ]]; then
-            # The live install was fully set aside, so anything live now came from previous/.
-            return_live_to "${PREVIOUS}" && unstash "${slot}" && rm -rf "${slot}"
+            # The live install was fully set aside, so anything live now came
+            # from previous/, unless the undo had already returned it (RETURNED).
+            if [[ ! -f "${slot}/RETURNED" ]]; then
+                return_live_to "${PREVIOUS}" && : > "${slot}/RETURNED"
+            fi
+            if [[ -f "${slot}/RETURNED" ]] && unstash "${slot}"; then
+                if [[ -n "${APP_PATH}" && -d "${slot}/DefenseClawMac.app" ]]; then
+                    mv "${APP_PATH}" "${PREVIOUS}/DefenseClawMac.app" && mv "${slot}/DefenseClawMac.app" "${APP_PATH}"
+                fi
+                rm -rf "${slot}"
+            fi
         else
             # Setting it aside stopped part-way; the live binaries were only copied.
             unstash_tree "${slot}" && rm -rf "${slot}"
         fi
     fi
+    [[ ! -e "${slot}" ]] || die "Could not recover an interrupted rollback; ${slot} holds the install it set aside (see ${LOG})"
 }
 
 # undo_snapshot: put back what snapshot() moved before it failed.
@@ -900,13 +915,15 @@ unstash_tree() {
 # return_live_to SLOT: move what unstash brought in from SLOT back into it.
 # Only valid while the install unstash replaced is fully set aside elsewhere.
 return_live_to() {
+    # Never over or into anything already there: that would be the other install.
     local slot="$1" name
     mkdir -p "${slot}/data" || return 1
     while IFS= read -r name; do
+        [[ ! -e "${slot}/data/${name}" && ! -L "${slot}/data/${name}" ]] || return 1
         mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
     done < <(data_entries)
-    if [[ -d "${VENV}" ]]; then mv "${VENV}" "${slot}/venv" || return 1; fi
-    if [[ -d "${INSTALLER_DIR}" ]]; then mv "${INSTALLER_DIR}" "${slot}/installer" || return 1; fi
+    if [[ -d "${VENV}" ]]; then [[ ! -e "${slot}/venv" ]] && mv "${VENV}" "${slot}/venv" || return 1; fi
+    if [[ -d "${INSTALLER_DIR}" ]]; then [[ ! -e "${slot}/installer" ]] && mv "${INSTALLER_DIR}" "${slot}/installer" || return 1; fi
 }
 
 swap_with_previous() {
@@ -930,7 +947,8 @@ swap_with_previous() {
     printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
     if ! unstash "${PREVIOUS}"; then
         # unstash only copies previous/bin, so returning the rest restores previous/.
-        if return_live_to "${PREVIOUS}" && unstash "${hold}"; then
+        # RETURNED tells an interrupted run's recovery that previous/ is whole again.
+        if return_live_to "${PREVIOUS}" && : > "${hold}/RETURNED" && unstash "${hold}"; then
             rm -rf "${hold}"
             err "Could not restore the previous install; the current one is back in place"
             return 1
@@ -939,8 +957,12 @@ swap_with_previous() {
         return 2
     fi
     if [[ -n "${APP_PATH}" && -d "${PREVIOUS}/DefenseClawMac.app" ]]; then
-        mv "${APP_PATH}" "${hold}/DefenseClawMac.app" && mv "${PREVIOUS}/DefenseClawMac.app" "${APP_PATH}" \
-            || warn "Could not swap the macOS app back; it stays at the newer version"
+        if mv "${APP_PATH}" "${hold}/DefenseClawMac.app"; then
+            mv "${PREVIOUS}/DefenseClawMac.app" "${APP_PATH}" \
+                || { mv "${hold}/DefenseClawMac.app" "${APP_PATH}"; warn "Could not swap the macOS app back; it stays at the newer version"; }
+        else
+            warn "Could not swap the macOS app back; it stays at the newer version"
+        fi
     fi
     date +%Y%m%dT%H%M%S > "${hold}/ROLLED_BACK"
     rm -rf "${PREVIOUS}"
