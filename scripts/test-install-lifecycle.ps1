@@ -28,7 +28,9 @@
     lane sets the HKLM DisableSelfUpdate policy for its duration, so it needs
     an elevated shell. upgrade-0.X.Y needs -CodexExe, a Codex CLI codex.exe:
     0.x configures the codex connector, and 1.x on Windows runs Codex only
-    from an installed codex.exe that it has selected.
+    from an installed codex.exe that it has selected. Unless Codex is already
+    installed, the lane puts it in the real %LOCALAPPDATA%\Programs\OpenAI\Codex\bin
+    for its duration.
 
     Every lane runs with its own USERPROFILE, LOCALAPPDATA, APPDATA and TEMP,
     -NoPersistPath, and the gateway on a free port, so it never touches the
@@ -410,10 +412,15 @@ function Test-UpgradePrevious {
 function Test-UpgradeLegacy([string]$From) {
     Enter-Lane "upgrade-$From"
     if (-not $CodexExe) { Fail "upgrade-$From needs -CodexExe"; return }
-    # Where the Codex installer puts it, one of the places DefenseClaw selects it from.
-    $codexBin = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin"
-    New-Item -ItemType Directory -Path $codexBin -Force | Out-Null
-    Copy-Item -LiteralPath $CodexExe -Destination (Join-Path $codexBin "codex.exe")
+    # DefenseClaw selects Codex from where its installer puts it, in the real
+    # profile's Known Folder (not the lane's LOCALAPPDATA). An existing Codex
+    # there is used as it is; one this lane adds is removed afterwards.
+    $codex = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\OpenAI\Codex\bin\codex.exe"
+    $placedCodex = -not (Test-Path -LiteralPath $codex)
+    if ($placedCodex) {
+        New-Item -ItemType Directory -Path (Split-Path $codex) -Force | Out-Null
+        Copy-Item -LiteralPath $CodexExe -Destination $codex
+    }
     $pathRaw = Get-UserPathRaw
     $pathKind = Get-UserPathKind
     try {
@@ -458,6 +465,10 @@ function Test-UpgradeLegacy([string]$From) {
         Assert-DataKept
     } finally {
         Set-UserPath $pathRaw $pathKind
+        if ($placedCodex) {
+            Stop-Lane
+            Remove-Item -LiteralPath $codex -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 

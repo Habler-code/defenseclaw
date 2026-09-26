@@ -161,6 +161,36 @@ function New-InstallDirectory([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Repair-DataOwner([Security.Principal.SecurityIdentifier]$User) {
+    # An elevated 0.x installer left the data dir, what it created there and
+    # the agent configs its connectors wrote (such as ~\.codex\config.toml)
+    # owned by the Administrators group; DefenseClaw refuses to manage files
+    # its user does not own. icacls changes only the owner: Set-Acl would also
+    # mark the SACL protected, which a replacement file cannot reproduce. The
+    # venv and this installer's own slots are rebuilt, so they are left alone.
+    $admins = New-Object Security.Principal.SecurityIdentifier "S-1-5-32-544"
+    $skip = @(".venv", ".staging", "previous", "installer")
+    $items = @(Get-ChildItem -LiteralPath $DataDir -Force -ErrorAction SilentlyContinue |
+        Where-Object { $skip -notcontains $_.Name -and $_.Name -notlike ".failed-*" })
+    $items += @($items | Where-Object { $_.PSIsContainer } |
+        ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue })
+    try {
+        $lock = Get-Content -Raw -LiteralPath (Join-Path $DataDir "hook_contract_lock.json") -ErrorAction Stop | ConvertFrom-Json
+        foreach ($entry in @($lock.connectors.PSObject.Properties | ForEach-Object { $_.Value })) {
+            foreach ($path in @($entry.locations.hook_config_paths)) {
+                if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+                $items += @(Get-Item -LiteralPath $path -Force) + @(Get-Item -LiteralPath (Split-Path $path) -Force)
+            }
+        }
+    } catch { }
+    foreach ($item in @(Get-Item -LiteralPath $DataDir -Force) + $items) {
+        try { $owner = (Get-Acl -LiteralPath $item.FullName).GetOwner([Security.Principal.SecurityIdentifier]) } catch { continue }
+        if ($owner -eq $User -or ($owner -ne $admins -and $item.FullName -ne $DataDir)) { continue }
+        & icacls.exe $item.FullName /setowner "*$($User.Value)" /C /Q *> $null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "Could not take ownership of $($item.FullName)" }
+    }
+}
+
 function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {
     # A rename, which either happens or changes nothing. (Move-Item copies a
     # directory it cannot rename and leaves both halves behind.) Windows
@@ -1077,12 +1107,7 @@ function Invoke-Install {
 
     # Lock and log.
     New-Item -ItemType Directory -Path (Join-Path $DataDir "logs") -Force | Out-Null
-    $acl = Get-Acl -LiteralPath $DataDir
-    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]) -ne $user) {
-        # Created by an elevated installer of an older release.
-        $acl.SetOwner($user)
-        Set-Acl -LiteralPath $DataDir -AclObject $acl
-    }
+    Repair-DataOwner $user
     try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch {
         $holder = [string](Get-Content -LiteralPath (Join-Path $LockDir "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)
         $process = if ($holder -match '^\d+$' -and [int]$holder -ne $PID) { Get-Process -Id ([int]$holder) -ErrorAction SilentlyContinue } else { $null }
