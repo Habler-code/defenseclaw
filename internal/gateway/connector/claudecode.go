@@ -1125,11 +1125,17 @@ func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string,
 	return command, args
 }
 
+// claudeCodeManagedHooksOnlyKey is the Claude Code managed setting that loads
+// only administrator-managed hooks (not user, project, local or plugin hooks),
+// so the tool input DefenseClaw's managed hook inspects is the input that runs.
+const claudeCodeManagedHooksOnlyKey = "allowManagedHooksOnly"
+
 // ManagedHookPolicy renders the Claude Code settings fragment installed in
 // the administrator-managed policy tier. Claude treats hooks from this tier as
-// trusted even when allowManagedHooksOnly=true. The fragment intentionally
-// contains hooks only: per-user OTLP credentials cannot safely be placed in a
-// machine-wide policy document.
+// trusted even when allowManagedHooksOnly=true. The fragment contains the hook
+// matrix and, unless the administrator opted out through
+// ClaudeCodeAllowUnmanagedHooks, allowManagedHooksOnly=true. Per-user OTLP
+// credentials cannot safely be placed in a machine-wide policy document.
 func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) {
 	if !opts.ManagedEnterprise {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup")
@@ -1153,6 +1159,9 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 		return nil, fmt.Errorf("verify Claude Code managed hook policy: %w", err)
 	}
 	policy := map[string]interface{}{"hooks": hooks}
+	if !opts.ClaudeCodeAllowUnmanagedHooks {
+		policy[claudeCodeManagedHooksOnlyKey] = true
+	}
 	body, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal Claude Code managed hook policy: %w", err)
@@ -1160,7 +1169,40 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	return append(body, '\n'), nil
 }
 
-// VerifyManagedHookPolicy verifies the exact persisted managed-policy shape.
+// ClaudeCodeManagedHookPolicyEnforcesManagedOnly reports whether a persisted
+// DefenseClaw managed policy carries allowManagedHooksOnly=true. DefenseClaw
+// renders exactly two forms: the default locked policy, and the hooks-only
+// policy an administrator selects with claude_code.allow_unmanaged_hooks.
+// Any other value of the key is rejected.
+func ClaudeCodeManagedHookPolicyEnforcesManagedOnly(data []byte) (bool, error) {
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false, fmt.Errorf("parse Claude Code managed hook policy: %w", err)
+	}
+	return claudeCodeManagedPolicyLockState(settings)
+}
+
+func claudeCodeManagedPolicyLockState(settings map[string]interface{}) (bool, error) {
+	raw, exists := settings[claudeCodeManagedHooksOnlyKey]
+	if !exists {
+		return false, nil
+	}
+	if locked, ok := raw.(bool); ok && locked {
+		return true, nil
+	}
+	return false, fmt.Errorf(
+		"Claude Code managed hook policy %s must be true or absent, got %v",
+		claudeCodeManagedHooksOnlyKey,
+		raw,
+	)
+}
+
+// VerifyManagedHookPolicy verifies that data is one of the two canonical
+// DefenseClaw managed-policy forms for opts: with allowManagedHooksOnly=true
+// (default) or without it (administrator opt-out). It deliberately accepts
+// either form so read-only runtime and identity checks, which have no access
+// to the administrator's configuration, keep working after an opt-out;
+// enterprise verify compares the exact bytes against the configured form.
 func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpts) error {
 	settings := map[string]interface{}{}
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -1170,6 +1212,11 @@ func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpt
 	if !ok {
 		return fmt.Errorf("Claude Code managed hook policy hooks have unsupported type %T", settings["hooks"])
 	}
+	locked, err := claudeCodeManagedPolicyLockState(settings)
+	if err != nil {
+		return err
+	}
+	opts.ClaudeCodeAllowUnmanagedHooks = !locked
 	hookCommand, hookArgs := claudeCodeManagedHookInvocation(
 		opts,
 		filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"),

@@ -19,3 +19,6 @@ func enterpriseManagedHookRuntimeEndpoint(string) (string, string, bool) {
 func enterpriseManagedHookRuntimeConnection(string) (string, string, *string, bool) {
 	return "", "", nil, false
 }
+func enterpriseManagedHookRuntimeForeignHookPolicy(string) ([]string, string, string) {
+	return nil, "", ""
+}
