@@ -25,19 +25,27 @@
 #       (Cisco release signing, or your own code-signing certificate for
 #       customer re-signing) with distribution_flavor "standalone". The
 #       lifecycle requires a Valid signature on every file; pass
-#       /allowedsigners=<sha256>,... to the Setup to pin your signer.
+#       allowedsigners=<sha256>,... to the Setup to pin your signer.
 #       Sign the outer Setup with the same certificate afterward.
+#
+#   --sign-command <cmd> (Authenticode-signed, built here)
+#       Builds the seven inner files like the default channel, runs
+#       "<cmd> <file>" on each of them (the command signs the file in place,
+#       for example packaging/mdm/signing/authenticode-sign.sh), embeds them
+#       with distribution_flavor "standalone", then signs the outer Setup
+#       with the same command. Exclusive with --payload-dir.
 #
 # Usage:
 #   packaging/windows/standalone/build-setup.sh --version 1.4.0 \
-#       [--out-dir dist/windows-standalone-1.4.0] [--payload-dir <signed>]
+#       [--out-dir dist/windows-standalone-1.4.0]
+#       [--payload-dir <signed> | --sign-command <cmd>]
 #
 # Prereqs: bash, git, go. Runs on macOS or Linux (cross-builds windows/amd64).
 
 set -euo pipefail
 
 usage() {
-    sed -n '4,36p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,44p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -48,17 +56,20 @@ die() {
 VERSION=""
 OUT_DIR=""
 SIGNED_PAYLOAD_DIR=""
+SIGN_COMMAND=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version)     VERSION="${2:?--version needs a value}"; shift 2 ;;
-        --out-dir)     OUT_DIR="${2:?--out-dir needs a value}"; shift 2 ;;
-        --payload-dir) SIGNED_PAYLOAD_DIR="${2:?--payload-dir needs a value}"; shift 2 ;;
+        --version)      VERSION="${2:?--version needs a value}"; shift 2 ;;
+        --out-dir)      OUT_DIR="${2:?--out-dir needs a value}"; shift 2 ;;
+        --payload-dir)  SIGNED_PAYLOAD_DIR="${2:?--payload-dir needs a value}"; shift 2 ;;
+        --sign-command) SIGN_COMMAND="${2:?--sign-command needs a value}"; shift 2 ;;
         -h|--help)     usage; exit 0 ;;
         *)             usage >&2; die "unknown argument: $1" ;;
     esac
 done
 
 [ -n "${VERSION}" ] || die "--version is required"
+[ -z "${SIGNED_PAYLOAD_DIR}" ] || [ -z "${SIGN_COMMAND}" ] || die "--payload-dir and --sign-command are exclusive"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || die "--version must be a release version (got '${VERSION}')"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -135,6 +146,14 @@ else
     cp -f "${STAGE_DIR}/defenseclaw-gateway.exe" "${STAGE_DIR}/defenseclaw.exe"
     cp -f "${REPO_ROOT}/packaging/windows/install-enterprise.ps1" "${STAGE_DIR}/install-enterprise.ps1"
     cp -f "${REPO_ROOT}/packaging/windows/DefenseClawEnterprise.psm1" "${STAGE_DIR}/DefenseClawEnterprise.psm1"
+    if [ -n "${SIGN_COMMAND}" ]; then
+        FLAVOR="standalone"
+        UNSIGNED_FLAG=()
+        for name in "${PAYLOAD_FILES[@]}"; do
+            echo "==> signing ${name}"
+            "${SIGN_COMMAND}" "${STAGE_DIR}/${name}" || die "signing ${name} failed"
+        done
+    fi
 fi
 
 EMITTER="${STAGE_DIR}/.windows-repro-manifest"
@@ -155,7 +174,7 @@ echo "==> emitting the ${FLAVOR} payload manifest"
     --payload-dir "${PAYLOAD_ONLY}" \
     --distribution-flavor "${FLAVOR}" \
     --out "${EMBED_DIR}/manifest.json" \
-    "${UNSIGNED_FLAG[@]}"
+    ${UNSIGNED_FLAG[@]+"${UNSIGNED_FLAG[@]}"}
 for name in "${PAYLOAD_FILES[@]}"; do
     cp -f "${PAYLOAD_ONLY}/${name}" "${EMBED_DIR}/${name}"
 done
@@ -166,6 +185,10 @@ echo "==> building ${SETUP##*/}"
     go build -trimpath -buildvcs=false \
     -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT}" \
     -o "${SETUP}" ./cmd/defenseclaw-enterprise-setup )
+if [ -n "${SIGN_COMMAND}" ]; then
+    echo "==> signing ${SETUP##*/}"
+    "${SIGN_COMMAND}" "${SETUP}" || die "signing ${SETUP##*/} failed"
+fi
 
 if command -v sha256sum >/dev/null 2>&1; then
     ( cd "${OUT_DIR}" && sha256sum "${SETUP##*/}" > "${SETUP##*/}.sha256" )
