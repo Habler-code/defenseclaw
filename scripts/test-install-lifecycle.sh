@@ -348,7 +348,11 @@ lane_drills() {
     local broken="${ROOT}/broken-assets" archive stage
     rm -rf "${broken}"
     cp -R "${ASSETS}" "${broken}"
-    archive="$(cd "${broken}" && ls defenseclaw-*-"$(uname -s | tr '[:upper:]' '[:lower:]')"-*.tar.gz | head -1)"
+    # The one this host installs: the asset dir may hold every platform's.
+    local arch
+    case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; *) arch=arm64 ;; esac
+    archive="defenseclaw-${TARGET}-$(uname -s | tr '[:upper:]' '[:lower:]')-${arch}.tar.gz"
+    [[ -f "${broken}/${archive}" ]] || { fail "no ${archive} in ${ASSETS}"; return 1; }
     stage="${ROOT}/broken-stage"
     rm -rf "${stage}"; mkdir -p "${stage}"
     tar -xzf "${broken}/${archive}" -C "${stage}"
