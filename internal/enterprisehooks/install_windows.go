@@ -137,12 +137,67 @@ func windowsEnterpriseManagedAgentMinimum(name string) string {
 	return minimum
 }
 
+// windowsEnterpriseLegacyManifestAgentMinimums are floors that earlier
+// releases accepted in targets.yaml and that sit below the current
+// enrollment floor. Rows at those versions can already be in an upgraded
+// host's manifest: every earlier installer wrote the Claude floor as the
+// bootstrap placeholder for a user with no detected client, and the
+// enumerator keeps a known row's recorded version. Such a row must not make
+// the whole manifest unreadable, or lifecycle capture, restore, teardown and
+// the enumerator's previous-row state fail for every target and connector.
+// Enrollment (platformInstall/platformVerify) still requires the current
+// floor, so the row fails as a single target.
+var windowsEnterpriseLegacyManifestAgentMinimums = map[string]string{
+	"claudecode": "2.1.152",
+}
+
+// windowsEnterpriseManifestAgentMinimum is the floor a targets.yaml row must
+// meet to be loaded: the enrollment floor, lowered only to a floor an
+// earlier release accepted.
+func windowsEnterpriseManifestAgentMinimum(name string) string {
+	minimum := windowsEnterpriseManagedAgentMinimum(name)
+	legacy := windowsEnterpriseLegacyManifestAgentMinimums[name]
+	if minimum != "" && legacy != "" && compareWindowsEnterpriseVersion(legacy, minimum) < 0 {
+		return legacy
+	}
+	return minimum
+}
+
+// requireWindowsEnterpriseManagedAgentVersion is the enrollment gate: the
+// version must meet the connector's current Windows floor.
 func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) error {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	minimum := windowsEnterpriseManagedAgentMinimum(name)
+	err := requireWindowsEnterpriseAgentVersionAtLeast(name, raw, minimum)
+	if err != nil && windowsEnterpriseLegacyManifestAgentMinimums[name] != "" &&
+		requireWindowsEnterpriseManifestAgentVersion(name, raw) == nil {
+		// A loadable legacy row: often the placeholder an earlier installer
+		// recorded for a user with no detected client.
+		return fmt.Errorf(
+			"%w (earlier releases accepted it, often as the placeholder for a user with no detected client); re-render or replace targets.yaml (Repair -Mode or -Manifest) so the row records %s or newer, or disable the row",
+			err,
+			minimum,
+		)
+	}
+	return err
+}
+
+// requireWindowsEnterpriseManifestAgentVersion is the targets.yaml load gate.
+// It accepts rows at a legacy floor that enrollment refuses (see
+// windowsEnterpriseLegacyManifestAgentMinimums).
+func requireWindowsEnterpriseManifestAgentVersion(connectorName, raw string) error {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	return requireWindowsEnterpriseAgentVersionAtLeast(
+		name,
+		raw,
+		windowsEnterpriseManifestAgentMinimum(name),
+	)
+}
+
+func requireWindowsEnterpriseAgentVersionAtLeast(name, raw, minimum string) error {
 	if err := requireWindowsEnterpriseAgentVersion(raw); err != nil {
 		return err
 	}
-	name := strings.ToLower(strings.TrimSpace(connectorName))
-	minimum := windowsEnterpriseManagedAgentMinimum(name)
 	if minimum == "" {
 		return nil
 	}

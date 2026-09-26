@@ -546,7 +546,12 @@ WDAC or AppLocker is an optional defense-in-depth layer. Pass
 `--attest-agent-application-control`) only after it allows approved signed
 clients and blocks explicitly tested old and unsigned clients. Omitting the
 attestation does not block either connector's managed hooks. The current
-minimum Claude version is 2.1.154, the first Claude hook contract. An enabled
+minimum Claude version is 2.1.154, the first Claude hook contract. A
+`targets.yaml` row that an earlier release recorded at 2.1.152 or 2.1.153
+(often its placeholder for a user with no detected client) still loads, so
+Upgrade, Repair, Uninstall and the enumerator keep working. That one target
+fails enrollment until a `Repair -Mode` or `-Manifest` records 2.1.154 or newer
+for it, or the row is disabled. An enabled
 Codex target is complete when its protected managed hook policy is installed
 and verified.
 

@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,5 +139,114 @@ targets:
 	if len(manifest.Targets) != 1 || !manifest.Targets[0].IsEnabled() ||
 		!manifest.Targets[0].IsDeferred() {
 		t.Fatalf("manifest = %+v, want one enabled deferred target", manifest)
+	}
+}
+
+// legacyClaudePlaceholderManifest is shaped like a targets.yaml an earlier
+// release rendered: release-26.8.4 and main before the Claude floor tracked
+// the hook contracts wrote 2.1.152 as the Claude placeholder for a user with
+// no detected client, and the enumerator keeps a known row's version.
+const legacyClaudePlaceholderManifest = `
+version: 1
+targets:
+  - user: "alice"
+    user_home: 'C:\Users\alice'
+    sid: S-1-5-21-1-2-3-1001
+    connector: "claudecode"
+    agent_version: "2.1.152"
+    enabled: true
+  - user: "alice"
+    user_home: 'C:\Users\alice'
+    sid: S-1-5-21-1-2-3-1001
+    connector: "codex"
+    agent_version: "0.131.0"
+    enabled: true
+  - user: "bob"
+    user_home: 'C:\Users\bob'
+    sid: S-1-5-21-1-2-3-1002
+    connector: "claudecode"
+    agent_version: "2.1.153"
+    enabled: true
+    deferred: true
+  - user: "bob"
+    user_home: 'C:\Users\bob'
+    sid: S-1-5-21-1-2-3-1002
+    connector: "cursor"
+    enabled: false
+`
+
+// TestLoadManifestWindowsKeepsLegacyClaudeRowsLoadable is the #901 review
+// regression: raising the Claude enrollment floor to the lowest hook contract
+// must not make a manifest with legacy 2.1.152/2.1.153 rows unreadable, which
+// failed Upgrade/Repair capture, Uninstall teardown and the enumerator's
+// previous-row state for every target and connector.
+func TestLoadManifestWindowsKeepsLegacyClaudeRowsLoadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(path, []byte(legacyClaudePlaceholderManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("LoadManifest(legacy Claude rows) error = %v", err)
+	}
+	if len(manifest.Targets) != 4 {
+		t.Fatalf("manifest targets = %d, want 4", len(manifest.Targets))
+	}
+	if _, _, err := LoadManifestWithSHA256(path); err != nil {
+		t.Fatalf("LoadManifestWithSHA256(legacy Claude rows) error = %v", err)
+	}
+
+	// The enumerator reads the same file for previous-row state. A load
+	// failure there treats every row as new and drops admin decisions such
+	// as the disabled Cursor row.
+	var logged []string
+	previous := loadPreviousManifestForEnumeration(path, func(subject, reason string) {
+		logged = append(logged, subject+": "+reason)
+	})
+	if len(logged) != 0 {
+		t.Fatalf("enumerator logged %q, want the previous manifest to load", logged)
+	}
+	cursor, ok := previous[previousManifestKey("S-1-5-21-1-2-3-1002", "cursor")]
+	if !ok || cursor.IsEnabled() {
+		t.Fatalf("previous cursor row = %+v (found %t), want the disabled decision kept", cursor, ok)
+	}
+	if claude := previous[previousManifestKey("S-1-5-21-1-2-3-1001", "claudecode")]; claude.AgentVersion != "2.1.152" {
+		t.Fatalf("previous claude row version = %q, want 2.1.152", claude.AgentVersion)
+	}
+
+	// Enrollment still refuses the legacy rows, one target at a time.
+	for _, version := range []string{"2.1.152", "2.1.153"} {
+		for name, gate := range map[string]func(context.Context, InstallOptions) (InstallResult, bool, error){
+			"install": platformInstall,
+			"verify":  platformVerify,
+		} {
+			_, handled, err := gate(context.Background(), InstallOptions{
+				ConnectorName: "claudecode",
+				AgentVersion:  version,
+			})
+			if !handled || err == nil ||
+				!strings.Contains(err.Error(), "below the Windows enterprise minimum "+windowsEnterpriseManagedAgentMinimum("claudecode")) ||
+				!strings.Contains(err.Error(), "Repair -Mode or -Manifest") {
+				t.Fatalf("platform %s(claudecode %s) = handled %t, err %v; want a per-target floor refusal with the fix", name, version, handled, err)
+			}
+		}
+	}
+}
+
+func TestLoadManifestWindowsRejectsClaudeBelowLegacyFloor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(path, []byte(`
+version: 1
+targets:
+  - user_home: 'C:\Users\alice'
+    sid: S-1-5-21-1-2-3-1001
+    connector: claudecode
+    agent_version: "2.1.151"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadManifest(path)
+	if err == nil || !strings.Contains(err.Error(), "below the Windows enterprise minimum 2.1.152") {
+		t.Fatalf("LoadManifest error = %v, want the legacy manifest floor to still reject 2.1.151", err)
 	}
 }

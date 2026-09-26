@@ -82,4 +82,20 @@ def test_go_gate_derives_the_claude_floor_from_the_contract_table() -> None:
             "var windowsEnterpriseContractRenderedConnectors"
         )
     ]
-    assert "2.1.152" not in gate
+    # 2.1.152 survives only as the targets.yaml load floor for rows earlier
+    # releases wrote; the enrollment gate uses the contract-derived floor.
+    legacy = gate[gate.index("var windowsEnterpriseLegacyManifestAgentMinimums") :]
+    legacy = legacy[: legacy.index("}")]
+    assert dict(re.findall(r'"([a-z]+)":\s*"([0-9.]+)"', legacy)) == {"claudecode": "2.1.152"}
+    assert gate.count("2.1.152") == 1
+
+
+def test_manifest_load_tolerates_legacy_rows_that_enrollment_refuses() -> None:
+    manifest_gate = (ROOT / "internal" / "enterprisehooks" / "manifest_windows.go").read_text(encoding="utf-8")
+    assert "requireWindowsEnterpriseManifestAgentVersion(" in manifest_gate
+    assert "requireWindowsEnterpriseManagedAgentVersion(" not in manifest_gate
+    gate = GO_GATE.read_text(encoding="utf-8")
+    for platform_gate in ("func platformInstall(", "func platformVerify("):
+        body = gate[gate.index(platform_gate) :]
+        body = body[: body.index("\n}\n")]
+        assert "requireWindowsEnterpriseManagedAgentVersion(" in body

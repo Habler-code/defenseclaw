@@ -2981,6 +2981,16 @@ func TestWindowsEnterpriseManagedAgentMinimumsTrackHookContracts(t *testing.T) {
 	if got := windowsEnterpriseManagedAgentMinimum("amp"); got != "" {
 		t.Fatalf("ungated connector floor = %q, want empty", got)
 	}
+	// targets.yaml keeps loading rows at the floor earlier releases wrote;
+	// only enrollment requires the contract floor.
+	if got := windowsEnterpriseManifestAgentMinimum("claudecode"); got != "2.1.152" {
+		t.Fatalf("Claude manifest load floor = %s, want the legacy 2.1.152", got)
+	}
+	for _, name := range []string{"codex", "cursor", "amp"} {
+		if got, want := windowsEnterpriseManifestAgentMinimum(name), windowsEnterpriseManagedAgentMinimum(name); got != want {
+			t.Fatalf("%s manifest load floor = %q, want its enrollment floor %q", name, got, want)
+		}
+	}
 }
 
 func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {

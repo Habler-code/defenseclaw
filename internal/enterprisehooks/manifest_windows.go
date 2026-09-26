@@ -35,7 +35,9 @@ func validateManifestPlatformTarget(index int, target ManifestTarget) error {
 	if strings.TrimSpace(target.AgentVersion) == "" {
 		return fmt.Errorf("enterprise hooks: Windows target %d requires explicit agent_version", index)
 	}
-	if err := requireWindowsEnterpriseManagedAgentVersion(
+	// The load gate tolerates a legacy floor; enrollment re-checks the
+	// current floor per target (requireWindowsEnterpriseManagedAgentVersion).
+	if err := requireWindowsEnterpriseManifestAgentVersion(
 		target.Connector,
 		target.AgentVersion,
 	); err != nil {
