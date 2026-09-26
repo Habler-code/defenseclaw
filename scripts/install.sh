@@ -233,6 +233,23 @@ case "${OS}" in
     *) die "Unsupported OS: ${OS} (use install.ps1 on Windows)" ;;
 esac
 
+# ── Managed hosts ────────────────────────────────────────────────────────────
+
+# A computer whose DefenseClaw is managed by the organization is installed
+# and updated through its MDM. A per-user copy would compete with the managed
+# services for the gateway port and the agents' hooks, so stop before
+# changing anything. DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR is for tests.
+managed_descriptor="${DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR:-}"
+if [[ -z "${managed_descriptor}" ]]; then
+    case "${OS}" in
+        linux) managed_descriptor=/etc/defenseclaw/managed-runtime.json ;;
+        darwin) managed_descriptor=/opt/cisco/defenseclaw/etc/managed-runtime.json ;;
+    esac
+fi
+if [[ -f "${managed_descriptor}" && ! -L "${managed_descriptor}" ]]; then
+    die "This computer's DefenseClaw is managed by your organization (${managed_descriptor}); your IT department installs and updates it. Nothing was changed."
+fi
+
 # ── Which version does this installer install? ───────────────────────────────
 
 fetch() {

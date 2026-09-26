@@ -91,7 +91,7 @@ def _disabled() -> bool:
 
 def _self_update_disabled_by_policy() -> bool:
     if os.name != "nt":
-        return False
+        return _managed_host_disables_self_update()
     try:
         import winreg
 
@@ -148,3 +148,19 @@ def _lookup_latest() -> str:
 
 def _data_dir() -> str:
     return os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+
+
+def _managed_host_disables_self_update() -> bool:
+    """A standalone managed host turns notices off unless its descriptor opts out."""
+
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    path = managed_descriptor()
+    if not path:
+        return False
+    try:
+        with open(path, encoding="utf-8") as stream:
+            descriptor = json.load(stream)
+    except (OSError, ValueError):
+        return True
+    return not (isinstance(descriptor, dict) and descriptor.get("disable_self_update") is False)

@@ -50,6 +50,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
@@ -76,6 +77,10 @@ func run() error {
 			"data directory, used to place the socket outside managed deployments")
 		managedEnterprise = flag.Bool("managed-enterprise", false,
 			"use the managed deployment's socket location")
+		serviceAccount = flag.String("service-account", "",
+			"gateway account: permit its uid and give the socket its group (unless --allow-uid/--socket-gid are set)")
+		homesFromManifest = flag.String("home-dirs-from-manifest", "",
+			"protected guardian manifest whose enabled users' homes Plane C watches; restarts when it changes")
 	)
 	flag.Parse()
 
@@ -90,9 +95,33 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if *serviceAccount != "" {
+		uid, gid, err := resolveServiceAccount(*serviceAccount)
+		if err != nil {
+			return err
+		}
+		if len(uids) == 0 {
+			uids = []int{uid}
+		}
+		if *socketGID < 0 {
+			*socketGID = gid
+		}
+	}
+	homes := splitList(*homeDirs)
+	manifestDigest := ""
+	if *homesFromManifest != "" {
+		fromManifest, digest, err := manifestHomes(*homesFromManifest)
+		if err != nil {
+			return err
+		}
+		homes, manifestDigest = append(homes, fromManifest...), digest
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if *homesFromManifest != "" {
+		ctx = watchManifest(ctx, *homesFromManifest, manifestDigest, 30*time.Second, logger)
+	}
 
 	// Under the Windows SCM there is no console and no signal: the service
 	// control manager expects the process to report Running within seconds
@@ -102,7 +131,7 @@ func run() error {
 	// killed with error 1053 -- a helper that can never start, on the one
 	// platform whose gateway most needs it.
 	return runUnderServiceManager(ctx, func(ctx context.Context) error {
-		return serve(ctx, path, uids, *socketGID, splitList(*homeDirs), logger)
+		return serve(ctx, path, uids, *socketGID, homes, logger)
 	})
 }
 

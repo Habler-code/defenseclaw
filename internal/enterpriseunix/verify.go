@@ -1,0 +1,283 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterpriseunix
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
+)
+
+// ledgerFreshness mirrors the gateway's guardian authorization window.
+const ledgerFreshness = 5 * time.Minute
+
+// readOnly handles status and verify.
+func (l *lifecycle) readOnly(ctx context.Context) int {
+	env, r := l.env, l.result
+	record, err := env.loadDeployment()
+	if err != nil {
+		r.AddError(codeState, err.Error())
+		return 0
+	}
+	if pending, _ := env.loadPending(); pending != nil {
+		r.TransactionPending = true
+	}
+	if record == nil {
+		r.Installed = false
+		if l.opts.Action == ActionVerify {
+			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
+		}
+		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
+			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", "))
+		}
+		return 0
+	}
+	r.Installed = true
+	r.InstalledVersion = record.ProductVersion
+	strict := l.opts.Action == ActionVerify
+	problems := l.verifyInstalled(ctx, record, strict)
+	l.describe(ctx, record, true)
+	if strict {
+		for _, problem := range problems {
+			r.AddError(codeVerify, problem)
+		}
+		if r.TransactionPending {
+			r.AddError(codeVerify, "a lifecycle transaction is pending; the next mutating run recovers it")
+		}
+	} else {
+		for _, problem := range problems {
+			r.AddWarning(codeVerify, problem)
+		}
+	}
+	return 0
+}
+
+// verifyInstalled compares the host with record. strict adds the checks
+// that only make sense on a settled deployment (ledger freshness, sandbox
+// properties). It returns human-readable problems.
+func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, strict bool) []string {
+	env := l.env
+	var problems []string
+	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+
+	account, ok, err := env.Accounts.Lookup(ctx, record.ServiceUser)
+	switch {
+	case err != nil:
+		add("service account %s: %v", record.ServiceUser, err)
+	case !ok:
+		add("service account %s is missing", record.ServiceUser)
+	case account.UID != record.ServiceUID || account.GID != record.ServiceGID:
+		add("service account %s is %d:%d, deployment recorded %d:%d", record.ServiceUser, account.UID, account.GID, record.ServiceUID, record.ServiceGID)
+	}
+
+	for _, path := range sortedKeys(record.Files) {
+		got, err := sha256File(env.P(path))
+		if err != nil {
+			add("%s: %v", path, err)
+			continue
+		}
+		if got != record.Files[path] {
+			add("%s was modified after install", path)
+		}
+	}
+	loadCredential := env.GOOS == "linux" && env.Services.Version(ctx) >= loadCredentialSystemd
+	for _, dir := range env.managedDirs(Account{Name: record.ServiceUser, UID: record.ServiceUID, GID: record.ServiceGID}, loadCredential) {
+		if dir.External {
+			continue
+		}
+		_, _, mode, err := statOwnerMode(env.P(dir.Path))
+		if err != nil {
+			add("%s: %v", dir.Path, err)
+			continue
+		}
+		uid, gid, err := env.OwnerOf(env.P(dir.Path))
+		if err != nil {
+			add("%s: %v", dir.Path, err)
+			continue
+		}
+		if mode&os.ModeSymlink != 0 || !mode.IsDir() {
+			add("%s is not a directory", dir.Path)
+			continue
+		}
+		if mode.Perm() != dir.Mode || uid != dir.Owner.UID || gid != dir.Owner.GID {
+			add("%s is %04o %d:%d, want %04o %d:%d", dir.Path, mode.Perm(), uid, gid, dir.Mode, dir.Owner.UID, dir.Owner.GID)
+		}
+	}
+	if err := env.Trust(env.P(env.Layout.ConfigPath), TrustAdminFile); err != nil {
+		add("config trust: %v", err)
+	}
+	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err != nil {
+		add("config: %v", err)
+	} else if sha256Bytes(raw) != record.ConfigSHA256 {
+		add("config.yaml changed since it was applied; run ensure")
+	}
+	if err := env.Trust(env.P(env.Layout.DescriptorPath), TrustAdminFile); err != nil {
+		add("runtime descriptor trust: %v", err)
+	} else if data, err := readBounded(env.P(env.Layout.DescriptorPath), maxInputBytes); err != nil {
+		add("runtime descriptor: %v", err)
+	} else if _, err := managed.ParseRuntimeDescriptor(data); err != nil {
+		add("runtime descriptor: %v", err)
+	}
+	if _, secretsSHA, err := env.listSecrets(); err != nil {
+		add("secrets: %v", err)
+	} else if secretsSHA != record.SecretsSHA256 {
+		add("protected credentials changed since they were applied; run ensure")
+	}
+	if record.Channel == ChannelPackage && env.GOOS == "linux" {
+		for _, unit := range env.Services.Units() {
+			embedded, _ := systemdunits.ReadFile(unit.Name)
+			if got, err := sha256File(env.P(env.Services.DefinitionPath(unit, ChannelPackage))); err != nil || got != sha256Bytes(embedded) {
+				add("%s does not match this build; reinstall the package", env.Services.DefinitionPath(unit, ChannelPackage))
+			}
+		}
+	}
+
+	if !record.NoStart {
+		for _, unit := range env.Services.Units() {
+			if unit.Required && !env.Services.Active(ctx, unit) {
+				add("%s is not active", unit.Name)
+			}
+		}
+		if status, _, err := env.HealthGet(ctx); err != nil {
+			add("gateway health: %v", err)
+		} else if status != 200 {
+			add("gateway health returned HTTP %d", status)
+		}
+	}
+
+	if strict && !record.NoStart {
+		if sd, ok := env.Services.(*systemdManager); ok {
+			props := sd.Sandbox(ctx, unitGateway)
+			want := map[string]string{"User": record.ServiceUser, "NoNewPrivileges": "yes", "ProtectSystem": "strict", "ProtectHome": "yes", "PrivateUsers": "no"}
+			for key, value := range want {
+				if got, present := props[key]; present && got != value {
+					add("%s %s=%s, want %s", unitGateway, key, got, value)
+				}
+			}
+			if caps, present := props["CapabilityBoundingSet"]; present && strings.TrimSpace(caps) != "" {
+				add("%s keeps capabilities %q; want none", unitGateway, caps)
+			}
+		}
+		if problem := l.ledgerProblem(); problem != "" {
+			add("%s", problem)
+		}
+	}
+	return problems
+}
+
+// ledgerProblem checks the guardian authorization ledger freshness.
+func (l *lifecycle) ledgerProblem() string {
+	env := l.env
+	path := env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
+	data, err := readBounded(path, 4<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return "the hook guardian has not published its authorization ledger yet"
+	}
+	if err != nil {
+		return "guardian ledger: " + err.Error()
+	}
+	var ledger struct {
+		UpdatedAt string `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &ledger); err != nil || ledger.UpdatedAt == "" {
+		return ""
+	}
+	if err := managed.ValidateHookGuardianFreshness(ledger.UpdatedAt, env.Now()); err != nil {
+		return "guardian ledger: " + err.Error()
+	}
+	return ""
+}
+
+// describe fills the result's services, readiness and enrollment.
+func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
+	env, r := l.env, l.result
+	r.Services = r.Services[:0]
+	for _, unit := range env.Services.Units() {
+		status, _ := env.Services.Status(ctx, unit)
+		r.Services = append(r.Services, status)
+		active := env.Services.Active(ctx, unit)
+		switch unit.Kind {
+		case "gateway":
+			if active {
+				if code, body, err := env.HealthGet(ctx); err == nil && code == 200 {
+					r.Readiness.Gateway = true
+					l.readInspection(body)
+				}
+			}
+		case "guardian":
+			r.Readiness.Guardian = active && l.ledgerProblem() == ""
+		case "enumerator":
+			r.Readiness.Enumerator = active
+		case "sensor_helper":
+			r.Readiness.SensorHelper = active
+		}
+	}
+	sort.SliceStable(r.Services, func(i, j int) bool { return r.Services[i].Name < r.Services[j].Name })
+	if record != nil {
+		r.InstalledVersion = record.ProductVersion
+	}
+	r.Enrollment = l.enrollmentCounts()
+	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0
+	if r.Inspection.Local == "" {
+		r.Inspection.Local = "unknown"
+	}
+	if r.Inspection.AIDefense == "" {
+		r.Inspection.AIDefense = "unknown"
+	}
+}
+
+// readInspection copies the gateway's inspection posture from /health when
+// the gateway publishes it.
+func (l *lifecycle) readInspection(body []byte) {
+	var health struct {
+		Inspection *struct {
+			Local     string `json:"local"`
+			AIDefense string `json:"ai_defense"`
+		} `json:"inspection"`
+	}
+	if json.Unmarshal(body, &health) == nil && health.Inspection != nil {
+		l.result.Inspection.Local = health.Inspection.Local
+		l.result.Inspection.AIDefense = health.Inspection.AIDefense
+	}
+}
+
+// enrollmentCounts summarizes the guardian authorization ledger; detailed
+// per-target state belongs to `enterprise hooks status`.
+func (l *lifecycle) enrollmentCounts() enterprisestatus.Enrollment {
+	env := l.env
+	var counts enterprisestatus.Enrollment
+	data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile)), 4<<20)
+	if err != nil {
+		return counts
+	}
+	var ledger struct {
+		TargetCount  int `json:"target_count"`
+		FailureCount int `json:"failure_count"`
+		PendingCount int `json:"pending_count"`
+	}
+	if json.Unmarshal(data, &ledger) == nil {
+		counts.Targets, counts.Failed, counts.Pending = ledger.TargetCount, ledger.FailureCount, ledger.PendingCount
+	}
+	return counts
+}

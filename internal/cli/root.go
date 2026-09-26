@@ -180,6 +180,9 @@ Run without arguments to start the sidecar daemon.`,
 		if versionJSON {
 			return writeMachineVersion(cmd.OutOrStdout())
 		}
+		if err := refusePerUserGatewayOnManagedHost(); err != nil {
+			return err
+		}
 		return runSidecar(cmd, args)
 	},
 	SilenceUsage: true,

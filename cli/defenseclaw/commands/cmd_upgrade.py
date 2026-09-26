@@ -23,33 +23,21 @@ keep ``python -m defenseclaw.main upgrade`` and ``--help`` working.
 
 from __future__ import annotations
 
-import os
-
 import click
-
-# Registered by the Windows standalone enterprise lifecycle. A per-user
-# upgrade beside a machine-wide managed deployment would install a second,
-# unmanaged gateway, so both commands refuse while it exists.
-_MANAGED_MARKER_KEY = r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
 
 
 def _managed_enterprise_profile() -> str | None:
-    """The profile of a registered machine-wide deployment, or None."""
+    """The machine-wide managed deployment on this host, or None.
 
-    if os.name != "nt":
-        return None
-    try:
-        import winreg
+    A per-user upgrade beside a managed deployment would install a second,
+    unmanaged gateway, so both commands refuse while it exists. The check
+    itself lives in the upgrade shim, which the console entry point runs
+    directly for ``defenseclaw upgrade``.
+    """
 
-        access = winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _MANAGED_MARKER_KEY, 0, access) as key:
-            try:
-                value, _kind = winreg.QueryValueEx(key, "Profile")
-            except OSError:
-                value = ""
-        return str(value) or "managed"
-    except (ImportError, OSError):
-        return None
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    return managed_deployment()
 
 
 def _refuse_on_managed_host(command: str) -> None:

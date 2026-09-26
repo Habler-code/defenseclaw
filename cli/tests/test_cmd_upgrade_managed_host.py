@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 
 import pytest
 from click.testing import CliRunner
 
+from defenseclaw import upgrade_shim
 from defenseclaw.commands import cmd_upgrade
 
 
@@ -51,14 +53,28 @@ def _fake_winreg(values: dict[str, str] | None) -> types.ModuleType:
     [(None, None), ({"Profile": "standalone"}, "standalone"), ({}, "managed")],
 )
 def test_marker_detection(monkeypatch: pytest.MonkeyPatch, values, expected) -> None:
-    monkeypatch.setattr(cmd_upgrade, "os", types.SimpleNamespace(name="nt"))
+    # One managed-host check serves the click commands and the console
+    # entry point, which runs the upgrade shim directly.
+    monkeypatch.setattr(upgrade_shim, "os", types.SimpleNamespace(name="nt", path=os.path))
     monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(values))
     assert cmd_upgrade._managed_enterprise_profile() == expected
+    assert upgrade_shim.managed_deployment() == expected
 
 
 def test_marker_is_ignored_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cmd_upgrade, "os", types.SimpleNamespace(name="posix"))
+    monkeypatch.setattr(upgrade_shim, "os", types.SimpleNamespace(name="posix", path=os.path))
+    monkeypatch.setattr(upgrade_shim, "MANAGED_DESCRIPTORS", ())
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg({"Profile": "standalone"}))
     assert cmd_upgrade._managed_enterprise_profile() is None
+
+
+def test_shim_refuses_on_a_managed_windows_host(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(upgrade_shim, "os", types.SimpleNamespace(name="nt", path=os.path))
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg({"Profile": "standalone"}))
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 1
+    err = capsys.readouterr().err
+    assert "managed by your organization (standalone)" in err
+    assert "Nothing was changed" in err
 
 
 @pytest.mark.parametrize("command", [cmd_upgrade.upgrade, cmd_upgrade.rollback])

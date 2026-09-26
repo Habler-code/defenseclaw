@@ -1,0 +1,1047 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterpriseunix
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+// Actions.
+const (
+	ActionInstall   = "install"
+	ActionUpgrade   = "upgrade"
+	ActionRepair    = "repair"
+	ActionEnsure    = "ensure"
+	ActionReconcile = "reconcile"
+	ActionStatus    = "status"
+	ActionVerify    = "verify"
+	ActionUninstall = "uninstall"
+)
+
+// Actions lists the lifecycle actions in documentation order.
+var Actions = []string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure, ActionReconcile, ActionStatus, ActionVerify, ActionUninstall}
+
+// Options are one lifecycle invocation's inputs.
+type Options struct {
+	Action string
+	// PayloadDir holds the binaries to install (payload channel).
+	PayloadDir string
+	// FromPackage installs the binaries the deb/rpm/pkg already placed in
+	// the layout's bin directory (package channel).
+	FromPackage bool
+	// ConfigFile replaces the managed config.
+	ConfigFile string
+	NoStart    bool
+	// AdoptExisting backs up and takes over a pre-existing unmanaged
+	// layout instead of refusing.
+	AdoptExisting bool
+	Purge         bool
+	// RemoveServiceAccount deletes the gateway account on purge.
+	RemoveServiceAccount bool
+	// ProductVersion, when set, must equal the payload's version.
+	ProductVersion string
+	// Reason annotates an ensure run (e.g. "path", "secret", "package").
+	Reason string
+}
+
+// Error codes in the lifecycle result.
+const (
+	codeInvalidArguments    = "invalid_arguments"
+	codeUnsupportedPlatform = "unsupported_platform"
+	codeNotRoot             = "not_root"
+	codeServiceManager      = "service_manager_unavailable"
+	codeBusy                = "lifecycle_busy"
+	codeProfileConflict     = "profile_conflict"
+	codeUnmanagedLayout     = "unmanaged_layout_present"
+	codeAlreadyInstalled    = "already_installed"
+	codeNotInstalled        = "not_installed"
+	codePayload             = "payload_invalid"
+	codePackageOwned        = "package_owned_binaries"
+	codeConfig              = "config_invalid"
+	codeAccount             = "service_account"
+	codeApply               = "apply_failed"
+	codeActivate            = "activation_failed"
+	codeRolledBack          = "rolled_back"
+	codeRollbackFailed      = "rollback_failed"
+	codeRecovered           = "recovered_interrupted_transaction"
+	codeUninstall           = "uninstall_failed"
+	codeReconcile           = "reconcile_failed"
+	codeVerify              = "verify_failed"
+	codeState               = "state_unreadable"
+	codeLeftovers           = "unmanaged_leftovers"
+)
+
+type lifecycle struct {
+	env    *Env
+	opts   Options
+	result *enterprisestatus.Result
+}
+
+// Run executes one lifecycle action and returns its result; the result's
+// ExitCode is set.
+func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
+	env.fillDefaults()
+	l := &lifecycle{
+		env:    env,
+		opts:   opts,
+		result: enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion),
+	}
+	failure := l.run(ctx)
+	l.result.Finish(env.GOOS, failure)
+	return l.result
+}
+
+// run returns the specific failure exit code (0 for the generic one).
+func (l *lifecycle) run(ctx context.Context) int {
+	env, r := l.env, l.result
+	if !contains(Actions, l.opts.Action) {
+		r.AddError(codeInvalidArguments, fmt.Sprintf("unknown action %q", l.opts.Action))
+		return enterprisestatus.InvalidArgsExitCode(env.GOOS)
+	}
+	if code := l.validateOptions(); code != 0 {
+		return code
+	}
+	if env.GOOS != "linux" && env.GOOS != "darwin" {
+		r.AddError(codeUnsupportedPlatform, fmt.Sprintf("no standalone lifecycle for %s", env.GOOS))
+		return 0
+	}
+	readOnly := l.opts.Action == ActionStatus || l.opts.Action == ActionVerify
+	if env.Geteuid() != 0 && l.opts.Action != ActionStatus {
+		r.AddError(codeNotRoot, "run this command as root (sudo or the MDM agent)")
+		return 0
+	}
+	if err := env.Services.Check(ctx); err != nil {
+		r.AddError(codeServiceManager, err.Error())
+		return 0
+	}
+	if readOnly {
+		return l.readOnly(ctx)
+	}
+
+	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
+		r.AddError(codeState, err.Error())
+		return 0
+	}
+	lock, err := env.acquireLock(ctx)
+	if err != nil {
+		if errors.Is(err, errLockBusy) {
+			r.AddError(codeBusy, err.Error())
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+		r.AddError(codeState, err.Error())
+		return 0
+	}
+	defer lock.release()
+
+	l.recoverInterrupted(ctx)
+	record, err := env.loadDeployment()
+	if err != nil {
+		r.AddError(codeState, err.Error())
+		return 0
+	}
+	if record != nil {
+		r.Installed = true
+		r.InstalledVersion = record.ProductVersion
+	}
+
+	switch l.opts.Action {
+	case ActionInstall:
+		if record != nil {
+			r.AddError(codeAlreadyInstalled, "DefenseClaw enterprise is already installed; use upgrade, repair or ensure")
+			return 0
+		}
+		return l.freshInstall(ctx)
+	case ActionUpgrade:
+		if record == nil {
+			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
+			return 0
+		}
+		if l.opts.PayloadDir == "" && !l.opts.FromPackage {
+			r.AddError(codeInvalidArguments, "upgrade needs --payload or --from-package")
+			return enterprisestatus.InvalidArgsExitCode(env.GOOS)
+		}
+		return l.apply(ctx, record)
+	case ActionRepair:
+		if record == nil {
+			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
+			return 0
+		}
+		return l.apply(ctx, record)
+	case ActionEnsure:
+		if record == nil {
+			return l.freshInstall(ctx)
+		}
+		if noop, reason := l.ensureNoop(ctx, record); noop {
+			r.Noop = true
+			r.NoopReason = reason
+			l.describe(ctx, record, false)
+			return 0
+		}
+		return l.apply(ctx, record)
+	case ActionReconcile:
+		if record == nil {
+			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
+			return 0
+		}
+		return l.reconcile(ctx, record)
+	case ActionUninstall:
+		return l.uninstall(ctx, record)
+	}
+	return 0
+}
+
+func (l *lifecycle) validateOptions() int {
+	o, r := l.opts, l.result
+	bad := func(message string) int {
+		r.AddError(codeInvalidArguments, message)
+		return enterprisestatus.InvalidArgsExitCode(l.env.GOOS)
+	}
+	if o.PayloadDir != "" && o.FromPackage {
+		return bad("--payload and --from-package are mutually exclusive")
+	}
+	if (o.PayloadDir != "" || o.FromPackage || o.ConfigFile != "" || o.AdoptExisting || o.NoStart) &&
+		!contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, o.Action) {
+		return bad(fmt.Sprintf("--payload, --from-package, --config, --adopt-existing and --no-start do not apply to %s", o.Action))
+	}
+	if o.Purge && o.Action != ActionUninstall {
+		return bad("--purge applies only to uninstall")
+	}
+	if o.RemoveServiceAccount && !o.Purge {
+		return bad("--remove-service-account requires uninstall --purge")
+	}
+	if o.ConfigFile != "" && !filepath.IsAbs(o.ConfigFile) {
+		return bad("--config must be an absolute path")
+	}
+	return 0
+}
+
+func (l *lifecycle) freshInstall(ctx context.Context) int {
+	env, r := l.env, l.result
+	if present, where := env.secureClientPresent(); present {
+		r.AddError(codeProfileConflict, fmt.Sprintf("a Cisco Secure Client DefenseClaw deployment is present (%s); the profiles are mutually exclusive — uninstall it first", where))
+		return 0
+	}
+	channel := ChannelPayload
+	if l.opts.FromPackage {
+		channel = ChannelPackage
+	}
+	if leftovers := env.unmanagedLeftovers(env.Services, channel); len(leftovers) > 0 {
+		if !l.opts.AdoptExisting {
+			r.AddError(codeUnmanagedLayout, "existing DefenseClaw machine state is not owned by a committed deployment ("+strings.Join(leftovers, ", ")+"); rerun with --adopt-existing to back it up and take it over")
+			return 0
+		}
+		if err := l.adopt(ctx, leftovers); err != nil {
+			r.AddError(codeUnmanagedLayout, err.Error())
+			return 0
+		}
+	}
+	if l.opts.PayloadDir == "" && !l.opts.FromPackage {
+		r.AddError(codeInvalidArguments, "install needs --payload or --from-package")
+		return enterprisestatus.InvalidArgsExitCode(env.GOOS)
+	}
+	return l.apply(ctx, nil)
+}
+
+// adopt archives the unmanaged leftovers, then stops and removes legacy
+// units so the fresh install starts from a known state. Config and state
+// stay in place; a valid legacy config is reused when no --config is given.
+func (l *lifecycle) adopt(ctx context.Context, leftovers []string) error {
+	env := l.env
+	archive := filepath.Join(env.P(env.Layout.LifecycleDir), adoptedPrefix+env.Now().UTC().Format("20060102T150405Z")+".tar.gz")
+	if err := env.archivePaths(archive, leftovers); err != nil {
+		return fmt.Errorf("back up the existing layout: %w", err)
+	}
+	l.result.AddWarning("adopted_existing_layout", "backed up the existing layout to "+archive)
+	if env.GOOS == "linux" {
+		names := append([]string{}, legacyLinuxUnits...)
+		for _, unit := range env.Services.Units() {
+			names = append(names, unit.Name)
+		}
+		for _, name := range names {
+			unit := Unit{Name: name}
+			_ = env.Services.Stop(ctx, unit)
+			_ = env.Services.Disable(ctx, unit)
+		}
+		for _, name := range legacyLinuxUnits {
+			if err := removeFile(env.P(filepath.Join("/etc/systemd/system", name))); err != nil {
+				return err
+			}
+		}
+		_ = env.Services.Reload(ctx)
+	}
+	return nil
+}
+
+// archivePaths writes a gzip tar of the given canonical paths.
+func (e *Env) archivePaths(archive string, paths []string) error {
+	file, err := os.OpenFile(archive, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	gz := gzip.NewWriter(file)
+	tw := tar.NewWriter(gz)
+	walkErr := func() error {
+		for _, canonical := range paths {
+			root := e.P(canonical)
+			err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				info, err := os.Lstat(path)
+				if err != nil {
+					return err
+				}
+				if !info.Mode().IsRegular() && !info.IsDir() {
+					return nil
+				}
+				header, err := tar.FileInfoHeader(info, "")
+				if err != nil {
+					return err
+				}
+				rel, _ := filepath.Rel(e.P("/"), path)
+				header.Name = rel
+				if err := tw.WriteHeader(header); err != nil {
+					return err
+				}
+				if info.Mode().IsRegular() {
+					in, err := os.Open(path)
+					if err != nil {
+						return err
+					}
+					_, copyErr := io.Copy(tw, in)
+					_ = in.Close()
+					return copyErr
+				}
+				return nil
+			})
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		return nil
+	}()
+	closeErr := errors.Join(tw.Close(), gz.Close(), file.Sync(), file.Close())
+	if walkErr != nil {
+		_ = os.Remove(archive)
+		return walkErr
+	}
+	return closeErr
+}
+
+// plan is the complete desired state of one apply.
+type plan struct {
+	account     Account
+	channel     string
+	version     string
+	payload     *payload
+	config      *validatedConfig
+	secrets     []string
+	secretsSHA  string
+	dirs        []desiredDir
+	files       []desiredFile
+	binaries    []desiredFile
+	createdDirs []string
+	stale       []string
+	systemd     int
+	installedAt string
+}
+
+// buildPlan computes the desired state without mutating the host. account
+// must already exist.
+func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account Account) (*plan, error) {
+	env := l.env
+	p := &plan{account: account, channel: ChannelPayload, systemd: env.Services.Version(ctx)}
+	if record != nil {
+		p.channel = record.Channel
+		p.installedAt = record.InstalledAt
+	}
+	if l.opts.FromPackage {
+		p.channel = ChannelPackage
+	} else if l.opts.PayloadDir != "" {
+		p.channel = ChannelPayload
+	}
+	if p.installedAt == "" {
+		p.installedAt = env.Now().UTC().Format(time.RFC3339)
+	}
+
+	switch {
+	case l.opts.PayloadDir != "":
+		pay, err := env.loadPayload(ctx, l.opts.PayloadDir)
+		if err != nil {
+			return nil, &codedError{code: codePayload, err: err}
+		}
+		p.payload = pay
+	case p.channel == ChannelPackage:
+		pay, err := env.loadPayload(ctx, env.P(env.Layout.BinDir))
+		if err != nil {
+			return nil, &codedError{code: codePayload, err: err}
+		}
+		p.payload = pay
+	default:
+		// Repair or ensure without a payload keeps the installed binaries,
+		// which must still be exactly what the record says.
+		for name, want := range recordBinaries(env, record) {
+			got, err := sha256File(env.P(filepath.Join(env.Layout.BinDir, name)))
+			if err != nil || got != want {
+				return nil, &codedError{code: codePayload, err: fmt.Errorf("installed %s does not match the deployment record; repair with --payload", name)}
+			}
+		}
+		pay, err := env.loadPayload(ctx, env.P(env.Layout.BinDir))
+		if err != nil {
+			return nil, &codedError{code: codePayload, err: err}
+		}
+		p.payload = pay
+	}
+	p.version = p.payload.Version
+	if l.opts.ProductVersion != "" && strings.TrimPrefix(l.opts.ProductVersion, "v") != p.version {
+		return nil, &codedError{code: codePayload, err: fmt.Errorf("payload version %s does not match --product-version %s", p.version, l.opts.ProductVersion)}
+	}
+	if p.channel == ChannelPayload && l.opts.PayloadDir != "" && env.GOOS == "linux" {
+		if env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)) {
+			return nil, &codedError{code: codePackageOwned, err: errors.New("the installed binaries belong to the defenseclaw-enterprise package; upgrade with the package manager")}
+		}
+	}
+
+	raw, err := l.configBytes()
+	if err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
+	validated, err := env.validateConfig(raw)
+	if err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
+	p.config = validated
+
+	p.secrets, p.secretsSHA, err = env.listSecrets()
+	if err != nil {
+		return nil, &codedError{code: codeState, err: err}
+	}
+	loadCredential := env.GOOS == "linux" && p.systemd >= loadCredentialSystemd
+
+	p.dirs = env.managedDirs(account, loadCredential)
+	for _, connector := range validated.machinePolicyEnabled(env.GOOS) {
+		for _, dir := range machinePolicyDirs(env.GOOS, connector) {
+			p.dirs = append(p.dirs, desiredDir{Path: dir, Mode: 0o755, Owner: rootOwner(), External: true})
+		}
+	}
+
+	files, err := env.renderFiles(renderInputs{
+		Account: account, Channel: p.channel, Version: p.version, InstalledAt: p.installedAt,
+		Config: validated, Secrets: p.secrets, LoadCredential: loadCredential,
+	})
+	if err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	p.files = files
+	serviceGroup := fileOwner{UID: 0, GID: account.GID}
+	p.files = append(p.files, desiredFile{Path: env.Layout.ConfigPath, Data: validated.Raw, SHA: validated.SHA, Mode: 0o640, Owner: serviceGroup, Kind: "config"})
+
+	if p.channel == ChannelPayload {
+		for _, name := range sortedKeys(p.payload.Digests) {
+			p.binaries = append(p.binaries, desiredFile{
+				Path: filepath.Join(env.Layout.BinDir, name), Src: filepath.Join(p.payload.Dir, name),
+				SHA: p.payload.Digests[name], Mode: 0o755, Owner: rootOwner(), Kind: "binary",
+			})
+		}
+	}
+
+	// Files the previous deployment wrote that this one no longer does.
+	if record != nil {
+		want := map[string]bool{}
+		for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
+			want[file.Path] = true
+		}
+		for path := range record.Files {
+			if !want[path] {
+				if p.channel == ChannelPackage && strings.HasPrefix(path, env.Layout.BinDir+"/") {
+					continue // the package owns the binaries now
+				}
+				p.stale = append(p.stale, path)
+			}
+		}
+		sort.Strings(p.stale)
+	}
+	return p, nil
+}
+
+func recordBinaries(env *Env, record *Deployment) map[string]string {
+	out := map[string]string{}
+	if record == nil {
+		return out
+	}
+	for path, digest := range record.Files {
+		if filepath.Dir(path) == env.Layout.BinDir {
+			out[filepath.Base(path)] = digest
+		}
+	}
+	return out
+}
+
+// configBytes picks the config to install: --config, else the installed
+// file, else the default.
+func (l *lifecycle) configBytes() ([]byte, error) {
+	env := l.env
+	if l.opts.ConfigFile != "" {
+		return readBounded(l.opts.ConfigFile, maxInputBytes)
+	}
+	data, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
+	if err == nil {
+		return data, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return DefaultConfig(env.Layout), nil
+	}
+	return nil, err
+}
+
+type codedError struct {
+	code string
+	err  error
+}
+
+func (e *codedError) Error() string { return e.err.Error() }
+func (e *codedError) Unwrap() error { return e.err }
+
+func errorCode(err error, fallback string) string {
+	var coded *codedError
+	if errors.As(err, &coded) {
+		return coded.code
+	}
+	return fallback
+}
+
+// apply runs the install/upgrade/repair transaction.
+func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
+	env, r := l.env, l.result
+	serviceName := env.Layout.ServiceUser
+	account, err := env.Accounts.Ensure(ctx, serviceName)
+	if err != nil {
+		r.AddError(codeAccount, err.Error())
+		return 0
+	}
+	p, err := l.buildPlan(ctx, record, account)
+	if err != nil {
+		r.AddError(errorCode(err, codeApply), err.Error())
+		return 0
+	}
+
+	units := env.Services.Units()
+	previouslyActive := []string{}
+	for _, unit := range units {
+		if env.Services.Active(ctx, unit) {
+			previouslyActive = append(previouslyActive, unit.Name)
+		}
+	}
+
+	snapshotID := env.Now().UTC().Format("20060102T150405.000000000Z")
+	snapPaths := []string{}
+	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
+		snapPaths = append(snapPaths, file.Path)
+	}
+	snapPaths = append(snapPaths, p.stale...)
+	snapPaths = append(snapPaths, filepath.Join(env.Layout.LifecycleDir, deploymentFileName))
+	dirPaths := []string{}
+	for _, dir := range p.dirs {
+		dirPaths = append(dirPaths, dir.Path)
+	}
+	snap, err := env.takeSnapshot(snapshotID, snapPaths, dirPaths)
+	if err != nil {
+		r.AddError(codeApply, err.Error())
+		return 0
+	}
+	pending := &Pending{Action: l.opts.Action, StartedAt: env.Now().UTC().Format(time.RFC3339), SnapshotDir: snap.Dir, Phase: "quiesce", PreviouslyActive: previouslyActive}
+	if err := env.savePending(pending); err != nil {
+		env.discardSnapshot(snap)
+		r.AddError(codeApply, err.Error())
+		return 0
+	}
+
+	failAndRollback := func(code string, cause error) int {
+		r.AddError(code, cause.Error())
+		if err := l.rollback(ctx, snap, previouslyActive); err != nil {
+			r.AddError(codeRollbackFailed, err.Error())
+		} else {
+			r.AddWarning(codeRolledBack, "restored the previous deployment")
+		}
+		_ = env.clearPending()
+		env.discardSnapshot(snap)
+		return 0
+	}
+
+	l.quiesce(ctx, units)
+	pending.Phase = "apply"
+	_ = env.savePending(pending)
+
+	createdDirs, err := l.applyDirs(p)
+	if err != nil {
+		return failAndRollback(codeApply, err)
+	}
+	changed, err := l.applyFiles(p)
+	if err != nil {
+		return failAndRollback(codeApply, err)
+	}
+	restartSockets := record != nil && record.ProductVersion != p.version && p.channel == ChannelPackage
+	for _, unit := range units {
+		if unit.Kind == "socket" && changed[env.Services.DefinitionPath(unit, p.channel)] {
+			restartSockets = true
+		}
+	}
+	if err := env.initialManifest(account); err != nil {
+		return failAndRollback(codeApply, err)
+	}
+	if env.GOOS == "linux" {
+		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
+			r.AddWarning("selinux_relabel", err.Error())
+		}
+	}
+	if err := env.Services.Reload(ctx); err != nil {
+		return failAndRollback(codeApply, err)
+	}
+
+	pending.Phase = "activate"
+	_ = env.savePending(pending)
+	if !l.opts.NoStart {
+		if err := l.activate(ctx, units, restartSockets); err != nil {
+			return failAndRollback(codeActivate, err)
+		}
+	} else {
+		for _, unit := range units {
+			if unit.Activate {
+				_ = env.Services.Disable(ctx, unit)
+			}
+		}
+		r.AddWarning("not_started", "installed without starting the services (--no-start); run repair or ensure to activate")
+	}
+
+	newRecord := &Deployment{
+		Profile: managed.ProfileStandalone, Platform: env.GOOS, ProductVersion: p.version, Channel: p.channel,
+		InstalledAt: p.installedAt, UpdatedAt: env.Now().UTC().Format(time.RFC3339), NoStart: l.opts.NoStart,
+		ServiceUser: account.Name, ServiceUID: account.UID, ServiceGID: account.GID,
+		ConfigSHA256: p.config.SHA, SecretsSHA256: p.secretsSHA, Files: map[string]string{},
+	}
+	if record != nil {
+		newRecord.CreatedServiceAccount = record.CreatedServiceAccount
+		newRecord.CreatedDirs = append(newRecord.CreatedDirs, record.CreatedDirs...)
+	}
+	newRecord.CreatedServiceAccount = newRecord.CreatedServiceAccount || account.Created
+	newRecord.CreatedDirs = mergeUnique(newRecord.CreatedDirs, createdDirs)
+	for _, file := range p.files {
+		newRecord.Files[file.Path] = file.SHA
+	}
+	for _, file := range p.binaries {
+		newRecord.Files[file.Path] = file.SHA
+	}
+	if p.channel == ChannelPackage {
+		for name, digest := range p.payload.Digests {
+			newRecord.Files[filepath.Join(env.Layout.BinDir, name)] = digest
+		}
+	}
+
+	if !l.opts.NoStart {
+		if problems := l.verifyInstalled(ctx, newRecord, false); len(problems) > 0 {
+			return failAndRollback(codeVerify, errors.New(strings.Join(problems, "; ")))
+		}
+	}
+	if err := env.saveDeployment(newRecord); err != nil {
+		return failAndRollback(codeApply, err)
+	}
+	_ = env.clearPending()
+	env.discardSnapshot(snap)
+	r.Installed = true
+	r.InstalledVersion = newRecord.ProductVersion
+	l.describe(ctx, newRecord, false)
+	return 0
+}
+
+// quiesce stops the services in reverse activation order. Sockets stay up
+// so hooks queue during the change; they are restarted in activation only
+// when their definition changed.
+func (l *lifecycle) quiesce(ctx context.Context, units []Unit) {
+	ordered := append([]Unit{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
+	for _, unit := range ordered {
+		if unit.Kind == "socket" {
+			continue
+		}
+		_ = l.env.Services.Stop(ctx, unit)
+	}
+}
+
+func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
+	env := l.env
+	created := []string{}
+	for _, dir := range p.dirs {
+		path := env.P(dir.Path)
+		if dir.External {
+			if exists(path) {
+				if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
+					// /opt on some systems is a symlink (ostree); resolve by
+					// refusing to write through it.
+					return nil, fmt.Errorf("%s exists and is not a plain directory", dir.Path)
+				}
+				continue
+			}
+			created = append(created, dir.Path)
+		}
+		if err := env.ensureDir(path, dir.Mode, dir.Owner); err != nil {
+			return nil, err
+		}
+	}
+	for _, file := range p.files {
+		if err := os.MkdirAll(env.P(filepath.Dir(file.Path)), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	return created, nil
+}
+
+// applyFiles writes every binary and file whose bytes differ, fixes the
+// metadata of the rest, removes stale files, and returns the canonical
+// paths it wrote or removed.
+func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
+	env := l.env
+	changed := map[string]bool{}
+	for _, file := range append(append([]desiredFile{}, p.binaries...), p.files...) {
+		current, _ := sha256File(env.P(file.Path))
+		if current == file.SHA {
+			if err := env.fixMetadata(env.P(file.Path), file.Mode, file.Owner); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		var err error
+		if file.Src != "" {
+			err = env.copyFileAtomic(file.Src, env.P(file.Path), file.Mode, file.Owner)
+		} else {
+			err = env.writeFileAtomic(env.P(file.Path), file.Data, file.Mode, file.Owner)
+		}
+		if err != nil {
+			return nil, err
+		}
+		changed[file.Path] = true
+	}
+	for _, path := range p.stale {
+		if err := removeFile(env.P(path)); err != nil {
+			return nil, err
+		}
+		changed[path] = true
+		if ownedParent(filepath.Dir(path)) {
+			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
+		}
+	}
+	return changed, nil
+}
+
+func (e *Env) fixMetadata(path string, mode os.FileMode, owner fileOwner) error {
+	if err := os.Chmod(path, mode); err != nil {
+		return err
+	}
+	return e.Lchown(path, owner.UID, owner.GID)
+}
+
+// initialManifest seeds an empty guardian manifest so the guardian and the
+// sensor helper start before the enumerator has published its first rows.
+// An existing manifest (enumerator- or administrator-written) is kept.
+func (e *Env) initialManifest(account Account) error {
+	path := e.P(e.Layout.ManifestPath)
+	if exists(path) {
+		return nil
+	}
+	return e.writeFileAtomic(path, []byte("version: 1\ntargets: []\n"), 0o640, fileOwner{UID: 0, GID: account.GID})
+}
+
+// activate enables and starts the units in stage order and waits for the
+// gateway to report healthy. A running socket keeps its listener (queued
+// hooks survive the change) unless its definition changed.
+func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets bool) error {
+	env := l.env
+	ordered := append([]Unit{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
+	for _, unit := range ordered {
+		if !unit.Activate {
+			continue
+		}
+		if err := env.Services.Enable(ctx, unit); err != nil {
+			return fmt.Errorf("enable %s: %w", unit.Name, err)
+		}
+		if unit.Kind == "socket" && env.Services.Active(ctx, unit) {
+			if !restartSockets {
+				continue
+			}
+			if err := env.Services.Stop(ctx, unit); err != nil {
+				return fmt.Errorf("restart %s: %w", unit.Name, err)
+			}
+		}
+		if err := env.Services.Start(ctx, unit); err != nil {
+			return fmt.Errorf("start %s: %w", unit.Name, err)
+		}
+		if unit.Kind == "gateway" {
+			if err := l.waitGatewayReady(ctx, unit); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (l *lifecycle) waitGatewayReady(ctx context.Context, unit Unit) error {
+	env := l.env
+	deadline := env.Now().Add(env.ReadyTimeout)
+	var lastErr error
+	for {
+		if env.Services.Active(ctx, unit) {
+			status, _, err := env.HealthGet(ctx)
+			if err == nil && status == 200 {
+				return nil
+			}
+			if err != nil {
+				lastErr = err
+			} else {
+				lastErr = fmt.Errorf("gateway /health returned HTTP %d", status)
+			}
+		} else {
+			lastErr = fmt.Errorf("%s is not active", unit.Name)
+		}
+		if !env.Now().Before(deadline) {
+			return fmt.Errorf("gateway did not become ready within %s: %v", env.ReadyTimeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(env.PollInterval):
+		}
+	}
+}
+
+// rollback stops everything, restores the snapshot and restarts what was
+// running before the transaction.
+func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, previouslyActive []string) error {
+	env := l.env
+	units := env.Services.Units()
+	ordered := append([]Unit{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
+	for _, unit := range ordered {
+		// A socket that was listening before keeps listening.
+		if unit.Kind == "socket" && contains(previouslyActive, unit.Name) {
+			continue
+		}
+		_ = env.Services.Stop(ctx, unit)
+	}
+	restoreErr := env.restore(snap)
+	reloadErr := env.Services.Reload(ctx)
+	sort.SliceStable(units, func(i, j int) bool { return units[i].Stage < units[j].Stage })
+	var startErrs []error
+	for _, unit := range units {
+		if contains(previouslyActive, unit.Name) {
+			if err := env.Services.Start(ctx, unit); err != nil {
+				startErrs = append(startErrs, err)
+			}
+		}
+	}
+	return errors.Join(restoreErr, reloadErr, errors.Join(startErrs...))
+}
+
+// recoverInterrupted rolls back a transaction a previous run left pending.
+func (l *lifecycle) recoverInterrupted(ctx context.Context) {
+	env, r := l.env, l.result
+	pending, err := env.loadPending()
+	if err != nil {
+		r.AddWarning(codeRecovered, "discarded an unreadable pending transaction: "+err.Error())
+		_ = env.clearPending()
+		return
+	}
+	if pending == nil {
+		return
+	}
+	snap, err := env.loadSnapshot(pending.SnapshotDir)
+	if err != nil {
+		r.AddWarning(codeRecovered, fmt.Sprintf("an interrupted %s left no usable snapshot (%v); this run re-applies the desired state", pending.Action, err))
+		_ = env.clearPending()
+		return
+	}
+	if err := l.rollback(ctx, snap, pending.PreviouslyActive); err != nil {
+		r.AddWarning(codeRecovered, fmt.Sprintf("rolled back an interrupted %s with errors: %v", pending.Action, err))
+	} else {
+		r.AddWarning(codeRecovered, fmt.Sprintf("rolled back an interrupted %s started at %s", pending.Action, pending.StartedAt))
+	}
+	_ = env.clearPending()
+	env.discardSnapshot(snap)
+}
+
+// ensureNoop reports whether the installed deployment already matches the
+// desired state. It never mutates the host.
+func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
+	env := l.env
+	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
+	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
+		return false, ""
+	}
+	p, err := l.buildPlan(ctx, record, account)
+	if err != nil {
+		// apply reports the same error with rollback semantics.
+		return false, ""
+	}
+	if p.version != record.ProductVersion || p.channel != record.Channel || p.config.SHA != record.ConfigSHA256 || p.secretsSHA != record.SecretsSHA256 || len(p.stale) > 0 {
+		return false, ""
+	}
+	if l.opts.NoStart != record.NoStart {
+		return false, ""
+	}
+	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
+		if record.Files[file.Path] != file.SHA {
+			return false, ""
+		}
+	}
+	if problems := l.verifyInstalled(ctx, record, false); len(problems) > 0 {
+		return false, ""
+	}
+	return true, "up_to_date"
+}
+
+func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
+	env, r := l.env, l.result
+	var err error
+	if env.GOOS == "linux" {
+		err = env.Services.Start(ctx, Unit{Name: unitGuardianOneshot})
+	} else {
+		_, err = env.Runner.Run(ctx, filepath.Join(env.P(env.Layout.BinDir), binGateway),
+			"enterprise", "hooks", "reconcile", "--manifest", env.Layout.ManifestPath, "--json")
+	}
+	if err != nil {
+		r.AddError(codeReconcile, err.Error())
+	}
+	l.describe(ctx, record, false)
+	return 0
+}
+
+// uninstall stops and removes the deployment. Config, secrets and state
+// stay unless purge is set.
+func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
+	env, r := l.env, l.result
+	units := env.Services.Units()
+	if record == nil && !l.opts.Purge {
+		r.Noop = true
+		r.NoopReason = "not_installed"
+		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
+			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); use uninstall --purge to remove it")
+		}
+		return 0
+	}
+	ordered := append([]Unit{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
+	var errs []error
+	for _, unit := range ordered {
+		_ = env.Services.Stop(ctx, unit)
+		if unit.Activate {
+			_ = env.Services.Disable(ctx, unit)
+		}
+	}
+	// On Linux the deb/rpm removes its own files. A macOS pkg has no
+	// uninstaller, so the lifecycle removes the binaries and the receipt.
+	packageManaged := record != nil && record.Channel == ChannelPackage && env.GOOS == "linux"
+	paths := []string{}
+	if record != nil {
+		for path := range record.Files {
+			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/")) {
+				continue
+			}
+			paths = append(paths, path)
+		}
+	} else {
+		for _, unit := range units {
+			paths = append(paths, env.Services.DefinitionPath(unit, ChannelPayload))
+		}
+		paths = append(paths, env.Layout.DescriptorPath)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		if path == env.Layout.ConfigPath && !l.opts.Purge {
+			continue
+		}
+		if err := removeFile(env.P(path)); err != nil {
+			errs = append(errs, err)
+		}
+		if ownedParent(filepath.Dir(path)) {
+			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
+		}
+	}
+	if err := env.Services.Reload(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
+	if env.GOOS == "darwin" {
+		if record != nil && record.Channel == ChannelPackage {
+			_, _ = env.Runner.Run(ctx, "pkgutil", "--forget", MacOSPackageID)
+		}
+	}
+	if record != nil {
+		for _, dir := range record.CreatedDirs {
+			_ = removeDirIfEmpty(env.P(dir))
+		}
+	}
+	_ = removeFile(env.deploymentPath())
+	_ = env.clearPending()
+	_ = os.RemoveAll(filepath.Join(env.P(env.Layout.LifecycleDir), snapshotsDirName))
+
+	if l.opts.Purge {
+		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir, env.Layout.LifecycleDir} {
+			if err := os.RemoveAll(env.P(dir)); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if !packageManaged {
+			if err := os.RemoveAll(env.P(env.Layout.InstallRoot)); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if env.GOOS == "darwin" {
+			_ = removeDirIfEmpty(env.P("/opt/cisco"))
+			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
+		}
+		if l.opts.RemoveServiceAccount {
+			if err := env.Accounts.Remove(ctx, env.Layout.ServiceUser); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		r.AddError(codeUninstall, err.Error())
+		return 0
+	}
+	r.Installed = false
+	return 0
+}
+
+func mergeUnique(values ...[]string) []string {
+	set := map[string]bool{}
+	for _, list := range values {
+		for _, value := range list {
+			set[value] = true
+		}
+	}
+	return sortedKeys(set)
+}

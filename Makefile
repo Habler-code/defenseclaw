@@ -62,7 +62,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
@@ -780,6 +780,21 @@ packaging-macos-bundle:
 	    "$(BUNDLE_TAGS)" \
 	    "$(CMID_OVERLAY)" \
 	    "$(CMID_VERSION)"
+
+# packaging-linux-enterprise builds the standalone managed-enterprise
+# payload tarball and the defenseclaw-enterprise .deb/.rpm for linux
+# amd64/arm64 with a local GoReleaser snapshot (into dist/). Packages are
+# unsigned unless NFPM_GPG_KEY_FILE (and NFPM_PASSPHRASE) are set.
+packaging-linux-enterprise:
+	@command -v goreleaser >/dev/null || { echo "packaging-linux-enterprise needs goreleaser v2" >&2; exit 1; }
+	goreleaser release --snapshot --clean --skip=sbom,sign,publish,validate
+
+# packaging-macos-enterprise builds the standalone managed-enterprise
+# installer package dist/defenseclaw-enterprise-$(VERSION)-darwin-arm64.pkg.
+# Unsigned unless MACOS_APP_SIGN_IDENTITY / MACOS_INSTALLER_SIGN_IDENTITY
+# are set; see scripts/build-macos-enterprise-pkg.sh.
+packaging-macos-enterprise:
+	@scripts/build-macos-enterprise-pkg.sh --version "$(VERSION)" --dist-dir "$(DIST_DIR)"
 
 # The managed-enterprise Windows build is split so a macOS release box (which
 # has SSH access to cisco-aispg/ai-common) prepares the -tags cmid gateway

@@ -2017,6 +2017,26 @@
       "since": "0.2.0"
     },
     {
+      "name": "DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR",
+      "category": "test_fixture",
+      "purpose": "Points install.sh at a temporary managed runtime descriptor so tests can prove the per-user installer refuses to run on a computer whose DefenseClaw is managed by the organization.",
+      "default": "unset (Linux /etc/defenseclaw/managed-runtime.json; macOS /opt/cisco/defenseclaw/etc/managed-runtime.json)",
+      "accepted_values": [
+        "absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/install.sh",
+          "description": "Refuses a per-user install when the managed runtime descriptor exists"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Test-only. Setting it only skips the per-user installer's refusal; the per-user gateway still refuses to start on a managed host."
+    },
+    {
       "name": "DEFENSECLAW_INSTALL_ROOT",
       "category": "runtime_path",
       "purpose": "Native Windows installer root injected by the stable defenseclaw.exe launcher so the managed Python CLI can locate the owning packaged install for installer-based upgrade handoff.",
@@ -3724,7 +3744,7 @@
       "name": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
       "category": "runtime_path",
       "purpose": "Override the local UDS path the AI Discovery sensor helper listens on and the gateway dials. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. Managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve.",
-      "default": "unset (managed_enterprise: Windows uses <TrustedProgramFiles>\\\\Cisco\\\\Cisco Secure Client\\\\DefenseClaw\\\\ipc\\\\sensor-helper.sock; Linux uses /run/defenseclaw/sensor-helper.sock; macOS brokers nothing because its managed gateway already runs as root. Other modes use <data_dir>/ipc/sensor-helper.sock)",
+      "default": "unset (managed_enterprise: Windows uses <TrustedProgramFiles>\\\\Cisco\\\\Cisco Secure Client\\\\DefenseClaw\\\\ipc\\\\sensor-helper.sock; Linux uses /run/defenseclaw-sensor/sensor-helper.sock; macOS standalone uses /var/run/defenseclaw-sensor/sensor-helper.sock; macOS Secure Client keeps /var/run/defenseclaw/sensor-helper.sock. Other modes use <data_dir>/ipc/sensor-helper.sock)",
       "accepted_values": [
         "any-absolute-path",
         "unset"

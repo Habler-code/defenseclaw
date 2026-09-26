@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import json
 import os
 import plistlib
 import stat
@@ -15,110 +16,172 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_systemd_enterprise_unit_pins_hardening_contract():
-    root = Path(__file__).resolve().parents[2]
-    unit = root / "packaging" / "systemd" / "defenseclaw-gateway.service"
-    text = unit.read_text(encoding="utf-8")
+SYSTEMD = ROOT / "packaging" / "systemd"
+STANDALONE_ENV = {
+    "Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise",
+    "Environment=DEFENSECLAW_ENTERPRISE_PROFILE=standalone",
+    "Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml",
+    "Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw",
+    "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian",
+}
 
-    required = {
+
+def _unit(name: str) -> list[str]:
+    return (SYSTEMD / name).read_text(encoding="utf-8").splitlines()
+
+
+def test_systemd_standalone_unit_set_is_exact():
+    units = sorted(p.name for p in SYSTEMD.iterdir() if p.suffix in {".service", ".socket", ".path", ".timer"})
+    assert units == [
+        "defenseclaw-enterprise-apply.path",
+        "defenseclaw-enterprise-apply.service",
+        "defenseclaw-enterprise-verify.service",
+        "defenseclaw-enterprise-verify.timer",
+        "defenseclaw-gateway-api.socket",
+        "defenseclaw-gateway-hook.socket",
+        "defenseclaw-gateway.service",
+        "defenseclaw-hook-enumerator.service",
+        "defenseclaw-hook-guardian-reconcile.service",
+        "defenseclaw-hook-guardian.service",
+        "defenseclaw-sensor-helper.service",
+    ]
+    # The racing reconcile timer, the ledger-less template unit and the
+    # static sensor-helper environment file are gone.
+    for retired in ("defenseclaw-hook-guardian.timer", "defenseclaw-hook-guardian@.service", "sensor-helper.env.example"):
+        assert not (SYSTEMD / retired).exists()
+
+
+def test_systemd_gateway_unit_pins_the_hardening_contract():
+    lines = _unit("defenseclaw-gateway.service")
+    required = STANDALONE_ENV | {
+        "Type=notify",
+        "NotifyAccess=main",
+        "Sockets=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket",
         "User=defenseclaw",
         "Group=defenseclaw",
-        "Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw",
-        "Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml",
-        "Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise",
-        "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian",
-        "StateDirectoryMode=0750",
-        "RuntimeDirectoryMode=0750",
-        "LogsDirectoryMode=0750",
+        "Restart=always",
+        "StartLimitIntervalSec=0",
+        "WatchdogSec=60s",
+        "PrivateUsers=no",
+        "NoNewPrivileges=true",
         "ProtectSystem=strict",
         "ProtectHome=true",
         "ProtectProc=invisible",
-        "ProcSubset=pid",
-        "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw",
-        "ReadWritePaths=/var/lib/defenseclaw /var/log/defenseclaw /run/defenseclaw",
         "CapabilityBoundingSet=",
-        "RestrictNamespaces=true",
-        "RestrictSUIDSGID=true",
-        "SystemCallArchitectures=native",
+        "AmbientCapabilities=",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         "SystemCallFilter=@system-service",
-        "NoNewPrivileges=true",
         "MemoryDenyWriteExecute=true",
+        "ReadWritePaths=/var/lib/defenseclaw /var/log/defenseclaw /run/defenseclaw -/run/defenseclaw-hook",
     }
-    missing = sorted(line for line in required if line not in text)
+    missing = sorted(line for line in required if line not in lines)
     assert not missing
-    assert text.splitlines().count("NoNewPrivileges=true") == 1
-    assert "NoNewPrivileges=false" not in text.splitlines()
+    assert "DynamicUser=yes" not in lines
 
 
-def test_systemd_hook_guardian_is_oneshot_and_keeps_gateway_config_read_only():
-    root = Path(__file__).resolve().parents[2]
-    unit = root / "packaging" / "systemd" / "defenseclaw-hook-guardian@.service"
-    text = unit.read_text(encoding="utf-8")
-
-    required = {
-        "Type=oneshot",
-        "User=root",
-        "Group=root",
-        "Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment",
-        "Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml",
-        "Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise",
-        "EnvironmentFile=-/etc/defenseclaw/hook-guardian/%i.env",
-        "ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks install --user %i",
-        "UMask=0077",
-        "ProtectSystem=strict",
-        "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw",
-        "ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian",
-        "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID",
-        "RestrictNamespaces=true",
-        "RestrictSUIDSGID=true",
-        "NoNewPrivileges=false",
-    }
-    missing = sorted(line for line in required if line not in text)
-    assert not missing
-    assert text.splitlines().count("NoNewPrivileges=false") == 1
-    assert "NoNewPrivileges=true" not in text.splitlines()
+def test_systemd_sockets_hold_the_listeners_across_restarts():
+    api = _unit("defenseclaw-gateway-api.socket")
+    hook = _unit("defenseclaw-gateway-hook.socket")
+    assert "ListenStream=127.0.0.1:18970" in api and "FileDescriptorName=api" in api
+    for line in (
+        "ListenStream=/run/defenseclaw-hook/hook.sock",
+        "FileDescriptorName=hook",
+        "SocketUser=defenseclaw",
+        "SocketMode=0666",
+        "DirectoryMode=0755",
+    ):
+        assert line in hook
+    # A stop of the gateway must not take the listeners with it.
+    assert not any(line.startswith("PartOf=") for line in api + hook)
 
 
-def test_systemd_hook_guardian_reconcile_timer_and_manifest_contract():
-    root = Path(__file__).resolve().parents[2]
-    service = root / "packaging" / "systemd" / "defenseclaw-hook-guardian.service"
-    watch = root / "packaging" / "systemd" / "defenseclaw-hook-guardian-watch.service"
-    timer = root / "packaging" / "systemd" / "defenseclaw-hook-guardian.timer"
-    tmpfiles = root / "packaging" / "systemd" / "defenseclaw.conf"
-    sample = root / "packaging" / "systemd" / "hook-guardian-targets.example.yaml"
+def test_systemd_guardian_units_share_the_bounded_privilege_contract():
+    for name in ("defenseclaw-hook-guardian.service", "defenseclaw-hook-guardian-reconcile.service"):
+        lines = _unit(name)
+        missing = sorted(line for line in STANDALONE_ENV | {
+            "User=root",
+            "NoNewPrivileges=true",
+            "ProtectSystem=strict",
+            "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw",
+            "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID",
+            "UMask=0077",
+        } if line not in lines)
+        assert not missing, name
+        assert "NoNewPrivileges=false" not in lines
+    watch = _unit("defenseclaw-hook-guardian.service")
+    assert any("enterprise hooks watch --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 1m" in line for line in watch)
+    assert "Restart=always" in watch
+    assert any("enterprise hooks reconcile" in line for line in _unit("defenseclaw-hook-guardian-reconcile.service"))
+    enumerator = _unit("defenseclaw-hook-enumerator.service")
+    assert any("enterprise hooks enumerate --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 5m" in line for line in enumerator)
+    assert "ProtectHome=read-only" in enumerator
+    assert "ReadWritePaths=/etc/defenseclaw/hook-guardian" in enumerator
 
-    service_text = service.read_text(encoding="utf-8")
-    watch_text = watch.read_text(encoding="utf-8")
-    timer_text = timer.read_text(encoding="utf-8")
-    tmpfiles_text = tmpfiles.read_text(encoding="utf-8")
-    sample_text = sample.read_text(encoding="utf-8")
 
-    assert "enterprise hooks reconcile --manifest /etc/defenseclaw/hook-guardian/targets.yaml" in service_text
-    assert "Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment" in service_text
-    assert "UMask=0077" in service_text
-    assert "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw" in service_text
-    assert "ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian" in service_text
-    assert "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian" in service_text
-    assert "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID" in service_text
-    assert "NoNewPrivileges=false" in service_text
-    assert service_text.splitlines().count("NoNewPrivileges=false") == 1
-    assert "NoNewPrivileges=true" not in service_text.splitlines()
-    assert "enterprise hooks watch --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 1m" in watch_text
-    assert "Restart=always" in watch_text
-    assert "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw" in watch_text
-    assert "ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian" in watch_text
-    assert "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian" in watch_text
-    assert "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID" in watch_text
-    assert "NoNewPrivileges=false" in watch_text
-    assert watch_text.splitlines().count("NoNewPrivileges=false") == 1
-    assert "NoNewPrivileges=true" not in watch_text.splitlines()
-    assert "OnUnitActiveSec=5min" in timer_text
-    assert "Persistent=true" in timer_text
-    assert "Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment" in timer_text
-    assert "d /etc/defenseclaw/hook-guardian 0750 root defenseclaw -" in tmpfiles_text
-    assert "d /var/lib/defenseclaw-hook-guardian 0750 root defenseclaw -" in tmpfiles_text
-    assert "version: 1" in sample_text
-    assert "connector: codex" in sample_text
+def test_systemd_sensor_helper_owns_its_socket_directory():
+    lines = _unit("defenseclaw-sensor-helper.service")
+    assert "RuntimeDirectory=defenseclaw-sensor" in lines
+    assert "ReadWritePaths=/run" not in lines
+    assert not any(line.startswith("EnvironmentFile=") for line in lines)
+    assert any("--service-account defenseclaw --home-dirs-from-manifest /etc/defenseclaw/hook-guardian/targets.yaml" in line for line in lines)
+    assert any(line.startswith("SystemCallFilter=@system-service") for line in lines)
+    assert "Before=defenseclaw-gateway.service" in lines
+
+
+def test_systemd_apply_path_and_verify_timer():
+    path = _unit("defenseclaw-enterprise-apply.path")
+    for line in (
+        "PathChanged=/etc/defenseclaw/config.yaml",
+        "PathChanged=/etc/defenseclaw/secrets",
+        "Unit=defenseclaw-enterprise-apply.service",
+    ):
+        assert line in path
+    assert any("enterprise linux ensure --reason path --json" in line for line in _unit("defenseclaw-enterprise-apply.service"))
+    assert "OnCalendar=daily" in _unit("defenseclaw-enterprise-verify.timer")
+    assert any("enterprise linux verify --json" in line for line in _unit("defenseclaw-enterprise-verify.service"))
+
+
+def test_systemd_sysusers_and_tmpfiles():
+    assert (SYSTEMD / "defenseclaw.sysusers").read_text(encoding="utf-8").splitlines()[-1].startswith("u defenseclaw -")
+    tmpfiles = (SYSTEMD / "defenseclaw.conf").read_text(encoding="utf-8")
+    assert "d /etc/defenseclaw 0755 root root -" in tmpfiles
+    assert "d /etc/defenseclaw/hook-guardian 0750 root defenseclaw -" in tmpfiles
+    assert "d /var/lib/defenseclaw-hook-guardian 0750 root defenseclaw -" in tmpfiles
+    assert "d /var/lib/defenseclaw-enterprise 0700 root root -" in tmpfiles
+    assert "d /run/defenseclaw-hook 0755 defenseclaw defenseclaw -" in tmpfiles
+    assert "/etc/defenseclaw/secrets" not in tmpfiles
+    sample = (SYSTEMD / "hook-guardian-targets.example.yaml").read_text(encoding="utf-8")
+    assert "version: 1" in sample
+
+
+def test_launchd_standalone_daemons():
+    directory = ROOT / "packaging" / "launchd-standalone"
+    labels = sorted(p.stem for p in directory.glob("*.plist"))
+    assert labels == [
+        "com.cisco.defenseclaw.apply",
+        "com.cisco.defenseclaw.gateway",
+        "com.cisco.defenseclaw.hook-enumerator",
+        "com.cisco.defenseclaw.hook-guardian",
+        "com.cisco.defenseclaw.sensor-helper",
+        "com.cisco.defenseclaw.verify",
+    ]
+    for label in labels:
+        with (directory / f"{label}.plist").open("rb") as fh:
+            payload = plistlib.load(fh)
+        assert payload["Label"] == label
+        assert payload["ProgramArguments"][0].startswith("/opt/cisco/defenseclaw/bin/")
+        assert "secureclient" not in json.dumps(payload).lower()
+    with (directory / "com.cisco.defenseclaw.gateway.plist").open("rb") as fh:
+        gateway = plistlib.load(fh)
+    assert gateway["UserName"] == "_defenseclaw" and gateway["GroupName"] == "_defenseclaw"
+    env = gateway["EnvironmentVariables"]
+    assert env["DEFENSECLAW_ENTERPRISE_PROFILE"] == "standalone"
+    assert env["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
+    assert env["DEFENSECLAW_UNIX_SERVICE_ACCOUNT"] == "_defenseclaw"
+    assert env["DEFENSECLAW_CONFIG"] == "/opt/cisco/defenseclaw/etc/config.yaml"
+    for root_job in ("com.cisco.defenseclaw.hook-guardian", "com.cisco.defenseclaw.hook-enumerator", "com.cisco.defenseclaw.sensor-helper"):
+        with (directory / f"{root_job}.plist").open("rb") as fh:
+            assert "UserName" not in plistlib.load(fh)
 
 
 def test_launchd_gateway_plist_uses_managed_paths():
@@ -204,6 +267,71 @@ def test_release_archives_ship_enterprise_packaging_assets():
         assert "NOTICE" in archive_files
         assert "THIRD_PARTY_LICENSES.txt" in archive_files
         assert "README*" in archive_files
+
+
+def test_linux_enterprise_package_ships_every_unit_and_calls_the_lifecycle():
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    (package,) = config["nfpms"]
+    assert package["package_name"] == "defenseclaw-enterprise"
+    assert package["formats"] == ["deb", "rpm"]
+    assert package["bindir"] == "/opt/defenseclaw/bin"
+    assert package["dependencies"] == ["systemd (>= 239)"]
+    assert package["overrides"]["rpm"]["dependencies"] == ["systemd >= 239"]
+    contents = {entry["src"]: entry["dst"] for entry in package["contents"]}
+    for unit in SYSTEMD.iterdir():
+        if unit.suffix in {".service", ".socket", ".path", ".timer"}:
+            assert contents[f"packaging/systemd/{unit.name}"] == f"/usr/lib/systemd/system/{unit.name}"
+    assert contents["packaging/systemd/defenseclaw.sysusers"] == "/usr/lib/sysusers.d/defenseclaw.conf"
+    assert contents["packaging/systemd/defenseclaw.conf"] == "/usr/lib/tmpfiles.d/defenseclaw.conf"
+    assert package["scripts"] == {
+        "postinstall": "packaging/linux/postinstall.sh",
+        "preremove": "packaging/linux/preremove.sh",
+        "postremove": "packaging/linux/postremove.sh",
+    }
+
+    postinstall = (ROOT / "packaging/linux/postinstall.sh").read_text(encoding="utf-8")
+    assert "enterprise linux ensure --from-package --reason package --json" in postinstall
+    preremove = (ROOT / "packaging/linux/preremove.sh").read_text(encoding="utf-8")
+    assert "enterprise linux uninstall --json" in preremove
+    for name in ("postinstall.sh", "preremove.sh", "postremove.sh"):
+        script = ROOT / "packaging/linux" / name
+        assert script.stat().st_mode & 0o111, name
+        text = script.read_text(encoding="utf-8")
+        # A maintainer script never fails the package transaction.
+        assert "set -e" not in text, name
+        assert text.rstrip().endswith("exit 0"), name
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize("argument", ["upgrade", "1", "deconfigure", "failed-upgrade"])
+def test_linux_enterprise_preremove_leaves_upgrades_to_the_new_postinstall(tmp_path: Path, argument: str):
+    # The script must exit before it touches the lifecycle on an upgrade;
+    # a stub gateway on PATH would never be reached (it uses an absolute path).
+    completed = subprocess.run(
+        ["sh", str(ROOT / "packaging/linux/preremove.sh"), argument],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0
+    assert completed.stdout == completed.stderr == ""
+
+
+def test_macos_enterprise_pkg_builder_calls_the_lifecycle():
+    builder = (ROOT / "scripts/build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    assert builder.startswith("#!/usr/bin/env bash")
+    assert "set -euo pipefail" in builder
+    assert "enterprise macos ensure --from-package --reason package --json" in builder
+    assert 'readonly INSTALL_BIN="opt/cisco/defenseclaw/bin"' in builder
+    assert 'readonly PKG_ID="com.cisco.defenseclaw.enterprise"' in builder
+    assert "com.cisco.secureclient.defenseclaw" in builder
+    assert "GOARCH=arm64" in builder
+    # Unsigned unless the release supplies Developer ID identities.
+    assert 'if [ -n "${MACOS_INSTALLER_SIGN_IDENTITY:-}" ]' in builder
+    assert 'if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]' in builder
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "packaging-linux-enterprise:" in makefile
+    assert "packaging-macos-enterprise:" in makefile
 
 
 def test_third_party_license_text_and_platform_packaging_contracts():
