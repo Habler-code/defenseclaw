@@ -693,3 +693,22 @@ func TestEnumerateWindowsHonoursCancelledContext(t *testing.T) {
 		t.Fatalf("cancelled ctx: err = %v, want context.Canceled", err)
 	}
 }
+
+func TestWindowsProfileAdmittedByEnrollment(t *testing.T) {
+	profile := windowsUserProfile{SID: "S-1-5-21-1-2-3-1012", Home: `C:\Users\dcrtvafbe30d1ee`}
+	if !windowsProfileAdmittedByEnrollment(profile, nil, nil) {
+		t.Fatal("no filters must admit every profile")
+	}
+	if windowsProfileAdmittedByEnrollment(profile, nil, []string{"DCRTVAFBE30D1EE"}) {
+		t.Fatal("exclusion by profile directory name did not match case-insensitively")
+	}
+	if windowsProfileAdmittedByEnrollment(profile, nil, []string{"s-1-5-21-1-2-3-1012"}) {
+		t.Fatal("exclusion by SID did not match")
+	}
+	if windowsProfileAdmittedByEnrollment(profile, []string{"dcw-std1"}, nil) {
+		t.Fatal("a non-empty include list admitted an unlisted profile")
+	}
+	if windowsProfileAdmittedByEnrollment(profile, []string{"dcrtvafbe30d1ee"}, []string{"dcrtvafbe30d1ee"}) {
+		t.Fatal("exclusion must win over inclusion")
+	}
+}

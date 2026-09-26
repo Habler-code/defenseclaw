@@ -5107,8 +5107,17 @@ function Get-DefenseClawGuardianReconcileID {
 
 function Get-DefenseClawGuardianStateIdentity {
     param([Parameter(Mandatory)][hashtable]$Layout)
+    # The guardian writes its state under DEFENSECLAW_HOME, the runtime
+    # directory. The standalone profile reads it there; Secure Client keeps
+    # its historical StateRoot lookup.
+    $stateDirectory = if (Test-DefenseClawStandaloneProfile) {
+        $Layout.RuntimeDirectory
+    }
+    else {
+        $Layout.StateRoot
+    }
     $path = Microsoft.PowerShell.Management\Join-Path `
-        $Layout.StateRoot `
+        $stateDirectory `
         'hook_guardian_state.json'
     if (-not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $path `
@@ -9207,6 +9216,32 @@ function Remove-DefenseClawTransactionCreatedSharedDirectories {
     }
 }
 
+function Assert-DefenseClawStandaloneSensorHelperOwned {
+    <#
+        Transaction snapshots do not record the sensor helper, so standalone
+        rollback proves its ownership directly: the exact protected image
+        (with or without the installer-derived --home-dirs list) running as
+        LocalSystem. Anything else is a foreign service and fails closed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $image = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+        -LiteralPath $key `
+        -Name ImagePath)
+    $objectName = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+        -LiteralPath $key `
+        -Name ObjectName)
+    $escapedPath = [regex]::Escape([string]$Layout.SensorHelperPath)
+    $ownedImage = '^"{0}" --managed-enterprise(?: --home-dirs "[^"]*")?$' -f $escapedPath
+    if ($image -notmatch $ownedImage -or
+        -not [string]::Equals($objectName, 'LocalSystem', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "refusing to manage foreign service $Name with ImagePath $image"
+    }
+}
+
 function Restore-DefenseClawTransaction {
     param(
         [Parameter(Mandatory)][string]$SnapshotPath,
@@ -9286,6 +9321,33 @@ function Restore-DefenseClawTransaction {
             -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
                 -Layout $Layout `
                 -GatewayServiceName ([string]$snapshot.gateway_service))
+    }
+    # A standalone snapshot does not record the sensor helper, yet activation
+    # starts it first, so a rollback after activation would find its binary
+    # locked. Quiesce it with the other services and bring it back below only
+    # when a pre-existing deployment is restored.
+    $standaloneSensorHelper = ''
+    $standaloneSensorHelperRestart = $false
+    if (Test-DefenseClawStandaloneProfile) {
+        $standaloneSensorHelper = Get-DefenseClawSensorHelperServiceName `
+            -GatewayServiceName ([string]$snapshot.gateway_service)
+        $standaloneSensorHelperRestart = @(
+            $snapshot.services |
+                Microsoft.PowerShell.Core\Where-Object {
+                    [string]::Equals(
+                        [string]$_.name,
+                        [string]$snapshot.gateway_service,
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -and [bool]$_.existed
+                }
+        ).Count -eq 1
+        if (Test-DefenseClawServiceExists -Name $standaloneSensorHelper) {
+            Assert-DefenseClawStandaloneSensorHelperOwned `
+                -Name $standaloneSensorHelper `
+                -Layout $Layout
+            Set-DefenseClawServiceStartMode -Name $standaloneSensorHelper -StartMode 4
+            Stop-DefenseClawService -Name $standaloneSensorHelper
+        }
     }
     # A retained snapshot may be recovered after a reboot or after the final
     # validated activation step. Disable every live owned service before the
@@ -9629,6 +9691,15 @@ function Restore-DefenseClawTransaction {
                 -State $snapshot `
                 -Path $SnapshotPath `
                 -Phase activating
+            $restartSensorHelper = $standaloneSensorHelperRestart -and
+                (Test-DefenseClawServiceExists -Name $standaloneSensorHelper)
+            if ($restartSensorHelper) {
+                # The restored gateway depends on its sensor helper. It stays
+                # disabled through the servicing assertion above and becomes
+                # startable only now, like the broker in the service restart.
+                Set-DefenseClawServiceStartMode -Name $standaloneSensorHelper -StartMode 3
+                Start-DefenseClawService -Name $standaloneSensorHelper
+            }
             Start-DefenseClawTransactionServices `
                 -Services $snapshot.services `
                 -Layout $Layout `
@@ -9636,6 +9707,22 @@ function Restore-DefenseClawTransaction {
                 -TrustInProcessQuiescence `
                 -GatewayServiceName ([string]$snapshot.gateway_service) `
                 -GuardianServiceName ([string]$snapshot.guardian_service)
+            if ($restartSensorHelper) {
+                # Boot policy follows the restored gateway.
+                $gatewayStartMode = @(
+                    $snapshot.services |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]::Equals(
+                                [string]$_.name,
+                                [string]$snapshot.gateway_service,
+                                [StringComparison]::OrdinalIgnoreCase
+                            )
+                        }
+                )[0].start_mode
+                Set-DefenseClawServiceStartMode `
+                    -Name $standaloneSensorHelper `
+                    -StartMode ([int]$gatewayStartMode)
+            }
         }
     }
 }
@@ -10590,6 +10677,23 @@ function Publish-DefenseClawInstallRollbackIntent {
     # rollback and own no absent-baseline roots. Query service absence only
     # after the transaction claims or an authenticated external receipt prove
     # that fresh-install cleanup authority actually exists.
+    if (Test-DefenseClawStandaloneProfile) {
+        # Transaction snapshots carry the gateway, guardian and enumerator
+        # preimages but not the sensor helper, which a fresh install registers
+        # first. A failed first install would otherwise leave that disabled
+        # service behind, this check would refuse root cleanup, and every
+        # later ensure or uninstall would fail the same way. Fresh-install
+        # cleanup authority is proven above, so an owned sensor helper can only
+        # be this transaction's.
+        $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
+            -GatewayServiceName ([string]$Snapshot.gateway_service)
+        if (Test-DefenseClawServiceExists -Name $sensorHelperName) {
+            Assert-DefenseClawStandaloneSensorHelperOwned `
+                -Name $sensorHelperName `
+                -Layout $Layout
+            Remove-DefenseClawService -Name $sensorHelperName
+        }
+    }
     foreach ($name in @(Get-DefenseClawManagedServiceNames `
             -GatewayServiceName ([string]$Snapshot.gateway_service) `
             -GuardianServiceName ([string]$Snapshot.guardian_service))) {
@@ -13347,6 +13451,15 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
     )) {
         $excluded[$name.ToUpperInvariant()] = $true
     }
+    if (Test-DefenseClawStandaloneProfile) {
+        # The sensor helper belongs to this same scope. A standalone first
+        # install registers it before anything else, so rollback reaches this
+        # check while it still exists; treating it as another deployment
+        # retained pending recovery and wedged the host.
+        $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
+            -GatewayServiceName $GatewayServiceName
+        $excluded[$sensorHelperName.ToUpperInvariant()] = $true
+    }
     $allServices = @(Microsoft.PowerShell.Management\Get-Service `
         -ErrorAction Stop)
     foreach ($service in @($allServices |
@@ -13466,10 +13579,9 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
             }
         }
     }
-    $certificationParent = [IO.Path]::Combine(
-        $vendorRoot,
-        'DefenseClaw-Cert'
-    )
+    # The per-profile certification state base: for Secure Client this is
+    # exactly ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Cert.
+    $certificationParent = [string](Get-DefenseClawProfileRoots).CertificationStateBase
     $certificationSnapshot =
         $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
             $certificationParent
@@ -16164,7 +16276,15 @@ function Assert-DefenseClawRecordedArtifactHashes {
         # gate, and the only way out is an Upgrade that replaces the artifact.
         [string]$Action = 'this action'
     )
-    foreach ($required in @('broker', 'gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')) {
+    # A standalone deployment has no CMID broker, so it records no broker
+    # hash; the same list as Assert-DefenseClawEnterpriseDeployment applies.
+    $requiredArtifacts = if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        @('broker', 'gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+    }
+    else {
+        @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+    }
+    foreach ($required in $requiredArtifacts) {
         if ($required -notin $ReplacedArtifacts -and
             $null -eq $Metadata.hashes.PSObject.Properties[$required]) {
             throw "deployment metadata is missing required artifact hash: $required"

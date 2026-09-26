@@ -92,6 +92,13 @@ type EnumerateOptions struct {
 	// Logger receives one line per filter-drop / warn event. Nil
 	// silences all diagnostics.
 	Logger EnumerationLogger
+
+	// IncludeUsers and ExcludeUsers filter profiles by account name
+	// (user or DOMAIN\user), SID, or profile directory name, compared
+	// case-insensitively. An empty IncludeUsers admits every profile. The
+	// standalone profile maps enterprise.enrollment onto these.
+	IncludeUsers []string
+	ExcludeUsers []string
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -206,6 +213,10 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		if _, skip := exclude[canonicalManifestTargetSID(profile.SID)]; skip {
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
+			continue
+		}
+		if !windowsProfileAdmittedByEnrollment(profile, opts.IncludeUsers, opts.ExcludeUsers) {
+			logfSafely(opts.Logger, profile.SID, "excluded by enterprise.enrollment")
 			continue
 		}
 		for _, conn := range connectors {
@@ -492,6 +503,46 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		),
 	)
 	return true
+}
+
+// windowsProfileAdmittedByEnrollment applies enterprise.enrollment's user
+// filters to one profile. Exclusion wins over inclusion.
+func windowsProfileAdmittedByEnrollment(profile windowsUserProfile, include, exclude []string) bool {
+	if len(include) == 0 && len(exclude) == 0 {
+		return true
+	}
+	names := windowsProfileEnrollmentNames(profile)
+	matches := func(list []string) bool {
+		for _, entry := range list {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			for _, name := range names {
+				if strings.EqualFold(entry, name) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if matches(exclude) {
+		return false
+	}
+	return len(include) == 0 || matches(include)
+}
+
+func windowsProfileEnrollmentNames(profile windowsUserProfile) []string {
+	names := []string{profile.SID, filepath.Base(filepath.Clean(profile.Home))}
+	if sid, err := windows.StringToSid(profile.SID); err == nil {
+		if account, domain, _, err := sid.LookupAccount(""); err == nil && account != "" {
+			names = append(names, account)
+			if domain != "" {
+				names = append(names, domain+`\`+account)
+			}
+		}
+	}
+	return names
 }
 
 func previousManifestKey(sid, connector string) string {

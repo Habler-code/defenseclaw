@@ -136,6 +136,17 @@ func executeEnterpriseSetup(
 		if runErr != nil && !opts.JSON {
 			destination = stderr
 		}
+		if opts.Standalone && opts.JSON {
+			// The lifecycle child's stderr is merged into this capture. An MDM
+			// parses stdout, so only the lifecycle's JSON result goes there.
+			document, diagnostics := splitStandaloneLifecycleJSON(output)
+			if len(diagnostics) != 0 {
+				if _, err := stderr.Write(diagnostics); err != nil {
+					return 0, fmt.Errorf("publish enterprise lifecycle diagnostics: %w", err)
+				}
+			}
+			output = document
+		}
 		if _, err := destination.Write(output); err != nil {
 			return 0, fmt.Errorf("publish enterprise lifecycle output: %w", err)
 		}

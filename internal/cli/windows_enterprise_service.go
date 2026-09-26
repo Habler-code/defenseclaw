@@ -707,7 +707,10 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			return errors.New("--mode must be observe or action")
 		}
 		opts.mode = mode
-		if action != "install" && action != "upgrade" && action != "repair" {
+		// Standalone ensure installs from the same shorthand when the host has
+		// no deployment yet, which is how an MDM first reaches a clean device.
+		standaloneEnsure := action == "ensure" && windowsEnterpriseStandalone(opts)
+		if action != "install" && action != "upgrade" && action != "repair" && !standaloneEnsure {
 			return fmt.Errorf(
 				"--mode / --connector are valid only with install, upgrade, or repair (got: %s)",
 				action,

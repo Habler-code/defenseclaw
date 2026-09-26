@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -1691,5 +1692,27 @@ func TestSetTemporaryEnvironmentRestoresUnsetAndExistingValues(t *testing.T) {
 	}
 	if _, ok := os.LookupEnv(unset); ok {
 		t.Fatal("previously unset environment variable remained set")
+	}
+}
+
+func TestWindowsEnterpriseEnsureAcceptsShorthandOnlyForStandalone(t *testing.T) {
+	standalone := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "claudecode,codex", resolvedProfile: managed.ProfileStandalone,
+	}
+	if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "ensure", standalone); err != nil {
+		t.Fatalf("standalone ensure with the QA shorthand: %v", err)
+	}
+	secureClient := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "codex", resolvedProfile: managed.ProfileSecureClient,
+	}
+	err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "ensure", secureClient)
+	if err == nil || !strings.Contains(err.Error(), "only with install, upgrade, or repair") {
+		t.Fatalf("Secure Client ensure with the QA shorthand error = %v, want the install/upgrade/repair refusal", err)
+	}
+	status := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "codex", resolvedProfile: managed.ProfileStandalone,
+	}
+	if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "status", status); err == nil {
+		t.Fatal("standalone status accepted the QA shorthand")
 	}
 }

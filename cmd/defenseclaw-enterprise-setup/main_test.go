@@ -336,3 +336,19 @@ func TestRunEnterpriseSetupHelpDoesNotInvokePlatform(t *testing.T) {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
+
+func TestSplitStandaloneLifecycleJSONKeepsOnlyTheResultOnStdout(t *testing.T) {
+	output := []byte("WARNING: sonic/ast only supports go1.17~1.26\r\n{\"schema_version\":2,\"ok\":true}\r\n")
+	document, diagnostics := splitStandaloneLifecycleJSON(output)
+	if string(document) != "{\"schema_version\":2,\"ok\":true}\n" {
+		t.Fatalf("document = %q", document)
+	}
+	if string(diagnostics) != "WARNING: sonic/ast only supports go1.17~1.26\n" {
+		t.Fatalf("diagnostics = %q", diagnostics)
+	}
+	plain := []byte("not json at all\n")
+	document, diagnostics = splitStandaloneLifecycleJSON(plain)
+	if string(document) != string(plain) || diagnostics != nil {
+		t.Fatalf("plain output = %q / %q, want it unchanged", document, diagnostics)
+	}
+}

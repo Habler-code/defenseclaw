@@ -225,10 +225,10 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	}
 
 	logf := enumerationLoggerForStderr(stderr)
-	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enterprisehooks.EnumerateOptions{
+	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		Logger:               logf,
-	})
+	}))
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: walk profiles: %w", err)
 	}
@@ -275,10 +275,10 @@ func runEnterpriseWindowsEnumerateAuditCycle(
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: authenticate committed manifest: %w", err)
 	}
-	discovered, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, enterprisehooks.EnumerateOptions{
+	discovered, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		Logger:               enumerationAuditLoggerForStderr(stderr),
-	})
+	}))
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: audit profiles: %w", err)
 	}
@@ -501,4 +501,18 @@ func isEnterpriseWindowsEnumerateConfigMissing(err error) bool {
 	return strings.Contains(msg, "no such file or directory") ||
 		strings.Contains(msg, "cannot find the file specified") ||
 		strings.Contains(msg, "The system cannot find the file specified")
+}
+
+// standaloneWindowsEnumerateOptions adds the standalone profile's enrollment
+// filters to an enumeration: enterprise.enrollment's include, exclude and
+// exempt users select the profiles. Secure Client options are returned
+// unchanged.
+func standaloneWindowsEnumerateOptions(cfg *config.Config, opts enterprisehooks.EnumerateOptions) enterprisehooks.EnumerateOptions {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return opts
+	}
+	enrollment := cfg.Enterprise.Enrollment
+	opts.IncludeUsers = append([]string(nil), enrollment.IncludeUsers...)
+	opts.ExcludeUsers = append(append([]string(nil), enrollment.ExcludeUsers...), enrollment.ExemptUsers...)
+	return opts
 }

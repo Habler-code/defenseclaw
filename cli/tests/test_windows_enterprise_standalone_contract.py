@@ -176,3 +176,92 @@ def test_hash_pinned_manifest_contract_is_shared() -> None:
     assert "`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`" in go
     setup = _text(ROOT / "cmd" / "defenseclaw-enterprise-setup" / "platform_windows.go")
     assert '"schema_version": 1, "files": files' in setup
+
+
+def test_standalone_fresh_install_rollback_removes_its_sensor_helper() -> None:
+    # Transaction snapshots do not record the sensor helper, which a fresh
+    # install registers first. A failed standalone first install must remove
+    # that owned service before the service-absence gate, or root cleanup
+    # refuses and every later ensure/uninstall is wedged.
+    module = _text(MODULE)
+    body = module[
+        module.index("function Publish-DefenseClawInstallRollbackIntent") : module.index(
+            "function Assert-DefenseClawInstallRollbackRootDescriptor"
+        )
+    ]
+    no_authority = body.index("if (-not $createdAny -and $null -eq $existing)")
+    gate = body.index("if (Test-DefenseClawStandaloneProfile) {", no_authority)
+    owned = body.index("Assert-DefenseClawStandaloneSensorHelperOwned `", gate)
+    remove = body.index("Remove-DefenseClawService -Name $sensorHelperName", owned)
+    absence = body.index("Get-DefenseClawManagedServiceNames `", remove)
+    assert no_authority < gate < owned < remove < absence
+    helper = module[
+        module.index("function Assert-DefenseClawStandaloneSensorHelperOwned") : module.index(
+            "function Restore-DefenseClawTransaction {"
+        )
+    ]
+    assert "--managed-enterprise(?: --home-dirs" in helper
+    assert "'LocalSystem'" in helper
+    assert "refusing to manage foreign service" in helper
+
+
+def test_standalone_rollback_quiesces_the_sensor_helper_before_restoring_files() -> None:
+    module = _text(MODULE)
+    start = module.index("function Restore-DefenseClawTransaction {")
+    body = module[start : module.index("\nfunction ", start + 10)]
+    gate = body.index("if (Test-DefenseClawStandaloneProfile) {")
+    owned = body.index("Assert-DefenseClawStandaloneSensorHelperOwned `", gate)
+    stop = body.index("Stop-DefenseClawService -Name $standaloneSensorHelper", owned)
+    ready = body.index("Assert-DefenseClawRestoredTransactionReadyForActivation", stop)
+    restart = body.index("Start-DefenseClawService -Name $standaloneSensorHelper", ready)
+    services_restart = body.index("Start-DefenseClawTransactionServices `", restart)
+    boot_policy = body.index("-Name $standaloneSensorHelper `", services_restart)
+    assert gate < owned < stop < ready < restart < services_restart < boot_policy
+
+
+def test_standalone_runtime_cleanup_scope_owns_its_sensor_helper() -> None:
+    module = _text(MODULE)
+    body = module[
+        module.index("function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive") : module.index(
+            "function ", module.index("function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive") + 10
+        )
+    ]
+    gate = body.index("if (Test-DefenseClawStandaloneProfile) {")
+    helper = body.index("Get-DefenseClawSensorHelperServiceName `", gate)
+    services = body.index("$allServices = @(Microsoft.PowerShell.Management\\Get-Service `")
+    assert gate < helper < services
+
+
+def test_runtime_cleanup_scope_reads_no_unset_root_variable() -> None:
+    # The per-profile root refactor removed $vendorRoot from this function
+    # but left one read; under StrictMode every rollback that reached it
+    # failed with "The variable '$vendorRoot' cannot be retrieved".
+    module = _text(MODULE)
+    start = module.index("function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive")
+    body = module[start : module.index("\nfunction ", start + 10)]
+    assert "$vendorRoot" not in body
+    assert "(Get-DefenseClawProfileRoots).CertificationStateBase" in body
+
+
+def test_recorded_artifact_hashes_do_not_require_a_standalone_broker() -> None:
+    # Standalone deployments record no broker hash. Requiring one made every
+    # standalone upgrade (and ensure on config drift) fail before mutation.
+    module = _text(MODULE)
+    start = module.index("function Assert-DefenseClawRecordedArtifactHashes")
+    body = module[start : module.index("\nfunction ", start + 10)]
+    gate = body.index("Test-DefenseClawLayoutBrokerEnabled -Layout $Layout")
+    loop = body.index("foreach ($required in $requiredArtifacts)", gate)
+    assert gate < loop
+
+
+def test_standalone_guardian_state_identity_reads_the_runtime_directory() -> None:
+    # The guardian publishes hook_guardian_state.json under DEFENSECLAW_HOME
+    # (the runtime directory). Looking under StateRoot made the rollback
+    # recovery lane reject every fresh guardian report as "not fresh".
+    module = _text(MODULE)
+    start = module.index("function Get-DefenseClawGuardianStateIdentity")
+    body = module[start : module.index("\nfunction ", start + 10)]
+    gate = body.index("if (Test-DefenseClawStandaloneProfile) {")
+    runtime = body.index("$Layout.RuntimeDirectory", gate)
+    join = body.index("hook_guardian_state.json", runtime)
+    assert gate < runtime < join

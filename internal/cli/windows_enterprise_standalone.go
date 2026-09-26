@@ -203,8 +203,41 @@ func runWindowsEnterpriseStandaloneAction(
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
+	if action == "uninstall" && windowsEnterpriseRecoveredFailedInstall(report) {
+		// Uninstall rolled back a failed first install. The host is at the
+		// requested end state, so an MDM must see success, not a retryable
+		// failure that would loop forever.
+		if present, err := windowsEnterpriseStandaloneFootprint(); err == nil && !present {
+			result.Noop = true
+			result.NoopReason = "recovered_failed_install"
+			result.AddWarning("recovered_failed_install", "uninstall rolled back a failed initial install; nothing remains installed")
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
+		}
+	}
 	applyWindowsEnterpriseInstallerReport(result, report, run)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// windowsEnterpriseRecoveredFailedInstall reports whether the lifecycle
+// stopped only because it rolled back a failed initial install, which leaves
+// the host without a deployment rather than broken.
+func windowsEnterpriseRecoveredFailedInstall(report *windowsEnterpriseInstallerReport) bool {
+	if report == nil || report.OK || report.Installed || report.TransactionPending {
+		return false
+	}
+	messages := append([]string{}, report.Errors...)
+	if strings.TrimSpace(report.Error) != "" {
+		messages = append(messages, report.Error)
+	}
+	if len(messages) == 0 {
+		return false
+	}
+	for _, message := range messages {
+		if !strings.Contains(message, "recovered a failed initial install") {
+			return false
+		}
+	}
+	return true
 }
 
 func runWindowsEnterpriseStandaloneInstaller(
@@ -665,6 +698,34 @@ func runWindowsEnterpriseStandaloneEnsure(
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
+	if plan.Action == "repair" && plan.Reason == "transaction_pending" && windowsEnterpriseRecoveredFailedInstall(report) {
+		// The pending transaction was a failed first install; repair rolled it
+		// back to an empty host. Converge by installing, exactly as ensure
+		// does on a clean device.
+		result.AddWarning("recovered_failed_install", "ensure rolled back a failed initial install before installing")
+		installPlan, planErr := planWindowsEnterpriseEnsure(&windowsEnterpriseInstallerReport{}, opts, script)
+		if planErr != nil {
+			result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		plan = installPlan
+		actionOpts = *opts
+		actionOpts.jsonOutput = true
+		if strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
+			manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, cmd, actionOpts.configPath)
+			if err != nil {
+				result.AddError("manifest_staging_failed", err.Error())
+				return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			}
+			defer cleanup()
+			actionOpts.manifestPath = manifestPath
+		}
+		report, run, err = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
+		if err != nil {
+			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
 	applyWindowsEnterpriseInstallerReport(result, report, run)
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
@@ -940,9 +1001,9 @@ func stageWindowsEnterpriseEnsureManifest(
 		return "", nil, err
 	}
 	cleanup := func() { _ = os.RemoveAll(directory) }
-	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, enterprisehooks.EnumerateOptions{
+	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		Logger: enumerationLoggerForStderr(cmd.ErrOrStderr()),
-	})
+	}))
 	if err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("enumerate local profiles: %w", err)

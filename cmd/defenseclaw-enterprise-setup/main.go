@@ -480,6 +480,31 @@ func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
 	return enterprisePayload{Manifest: manifest, Files: files, Required: requiredFiles}, nil
 }
 
+// splitStandaloneLifecycleJSON separates the lifecycle's JSON result from
+// diagnostics that share the combined child output (for example a library
+// warning printed at process start). The result is the last line that is a
+// complete JSON object; everything else is returned as diagnostics. Output
+// without such a line is returned unchanged as the document.
+func splitStandaloneLifecycleJSON(output []byte) (document, diagnostics []byte) {
+	lines := bytes.Split(output, []byte("\n"))
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := bytes.TrimSpace(lines[index])
+		if len(line) == 0 || line[0] != '{' || !json.Valid(line) {
+			continue
+		}
+		var rest bytes.Buffer
+		for other, text := range lines {
+			if other == index || len(bytes.TrimSpace(text)) == 0 {
+				continue
+			}
+			rest.Write(bytes.TrimRight(text, "\r"))
+			rest.WriteByte('\n')
+		}
+		return append(append([]byte{}, line...), '\n'), rest.Bytes()
+	}
+	return output, nil
+}
+
 func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupOptions, err error) {
 	if err == nil {
 		return

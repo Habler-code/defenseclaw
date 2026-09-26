@@ -522,3 +522,23 @@ func TestWindowsEnterpriseLifecycleLogRotatesFiveGenerations(t *testing.T) {
 		t.Fatalf("last result %q: %v", body, err)
 	}
 }
+
+func TestWindowsEnterpriseRecoveredFailedInstallIsRecognizedOnlyAlone(t *testing.T) {
+	recovered := &windowsEnterpriseInstallerReport{
+		Error: "Uninstall recovered a failed initial install; run Install to create a deployment",
+	}
+	if !windowsEnterpriseRecoveredFailedInstall(recovered) {
+		t.Fatal("the rolled-back first install was not recognized")
+	}
+	for name, report := range map[string]*windowsEnterpriseInstallerReport{
+		"ok":        {OK: true},
+		"installed": {Installed: true, Error: recovered.Error},
+		"pending":   {TransactionPending: true, Error: recovered.Error},
+		"other":     {Errors: []string{recovered.Error, "service DefenseClawGateway failed to stop"}},
+		"empty":     {},
+	} {
+		if windowsEnterpriseRecoveredFailedInstall(report) {
+			t.Fatalf("%s report was treated as a recovered first install", name)
+		}
+	}
+}
