@@ -368,7 +368,12 @@ if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
     for candidate in "${DEFENSECLAW_APP_PATH:-}" /Applications/DefenseClawMac.app "${HOME}/Applications/DefenseClawMac.app"; do
         [[ -n "${candidate}" && -d "${candidate}" ]] || continue
         if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${candidate}/Contents/Info.plist" 2>/dev/null)" == com.cisco.defenseclaw.macos ]]; then
-            APP_PATH="${candidate}"; break
+            if [[ -w "${candidate}" && -w "$(dirname "${candidate}")" ]]; then
+                APP_PATH="${candidate}"
+            else
+                warn "${candidate} is not writable by $(id -un); leaving the app as it is (update it from the DMG)"
+            fi
+            break
         fi
     done
 fi
