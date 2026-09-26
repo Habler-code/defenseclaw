@@ -147,6 +147,15 @@ $script:AclSelfHealMarker = 'managed_acl_self_heal'
 $script:SchemaVersion = 1
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
+# The signed AVC 0.8.6 hook contract starts at Claude Code 2.1.152. Unlike
+# main, this release must keep its recorded minimum at that version.
+$script:ClaudeMinimumClientVersion = '2.1.152'
+# Claude Code honors "managedSourcesBehavior": "merge" from this release
+# (connector.ClaudeCodeManagedSourcesMergeMinimumVersion, which a contract test
+# pins this to). An older approved client ignores the key and loads only an
+# outranking HKLM policy, so under an HKLM merge policy that does not carry the
+# DefenseClaw hooks this is the effective approved-client floor.
+$script:ClaudeManagedSourcesMergeMinimumClientVersion = '2.1.242'
 $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
 $script:ProgramFiles = [string]$trustedMachineRoots.ProgramFiles
 $script:ProgramData = [string]$trustedMachineRoots.ProgramData
@@ -7080,6 +7089,10 @@ function Get-DefenseClawLayout {
         CoreHardeningCertification = [bool]$CoreHardeningCertification
         AgentApplicationControlAttested = [bool]$AgentApplicationControlAttested
         ClaudeEffectivePolicyVerified = $false
+        # Non-empty when protected evidence records a verified Claude policy
+        # that is not the currently installed Claude policy identity.
+        # The Claude floor the application-control evidence was attested at.
+        AgentApplicationControlClaudeMinimumVersion = $script:ClaudeMinimumClientVersion
         ClaudeTargetEnabled = $false
         CodexTargetEnabled = $false
         CursorTargetEnabled = $false
@@ -8936,6 +8949,70 @@ function Initialize-DefenseClawCodexRequirementsAclBackup {
     [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
 }
 
+function Test-DefenseClawClaudeMinimumClientVersion {
+    param([AllowNull()]$Value)
+    $text = [string]$Value
+    return [bool](
+        $text -ceq $script:ClaudeMinimumClientVersion -or
+        $text -ceq $script:ClaudeManagedSourcesMergeMinimumClientVersion
+    )
+}
+
+function Test-DefenseClawClaudeVersionAtLeast {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory)][string]$Minimum
+    )
+    $parsed = $null
+    $floor = $null
+    if (-not [Version]::TryParse([string]$Value, [ref]$parsed) -or
+        -not [Version]::TryParse($Minimum, [ref]$floor)) {
+        return $false
+    }
+    return [bool]($parsed -ge $floor)
+}
+
+function Get-DefenseClawClaudeRequiredClientVersion {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # The approved-client floor application control must enforce for the
+    # DefenseClaw Claude hooks to load. An outranking HKLM merge policy raises
+    # it: an older client ignores the merge and applies only that policy.
+    $hklm = Get-DefenseClawClaudeHKLMPolicyState -Layout $Layout
+    if ([bool]$hklm.merge_client_floor_required) {
+        return $script:ClaudeManagedSourcesMergeMinimumClientVersion
+    }
+    return $script:ClaudeMinimumClientVersion
+}
+
+function Set-DefenseClawRequestedAttestations {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$AttestAgentApplicationControl,
+        [switch]$AttestClaudeEffectivePolicy
+    )
+    # Explicit attestations describe the transaction being started. The
+    # lifecycle applies them after reading existing evidence and again after
+    # pending-transaction recovery, which restores the interrupted
+    # transaction's evidence state into the layout.
+    if ($AttestAgentApplicationControl) {
+        if ([bool]$Layout.CoreHardeningCertification) {
+            throw '-AttestAgentApplicationControl is forbidden in core-hardening certification mode'
+        }
+        $Layout.AgentApplicationControlAttested = $true
+        # The administrator attests the floor this host currently requires.
+        # Re-published evidence without a fresh attestation keeps the floor
+        # it recorded.
+        $Layout.AgentApplicationControlClaudeMinimumVersion =
+            Get-DefenseClawClaudeRequiredClientVersion -Layout $Layout
+    }
+    if ($AttestClaudeEffectivePolicy) {
+        if ([bool]$Layout.CoreHardeningCertification) {
+            throw '-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode'
+        }
+        $Layout.ClaudeEffectivePolicyVerified = $true
+    }
+}
+
 function Get-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = [IO.Path]::GetFullPath(
@@ -9006,7 +9083,8 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     if ($null -eq $approvedClient -or
         $approvedClient.Value -isnot [bool] -or
         [bool]$approvedClient.Value -ne [bool]$enforced.Value -or
-        [string]$attestation.minimum_claude_version -cne '2.1.152') {
+        -not (Test-DefenseClawClaudeMinimumClientVersion `
+            -Value $attestation.minimum_claude_version)) {
         throw 'agent application-control evidence has an invalid approved-client result or Claude version floor'
     }
     $claudeEffective = $attestation.PSObject.Properties[
@@ -9091,7 +9169,16 @@ function Write-DefenseClawAgentApplicationControlAttestation {
         agent_application_control_enforced = [bool]$Layout.AgentApplicationControlAttested
         prerequisite = $script:AgentApplicationControlPrerequisite
         approved_agent_clients_enforced = [bool]$Layout.AgentApplicationControlAttested
-        minimum_claude_version = '2.1.152'
+        minimum_claude_version = $(
+            if ([bool]$Layout.AgentApplicationControlAttested -and
+                (Test-DefenseClawClaudeMinimumClientVersion `
+                    -Value $Layout.AgentApplicationControlClaudeMinimumVersion)) {
+                [string]$Layout.AgentApplicationControlClaudeMinimumVersion
+            }
+            else {
+                $script:ClaudeMinimumClientVersion
+            }
+        )
         claude_effective_policy_verified = [bool]$Layout.ClaudeEffectivePolicyVerified
         claude_effective_policy_manifest_sha256 = $claudeManifestHash
         attested_by_sid = [string]$identity.User.Value
@@ -9548,6 +9635,7 @@ function Restore-DefenseClawTransaction {
     $Layout.ClaudeEffectivePolicyVerified = [bool](
         $snapshotClaudeEffective.Value
     )
+    $Layout.AgentApplicationControlClaudeMinimumVersion = $script:ClaudeMinimumClientVersion
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.AgentApplicationControlAttestationPath `
         -PathType Leaf) {
@@ -9561,6 +9649,9 @@ function Restore-DefenseClawTransaction {
             [bool]$Layout.ClaudeEffectivePolicyVerified) {
             throw 'restored Claude effective-policy evidence does not match the transaction snapshot'
         }
+        $Layout.AgentApplicationControlClaudeMinimumVersion = [string](
+            $restoredAttestation.minimum_claude_version
+        )
     }
     $previousServices = @($snapshot.services | Microsoft.PowerShell.Core\Where-Object { [bool]$_.existed })
     if ($previousServices.Count -gt 0) {
@@ -15886,7 +15977,8 @@ function Assert-DefenseClawEnterpriseDeployment {
         $approvedAgentsProperty.Value -isnot [bool] -or
         [bool]$approvedAgentsProperty.Value -ne
             [bool]$applicationControlProperty.Value -or
-        [string]$metadata.claude_minimum_client_version -cne '2.1.152') {
+        -not (Test-DefenseClawClaudeMinimumClientVersion `
+            -Value $metadata.claude_minimum_client_version)) {
         throw 'deployment metadata does not attest approved Claude clients at version 2.1.152 or newer'
     }
     $claudeTargetProperty = $metadata.PSObject.Properties[
@@ -15954,6 +16046,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         }
         $Layout.ClaudeEffectivePolicyVerified = [bool](
             $attestation.claude_effective_policy_verified
+        )
+        $Layout.AgentApplicationControlClaudeMinimumVersion = [string](
+            $attestation.minimum_claude_version
         )
         if ($recordedAttestationHash -cnotmatch '^[0-9a-f]{64}$') {
             throw 'deployment metadata contains an invalid agent application-control attestation SHA-256'
@@ -16706,6 +16801,54 @@ function Test-DefenseClawClaudeHKLMCarriesInstalledHooks {
     return $true
 }
 
+function Get-DefenseClawClaudeMergePendingTargets {
+    param([AllowNull()]$Report)
+    # Guardian rows whose recorded Claude version is below the merge floor.
+    # The version is recorded once, at discovery, and is often the installer's
+    # placeholder, so a listed target may already run a newer client; if it
+    # really is older, it ignores the merge and loads no DefenseClaw hooks.
+    $targets = [Collections.Generic.List[string]]::new()
+    if ($null -eq $Report) {
+        return @()
+    }
+    $rows = $Report.PSObject.Properties['verification']
+    if ($null -eq $rows) {
+        return @()
+    }
+    foreach ($row in @($rows.Value)) {
+        if ($null -eq $row -or $row -isnot [Management.Automation.PSCustomObject]) {
+            continue
+        }
+        $connector = $row.PSObject.Properties['connector']
+        $result = $row.PSObject.Properties['result']
+        if ($null -eq $connector -or [string]$connector.Value -cne 'claudecode' -or
+            $null -eq $result -or $result.Value -isnot [Management.Automation.PSCustomObject]) {
+            continue
+        }
+        $recorded = $result.Value.PSObject.Properties['agent_version']
+        $version = ''
+        if ($null -ne $recorded -and
+            [string]$recorded.Value -match '(\d+)\.(\d+)\.(\d+)') {
+            $version = $Matches[0]
+        }
+        if (Test-DefenseClawClaudeVersionAtLeast `
+            -Value $version `
+            -Minimum $script:ClaudeManagedSourcesMergeMinimumClientVersion) {
+            continue
+        }
+        $sid = $row.PSObject.Properties['sid']
+        $label = if ($null -ne $sid -and -not [string]::IsNullOrWhiteSpace([string]$sid.Value)) {
+            "claudecode@$([string]$sid.Value)"
+        }
+        else {
+            'claudecode'
+        }
+        $shown = if ([string]::IsNullOrEmpty($version)) { 'unknown' } else { $version }
+        $targets.Add("$label (recorded $shown)")
+    }
+    return @($targets)
+}
+
 function Get-DefenseClawClaudeHKLMPolicyState {
     param([Parameter(Mandatory)][hashtable]$Layout)
     # Read-only Status view of an MDM/GPO Claude policy. It outranks the
@@ -16713,14 +16856,18 @@ function Get-DefenseClawClaudeHKLMPolicyState {
     # targets only when it merges managed sources or carries the DefenseClaw
     # hook matrix; this reports the same state with its fix and never throws.
     $policyName = 'HKLM\SOFTWARE\Policies\ClaudeCode\Settings'
+    $mergeFloor = $script:ClaudeManagedSourcesMergeMinimumClientVersion
     $remedy = (
-        'set "managedSourcesBehavior": "merge" in it (Claude Code 2.1.242 ' +
+        "set `"managedSourcesBehavior`": `"merge`" in it (Claude Code $mergeFloor " +
         'or newer), or add the hooks printed by defenseclaw-gateway ' +
         'enterprise windows export-claude-policy to it'
     )
     $state = [ordered]@{
         shadowed = $false
         managed_sources_merge = $false
+        # True when the DefenseClaw hooks load only on a merge-honoring
+        # client, which makes the merge floor the approved-client floor.
+        merge_client_floor_required = $false
         detail = $null
     }
     $base = $null
@@ -16760,7 +16907,21 @@ function Get-DefenseClawClaudeHKLMPolicyState {
             }
             elseif ($null -ne $behavior -and [string]$behavior.Value -ceq 'merge') {
                 $state.managed_sources_merge = $true
-                $state.detail = "$policyName requests managedSourcesBehavior merge; Claude Code clients older than 2.1.242 ignore it and load only that policy"
+                # A merge policy that also carries the DefenseClaw hooks is
+                # effective on every client, because first-wins selects it.
+                $carries = $false
+                try {
+                    $carries = [bool](Test-DefenseClawClaudeHKLMCarriesInstalledHooks `
+                        -Settings $settings `
+                        -Layout $Layout)
+                }
+                catch {
+                    $carries = $false
+                }
+                if (-not $carries) {
+                    $state.merge_client_floor_required = $true
+                    $state.detail = "$policyName requests managedSourcesBehavior merge; Claude Code clients older than $mergeFloor ignore it and load only that policy, so approved-client application control must require Claude Code $mergeFloor or newer"
+                }
             }
             elseif (-not (Test-DefenseClawClaudeHKLMCarriesInstalledHooks `
                 -Settings $settings `
@@ -16890,6 +17051,7 @@ function Get-DefenseClawLifecycleStatus {
         $Layout.ClaudeEffectivePolicyVerified
     )
     $generation = $null
+    $guardianReport = $null
     if ($installed -and -not $pending) {
         try {
             $gatewayReady = Test-DefenseClawGatewayReady `
@@ -16977,12 +17139,38 @@ function Get-DefenseClawLifecycleStatus {
     $claudeHKLMPolicy = [pscustomobject]@{
         shadowed = $false
         managed_sources_merge = $false
+        merge_client_floor_required = $false
         detail = $null
     }
+    $claudeMinimumClientVersion = $script:ClaudeMinimumClientVersion
+    $claudeMergePendingTargets = @()
     if ($installed -and $claudeTargetEnabled) {
         $claudeHKLMPolicy = Get-DefenseClawClaudeHKLMPolicyState -Layout $Layout
         if ([bool]$claudeHKLMPolicy.shadowed) {
             $claudeEffectivePolicyVerified = $false
+        }
+        elseif ([bool]$claudeHKLMPolicy.merge_client_floor_required) {
+            # Under merge an approved client older than the merge floor loads
+            # only the HKLM policy, with no DefenseClaw hooks. The recorded
+            # target versions cannot rule that out; only application control
+            # attested at the merge floor can.
+            $claudeMinimumClientVersion = $script:ClaudeManagedSourcesMergeMinimumClientVersion
+            $claudeMergePendingTargets = @(
+                Get-DefenseClawClaudeMergePendingTargets -Report $guardianReport
+            )
+            if (-not ([bool]$Layout.AgentApplicationControlAttested -and
+                (Test-DefenseClawClaudeVersionAtLeast `
+                    -Value $Layout.AgentApplicationControlClaudeMinimumVersion `
+                    -Minimum $claudeMinimumClientVersion))) {
+                $claudeEffectivePolicyVerified = $false
+                $claudeHKLMPolicy.detail = (
+                    "$($claudeHKLMPolicy.detail); application control is not " +
+                    "attested at that floor, so an older approved client runs " +
+                    'without the DefenseClaw hooks: enforce Claude Code ' +
+                    "$claudeMinimumClientVersion or newer in WDAC/AppLocker, " +
+                    'then run Repair -AttestAgentApplicationControl'
+                )
+            }
         }
     }
     # Cursor uses the same protected Guardian/runtime readiness lane but does
@@ -17026,12 +17214,21 @@ function Get-DefenseClawLifecycleStatus {
         cursor_target_enabled = [bool]$cursorTargetEnabled
         claude_target_enabled = [bool]$claudeTargetEnabled
         claude_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
-        claude_minimum_client_version = '2.1.152'
+        claude_minimum_client_version = $claudeMinimumClientVersion
+        agent_application_control_claude_minimum_version = $(
+            if ([bool]$Layout.AgentApplicationControlAttested) {
+                [string]$Layout.AgentApplicationControlClaudeMinimumVersion
+            }
+            else {
+                $null
+            }
+        )
         approved_agent_clients_enforced = [bool]$Layout.AgentApplicationControlAttested
         claude_effective_policy_verified = [bool]$claudeEffectivePolicyVerified
         claude_policy_shadowed_by_hklm = [bool]$claudeHKLMPolicy.shadowed
         claude_policy_hklm_managed_sources_merge = [bool]$claudeHKLMPolicy.managed_sources_merge
         claude_policy_hklm_detail = $claudeHKLMPolicy.detail
+        claude_policy_hklm_merge_pending_targets = @($claudeMergePendingTargets)
         security_complete = [bool](
             $healthy -and
             $externalSecuritySatisfied
@@ -22738,19 +22935,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         $layout.ClaudeEffectivePolicyVerified = [bool](
             $existingApplicationControlAttestation.claude_effective_policy_verified
         )
+        $layout.AgentApplicationControlClaudeMinimumVersion = [string](
+            $existingApplicationControlAttestation.minimum_claude_version
+        )
     }
-    if ($AttestAgentApplicationControl) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestAgentApplicationControl is forbidden in core-hardening certification mode'
-        }
-        $layout.AgentApplicationControlAttested = $true
-    }
-    if ($AttestClaudeEffectivePolicy) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode'
-        }
-        $layout.ClaudeEffectivePolicyVerified = $true
-    }
+    Set-DefenseClawRequestedAttestations `
+        -Layout $layout `
+        -AttestAgentApplicationControl:$AttestAgentApplicationControl `
+        -AttestClaudeEffectivePolicy:$AttestClaudeEffectivePolicy
     if ($Action -eq 'Status') {
         Assert-DefenseClawLayoutVolumeIdentity `
             -Layout $layout `
@@ -23021,6 +23213,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -NativeCleanupSource $nativeCleanupSource `
                 -SelfUninstallCallerPID $SelfUninstallCallerPID
         }
+        # Recovery restored the interrupted transaction's evidence. Apply this
+        # action's explicit attestation and its currently required Claude floor.
+        Set-DefenseClawRequestedAttestations `
+            -Layout $layout `
+            -AttestAgentApplicationControl:$AttestAgentApplicationControl `
+            -AttestClaudeEffectivePolicy:$AttestClaudeEffectivePolicy
         return Invoke-DefenseClawInstallLikeLifecycle `
             -Action $Action `
             -Layout $layout `
