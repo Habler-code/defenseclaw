@@ -182,9 +182,17 @@ def test_fixed_managed_ipc_path_is_provisioned_for_the_exact_gateway_sid() -> No
         "function Initialize-DefenseClawManagedIPCDirectory",
         "function Set-DefenseClawManagedAcls",
     )
-    assert "'Cisco Secure Client'" in provisioner
-    assert "'DefenseClaw'" in provisioner
-    assert "'ipc'" in provisioner
+    # The expected directory is the active profile's ManagedIPCDirectory:
+    # Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc for Secure
+    # Client (the AVC GUI contract), Program Files\Cisco\DefenseClaw\ipc for
+    # standalone.
+    assert "(Get-DefenseClawProfileRoots).ManagedIPCDirectory" in provisioner
+    roots = source[
+        source.index("function Get-DefenseClawProfileRoots {") :
+        source.index("function Resolve-DefenseClawProfileFromLifecycleDirectory {")
+    ]
+    assert "'Cisco\\Cisco Secure Client'" in roots
+    assert '"$vendor\\DefenseClaw\\ipc"' in roots
     assert "Get-DefenseClawServiceSID" in provisioner
     assert "Assert-DefenseClawCanonicalVolumePath" in provisioner
     assert "Assert-DefenseClawNoReparsePath" in provisioner

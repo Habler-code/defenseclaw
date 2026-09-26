@@ -86,6 +86,17 @@ type windowsEnterpriseLifecycleOptions struct {
 	connector       string
 	jsonOutput      bool
 	providerLibrary string
+	// profile selects the enterprise profile (secure_client or
+	// standalone). Empty resolves from the supplied config, then the
+	// profile this host records, then Secure Client; resolvedProfile holds
+	// the result. The trust, signer, and version options apply only to
+	// the standalone profile.
+	profile         string
+	resolvedProfile string
+	trustMode       string
+	payloadManifest string
+	allowedSigners  []string
+	productVersion  string
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -132,6 +143,9 @@ type windowsServiceConfigValidation struct {
 	DeploymentMode string `json:"deployment_mode"`
 	APIBind        string `json:"api_bind"`
 	GuardrailBind  string `json:"guardrail_bind,omitempty"`
+	// Profile is reported only for the standalone profile so the Secure
+	// Client report keeps its original shape.
+	Profile string `json:"profile,omitempty"`
 }
 
 var (
@@ -144,6 +158,7 @@ var (
 	windowsEnterpriseProgramDataResolver     = trustedWindowsEnterpriseProgramData
 	windowsEnterpriseMachineRootsResolver    = resolveWindowsEnterpriseMachineRoots
 	windowsEnterpriseProviderLibraryResolver = managed.DiscoverCMIDLibrary
+	windowsEnterpriseStandaloneHostValidator = validateWindowsEnterpriseStandaloneHost
 )
 
 type windowsEnterprisePowerShellTempOps struct {
@@ -172,7 +187,7 @@ daemon unless an administrator explicitly invokes a lifecycle action.`,
 }
 
 func init() {
-	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"} {
+	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall", "ensure"} {
 		enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseLifecycleCommand(action))
 	}
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
@@ -232,6 +247,16 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.StringVar(&opts.connector, "connector", "",
 		"QA shorthand: comma-separated connector list (paired with --mode)")
 	flags.BoolVar(&opts.jsonOutput, "json", false, "emit machine-readable JSON")
+	flags.StringVar(&opts.profile, "profile", "",
+		"enterprise profile: secure_client or standalone (default: the supplied config's enterprise.profile, then the installed profile, then secure_client)")
+	flags.StringVar(&opts.trustMode, "trust-mode", "",
+		"standalone payload trust: authenticode (default) or hash_pinned")
+	flags.StringVar(&opts.payloadManifest, "payload-manifest", "",
+		"standalone hash_pinned trust anchor: administrator-owned JSON of payload SHA-256 digests")
+	flags.StringArrayVar(&opts.allowedSigners, "allowed-signer", nil,
+		"standalone: SHA-256 thumbprint of an accepted Authenticode signer certificate (repeatable)")
+	flags.StringVar(&opts.productVersion, "product-version", "",
+		"standalone: version recorded for this deployment (default: this CLI's version)")
 	return cmd
 }
 
@@ -251,6 +276,8 @@ func windowsEnterpriseLifecycleSummary(action string) string {
 		return "Verify files, DACLs, service policy, mode pin, and readiness"
 	case "uninstall":
 		return "Remove enterprise services while preserving state by default"
+	case "ensure":
+		return "Converge a standalone deployment: install, upgrade, repair, or no-op"
 	default:
 		return "Manage Windows enterprise services"
 	}
@@ -274,17 +301,34 @@ func runWindowsEnterpriseLifecycle(
 	if opts == nil {
 		return failPreflight(errors.New("Windows enterprise lifecycle options are unavailable"))
 	}
-	if opts.purge && action != "uninstall" {
-		return failPreflight(errors.New("--purge is valid only with enterprise windows uninstall"))
+	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
+		if windowsEnterpriseStandaloneRequested(opts) {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
+		return failPreflight(err)
 	}
-	if opts.noStart && action != "install" && action != "upgrade" && action != "repair" {
-		return failPreflight(errors.New("--no-start is valid only with install, upgrade, or repair"))
+	if windowsEnterpriseStandalone(opts) {
+		failPreflight = func(err error) error {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
+		if err := windowsEnterpriseStandaloneHostValidator(); err != nil {
+			return failPreflight(err)
+		}
+	}
+	if opts.purge && action != "uninstall" {
+		return failPreflight(windowsEnterpriseInvalidArguments("--purge is valid only with enterprise windows uninstall"))
+	}
+	if opts.noStart && action != "install" && action != "upgrade" && action != "repair" && action != "ensure" {
+		return failPreflight(windowsEnterpriseInvalidArguments("--no-start is valid only with install, upgrade, repair, or ensure"))
 	}
 	if err := validateWindowsEnterpriseLifecycleSecurityOptions(cmd, action, opts); err != nil {
+		if windowsEnterpriseStandalone(opts) {
+			err = fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
+		}
 		return failPreflight(err)
 	}
 	mutation := action == "install" || action == "upgrade" || action == "repair"
-	if mutation && strings.TrimSpace(opts.brokerBinary) != "" {
+	if mutation && !windowsEnterpriseStandalone(opts) && strings.TrimSpace(opts.brokerBinary) != "" {
 		opts.providerLibrary = strings.TrimSpace(windowsEnterpriseProviderLibraryResolver())
 		if opts.providerLibrary == "" {
 			return failPreflight(errors.New(
@@ -307,6 +351,14 @@ func runWindowsEnterpriseLifecycle(
 		}
 		defer func() { _ = cleanup() }()
 		script = staged
+	}
+	if windowsEnterpriseStandalone(opts) && opts.trustMode == windowsEnterpriseTrustHashPinned {
+		if err := verifyWindowsEnterpriseHashPinnedInstaller(script, opts.payloadManifest); err != nil {
+			return failPreflight(err)
+		}
+	}
+	if action == "ensure" {
+		return runWindowsEnterpriseStandaloneEnsure(ctx, cmd, opts, script)
 	}
 	args := windowsEnterprisePowerShellArgs(action, opts)
 	executable, executableErr := windowsEnterpriseExecutableResolver()
@@ -351,6 +403,9 @@ func runWindowsEnterpriseLifecycle(
 				strconv.FormatUint(uint64(callerPID), 10),
 			)
 		}
+	}
+	if windowsEnterpriseStandalone(opts) {
+		return runWindowsEnterpriseStandaloneAction(ctx, cmd, action, opts, script, args)
 	}
 	return windowsEnterpriseCommandRunner(ctx, cmd, script, args)
 }
@@ -560,7 +615,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	if opts.jsonOutput {
 		args = append(args, "-Json")
 	}
-	return args
+	return append(args, windowsEnterpriseStandalonePowerShellArgs(opts)...)
 }
 
 func validateWindowsEnterpriseLifecycleSecurityOptions(
@@ -759,6 +814,32 @@ func runWindowsEnterprisePowerShell(
 	if err != nil {
 		return err
 	}
+	_, err = runWindowsEnterprisePowerShellEngine(
+		ctx,
+		cmd,
+		powerShell,
+		trustedWindowsEnterpriseEnvironment,
+		script,
+		args,
+		cmd.OutOrStdout(),
+		cmd.ErrOrStderr(),
+	)
+	return err
+}
+
+// runWindowsEnterprisePowerShellEngine runs the installer on one validated
+// engine with a strict environment. stdout receives the installer's output
+// as it is produced; the bounded capture is returned for diagnostics.
+func runWindowsEnterprisePowerShellEngine(
+	ctx context.Context,
+	cmd *cobra.Command,
+	powerShell string,
+	environment func(string) ([]string, error),
+	script string,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+) (*windowsEnterpriseOutputCapture, error) {
 	commandArgs := []string{
 		"-NoLogo",
 		"-NoProfile",
@@ -770,7 +851,7 @@ func runWindowsEnterprisePowerShell(
 	child := exec.CommandContext(ctx, powerShell, commandArgs...)
 	powerShellTemp, cleanupTemp, err := prepareWindowsEnterprisePowerShellTemp()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cleanupPending := true
 	defer func() {
@@ -778,20 +859,20 @@ func runWindowsEnterprisePowerShell(
 			_ = cleanupTemp()
 		}
 	}()
-	childEnvironment, err := trustedWindowsEnterpriseEnvironment(powerShellTemp)
+	childEnvironment, err := environment(powerShellTemp)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	workingDirectory, err := trustedWindowsEnterpriseWorkingDirectory()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	child.Env = childEnvironment
 	child.Dir = workingDirectory
 	child.Stdin = cmd.InOrStdin()
-	var childOutput windowsEnterpriseOutputCapture
-	child.Stdout = io.MultiWriter(cmd.OutOrStdout(), &childOutput)
-	child.Stderr = cmd.ErrOrStderr()
+	childOutput := &windowsEnterpriseOutputCapture{}
+	child.Stdout = io.MultiWriter(stdout, childOutput)
+	child.Stderr = stderr
 	runErr := child.Run()
 	cleanupErr := cleanupTemp()
 	cleanupPending = false
@@ -825,9 +906,9 @@ func runWindowsEnterprisePowerShell(
 		if cleanupErr != nil {
 			failures = append(failures, fmt.Errorf("remove protected Windows enterprise PowerShell temp: %w", cleanupErr))
 		}
-		return errors.Join(failures...)
+		return childOutput, errors.Join(failures...)
 	}
-	return nil
+	return childOutput, nil
 }
 
 func windowsEnterpriseInstallerFailureDiagnostic(
@@ -1325,6 +1406,18 @@ func validateWindowsServiceConfig(
 	}
 	if loaded.Guardrail.Enabled {
 		report.GuardrailBind = loaded.Guardrail.EffectiveHost()
+	}
+	// The lifecycle pins DEFENSECLAW_ENTERPRISE_PROFILE for standalone
+	// helpers exactly as it pins the services; the loader has already
+	// rejected a config that contradicts the pin.
+	if managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+		if !loaded.StandaloneEnterprise() {
+			return windowsServiceConfigValidation{}, fmt.Errorf(
+				"managed config resolves the %q enterprise profile, not %s",
+				loaded.EnterpriseProfile(), managed.ProfileStandalone,
+			)
+		}
+		report.Profile = managed.ProfileStandalone
 	}
 	return report, nil
 }

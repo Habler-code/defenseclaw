@@ -23,7 +23,45 @@ keep ``python -m defenseclaw.main upgrade`` and ``--help`` working.
 
 from __future__ import annotations
 
+import os
+
 import click
+
+# Registered by the Windows standalone enterprise lifecycle. A per-user
+# upgrade beside a machine-wide managed deployment would install a second,
+# unmanaged gateway, so both commands refuse while it exists.
+_MANAGED_MARKER_KEY = r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
+
+
+def _managed_enterprise_profile() -> str | None:
+    """The profile of a registered machine-wide deployment, or None."""
+
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        access = winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _MANAGED_MARKER_KEY, 0, access) as key:
+            try:
+                value, _kind = winreg.QueryValueEx(key, "Profile")
+            except OSError:
+                value = ""
+        return str(value) or "managed"
+    except (ImportError, OSError):
+        return None
+
+
+def _refuse_on_managed_host(command: str) -> None:
+    profile = _managed_enterprise_profile()
+    if profile:
+        click.echo(
+            f"  ✗ A managed DefenseClaw enterprise deployment ({profile}) is installed on this computer; "
+            f"'defenseclaw {command}' is disabled. Use the managed deployment channel.",
+            err=True,
+        )
+        click.echo("    Nothing was changed.", err=True)
+        raise SystemExit(1)
 
 
 @click.command("upgrade")
@@ -31,6 +69,7 @@ import click
 @click.option("--yes", "-y", is_flag=True, help="Do not prompt.")
 def upgrade(target_version: str | None, yes: bool) -> None:
     """Upgrade to the latest release (or X.Y.Z) using that release's installer."""
+    _refuse_on_managed_host("upgrade")
     from defenseclaw.upgrade_shim import run
 
     args = ["upgrade"] + (["--version", target_version] if target_version else []) + (["--yes"] if yes else [])
@@ -41,6 +80,7 @@ def upgrade(target_version: str | None, yes: bool) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Do not prompt.")
 def rollback(yes: bool) -> None:
     """Restore the install that the last upgrade replaced."""
+    _refuse_on_managed_host("rollback")
     from defenseclaw.upgrade_shim import run
 
     raise SystemExit(run(["rollback"] + (["--yes"] if yes else [])))

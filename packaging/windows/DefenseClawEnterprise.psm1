@@ -141,6 +141,100 @@ $script:System32 = [IO.Path]::GetFullPath(
 $script:ScExe = [IO.Path]::Combine($script:System32, 'sc.exe')
 $script:DefenseClawNativeSecurityType = $null
 
+# Enterprise profile. SecureClient is the Cisco Secure Client (AVC)
+# deployment and the only profile a caller gets without asking: every root,
+# service, and environment value below is byte-identical to the historical
+# layout for it. Standalone is deployable by any MDM: vendor-neutral roots,
+# no CMID credential broker, and the local policy engine decides. The
+# lifecycle entry point sets the profile once per process before it
+# resolves a layout; nothing else writes it.
+$script:DefenseClawEnterpriseProfile = 'SecureClient'
+$script:DefenseClawPinnedPayloadSHA256 = @{}
+$script:DefenseClawAllowedSignerSHA256 = @()
+$script:DefenseClawTrustMode = 'Authenticode'
+
+function Set-DefenseClawEnterpriseProfile {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('SecureClient', 'Standalone')]
+        [string]$EnterpriseProfile
+    )
+    $script:DefenseClawEnterpriseProfile = $EnterpriseProfile
+}
+
+function Get-DefenseClawEnterpriseProfile {
+    return [string]$script:DefenseClawEnterpriseProfile
+}
+
+function Test-DefenseClawStandaloneProfile {
+    return [string]$script:DefenseClawEnterpriseProfile -ceq 'Standalone'
+}
+
+function Test-DefenseClawBrokerEnabled {
+    # The CMID credential broker exists only to isolate Secure Client's
+    # machine-credential provider. A standalone deployment has no provider,
+    # so it has no broker service, key, pipe, or gateway dependency.
+    return -not (Test-DefenseClawStandaloneProfile)
+}
+
+function Get-DefenseClawProfileRoots {
+    <#
+        The single source of the per-profile machine roots. Secure Client
+        literals appear only here, in the CMID provider root, and in the
+        certification scope grammar derived from here.
+    #>
+    param(
+        [ValidateSet('SecureClient', 'Standalone')]
+        [string]$EnterpriseProfile = $script:DefenseClawEnterpriseProfile
+    )
+    $vendor = if ($EnterpriseProfile -ceq 'Standalone') {
+        'Cisco'
+    }
+    else {
+        'Cisco\Cisco Secure Client'
+    }
+    return @{
+        Profile = $EnterpriseProfile
+        InstallRoot = [IO.Path]::Combine($script:ProgramFiles, "$vendor\DefenseClaw")
+        StateRoot = [IO.Path]::Combine($script:ProgramData, "$vendor\DefenseClaw")
+        CertificationInstallBase = [IO.Path]::Combine($script:ProgramFiles, "$vendor\DefenseClaw-Cert")
+        CertificationStateBase = [IO.Path]::Combine($script:ProgramData, "$vendor\DefenseClaw-Cert")
+        ManagedIPCDirectory = [IO.Path]::Combine($script:ProgramFiles, "$vendor\DefenseClaw\ipc")
+        LifecycleDirectory = [IO.Path]::Combine($script:ProgramData, "$vendor\DefenseClaw-Lifecycle")
+        BrokerEnabled = ($EnterpriseProfile -cne 'Standalone')
+    }
+}
+
+function Test-DefenseClawLayoutBrokerEnabled {
+    param([Parameter(Mandatory)][object]$Layout)
+    if ($Layout -is [Collections.IDictionary]) {
+        return -not ($Layout.Contains('BrokerEnabled') -and -not [bool]$Layout['BrokerEnabled'])
+    }
+    $property = $Layout.PSObject.Properties['BrokerEnabled']
+    return -not ($null -ne $property -and -not [bool]$property.Value)
+}
+
+function Resolve-DefenseClawProfileFromLifecycleDirectory {
+    <#
+        Maps a protected lifecycle receipt directory back to its profile so
+        a detached finalizer, which has no caller-supplied profile, resolves
+        the same layout the transaction that wrote the receipt used.
+    #>
+    param([Parameter(Mandatory)][string]$Directory)
+    $full = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
+    foreach ($candidate in @('SecureClient', 'Standalone')) {
+        $roots = Get-DefenseClawProfileRoots -EnterpriseProfile $candidate
+        if ([string]::Equals(
+                $full,
+                [string]$roots.LifecycleDirectory,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            return $candidate
+        }
+    }
+    return ''
+}
+
 function Initialize-DefenseClawNativeSecurity {
     if ($null -ne $script:DefenseClawNativeSecurityType) {
         return $script:DefenseClawNativeSecurityType
@@ -2169,6 +2263,14 @@ function Get-DefenseClawManagedServiceNames {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName
     )
+    if (-not (Test-DefenseClawBrokerEnabled)) {
+        return @(
+            $GatewayServiceName,
+            (Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName),
+            $GuardianServiceName,
+            (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName)
+        )
+    }
     return @(
         $GatewayServiceName,
         (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName),
@@ -2267,18 +2369,13 @@ function Assert-DefenseClawUnsignedCertificationScope {
     if ($GuardianServiceName -cne $expectedGuardian) {
         throw "$prefix; guardian service name must be exactly $expectedGuardian"
     }
+    $profileRoots = Get-DefenseClawProfileRoots
     $expectedInstall = [IO.Path]::Combine(
-        $script:ProgramFiles,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw-Cert',
+        [string]$profileRoots.CertificationInstallBase,
         $runID
     ).TrimEnd('\')
     $expectedState = [IO.Path]::Combine(
-        $script:ProgramData,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw-Cert',
+        [string]$profileRoots.CertificationStateBase,
         $runID
     ).TrimEnd('\')
     if (-not [string]::Equals(
@@ -2318,7 +2415,19 @@ function Assert-DefenseClawRegularSource {
     }
     if ($Authenticode) {
         $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $full
-        if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -and -not $AllowUnsigned) {
+        if (Test-DefenseClawStandaloneProfile) {
+            # Standalone admission: a Valid signature (optionally pinned to
+            # allowed signers) or, in HashPinned mode, an exact SHA-256 from
+            # the administrator's payload manifest.
+            if (-not $AllowUnsigned -and
+                -not (Test-DefenseClawStandalonePayloadTrusted -Path $full -Signature $signature)) {
+                throw (
+                    "$Label is not admitted by the standalone payload trust policy " +
+                    "(Authenticode $($signature.Status); trust mode $($script:DefenseClawTrustMode)): $full"
+                )
+            }
+        }
+        elseif ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -and -not $AllowUnsigned) {
             throw "$Label Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for controlled test builds"
         }
     }
@@ -4029,12 +4138,21 @@ function Get-DefenseClawServiceEnvironmentValues {
     )) {
         $values.Add($value)
     }
+    if (Test-DefenseClawStandaloneProfile) {
+        # The profile pin rides next to the deployment-mode pin so neither a
+        # config replacement nor a caller environment can move a standalone
+        # service onto the Secure Client decision stack.
+        $values.Add('DEFENSECLAW_ENTERPRISE_PROFILE=standalone')
+    }
     $brokerValues = @($BrokerPipeName, $BrokerServiceName, $BrokerAuthKeyPath)
     $brokerValueCount = @($brokerValues | Microsoft.PowerShell.Core\Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_)
     }).Count
     if ($brokerValueCount -ne 0 -and $brokerValueCount -ne 3) {
         throw 'credential broker service environment is partially configured'
+    }
+    if ($brokerValueCount -ne 0 -and -not (Test-DefenseClawBrokerEnabled)) {
+        throw 'the standalone profile has no credential broker; broker service environment is not allowed'
     }
     if ($brokerValueCount -eq 3) {
         $values.Add("DEFENSECLAW_CMID_BROKER_PIPE=$BrokerPipeName")
@@ -4087,10 +4205,14 @@ function Set-DefenseClawServiceEnvironment {
 function Get-DefenseClawSensorHelperEnvironmentValues {
     param([Parameter(Mandatory)][string]$GatewayServiceName)
     Assert-DefenseClawServiceName -Name $GatewayServiceName
-    return [string[]]@(
+    $values = @(
         "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME=$GatewayServiceName",
         "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName"
     )
+    if (Test-DefenseClawStandaloneProfile) {
+        $values += 'DEFENSECLAW_ENTERPRISE_PROFILE=standalone'
+    }
+    return [string[]]$values
 }
 
 function Set-DefenseClawSensorHelperServiceEnvironment {
@@ -4475,16 +4597,42 @@ function Assert-DefenseClawServiceRegistryAcl {
     }
 }
 
+function Get-DefenseClawGatewayServiceDependencies {
+    <#
+        The gateway depends on the credential broker (Secure Client only)
+        and on the sensor helper when one is registered, so each socket is
+        listening before the gateway looks for it. Secure Client values are
+        exactly the historical ones.
+    #>
+    param(
+        [string]$BrokerServiceName,
+        [string]$SensorHelperServiceName,
+        [switch]$SensorHelperRegistered
+    )
+    if (Test-DefenseClawBrokerEnabled) {
+        if ($SensorHelperRegistered) {
+            return '{0}/{1}' -f $BrokerServiceName, $SensorHelperServiceName
+        }
+        return $BrokerServiceName
+    }
+    if ($SensorHelperRegistered) {
+        return $SensorHelperServiceName
+    }
+    return '/'
+}
+
 function Set-DefenseClawManagedServices {
     param(
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [Parameter(Mandatory)][string]$BrokerServiceName,
-        [Parameter(Mandatory)][string]$BrokerPath,
-        [Parameter(Mandatory)][string]$BrokerPipeName,
-        [Parameter(Mandatory)][string]$BrokerAuthKeyPath,
-        [Parameter(Mandatory)][string]$ProviderLibraryPath,
-        [Parameter(Mandatory)][string]$BrokerLogPath,
+        # Required for the Secure Client profile; the standalone profile has
+        # no credential broker and passes none of these.
+        [string]$BrokerServiceName,
+        [string]$BrokerPath,
+        [string]$BrokerPipeName,
+        [string]$BrokerAuthKeyPath,
+        [string]$ProviderLibraryPath,
+        [string]$BrokerLogPath,
         [Parameter(Mandatory)][string]$GatewayPath,
         [Parameter(Mandatory)][string]$ManifestPath,
         [Parameter(Mandatory)][string]$RuntimeDirectory,
@@ -4498,17 +4646,46 @@ function Set-DefenseClawManagedServices {
     )
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
-    Assert-DefenseClawServiceName -Name $BrokerServiceName
-    if ($BrokerServiceName -cne (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)) {
-        throw 'credential broker service name does not match the gateway identity'
+    $brokerEnabled = Test-DefenseClawBrokerEnabled
+    if ($brokerEnabled) {
+        foreach ($required in @(
+            @('BrokerServiceName', $BrokerServiceName),
+            @('BrokerPath', $BrokerPath),
+            @('BrokerPipeName', $BrokerPipeName),
+            @('BrokerAuthKeyPath', $BrokerAuthKeyPath),
+            @('ProviderLibraryPath', $ProviderLibraryPath),
+            @('BrokerLogPath', $BrokerLogPath)
+        )) {
+            if ([string]::IsNullOrWhiteSpace([string]$required[1])) {
+                throw "credential broker service configuration requires $($required[0])"
+            }
+        }
+        Assert-DefenseClawServiceName -Name $BrokerServiceName
+        if ($BrokerServiceName -cne (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)) {
+            throw 'credential broker service name does not match the gateway identity'
+        }
+    }
+    else {
+        foreach ($forbidden in @($BrokerServiceName, $BrokerPath, $BrokerPipeName, $BrokerAuthKeyPath, $ProviderLibraryPath, $BrokerLogPath)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$forbidden)) {
+                throw 'the standalone profile has no credential broker service'
+            }
+        }
+        $absentBroker = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+        if (Test-DefenseClawServiceExists -Name $absentBroker) {
+            throw "profile_conflict: credential broker service $absentBroker exists; uninstall the Secure Client deployment before installing the standalone profile"
+        }
     }
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawServiceName -Name $enumeratorServiceName
     $gatewayAccount = "NT SERVICE\$GatewayServiceName"
     $gatewayImage = '"{0}"' -f $GatewayPath
-    $brokerImage = '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"' -f `
-        $BrokerPath, $BrokerServiceName, $GatewayServiceName, $BrokerPipeName, `
-        $BrokerAuthKeyPath, $ProviderLibraryPath, $BrokerLogPath
+    $brokerImage = ''
+    if ($brokerEnabled) {
+        $brokerImage = '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"' -f `
+            $BrokerPath, $BrokerServiceName, $GatewayServiceName, $BrokerPipeName, `
+            $BrokerAuthKeyPath, $ProviderLibraryPath, $BrokerLogPath
+    }
     $guardianImage = '"{0}" enterprise hooks watch --manifest "{1}" --interval 1m' -f $GatewayPath, $ManifestPath
     # Spec 005 D1: third SCM service reuses the gateway binary, invoked
     # with the `enterprise windows enumerate` subcommand. Runs as
@@ -4524,35 +4701,37 @@ function Set-DefenseClawManagedServices {
     # sufficient: SCM may still execute an already queued failure restart.
     $configuredStart = if ($DeferAutomaticStart) { 'disabled' } else { 'auto' }
 
-    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
-        -Name $BrokerServiceName `
-        -ExpectedImage $brokerImage `
-        -AllowArgumentUpgrade
-    if (Test-DefenseClawServiceExists -Name $BrokerServiceName) {
-        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
-            'config', $BrokerServiceName,
-            'binPath=', $brokerImage,
-            'type=', 'own',
-            'start=', $configuredStart,
-            'error=', 'normal',
-            'depend=', '/',
-            'obj=', 'LocalSystem',
-            'DisplayName=', 'DefenseClaw Credential Broker'
-        ))
+    if ($brokerEnabled) {
+        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+            -Name $BrokerServiceName `
+            -ExpectedImage $brokerImage `
+            -AllowArgumentUpgrade
+        if (Test-DefenseClawServiceExists -Name $BrokerServiceName) {
+            [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+                'config', $BrokerServiceName,
+                'binPath=', $brokerImage,
+                'type=', 'own',
+                'start=', $configuredStart,
+                'error=', 'normal',
+                'depend=', '/',
+                'obj=', 'LocalSystem',
+                'DisplayName=', 'DefenseClaw Credential Broker'
+            ))
+        }
+        else {
+            [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+                'create', $BrokerServiceName,
+                'binPath=', $brokerImage,
+                'type=', 'own',
+                'start=', $configuredStart,
+                'error=', 'normal',
+                'depend=', '/',
+                'obj=', 'LocalSystem',
+                'DisplayName=', 'DefenseClaw Credential Broker'
+            ))
+        }
+        Assert-DefenseClawServiceImagePath -Name $BrokerServiceName -ExpectedImage $brokerImage
     }
-    else {
-        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
-            'create', $BrokerServiceName,
-            'binPath=', $brokerImage,
-            'type=', 'own',
-            'start=', $configuredStart,
-            'error=', 'normal',
-            'depend=', '/',
-            'obj=', 'LocalSystem',
-            'DisplayName=', 'DefenseClaw Credential Broker'
-        ))
-    }
-    Assert-DefenseClawServiceImagePath -Name $BrokerServiceName -ExpectedImage $brokerImage
 
     # The AI Discovery sensor helper. Registered only when its binary was
     # laid down, so an install that does not ship it is unchanged rather
@@ -4602,10 +4781,10 @@ function Set-DefenseClawManagedServices {
     # listening before the planes look for it. A gateway that starts first
     # reports the broker unreachable, which is honest but is a coverage gap
     # for no reason when the ordering is ours to choose.
-    $gatewayDependencies = $BrokerServiceName
-    if ($sensorHelperRegistered) {
-        $gatewayDependencies = '{0}/{1}' -f $BrokerServiceName, $sensorHelperServiceName
-    }
+    $gatewayDependencies = Get-DefenseClawGatewayServiceDependencies `
+        -BrokerServiceName $BrokerServiceName `
+        -SensorHelperServiceName $sensorHelperServiceName `
+        -SensorHelperRegistered:$sensorHelperRegistered
 
     if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
@@ -4703,7 +4882,9 @@ function Set-DefenseClawManagedServices {
         -ExpectedImage $enumeratorImage
 
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GatewayServiceName, 'restricted'))
-    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $BrokerServiceName, 'unrestricted'))
+    if ($brokerEnabled) {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $BrokerServiceName, 'unrestricted'))
+    }
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GuardianServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $enumeratorServiceName, 'unrestricted'))
     if ($sensorHelperRegistered) {
@@ -4712,9 +4893,11 @@ function Set-DefenseClawManagedServices {
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $GatewayServiceName, 'SeChangeNotifyPrivilege'
     ))
-    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
-        'privs', $BrokerServiceName, 'SeChangeNotifyPrivilege'
-    ))
+    if ($brokerEnabled) {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+            'privs', $BrokerServiceName, 'SeChangeNotifyPrivilege'
+        ))
+    }
     if ($sensorHelperRegistered) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'privs', $sensorHelperServiceName, 'SeChangeNotifyPrivilege'
@@ -4728,7 +4911,12 @@ function Set-DefenseClawManagedServices {
         'privs', $enumeratorServiceName,
         'SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege'
     ))
-    $hardenedServices = @($BrokerServiceName, $GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)
+    $hardenedServices = if ($brokerEnabled) {
+        @($BrokerServiceName, $GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)
+    }
+    else {
+        @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)
+    }
     if ($sensorHelperRegistered) {
         $hardenedServices += $sensorHelperServiceName
     }
@@ -4750,13 +4938,15 @@ function Set-DefenseClawManagedServices {
         Set-DefenseClawServiceRegistryAcl -Name $service
     }
 
-    Set-DefenseClawCMIDBrokerAuthKey `
-        -Path $BrokerAuthKeyPath `
-        -GatewayServiceName $GatewayServiceName
-    Microsoft.PowerShell.Management\Remove-ItemProperty `
-        -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$BrokerServiceName" `
-        -Name Environment `
-        -ErrorAction SilentlyContinue
+    if ($brokerEnabled) {
+        Set-DefenseClawCMIDBrokerAuthKey `
+            -Path $BrokerAuthKeyPath `
+            -GatewayServiceName $GatewayServiceName
+        Microsoft.PowerShell.Management\Remove-ItemProperty `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$BrokerServiceName" `
+            -Name Environment `
+            -ErrorAction SilentlyContinue
+    }
 
     Set-DefenseClawServiceEnvironment `
         -Name $GatewayServiceName `
@@ -5181,13 +5371,7 @@ function Initialize-DefenseClawManagedIPCDirectory {
     # AVC release-26.8.4 integration: the UI-IPC UDS socket lives under
     # Program Files, not ProgramData. Path parity with the Go resolver
     # in internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02.
-    $expectedIPCDirectory = [IO.Path]::Combine(
-        $script:ProgramFiles,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw',
-        'ipc'
-    ).TrimEnd('\')
+    $expectedIPCDirectory = [string](Get-DefenseClawProfileRoots).ManagedIPCDirectory
     $ipcDirectory = Assert-DefenseClawCanonicalVolumePath `
         -Path ([IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')) `
         -Label 'managed IPC directory'
@@ -5438,13 +5622,7 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
     # AVC release-26.8.4 integration: the UI-IPC UDS socket lives under
     # Program Files, not ProgramData. Path parity with the Go resolver
     # in internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02.
-    $expectedIPCDirectory = [IO.Path]::Combine(
-        $script:ProgramFiles,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw',
-        'ipc'
-    ).TrimEnd('\')
+    $expectedIPCDirectory = [string](Get-DefenseClawProfileRoots).ManagedIPCDirectory
     $ipcDirectory = Assert-DefenseClawCanonicalVolumePath `
         -Path ([IO.Path]::GetFullPath(
             [string]$Layout.ManagedIPCDirectory
@@ -5592,6 +5770,9 @@ function Set-DefenseClawManagedAcls {
         Set-DefenseClawPathAcl -Path $Layout.GatewayPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
     }
     foreach ($path in @($Layout.BrokerPath, $Layout.ACPPath, $Layout.HookPath, $Layout.SensorHelperPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+        if ([string]::IsNullOrWhiteSpace([string]$path)) {
+            continue
+        }
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
             Set-DefenseClawPathAcl -Path $path -Kind InstallFile -GatewayServiceSID $gatewaySID
         }
@@ -5621,7 +5802,9 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
-    Set-DefenseClawPathAcl -Path $Layout.BrokerStateDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        Set-DefenseClawPathAcl -Path $Layout.BrokerStateDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
+    }
     Set-DefenseClawPathAcl -Path $Layout.AuthorizationDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
     foreach ($authorizationFile in @(
         $Layout.AuthorizationLedgerPath,
@@ -5641,14 +5824,17 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.LogDirectory -Kind LogDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GatewayLogDirectory -Kind GatewayLogDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GuardianLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
-    Set-DefenseClawPathAcl -Path $Layout.BrokerLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        Set-DefenseClawPathAcl -Path $Layout.BrokerLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
+    }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayLogPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayLogPath -Kind RuntimeFile -GatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GuardianLogPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GuardianLogPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     }
-    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.BrokerLogPath -PathType Leaf) {
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.BrokerLogPath -PathType Leaf)) {
         Set-DefenseClawPathAcl -Path $Layout.BrokerLogPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) {
@@ -6378,6 +6564,7 @@ function Get-DefenseClawLayout {
     )
     $fullInstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
     $fullStateRoot = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    $profileRoots = Get-DefenseClawProfileRoots
     $certificationRunID = ''
     if ($GatewayServiceName -cmatch
         '^DefenseClawCertGateway_([a-f0-9]{10})$') {
@@ -6387,17 +6574,11 @@ function Get-DefenseClawLayout {
             throw 'certification service names must use the same exact run identifier'
         }
         $expectedInstallRoot = [IO.Path]::Combine(
-            $script:ProgramFiles,
-            'Cisco',
-            'Cisco Secure Client',
-            'DefenseClaw-Cert',
+            [string]$profileRoots.CertificationInstallBase,
             $certificationRunID
         ).TrimEnd('\')
         $expectedStateRoot = [IO.Path]::Combine(
-            $script:ProgramData,
-            'Cisco',
-            'Cisco Secure Client',
-            'DefenseClaw-Cert',
+            [string]$profileRoots.CertificationStateBase,
             $certificationRunID
         ).TrimEnd('\')
         if (-not [string]::Equals(
@@ -6431,18 +6612,8 @@ function Get-DefenseClawLayout {
                 'DefenseClawHookGuardian'
             )
         }
-        $expectedInstallRoot = [IO.Path]::Combine(
-            $script:ProgramFiles,
-            'Cisco',
-            'Cisco Secure Client',
-            'DefenseClaw'
-        ).TrimEnd('\')
-        $expectedStateRoot = [IO.Path]::Combine(
-            $script:ProgramData,
-            'Cisco',
-            'Cisco Secure Client',
-            'DefenseClaw'
-        ).TrimEnd('\')
+        $expectedInstallRoot = [string]$profileRoots.InstallRoot
+        $expectedStateRoot = [string]$profileRoots.StateRoot
         if (-not [string]::Equals(
                 $fullInstallRoot,
                 $expectedInstallRoot,
@@ -6473,17 +6644,10 @@ function Get-DefenseClawLayout {
     # (not ProgramData) as of the AVC release-26.8.4 integration —
     # Cisco Secure Client's Windows GUI dials the socket under Program
     # Files so DefenseClaw follows. Path parity with
-    # internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02.
-    $managedIPCDirectory = [IO.Path]::Combine(
-        $script:ProgramFiles,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw',
-        'ipc'
-    )
-    $lifecycleLockDirectory = Microsoft.PowerShell.Management\Join-Path `
-        $script:ProgramData `
-        'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle'
+    # internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02. The
+    # standalone profile keeps the same shape under its own root.
+    $managedIPCDirectory = [string]$profileRoots.ManagedIPCDirectory
+    $lifecycleLockDirectory = [string]$profileRoots.LifecycleDirectory
     $stateBoundary = $fullStateRoot + '\'
     $lifecycleBoundary = [IO.Path]::GetFullPath(
         $lifecycleLockDirectory
@@ -6527,7 +6691,27 @@ function Get-DefenseClawLayout {
     $runtimeDirectory = Microsoft.PowerShell.Management\Join-Path `
         $StateRoot `
         'runtime'
-    return @{
+    # The standalone profile has no credential broker: every broker path is
+    # empty so any code path that forgets the profile fails loudly instead of
+    # creating a broker directory, key, pipe, or service.
+    $brokerEnabled = [bool]$profileRoots.BrokerEnabled
+    $brokerPath = ''
+    $brokerServiceName = ''
+    $brokerPipeName = ''
+    $brokerAuthKeyPath = ''
+    $brokerLogPath = ''
+    if ($brokerEnabled) {
+        $brokerPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-cmid-broker.exe')
+        $brokerServiceName = (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)
+        $brokerPipeName = ('\\.\pipe\{0}' -f $brokerServiceName)
+        $brokerAuthKeyPath = (Microsoft.PowerShell.Management\Join-Path $brokerStateDirectory 'broker-auth.key')
+        $brokerLogPath = (Microsoft.PowerShell.Management\Join-Path $brokerLogDirectory 'cmid-broker.log')
+    }
+    else {
+        $brokerStateDirectory = ''
+        $brokerLogDirectory = ''
+    }
+    $layout = @{
         InstallRoot = $InstallRoot
         StateRoot = $StateRoot
         StateRootAncestors = (Get-DefenseClawManagedRootAncestors `
@@ -6545,7 +6729,7 @@ function Get-DefenseClawLayout {
         ManagedIPCDirectory = $managedIPCDirectory
         ManagedIPCSocketPath = (Microsoft.PowerShell.Management\Join-Path $managedIPCDirectory 'defenseclaw_ipc.sock')
         BrokerStateDirectory = $brokerStateDirectory
-        BrokerAuthKeyPath = (Microsoft.PowerShell.Management\Join-Path $brokerStateDirectory 'broker-auth.key')
+        BrokerAuthKeyPath = $brokerAuthKeyPath
         GuardianDirectory = $guardianDirectory
         AuthorizationDirectory = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian-state')
         AuthorizationLedgerPath = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian-state\protected_targets.json')
@@ -6554,20 +6738,20 @@ function Get-DefenseClawLayout {
         BrokerLogDirectory = $brokerLogDirectory
         GuardianLogDirectory = $guardianLogDirectory
         GatewayLogPath = (Microsoft.PowerShell.Management\Join-Path $gatewayLogDirectory 'gateway.log')
-        BrokerLogPath = (Microsoft.PowerShell.Management\Join-Path $brokerLogDirectory 'cmid-broker.log')
+        BrokerLogPath = $brokerLogPath
         GuardianLogPath = (Microsoft.PowerShell.Management\Join-Path $guardianLogDirectory 'hook-guardian.log')
         InstallStateDirectory = $installState
         GatewayPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-gateway.exe')
         ACPPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-acp.exe')
-        BrokerPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-cmid-broker.exe')
-        BrokerServiceName = (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)
+        BrokerPath = $brokerPath
+        BrokerServiceName = $brokerServiceName
         SensorHelperPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-sensor-helper.exe')
         SensorHelperServiceName = (Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName)
         # Populated by the profile enumerator, the same eligible-users
         # enumeration that renders targets.yaml. Empty means the helper
         # watches nothing, which it reports rather than guessing at a home.
         SensorHelperHomeDirs = ''
-        BrokerPipeName = ('\\.\pipe\{0}' -f (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName))
+        BrokerPipeName = $brokerPipeName
         ProviderLibraryPath = ''
         HookPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe')
         CLIPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw.exe')
@@ -6620,6 +6804,14 @@ function Get-DefenseClawLayout {
         CursorTargetEnabled = $false
         CertificationCodexHome = [string]$CertificationCodexHome
     }
+    if (-not $brokerEnabled) {
+        # Only standalone layouts carry profile keys, so a Secure Client
+        # layout keeps its historical shape; Test-DefenseClawLayoutBrokerEnabled
+        # treats an absent key as the Secure Client broker deployment.
+        $layout['Profile'] = 'Standalone'
+        $layout['BrokerEnabled'] = $false
+    }
+    return $layout
 }
 
 function Assert-DefenseClawLayoutVolumeIdentity {
@@ -6686,6 +6878,10 @@ function New-DefenseClawLayoutDirectories {
         $Layout.InstallStateDirectory,
         $Layout.TransactionsDirectory
     )) {
+        # Standalone layouts carry empty broker directories.
+        if ([string]::IsNullOrWhiteSpace([string]$path)) {
+            continue
+        }
         New-DefenseClawDirectory -Path $path
     }
 }
@@ -6923,9 +7119,29 @@ function Get-DefenseClawDeploymentMetadata {
             [bool]$Layout.CursorTargetEnabled)) {
         throw 'core-hardening certification metadata cannot enable Codex or Cursor targets'
     }
+    # A missing profile field is a Secure Client deployment: every
+    # historical metadata document predates the standalone profile.
+    $profileProperty = $metadata.PSObject.Properties['profile']
+    $recordedProfile = if ($null -eq $profileProperty -or
+        [string]::IsNullOrWhiteSpace([string]$profileProperty.Value)) {
+        'secure_client'
+    }
+    else {
+        [string]$profileProperty.Value
+    }
+    $requestedProfile = if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) { 'secure_client' } else { 'standalone' }
+    if ($recordedProfile -cne $requestedProfile) {
+        throw (
+            "profile_conflict: deployment metadata records the $recordedProfile " +
+            "profile but this lifecycle runs the $requestedProfile profile"
+        )
+    }
     $providerLibraryProperty = $metadata.PSObject.Properties['provider_library_path']
     if ($null -ne $providerLibraryProperty -and
         -not [string]::IsNullOrWhiteSpace([string]$providerLibraryProperty.Value)) {
+        if (-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+            throw 'standalone deployment metadata must not name a credential provider library'
+        }
         $Layout.ProviderLibraryPath = Resolve-DefenseClawFullPath `
             -Path ([string]$providerLibraryProperty.Value)
     }
@@ -6960,6 +7176,9 @@ function New-DefenseClawDeploymentMetadata {
         @('installer', $Layout.InstallerPath),
         @('module', $Layout.ModulePath)
     )) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry[1])) {
+            continue
+        }
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $entry[1] -PathType Leaf) {
             $hashes[$entry[0]] = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $entry[1] -Algorithm SHA256).Hash.ToLowerInvariant()
         }
@@ -7082,6 +7301,22 @@ function New-DefenseClawDeploymentMetadata {
     if ($null -ne $ManagedHooksActivation) {
         $metadata['managed_hooks_activation'] = $ManagedHooksActivation
     }
+    if (-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        # Standalone metadata names its profile and payload trust. Secure
+        # Client metadata keeps its historical field set exactly.
+        $metadata['broker_account'] = ''
+        $metadata['profile'] = 'standalone'
+        $metadata['trust_mode'] = if ([string]$script:DefenseClawTrustMode -ceq 'HashPinned') {
+            'hash_pinned'
+        }
+        else {
+            'authenticode'
+        }
+        $productVersion = [string]$Layout.ProductVersion
+        if (-not [string]::IsNullOrWhiteSpace($productVersion)) {
+            $metadata['product_version'] = $productVersion
+        }
+    }
     return $metadata
 }
 
@@ -7202,10 +7437,16 @@ function Assert-DefenseClawMetadataIdentity {
         throw "deployment metadata belongs to guardian service $($Metadata.guardian_service), not $GuardianServiceName"
     }
     $brokerProperty = $Metadata.PSObject.Properties['broker_service']
+    $expectedBrokerService = if (Test-DefenseClawBrokerEnabled) {
+        Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    }
+    else {
+        ''
+    }
     if ($null -ne $brokerProperty -and
         -not [string]::Equals(
             [string]$brokerProperty.Value,
-            (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName),
+            $expectedBrokerService,
             [StringComparison]::OrdinalIgnoreCase
         )) {
         throw 'deployment metadata belongs to a different credential broker service'
@@ -7529,6 +7770,10 @@ function New-DefenseClawTransaction {
         $Layout.AgentApplicationControlAttestationPath,
         $Layout.ManagedHooksLifecycleJournalPath
     )) {
+        # Standalone layouts have no broker binary or key to snapshot.
+        if ([string]::IsNullOrWhiteSpace([string]$destination)) {
+            continue
+        }
         $destinations.Add([string]$destination)
     }
     # Uninstall creates its teardown journal only after this transaction has
@@ -8834,6 +9079,10 @@ function Restore-DefenseClawTransaction {
         [string]$snapshot.guardian_service,
         (Get-DefenseClawEnumeratorServiceName -GuardianServiceName ([string]$snapshot.guardian_service))
     )) {
+        # A standalone layout has no broker service name.
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            continue
+        }
         if (Test-DefenseClawServiceExists -Name $name) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
@@ -11792,18 +12041,20 @@ function Recover-DefenseClawQuiescingIntent {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
-    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
-        -Name $Layout.BrokerServiceName `
-        -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName) `
-        -AllowArgumentUpgrade
-    if ($serviceState.ContainsKey($brokerServiceName)) {
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
         Assert-DefenseClawCMIDBrokerServiceOrAbsent `
-            -Name $brokerServiceName `
+            -Name $Layout.BrokerServiceName `
             -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
                 -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName)
+                -GatewayServiceName $GatewayServiceName) `
+            -AllowArgumentUpgrade
+        if ($serviceState.ContainsKey($brokerServiceName)) {
+            Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+                -Name $brokerServiceName `
+                -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName)
+        }
     }
     # A process/reboot recovery never trusts elapsed wall time from the prior
     # process. Reestablish both disabled+stopped, publish a fresh durable
@@ -11970,6 +12221,7 @@ function Invoke-DefenseClawGatewayCommand {
         'DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED',
         'DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED',
         'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED',
+        'DEFENSECLAW_ENTERPRISE_PROFILE',
         'CODEX_HOME'
     )
     $previous = @{}
@@ -11999,6 +12251,13 @@ function Invoke-DefenseClawGatewayCommand {
         [Environment]::SetEnvironmentVariable(
             'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED',
             $(if ([bool]$Layout.ClaudeEffectivePolicyVerified) { '1' } else { $null }),
+            'Process'
+        )
+        # Lifecycle helpers resolve the same profile the services are pinned
+        # to; a caller's inherited pin never reaches a Secure Client helper.
+        [Environment]::SetEnvironmentVariable(
+            'DEFENSECLAW_ENTERPRISE_PROFILE',
+            $(if (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) { $null } else { 'standalone' }),
             'Process'
         )
         # The gateway service and every lifecycle helper are deliberately
@@ -12894,15 +13153,7 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
             )
         }
     }
-    $vendorRoot = [IO.Path]::Combine(
-        $script:ProgramData,
-        'Cisco',
-        'Cisco Secure Client'
-    )
-    $productionState = [IO.Path]::Combine(
-        $vendorRoot,
-        'DefenseClaw'
-    )
+    $productionState = [string](Get-DefenseClawProfileRoots).StateRoot
     $nativeSecurity = Initialize-DefenseClawNativeSecurity
     if (-not [string]::Equals(
             [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\'),
@@ -14571,11 +14822,17 @@ function Wait-DefenseClawEnterpriseReadiness {
     $gatewayReady = $false
     $guardianReady = $false
     do {
-        $broker = Microsoft.PowerShell.Management\Get-Service `
-            -Name $Layout.BrokerServiceName `
-            -ErrorAction SilentlyContinue
-        $brokerReady = $null -ne $broker -and
-            $broker.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+            $broker = Microsoft.PowerShell.Management\Get-Service `
+                -Name $Layout.BrokerServiceName `
+                -ErrorAction SilentlyContinue
+            $brokerReady = $null -ne $broker -and
+                $broker.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        }
+        else {
+            # The standalone profile has no credential broker to wait for.
+            $brokerReady = $true
+        }
         $gatewayReady = $brokerReady -and (Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName)
         if ($gatewayReady) {
             $guardianReady = Test-DefenseClawGuardianReady `
@@ -14763,24 +15020,37 @@ function Assert-DefenseClawManagedServiceConfigurations {
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
     )
-    $brokerImage = Get-DefenseClawCMIDBrokerImage `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName
+    $brokerImage = if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        Get-DefenseClawCMIDBrokerImage `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+    }
+    else {
+        ''
+    }
     $sensorHelperServiceName = Get-DefenseClawSensorHelperServiceName `
         -GatewayServiceName $GatewayServiceName
     $sensorHelperEnvironment = [string[]]@(
         Get-DefenseClawSensorHelperEnvironmentValues `
             -GatewayServiceName $GatewayServiceName
     )
-    Assert-DefenseClawServiceConfiguration `
-        -Name $Layout.BrokerServiceName `
-        -ExpectedImage $brokerImage `
-        -ExpectedAccount 'LocalSystem' `
-        -ExpectedDisplayName 'DefenseClaw Credential Broker' `
-        -ExpectedSidType 1 `
-        -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
-        -ExpectedEnvironment @() `
-        -ExpectedStartMode $expectedStartMode
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        Assert-DefenseClawServiceConfiguration `
+            -Name $Layout.BrokerServiceName `
+            -ExpectedImage $brokerImage `
+            -ExpectedAccount 'LocalSystem' `
+            -ExpectedDisplayName 'DefenseClaw Credential Broker' `
+            -ExpectedSidType 1 `
+            -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
+            -ExpectedEnvironment @() `
+            -ExpectedStartMode $expectedStartMode
+    }
+    $gatewayExpectedDependencies = if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        @($Layout.BrokerServiceName, $sensorHelperServiceName)
+    }
+    else {
+        @($sensorHelperServiceName)
+    }
     Assert-DefenseClawServiceConfiguration `
         -Name $sensorHelperServiceName `
         -ExpectedImage (Get-DefenseClawSensorHelperImage -Layout $Layout -GatewayServiceName $GatewayServiceName) `
@@ -14798,7 +15068,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $gatewayEnvironment `
-        -ExpectedDependencies @($Layout.BrokerServiceName, $sensorHelperServiceName) `
+        -ExpectedDependencies $gatewayExpectedDependencies `
         -ExpectedStartMode $expectedStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GuardianServiceName `
@@ -15207,6 +15477,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         -RequiredRights $serviceInstallRights `
         -AllowUsersRead
     foreach ($path in @($Layout.BrokerPath, $Layout.ACPPath, $Layout.HookPath, $Layout.SensorHelperPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+        if ([string]::IsNullOrWhiteSpace([string]$path)) {
+            continue
+        }
         Assert-DefenseClawPathAcl `
             -Path $path `
             -AllowedWriterSIDs $adminWriters `
@@ -15230,6 +15503,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         $Layout.GuardianLogDirectory,
         $Layout.MetadataPath
     )) {
+        if ([string]::IsNullOrWhiteSpace([string]$path)) {
+            continue
+        }
         $adminOnlyPaths.Add([string]$path)
     }
     if (Microsoft.PowerShell.Management\Test-Path `
@@ -15307,12 +15583,14 @@ function Assert-DefenseClawEnterpriseDeployment {
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $authorizationDirectoryRights `
         -RejectUntrustedRead
-    Assert-DefenseClawPathAcl `
-        -Path $Layout.BrokerStateDirectory `
-        -AllowedWriterSIDs $adminWriters `
-        -AllowedReaderSIDs $gatewayReaders `
-        -RequiredRights $authorizationDirectoryRights `
-        -RejectUntrustedRead
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        Assert-DefenseClawPathAcl `
+            -Path $Layout.BrokerStateDirectory `
+            -AllowedWriterSIDs $adminWriters `
+            -AllowedReaderSIDs $gatewayReaders `
+            -RequiredRights $authorizationDirectoryRights `
+            -RejectUntrustedRead
+    }
     foreach ($authorizationFile in @(
         $Layout.AuthorizationLedgerPath,
         (Microsoft.PowerShell.Management\Join-Path `
@@ -15355,7 +15633,13 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RejectUntrustedRead
     }
 
-    foreach ($requiredHash in @('broker', 'gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')) {
+    $requiredHashes = if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        @('broker', 'gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+    }
+    else {
+        @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+    }
+    foreach ($requiredHash in $requiredHashes) {
         if ($null -eq $metadata.hashes.PSObject.Properties[$requiredHash]) {
             throw "deployment metadata is missing required artifact hash: $requiredHash"
         }
@@ -15367,7 +15651,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     foreach ($property in $metadata.hashes.PSObject.Properties) {
         # Must cover every key the hash writer emits.
         $path = switch ($property.Name) {
-            'broker' { $Layout.BrokerPath }
+            'broker' { if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) { $Layout.BrokerPath } else { $null } }
             'gateway' { $Layout.GatewayPath }
             'acp' { $Layout.ACPPath }
             'hook' { $Layout.HookPath }
@@ -15399,6 +15683,14 @@ function Assert-DefenseClawEnterpriseDeployment {
         "DEFENSECLAW_CMID_BROKER_SERVICE_NAME=$($Layout.BrokerServiceName)",
         "DEFENSECLAW_CMID_BROKER_AUTH_KEY=$($Layout.BrokerAuthKeyPath)"
     )
+    if (-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        # Same order the writer uses: base pins, the profile pin, then the
+        # attestation flags; the standalone profile has no broker entries.
+        $gatewayEnvironment = [string[]]@(
+            @($gatewayEnvironment | Microsoft.PowerShell.Utility\Select-Object -First 8) +
+                'DEFENSECLAW_ENTERPRISE_PROFILE=standalone'
+        )
+    }
     $guardianEnvironment = [string[]]@(
         "DEFENSECLAW_HOME=$($Layout.RuntimeDirectory)",
         "DEFENSECLAW_CONFIG=$($Layout.ConfigPath)",
@@ -15409,6 +15701,11 @@ function Assert-DefenseClawEnterpriseDeployment {
         "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName",
         "DEFENSECLAW_WINDOWS_SERVICE_LOG=$($Layout.GuardianLogPath)"
     )
+    if (-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        $guardianEnvironment = [string[]]@(
+            $guardianEnvironment + 'DEFENSECLAW_ENTERPRISE_PROFILE=standalone'
+        )
+    }
     if ([bool]$Layout.AgentApplicationControlAttested) {
         $gatewayEnvironment = [string[]]@(
             $gatewayEnvironment + @(
@@ -15457,6 +15754,11 @@ function Assert-DefenseClawEnterpriseDeployment {
         "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName",
         "DEFENSECLAW_WINDOWS_SERVICE_LOG=$($Layout.GuardianLogPath)"
     )
+    if (-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        $enumeratorEnvironment = [string[]]@(
+            $enumeratorEnvironment + 'DEFENSECLAW_ENTERPRISE_PROFILE=standalone'
+        )
+    }
     if ([bool]$Layout.AgentApplicationControlAttested) {
         $enumeratorEnvironment = [string[]]@(
             $enumeratorEnvironment + @(
@@ -15471,15 +15773,23 @@ function Assert-DefenseClawEnterpriseDeployment {
                 'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1'
         )
     }
-    Assert-DefenseClawServiceConfiguration `
-        -Name $Layout.BrokerServiceName `
-        -ExpectedImage (Get-DefenseClawCMIDBrokerImage -Layout $Layout -GatewayServiceName $GatewayServiceName) `
-        -ExpectedAccount 'LocalSystem' `
-        -ExpectedDisplayName 'DefenseClaw Credential Broker' `
-        -ExpectedSidType 1 `
-        -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
-        -ExpectedEnvironment @() `
-        -ExpectedStartMode $expectedServiceStartMode
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        Assert-DefenseClawServiceConfiguration `
+            -Name $Layout.BrokerServiceName `
+            -ExpectedImage (Get-DefenseClawCMIDBrokerImage -Layout $Layout -GatewayServiceName $GatewayServiceName) `
+            -ExpectedAccount 'LocalSystem' `
+            -ExpectedDisplayName 'DefenseClaw Credential Broker' `
+            -ExpectedSidType 1 `
+            -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
+            -ExpectedEnvironment @() `
+            -ExpectedStartMode $expectedServiceStartMode
+    }
+    $gatewayExpectedDependencies = if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        @($Layout.BrokerServiceName, $sensorHelperServiceName)
+    }
+    else {
+        @($sensorHelperServiceName)
+    }
     Assert-DefenseClawServiceConfiguration `
         -Name $sensorHelperServiceName `
         -ExpectedImage (Get-DefenseClawSensorHelperImage -Layout $Layout -GatewayServiceName $GatewayServiceName) `
@@ -15497,7 +15807,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $gatewayEnvironment `
-        -ExpectedDependencies @($Layout.BrokerServiceName, $sensorHelperServiceName) `
+        -ExpectedDependencies $gatewayExpectedDependencies `
         -ExpectedStartMode $expectedServiceStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GuardianServiceName `
@@ -15536,12 +15846,14 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
 
     if ($RequireReadiness) {
-        $brokerService = Microsoft.PowerShell.Management\Get-Service `
-            -Name $Layout.BrokerServiceName `
-            -ErrorAction SilentlyContinue
-        if ($null -eq $brokerService -or
-            $brokerService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
-            throw 'credential broker SCM process is not running'
+        if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+            $brokerService = Microsoft.PowerShell.Management\Get-Service `
+                -Name $Layout.BrokerServiceName `
+                -ErrorAction SilentlyContinue
+            if ($null -eq $brokerService -or
+                $brokerService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+                throw 'credential broker SCM process is not running'
+            }
         }
         $sensorHelperService = Microsoft.PowerShell.Management\Get-Service `
             -Name $Layout.SensorHelperServiceName `
@@ -15687,10 +15999,21 @@ function Get-DefenseClawLifecycleSources {
         [string]::IsNullOrWhiteSpace($ModuleSource)) {
         throw "$Action requires the installer and adjacent module source paths"
     }
+    $brokerEnabled = Test-DefenseClawBrokerEnabled
+    if (-not $brokerEnabled -and
+        (-not [string]::IsNullOrWhiteSpace($BrokerBinary) -or
+            -not [string]::IsNullOrWhiteSpace($ProviderLibrary))) {
+        throw 'the standalone profile has no credential broker; omit -BrokerBinary and -ProviderLibrary'
+    }
     if ($Action -eq 'Install') {
-        $required = @(
-            @('BrokerBinary', $BrokerBinary),
-            @('ProviderLibrary', $ProviderLibrary),
+        $required = @()
+        if ($brokerEnabled) {
+            $required += @(
+                @('BrokerBinary', $BrokerBinary),
+                @('ProviderLibrary', $ProviderLibrary)
+            )
+        }
+        $required += @(
             @('GatewayBinary', $GatewayBinary),
             @('ACPBinary', $ACPBinary),
             @('HookBinary', $HookBinary),
@@ -15711,7 +16034,14 @@ function Get-DefenseClawLifecycleSources {
             }
         }
     }
-    if ($Action -eq 'Upgrade' -and
+    if ($Action -eq 'Upgrade' -and -not $brokerEnabled -and
+        ([string]::IsNullOrWhiteSpace($GatewayBinary) -or
+        [string]::IsNullOrWhiteSpace($ACPBinary) -or
+        [string]::IsNullOrWhiteSpace($HookBinary) -or
+        [string]::IsNullOrWhiteSpace($SensorHelperBinary))) {
+        throw 'Upgrade requires -GatewayBinary, -ACPBinary, -HookBinary, and -SensorHelperBinary'
+    }
+    if ($Action -eq 'Upgrade' -and $brokerEnabled -and
         ([string]::IsNullOrWhiteSpace($BrokerBinary) -or
         [string]::IsNullOrWhiteSpace($ProviderLibrary) -or
         [string]::IsNullOrWhiteSpace($GatewayBinary) -or
@@ -15849,7 +16179,13 @@ function Get-DefenseClawLifecycleStatus {
     $installed = $null -ne $metadata -and (Test-DefenseClawMetadataInstalled -Metadata $metadata)
     $pending = Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf
     $gatewayState = Get-DefenseClawServiceState -Name $GatewayServiceName
-    $brokerState = Get-DefenseClawServiceState -Name $Layout.BrokerServiceName
+    $brokerEnabled = (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)
+    $brokerState = if ($brokerEnabled) {
+        Get-DefenseClawServiceState -Name $Layout.BrokerServiceName
+    }
+    else {
+        'not_applicable'
+    }
     $guardianState = Get-DefenseClawServiceState -Name $GuardianServiceName
     $gatewayReady = $false
     $guardianReady = $false
@@ -15923,9 +16259,11 @@ function Get-DefenseClawLifecycleStatus {
             )
         }
     }
+    $brokerHealthyInstalled = (-not $brokerEnabled) -or $brokerState -eq 'running'
+    $brokerHealthyAbsent = (-not $brokerEnabled) -or $brokerState -eq 'absent'
     $healthy = if ($installed) {
         $gatewayState -eq 'running' -and
-            $brokerState -eq 'running' -and
+            $brokerHealthyInstalled -and
             $guardianState -eq 'running' -and
             $gatewayReady -and
             $guardianReady -and
@@ -15935,7 +16273,7 @@ function Get-DefenseClawLifecycleStatus {
     }
     else {
         $gatewayState -eq 'absent' -and
-            $brokerState -eq 'absent' -and
+            $brokerHealthyAbsent -and
             $guardianState -eq 'absent' -and
             -not $pending -and
             $errors.Count -eq 0
@@ -15948,7 +16286,7 @@ function Get-DefenseClawLifecycleStatus {
         (-not $claudeTargetEnabled -or
             $claudeEffectivePolicyVerified)
     )
-    return [pscustomobject][ordered]@{
+    $status = [ordered]@{
         schema_version = 1
         ok = [bool]$healthy
         action = $Action.ToLowerInvariant()
@@ -15988,6 +16326,35 @@ function Get-DefenseClawLifecycleStatus {
         guardian_generation = $generation
         errors = @($errors)
     }
+    if (-not $brokerEnabled) {
+        # Standalone status also reports the services Secure Client status
+        # historically omitted, plus the deployment's recorded version and
+        # payload trust, so MDM detection reads one document.
+        $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
+            -GatewayServiceName $GatewayServiceName
+        $enumeratorName = Get-DefenseClawEnumeratorServiceName `
+            -GuardianServiceName $GuardianServiceName
+        $status['profile'] = 'standalone'
+        $status['sensor_helper_service'] = $sensorHelperName
+        $status['sensor_helper_service_state'] = Get-DefenseClawServiceState -Name $sensorHelperName
+        $status['enumerator_service'] = $enumeratorName
+        $status['enumerator_service_state'] = Get-DefenseClawServiceState -Name $enumeratorName
+        $recordedVersion = ''
+        $recordedTrust = ''
+        if ($null -ne $metadata) {
+            $versionProperty = $metadata.PSObject.Properties['product_version']
+            if ($null -ne $versionProperty) {
+                $recordedVersion = [string]$versionProperty.Value
+            }
+            $trustProperty = $metadata.PSObject.Properties['trust_mode']
+            if ($null -ne $trustProperty) {
+                $recordedTrust = [string]$trustProperty.Value
+            }
+        }
+        $status['installed_version'] = $recordedVersion
+        $status['trust_mode'] = $recordedTrust
+    }
+    return [pscustomobject]$status
 }
 
 function Test-DefenseClawGuardianCoverageReport {
@@ -17504,6 +17871,13 @@ function Start-DefenseClawSelfUninstallHelper {
         $script:System32,
         'WindowsPowerShell\v1.0\powershell.exe'
     )
+    $engineDirectory = [IO.Path]::Combine($script:System32, 'WindowsPowerShell\v1.0')
+    if (Test-DefenseClawStandaloneProfile) {
+        # The standalone lifecycle runs only on PowerShell 7; its finalizer
+        # uses the same engine the CLI resolved and validated.
+        $engineDirectory = [IO.Path]::GetFullPath($PSHOME).TrimEnd('\')
+        $powerShell = [IO.Path]::Combine($engineDirectory, 'pwsh.exe')
+    }
     $powerShell = Resolve-DefenseClawFullPath `
         -Path $powerShell `
         -MustExist `
@@ -17551,16 +17925,13 @@ function Start-DefenseClawSelfUninstallHelper {
                 $script:System32,
                 $script:WindowsDirectory,
                 ([IO.Path]::Combine($script:System32, 'Wbem')),
-                ([IO.Path]::Combine(
-                    $script:System32,
-                    'WindowsPowerShell\v1.0'
-                ))
+                $engineDirectory
             ) -join [IO.Path]::PathSeparator
         )),
         @('PSModulePath', (
             [IO.Path]::Combine(
-                $script:System32,
-                'WindowsPowerShell\v1.0\Modules'
+                $engineDirectory,
+                'Modules'
             )
         ))
     )) {
@@ -18074,12 +18445,15 @@ function Complete-DefenseClawSelfUninstallRetirement {
     $fullReceiptPath = Assert-DefenseClawCanonicalVolumePath `
         -Path $ReceiptPath `
         -Label 'self-uninstall finalizer receipt'
-    $expectedLifecycleDirectory = [IO.Path]::Combine(
-        $script:ProgramData,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw-Lifecycle'
-    ).TrimEnd('\')
+    # The receipt's own protected directory names the profile whose
+    # transaction wrote it; a detached finalizer has no other authority.
+    $receiptProfile = Resolve-DefenseClawProfileFromLifecycleDirectory `
+        -Directory ([IO.Path]::GetDirectoryName($fullReceiptPath))
+    if ([string]::IsNullOrWhiteSpace($receiptProfile)) {
+        throw 'self-uninstall finalizer receipt path is outside the exact protected lifecycle namespace'
+    }
+    Set-DefenseClawEnterpriseProfile -EnterpriseProfile $receiptProfile
+    $expectedLifecycleDirectory = [string](Get-DefenseClawProfileRoots).LifecycleDirectory
     if (-not [string]::Equals(
             [IO.Path]::GetDirectoryName($fullReceiptPath),
             $expectedLifecycleDirectory,
@@ -19033,10 +19407,34 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         (Get-DefenseClawEnumeratorServiceName `
             -GuardianServiceName $GuardianServiceName)
     )
-    if ($managedServiceNames.Count -ne 5 -or
-        ($managedServiceNames -join "`n") -cne
-            ($expectedServiceNames -join "`n")) {
-        throw 'exact-scope purge did not resolve exactly five managed services'
+    # Role -> exact service name. The standalone profile has no broker row.
+    $roleServiceNames = @{
+        Gateway = [string]$expectedServiceNames[0]
+        Broker = [string]$expectedServiceNames[1]
+        SensorHelper = [string]$expectedServiceNames[2]
+        Guardian = [string]$expectedServiceNames[3]
+        Enumerator = [string]$expectedServiceNames[4]
+    }
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        $purgeRoles = @('Gateway', 'Broker', 'SensorHelper', 'Guardian', 'Enumerator')
+        $teardownRoles = @('Enumerator', 'Guardian', 'Gateway', 'SensorHelper', 'Broker')
+        if ($managedServiceNames.Count -ne 5 -or
+            ($managedServiceNames -join "`n") -cne
+                ($expectedServiceNames -join "`n")) {
+            throw 'exact-scope purge did not resolve exactly five managed services'
+        }
+    }
+    else {
+        $purgeRoles = @('Gateway', 'SensorHelper', 'Guardian', 'Enumerator')
+        $teardownRoles = @('Enumerator', 'Guardian', 'Gateway', 'SensorHelper')
+        $standaloneExpected = @($purgeRoles | Microsoft.PowerShell.Core\ForEach-Object {
+            [string]$roleServiceNames[$_]
+        })
+        if ($managedServiceNames.Count -ne 4 -or
+            ($managedServiceNames -join "`n") -cne
+                ($standaloneExpected -join "`n")) {
+            throw 'exact-scope purge did not resolve exactly four standalone managed services'
+        }
     }
     # Keep the primary service identity checks visibly inside this destructive
     # boundary; the role helper repeats them immediately before each delete.
@@ -19048,7 +19446,7 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
-    foreach ($role in @('Gateway', 'Broker', 'SensorHelper', 'Guardian', 'Enumerator')) {
+    foreach ($role in $purgeRoles) {
         Assert-DefenseClawExactScopeService `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -19082,6 +19480,11 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         gateway_service_sid = $gatewaySID
         validate_only = $true
     }
+    if (Test-DefenseClawStandaloneProfile) {
+        # The native boundary accepts only the named profile's exact layouts;
+        # Secure Client requests keep their original shape.
+        $request['profile'] = 'standalone'
+    }
     $requestPath = Microsoft.PowerShell.Management\Join-Path `
         $Layout.LifecycleLockDirectory `
         "namespace-root-cleanup-$($Layout.PurgeScopeSHA256)-request.json"
@@ -19093,14 +19496,8 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
     # SCM row as recovery authority. Quiescence releases mapped binaries so
     # the native helper can prove exclusive destructive access to every inode;
     # no IPC grant, service row, registry key, or file is removed yet.
-    foreach ($role in @('Enumerator', 'Guardian', 'Gateway', 'SensorHelper', 'Broker')) {
-        $name = switch ($role) {
-            'Enumerator' { [string]$expectedServiceNames[4] }
-            'Guardian' { [string]$expectedServiceNames[3] }
-            'Gateway' { [string]$expectedServiceNames[0] }
-            'SensorHelper' { [string]$expectedServiceNames[2] }
-            'Broker' { [string]$expectedServiceNames[1] }
-        }
+    foreach ($role in $teardownRoles) {
+        $name = [string]$roleServiceNames[$role]
         if (-not (Test-DefenseClawServiceExists -Name $name)) {
             continue
         }
@@ -19168,19 +19565,13 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
     # Root retirement succeeded. Reauthenticate each remaining exact SCM row
     # immediately before deleting it; similarly named or drifted rows remain
     # untouched and fail the recovery closed.
-    foreach ($role in @('Enumerator', 'Guardian', 'Gateway', 'SensorHelper', 'Broker')) {
+    foreach ($role in $teardownRoles) {
         Assert-DefenseClawExactScopeService `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -Role $role
-        $name = switch ($role) {
-            'Enumerator' { [string]$expectedServiceNames[4] }
-            'Guardian' { [string]$expectedServiceNames[3] }
-            'Gateway' { [string]$expectedServiceNames[0] }
-            'SensorHelper' { [string]$expectedServiceNames[2] }
-            'Broker' { [string]$expectedServiceNames[1] }
-        }
+        $name = [string]$roleServiceNames[$role]
         Remove-DefenseClawService -Name $name
     }
     foreach ($path in @($requestPath, $reportPath)) {
@@ -19530,15 +19921,20 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     if ($Sources.ContainsKey('provider_library')) {
         $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
     }
-    if ([string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
-        throw "$Action requires a validated managed credential provider library"
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        if ([string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
+            throw "$Action requires a validated managed credential provider library"
+        }
+        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+            -Name $Layout.BrokerServiceName `
+            -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName) `
+            -AllowArgumentUpgrade
     }
-    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
-        -Name $Layout.BrokerServiceName `
-        -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName) `
-        -AllowArgumentUpgrade
+    elseif (-not [string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
+        throw 'the standalone profile has no credential provider library'
+    }
     if ($null -ne $metadata) {
         Assert-DefenseClawMetadataIdentity `
             -Metadata $metadata `
@@ -19728,7 +20124,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
         Stop-DefenseClawService -Name $Layout.SensorHelperServiceName
-        Stop-DefenseClawService -Name $Layout.BrokerServiceName
+        if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+            Stop-DefenseClawService -Name $Layout.BrokerServiceName
+        }
         # Upgrade/Repair must capture the old machine-policy identity before a
         # replacement config or manifest changes its endpoint/target set. New
         # gateway/hook bytes are staged first so even an upgrade from a release
@@ -19774,6 +20172,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             $Layout.InstallerPath,
             $Layout.ModulePath
         )) {
+            # Standalone layouts carry no broker binary.
+            if ([string]::IsNullOrWhiteSpace([string]$requiredPath)) {
+                continue
+            }
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
                 throw "required managed artifact is missing after $Action staging: $requiredPath"
             }
@@ -19853,7 +20255,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             $requiredPath = $entry.Path
             $skippable = ($null -ne $entry.SourceKey) -and
                 (-not $Sources.ContainsKey($entry.SourceKey))
-            if ($skippable) {
+            if ($skippable -or [string]::IsNullOrWhiteSpace([string]$requiredPath)) {
                 continue
             }
             if (-not (Microsoft.PowerShell.Management\Test-Path `
@@ -20153,10 +20555,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             }
             # The LocalSystem broker must be live before any restricted
             # gateway path can request a credential.
-            Set-DefenseClawServiceStartMode `
-                -Name $Layout.BrokerServiceName `
-                -StartMode 3
-            Start-DefenseClawService -Name $Layout.BrokerServiceName
+            if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+                Set-DefenseClawServiceStartMode `
+                    -Name $Layout.BrokerServiceName `
+                    -StartMode 3
+                Start-DefenseClawService -Name $Layout.BrokerServiceName
+            }
             Set-DefenseClawServiceStartMode `
                 -Name $Layout.SensorHelperServiceName `
                 -StartMode 3
@@ -20232,9 +20636,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GuardianServiceName `
                 -StartMode 2
-            Set-DefenseClawServiceStartMode `
-                -Name $Layout.BrokerServiceName `
-                -StartMode 2
+            if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+                Set-DefenseClawServiceStartMode `
+                    -Name $Layout.BrokerServiceName `
+                    -StartMode 2
+            }
             Set-DefenseClawServiceStartMode `
                 -Name $Layout.SensorHelperServiceName `
                 -StartMode 2
@@ -20466,12 +20872,14 @@ function Invoke-DefenseClawUninstallLifecycle {
                 -GatewayServiceName $GatewayServiceName) `
             -SensorHelper
         Remove-DefenseClawService -Name $Layout.SensorHelperServiceName
-        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
-            -Name $Layout.BrokerServiceName `
-            -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName)
-        Remove-DefenseClawService -Name $Layout.BrokerServiceName
+        if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+            Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+                -Name $Layout.BrokerServiceName `
+                -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName)
+            Remove-DefenseClawService -Name $Layout.BrokerServiceName
+        }
         $tombstone = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -20761,6 +21169,217 @@ function Invoke-DefenseClawReconcileLifecycle {
     return $result
 }
 
+function Test-DefenseClawProfileDeploymentInstalled {
+    <#
+        Reports whether a profile's deployment metadata records an installed
+        deployment. An uninstall tombstone (installed=false) is not a
+        deployment; metadata that cannot be read or parsed is treated as one,
+        so a damaged record never lets the other profile adopt the services.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('SecureClient', 'Standalone')]
+        [string]$EnterpriseProfile
+    )
+    $roots = Get-DefenseClawProfileRoots -EnterpriseProfile $EnterpriseProfile
+    $metadataPath = [IO.Path]::Combine(
+        [string]$roots.StateRoot,
+        'install',
+        'deployment.json'
+    )
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $metadataPath `
+            -PathType Leaf)) {
+        return [pscustomobject]@{ installed = $false; path = $metadataPath }
+    }
+    $installed = $true
+    try {
+        $metadata = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $metadataPath `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $installed = Test-DefenseClawMetadataInstalled -Metadata $metadata
+    }
+    catch {
+        $installed = $true
+    }
+    return [pscustomobject]@{ installed = [bool]$installed; path = $metadataPath }
+}
+
+function Assert-DefenseClawNoOtherProfileDeployment {
+    <#
+        Profiles share the SCM service names, so one host carries at most one
+        enterprise deployment. A standalone mutation refuses while an
+        installed Secure Client deployment or its credential broker service
+        exists; a Secure Client mutation refuses while an installed
+        standalone deployment exists. Uninstall tombstones do not block.
+    #>
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        $standalone = Test-DefenseClawProfileDeploymentInstalled -EnterpriseProfile Standalone
+        if ([bool]$standalone.installed) {
+            throw (
+                'profile_conflict: a standalone DefenseClaw enterprise ' +
+                "deployment exists ($($standalone.path)); uninstall it before " +
+                'installing the Secure Client profile'
+            )
+        }
+        return
+    }
+    $secureClient = Test-DefenseClawProfileDeploymentInstalled -EnterpriseProfile SecureClient
+    if ([bool]$secureClient.installed) {
+        throw (
+            'profile_conflict: a Cisco Secure Client DefenseClaw deployment ' +
+            "exists ($($secureClient.path)); uninstall it before installing " +
+            'the standalone profile'
+        )
+    }
+    if (Test-DefenseClawServiceExists -Name 'DefenseClawCMIDBroker') {
+        throw (
+            'profile_conflict: the Secure Client credential broker service ' +
+            'DefenseClawCMIDBroker exists; uninstall the Secure Client ' +
+            'deployment before installing the standalone profile'
+        )
+    }
+}
+
+function Initialize-DefenseClawStandalonePayloadTrust {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Authenticode', 'HashPinned')]
+        [string]$TrustMode,
+        [string]$PayloadManifest,
+        [string[]]$AllowedSigners = @()
+    )
+    $script:DefenseClawTrustMode = $TrustMode
+    $script:DefenseClawPinnedPayloadSHA256 = @{}
+    $script:DefenseClawAllowedSignerSHA256 = @()
+    foreach ($signer in @($AllowedSigners)) {
+        $value = ([string]$signer).Trim().ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            continue
+        }
+        if ($value -cnotmatch '^[0-9a-f]{64}$') {
+            throw "allowed signer must be a SHA-256 certificate thumbprint: $signer"
+        }
+        $script:DefenseClawAllowedSignerSHA256 += $value
+    }
+    if ($TrustMode -ceq 'Authenticode') {
+        if (-not [string]::IsNullOrWhiteSpace($PayloadManifest)) {
+            throw '-PayloadManifest applies only to -TrustMode HashPinned'
+        }
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($PayloadManifest)) {
+        throw '-TrustMode HashPinned requires -PayloadManifest'
+    }
+    $manifestPath = Resolve-DefenseClawFullPath -Path $PayloadManifest -MustExist -Leaf
+    # The manifest is the trust anchor for every unsigned payload file, so it
+    # gets the same protected-source checks as an administrator config.
+    [void](Assert-DefenseClawTrustedSource -Path $manifestPath -Label 'payload SHA-256 manifest')
+    Assert-DefenseClawNoReparsePath -Path $manifestPath
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $manifestPath -Force
+    if ([int64]$item.Length -gt 1048576) {
+        throw 'payload SHA-256 manifest exceeds 1 MiB'
+    }
+    try {
+        $document = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $manifestPath `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch {
+        throw "cannot parse payload SHA-256 manifest: $($_.Exception.Message)"
+    }
+    if ($null -eq $document.PSObject.Properties['schema_version'] -or
+        [int]$document.schema_version -ne 1 -or
+        $null -eq $document.PSObject.Properties['files']) {
+        throw 'payload SHA-256 manifest must be schema_version 1 with a files map'
+    }
+    foreach ($property in $document.files.PSObject.Properties) {
+        $name = [string]$property.Name
+        $digest = ([string]$property.Value).Trim().ToLowerInvariant()
+        if ($name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or
+            $digest -cnotmatch '^[0-9a-f]{64}$') {
+            throw "payload SHA-256 manifest has an invalid entry: $name"
+        }
+        $script:DefenseClawPinnedPayloadSHA256[$name.ToLowerInvariant()] = $digest
+    }
+    if ($script:DefenseClawPinnedPayloadSHA256.Count -eq 0) {
+        throw 'payload SHA-256 manifest pins no files'
+    }
+}
+
+function Test-DefenseClawStandalonePayloadTrusted {
+    <#
+        Standalone payload admission for a file whose Authenticode status is
+        not Valid (HashPinned), or an extra signer pin on a Valid one.
+        Returns $true only when the file is admitted by the standalone trust
+        policy; Secure Client never reaches this path.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Signature
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    if ($Signature.Status -eq [Management.Automation.SignatureStatus]::Valid) {
+        if (@($script:DefenseClawAllowedSignerSHA256).Count -eq 0) {
+            return $true
+        }
+        if ($null -eq $Signature.SignerCertificate) {
+            return $false
+        }
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $thumbprint = ([BitConverter]::ToString(
+                $sha256.ComputeHash($Signature.SignerCertificate.RawData)
+            )).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+        return $thumbprint -in @($script:DefenseClawAllowedSignerSHA256)
+    }
+    if ([string]$script:DefenseClawTrustMode -cne 'HashPinned') {
+        return $false
+    }
+    $leaf = [IO.Path]::GetFileName($Path).ToLowerInvariant()
+    if (-not $script:DefenseClawPinnedPayloadSHA256.ContainsKey($leaf)) {
+        return $false
+    }
+    $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return $actual -ceq [string]$script:DefenseClawPinnedPayloadSHA256[$leaf]
+}
+
+function Initialize-DefenseClawRecordedPayloadTrust {
+    <#
+        A hash-pinned standalone deployment re-admits its own installed
+        payload on later Repair/Verify/Uninstall runs from the protected,
+        administrator-owned deployment metadata that recorded each artifact
+        digest, so those actions need no second manifest.
+    #>
+    param(
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $trustProperty = $Metadata.PSObject.Properties['trust_mode']
+    if ($null -eq $trustProperty -or [string]$trustProperty.Value -cne 'hash_pinned') {
+        return
+    }
+    if ([string]$script:DefenseClawTrustMode -cne 'HashPinned') {
+        $script:DefenseClawTrustMode = 'HashPinned'
+    }
+    foreach ($property in $Metadata.hashes.PSObject.Properties) {
+        $path = Get-DefenseClawArtifactPath -Layout $Layout -Name ([string]$property.Name)
+        if ([string]::IsNullOrWhiteSpace([string]$path)) {
+            continue
+        }
+        $leaf = [IO.Path]::GetFileName([string]$path).ToLowerInvariant()
+        if (-not $script:DefenseClawPinnedPayloadSHA256.ContainsKey($leaf)) {
+            $script:DefenseClawPinnedPayloadSHA256[$leaf] = ([string]$property.Value).ToLowerInvariant()
+        }
+    }
+}
+
 function Invoke-DefenseClawEnterpriseLifecycle {
     [CmdletBinding()]
     param(
@@ -20777,8 +21396,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$NativeCleanupBinary,
         [string]$Config,
         [string]$Manifest,
-        [string]$InstallRoot = (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
-        [string]$StateRoot = (Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw'),
+        [ValidateSet('SecureClient', 'Standalone')]
+        [string]$EnterpriseProfile = 'SecureClient',
+        # Empty selects the exact production roots of -EnterpriseProfile.
+        [string]$InstallRoot,
+        [string]$StateRoot,
         [string]$GatewayServiceName = 'DefenseClawGateway',
         [string]$GuardianServiceName = 'DefenseClawHookGuardian',
         [string]$CertificationCodexHome,
@@ -20794,8 +21416,53 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # Retained for command-line compatibility, but rejected before layout
         # resolution until late config publication has an authenticated target
         # runtime preparation and activation transaction.
-        [switch]$DeferredConfig
+        [switch]$DeferredConfig,
+        # Standalone-only payload trust. Authenticode (default) requires a
+        # Valid signature and, when -AllowedSigners is non-empty, a signer
+        # whose SHA-256 certificate thumbprint is listed (customer re-signing
+        # or publisher pinning). HashPinned accepts an unsigned payload file
+        # only when its SHA-256 appears in the administrator-supplied
+        # -PayloadManifest. Neither relaxes the certification-only
+        # -AllowUnsigned contract.
+        [ValidateSet('Authenticode', 'HashPinned')]
+        [string]$TrustMode = 'Authenticode',
+        [string]$PayloadManifest,
+        [string[]]$AllowedSigners = @(),
+        [string]$ProductVersion
     )
+    Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
+    $entryProfileRoots = Get-DefenseClawProfileRoots
+    if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+        $InstallRoot = [string]$entryProfileRoots.InstallRoot
+    }
+    if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+        $StateRoot = [string]$entryProfileRoots.StateRoot
+    }
+    if (Test-DefenseClawStandaloneProfile) {
+        Initialize-DefenseClawStandalonePayloadTrust `
+            -TrustMode $TrustMode `
+            -PayloadManifest $PayloadManifest `
+            -AllowedSigners $AllowedSigners
+        if ($Action -in @('Install', 'Upgrade', 'Repair') -and
+            $GatewayServiceName -ceq 'DefenseClawGateway') {
+            Assert-DefenseClawNoOtherProfileDeployment
+        }
+    }
+    elseif ($TrustMode -cne 'Authenticode' -or
+        -not [string]::IsNullOrWhiteSpace($PayloadManifest) -or
+        @($AllowedSigners | Microsoft.PowerShell.Core\Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_)
+        }).Count -gt 0 -or
+        -not [string]::IsNullOrWhiteSpace($ProductVersion)) {
+        throw 'payload trust modes, allowed signers, and product version recording apply only to the standalone profile'
+    }
+    elseif ($Action -in @('Install', 'Upgrade', 'Repair') -and
+        $GatewayServiceName -ceq 'DefenseClawGateway') {
+        # The profiles share SCM service names. A host that carries a
+        # standalone deployment must not be adopted by the Secure Client
+        # lifecycle; on every other host this check is a no-op.
+        Assert-DefenseClawNoOtherProfileDeployment
+    }
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
     if ([string]::Equals($GatewayServiceName, $GuardianServiceName, [StringComparison]::OrdinalIgnoreCase)) {
@@ -20903,6 +21570,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -CertificationCodexHome $resolvedCertificationCodexHome `
         -CoreHardeningCertification:$CoreHardeningCertification `
         -AgentApplicationControlAttested:$AttestAgentApplicationControl
+    if (Test-DefenseClawStandaloneProfile) {
+        $layout.ProductVersion = [string]$ProductVersion
+    }
 
     # Keep the authoritative current/global/GUID drive identity adjacent to
     # the first managed metadata read, not only to caller argument parsing.
@@ -20918,7 +21588,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # Protected metadata, not a caller-supplied certification path, is the
         # authority for continuing an existing core-hardening certification
         # deployment.
-        [void](Get-DefenseClawDeploymentMetadata -Layout $layout)
+        $entryMetadata = Get-DefenseClawDeploymentMetadata -Layout $layout
+        if ((Test-DefenseClawStandaloneProfile) -and
+            $null -ne $entryMetadata -and
+            [string]::IsNullOrWhiteSpace($PayloadManifest)) {
+            Initialize-DefenseClawRecordedPayloadTrust `
+                -Metadata $entryMetadata `
+                -Layout $layout
+        }
     }
     $applicationControlAttestationExists = Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $layout.AgentApplicationControlAttestationPath `

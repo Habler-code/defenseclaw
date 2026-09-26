@@ -227,11 +227,65 @@ func TestLoadEnterprisePayloadRejectsLegacyFilesMap(t *testing.T) {
 	}
 }
 
+func TestLoadEnterprisePayloadAcceptsStandaloneFlavors(t *testing.T) {
+	for _, unsigned := range []bool{false, true} {
+		payloadFS, manifest := newEnterprisePayloadFixtureForFlavor(t, unsigned, true)
+		payload, err := loadEnterprisePayload(payloadFS)
+		if err != nil {
+			t.Fatalf("unsigned=%t: %v", unsigned, err)
+		}
+		if !payload.Standalone() || len(payload.Required) != len(standalonePayloadFiles) {
+			t.Fatalf("payload %+v, manifest %+v", payload, manifest)
+		}
+		if _, broker := payload.Files["defenseclaw-cmid-broker.exe"]; broker {
+			t.Fatal("the standalone payload must not carry the CMID broker")
+		}
+	}
+	// A standalone manifest may not smuggle the broker back in.
+	payloadFS, manifest := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	contents := []byte("broker")
+	digest := sha256.Sum256(contents)
+	payloadFS["payload/defenseclaw-cmid-broker.exe"] = &fstest.MapFile{Data: contents, Mode: 0o444}
+	manifest.Files = append(manifest.Files, enterprisePayloadManifestFile{Name: "defenseclaw-cmid-broker.exe", SHA256: hex.EncodeToString(digest[:]), Size: int64(len(contents))})
+	writeEnterprisePayloadManifest(t, payloadFS, manifest)
+	if _, err := loadEnterprisePayload(payloadFS); err == nil {
+		t.Fatal("standalone payload with a broker was accepted")
+	}
+	// A Secure Client inventory labeled standalone is rejected.
+	payloadFS, manifest = newEnterprisePayloadFixture(t, false)
+	manifest.DistributionFlavor = standaloneFlavor
+	writeEnterprisePayloadManifest(t, payloadFS, manifest)
+	if _, err := loadEnterprisePayload(payloadFS); err == nil {
+		t.Fatal("Secure Client inventory accepted as standalone")
+	}
+}
+
+func TestParseEnterpriseSetupEnsureAndSigners(t *testing.T) {
+	opts, _, err := parseEnterpriseSetupOptions([]string{"/ensure", "config=C:\\c.yaml", "allowedsigners=" + strings.Repeat("AB", 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Action != "ensure" || opts.Config != `C:\c.yaml` {
+		t.Fatalf("opts %+v", opts)
+	}
+	if _, _, err := parseEnterpriseSetupOptions([]string{"/ensure", "--allowed-signers=nope"}); err == nil {
+		t.Fatal("invalid signer accepted")
+	}
+}
+
 func newEnterprisePayloadFixture(t *testing.T, unsigned bool) (fstest.MapFS, enterprisePayloadManifest) {
+	return newEnterprisePayloadFixtureForFlavor(t, unsigned, false)
+}
+
+func newEnterprisePayloadFixtureForFlavor(t *testing.T, unsigned, standalone bool) (fstest.MapFS, enterprisePayloadManifest) {
 	t.Helper()
-	payloadFS := make(fstest.MapFS, len(requiredPayloadFiles)+1)
-	entries := make([]enterprisePayloadManifestFile, 0, len(requiredPayloadFiles))
-	for _, name := range requiredPayloadFiles {
+	files := requiredPayloadFiles
+	if standalone {
+		files = standalonePayloadFiles
+	}
+	payloadFS := make(fstest.MapFS, len(files)+1)
+	entries := make([]enterprisePayloadManifestFile, 0, len(files))
+	for _, name := range files {
 		contents := []byte("test payload for " + name)
 		digest := sha256.Sum256(contents)
 		entries = append(entries, enterprisePayloadManifestFile{
@@ -244,6 +298,12 @@ func newEnterprisePayloadFixture(t *testing.T, unsigned bool) (fstest.MapFS, ent
 	flavor := managedEnterpriseFlavor
 	if unsigned {
 		flavor = managedEnterpriseUnsignedFlavor
+	}
+	if standalone {
+		flavor = standaloneFlavor
+		if unsigned {
+			flavor = standaloneUnsignedFlavor
+		}
 	}
 	manifest := enterprisePayloadManifest{
 		SchemaVersion:      1,
