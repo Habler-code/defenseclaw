@@ -846,9 +846,23 @@ func validateInstallFootprintBeforeSetup(home, dataDir string, uid int, connecto
 	return nil
 }
 
+// beforeTargetPathMutation is a test seam invoked after a repair helper has
+// inspected a path and immediately before it changes that path.
+var beforeTargetPathMutation func(path string)
+
+// removeRepairSymlink removes a target-owned symlink during authorized
+// repair. It runs only with the target user's credentials, so a path
+// component replaced after inspection cannot extend the removal to an entry
+// the user could not remove directly.
 func removeRepairSymlink(path string, uid int, label string) error {
+	if err := requireTargetPathCredentials(); err != nil {
+		return err
+	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
 		return fmt.Errorf("enterprise hooks: symlink %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+	}
+	if hook := beforeTargetPathMutation; hook != nil {
+		hook(path)
 	}
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("enterprise hooks: remove symlink %s %s: %w", label, path, err)
@@ -949,7 +963,9 @@ func hardenInstallFootprint(
 			return err
 		}
 	}
-	return lchownInstallFootprint(uid, gid, dataDir, footprint, hookConfigPaths)
+	// Everything above was created by, and is therefore owned by, the
+	// target user this process runs as; no ownership repair is needed.
+	return nil
 }
 
 func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {

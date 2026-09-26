@@ -1352,6 +1352,7 @@ The guardian command:
 - rejects proxy/plugin connectors;
 - refuses first-time install when the agent hook config file is missing;
 - rejects hook config paths outside the target home, including unsafe symlink escapes;
+- validates and repairs the user's files only from a worker process running as that user;
 - writes a raw connector-scoped hook token, not the gateway administrator token, into the user's hook runtime;
 - preserves the user's ownership on patched hook files and per-user hook scripts;
 - applies the same action-mode hook-contract validation as gateway startup.
@@ -1369,12 +1370,17 @@ A successful privileged reconcile writes two different records:
 
 The gateway does not treat the service-writable status file as authorization. Managed hook enforcement is reported ready only when the trusted authorization record covers every configured target. Partial coverage remains starting/non-enforcing and includes an actionable health hint.
 
-The guardian units set `NoNewPrivileges=false` deliberately. Each reconcile
-temporarily adopts the target user's effective UID/GID so connector files are
-created with the user's ownership, then returns to root to process the next
-allow-listed target. Linux otherwise prevents the long-lived guardian from
-regaining its bounded `CAP_SETUID` after that credential drop. The units still
-limit capabilities to `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`,
+The guardian itself stays root and never changes its own credentials. For each
+allow-listed target it starts a short-lived worker from its own executable; the
+worker permanently switches to the target user's UID, primary GID, and no other
+groups before it opens any path in that user's home, then validates, installs,
+or repairs the target and exits. Every file change is therefore checked by the
+kernel against the user's own permissions, and connector files keep the user's
+ownership. The worker needs only `CAP_SETUID` and `CAP_SETGID` for that switch;
+it does not depend on the units' `NoNewPrivileges=false`. On macOS the root
+guardian starts a worker only from an executable that no other user can
+replace, such as the packaged `/opt/cisco/secureclient/defenseclaw/bin` binary.
+The units limit capabilities to `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`,
 `CAP_SETGID`, and `CAP_SETUID`, retain the `@system-service` syscall filter,
 deny SUID/SGID creation, and restrict writable paths to user homes and the two
 guardian state directories.
@@ -1394,7 +1400,7 @@ sudo systemctl start defenseclaw-hook-guardian@ubuntu.service
 
 The template unit is useful for a single user/connector bootstrap. For ongoing fleet management, prefer the manifest-driven reconcile and watcher because they produce one aggregate state and authorization record.
 
-Run one guardian invocation per user and connector. The template intentionally has narrower scope than a full root shell: it runs as root so it can repair user-owned files, sets `UMask=0077`, and limits its capability bounding set to ownership, DAC file access, and the credential drop used for per-user setup (`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_SETGID`, `CAP_SETUID`). It needs write access to user homes so it can repair hook files and to `/var/lib/defenseclaw` so the shared CLI startup can open the audit DB and write guardian state. Do not remove `ProtectHome=true` from the always-on gateway service to solve per-user hooks.
+Run one guardian invocation per user and connector. The template intentionally has narrower scope than a full root shell: it runs as root so it can repair user-owned files, sets `UMask=0077`, and limits its capability bounding set to ownership, DAC file access, and the credential switch of its per-target worker (`CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_SETGID`, `CAP_SETUID`). It needs write access to user homes so it can repair hook files and to `/var/lib/defenseclaw` so the shared CLI startup can open the audit DB and write guardian state. Do not remove `ProtectHome=true` from the always-on gateway service to solve per-user hooks.
 
 For periodic multi-user repair, create an explicit allow-list at `/etc/defenseclaw/hook-guardian/targets.yaml`:
 

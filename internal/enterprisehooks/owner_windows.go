@@ -11,7 +11,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"golang.org/x/sys/windows"
 )
 
@@ -56,6 +55,8 @@ func chmodOwnedPath(path string, mode os.FileMode) error {
 	return errEnterpriseHooksUnsupportedWindows
 }
 
-func lchownInstallFootprint(_, _ int, _ string, _ connector.AgentPaths, _ []string) error {
+// requireTargetPathCredentials is unused on Windows, where platformInstall
+// owns every mutation through SID impersonation.
+func requireTargetPathCredentials() error {
 	return errEnterpriseHooksUnsupportedWindows
 }

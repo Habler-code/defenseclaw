@@ -170,10 +170,10 @@ func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowSticky
 
 func hookAPITrustedOwner(uid uint32) bool {
 	// Real/effective-UID ownership is intentional for unmanaged installs and
-	// privileged enterprise reconciliation. The latter keeps real uid 0 while
-	// temporarily dropping effective uid to the manifest-pinned target user;
-	// files that user just created must be validated against the effective uid.
-	// Accepting both preserves the unmanaged/setuid compatibility contract.
+	// privileged enterprise reconciliation. The latter runs in a per-target
+	// worker that has become the manifest-pinned target user, so files that
+	// user just created are owned by the process uid. Accepting both real and
+	// effective uid preserves the unmanaged/setuid compatibility contract.
 	if runtimeowner.Trusted(uid) {
 		return true
 	}
