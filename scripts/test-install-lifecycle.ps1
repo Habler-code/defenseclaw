@@ -467,6 +467,11 @@ function Test-UpgradeLegacy([string]$From) {
         Set-UserPath $pathRaw $pathKind
         if ($placedCodex) {
             Stop-Lane
+            # The gateway's Codex app-server outlives it. Deleting a running
+            # image only marks it for deletion, and the next lane would find a
+            # codex.exe that cannot be opened.
+            Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $codex } |
+                ForEach-Object { $_.Kill(); [void]$_.WaitForExit(10000) }
             Remove-Item -LiteralPath $codex -Force -ErrorAction SilentlyContinue
         }
     }
