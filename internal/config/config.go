@@ -314,7 +314,10 @@ type Config struct {
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
 	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
-	Routing RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
+	// Enterprise selects the managed_enterprise profile (Secure Client or
+	// standalone) and tunes the standalone profile. See enterprise.go.
+	Enterprise EnterpriseConfig `mapstructure:"enterprise" yaml:"enterprise,omitempty"`
+	Routing    RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -2867,6 +2870,12 @@ func loadConfigSource(
 	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
+	if err := resolveEnterpriseConfig(&cfg, runtime.GOOS, os.Getenv(managed.EnterpriseProfileEnv)); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "enterprise_config_invalid")
 		}
 		return nil, err
 	}

@@ -1259,6 +1259,31 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_ENTERPRISE_PROFILE",
+      "category": "runtime_path",
+      "purpose": "Pin the managed_enterprise profile (secure_client or standalone) in every managed service environment, next to DEFENSECLAW_DEPLOYMENT_MODE, so a config replacement cannot switch the decision and identity stack.",
+      "default": "unset (use config.yaml enterprise.profile; then secure_client on Windows/macOS, standalone on Linux)",
+      "accepted_values": [
+        "secure_client",
+        "standalone",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "Resolves and validates the enterprise profile against config.yaml before any managed trust check"
+        },
+        {
+          "location": "internal/managed/profile.go",
+          "description": "Profile resolution rules and the per-OS default"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Immutable profile boundary. Must agree with config.yaml enterprise.profile; a mismatch refuses to start. Only meaningful with DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise; setting it on an unmanaged process is an error."
+    },
+    {
       "name": "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST",
       "category": "test_fixture",
       "purpose": "Skip the on-disk trust check LoadEnvConfigEndpoint enforces on the AVC-authored env_config.json: root ownership and no group/world write on Unix, administrator ownership across the ancestor chain on Windows. Set only in unit tests that exercise the JSON parse / URL validation branches with a fixture the test user can write.",
