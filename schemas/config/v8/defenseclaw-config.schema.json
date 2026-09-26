@@ -297,7 +297,16 @@
         "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
         "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 3000 },
         "enabled_rules": { "$ref": "#/$defs/stringList" },
-        "scan_hook_surface": { "type": "boolean", "default": true }
+        "scan_hook_surface": { "type": "boolean", "default": true },
+        "unavailable_action": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "block"
+          ],
+          "default": "allow",
+          "description": "managed_enterprise only: what to do with a request Cisco AI Defense should have inspected but could not. allow lets it through (fail-open); block returns a block verdict that action-mode connectors enforce."
+        }
       }
     },
     "scanners": {

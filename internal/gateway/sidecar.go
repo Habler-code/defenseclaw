@@ -1653,6 +1653,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if nextManagedEnterprise {
 			if proxy := s.proxySnapshot(); proxy != nil {
 				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
+				proxy.SetManagedUnavailableAction(s.currentConfig().CiscoAIDefense.UnavailableAction)
 			}
 		}
 	}
@@ -3144,6 +3145,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
+	// Same provider gate as the multi-connector boot: managed mode disables
+	// the local detectors, so a build that can never mint a managed-cloud
+	// credential must report an error instead of running with no inspector.
+	if s.currentConfig().Guardrail.Enabled && managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+		if err := s.requireManagedInspectionSupport(); err != nil {
+			return err
+		}
+	}
 	if !s.currentConfig().Guardrail.Enabled {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
 		if err := conn.Teardown(ctx, setupOpts); err != nil {
@@ -3278,14 +3287,17 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// initialize, remote inspection stays disabled entirely.
 		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
 			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
+			proxy.SetManagedUnavailableAction(s.currentConfig().CiscoAIDefense.UnavailableAction)
 			// AID-only posture: every local detector (guardrail regex,
 			// CodeGuard/ClawShield) and explicit local policy (static
 			// block/allow, MCP block, block-list, approval, multi-turn,
 			// judge) is disabled across proxy/hook/router lanes. Cisco AI
 			// Defense is the sole decision-maker; requests it cannot decide
-			// (AID down/timeout/unwired) fail open. Log once at boot so
-			// operators see the posture in the sidecar log.
-			fmt.Fprintln(os.Stderr, "[guardrail] managed_enterprise: local detections disabled; Cisco AI Defense authoritative (fail-open on AID unavailable)")
+			// (AID down/timeout/unwired) follow
+			// cisco_ai_defense.unavailable_action (allow by default). Log
+			// once at boot so operators see the posture in the sidecar log.
+			fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: local detections disabled; Cisco AI Defense authoritative (%s)\n",
+				managedAIDUnavailablePostureLabel(s.currentConfig()))
 		}
 		// Start connector hook self-heal before the observability-only
 		// short-circuit below. Hook-native connectors (codex, claudecode,
@@ -3363,7 +3375,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					verifiedEnforcement = enforcementEnabled
 					hint = "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path"
 				}
-				s.health.SetGuardrail(state, status, map[string]interface{}{
+				detail := map[string]interface{}{
 					"summary":             summary,
 					"connector":           conn.Name(),
 					"mode":                "observability",
@@ -3374,7 +3386,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					"hint":                hint,
 					"lifecycle_manager":   "enterprise_hook_guardian",
 					"guardian_verified":   covered,
-				})
+				}
+				s.addManagedInspectionHealth(detail)
+				s.health.SetGuardrail(state, status, detail)
 			}
 			publishHealth()
 			fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — awaiting enterprise hook guardian verification\n", conn.Name(), policyMode, enforcementEnabled)
@@ -3782,12 +3796,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	// Managed mode disables the local detectors, so remote inspection is
 	// all that stands between a tool call and its upstream. A build with
 	// no credential factory can never reach it.
-	if !cloudreg.Registered() {
-		err := fmt.Errorf(
-			"managed_enterprise requires managed-cloud support: %w",
-			cloudreg.ErrNoProviderRegistered,
-		)
-		s.health.SetGuardrail(StateError, err.Error(), nil)
+	if err := s.requireManagedInspectionSupport(); err != nil {
 		return err
 	}
 	// A registered factory that fails now may only be waiting on the
@@ -3871,23 +3880,16 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			enforcementEnabled = hookEnforcement
 			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
 		}
-		inspectionAvailable, inspectionDetail := s.inspectionAvailability()
 		detail := map[string]interface{}{
-			"summary":              summary,
-			"connectors":           succeeded,
-			"enforcement_enabled":  enforcementEnabled,
-			"inspection_available": inspectionAvailable,
-			"proxy_port":           "closed",
-			"hint":                 hint,
-			"lifecycle_manager":    "enterprise_hook_guardian",
-			"guardian_verified":    covered,
+			"summary":             summary,
+			"connectors":          succeeded,
+			"enforcement_enabled": enforcementEnabled,
+			"proxy_port":          "closed",
+			"hint":                hint,
+			"lifecycle_manager":   "enterprise_hook_guardian",
+			"guardian_verified":   covered,
 		}
-		if !inspectionAvailable {
-			detail["inspection_error"] = inspectionDetail
-			// enforcement_enabled describes the configured hook mode, so
-			// say plainly that nothing is inspecting behind it.
-			detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected"
-		}
+		s.addManagedInspectionHealth(detail)
 		s.health.SetGuardrail(state, status, detail)
 	}
 	publishHealth()
