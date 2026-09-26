@@ -25,8 +25,4 @@ func runUnixLifecycle(_ *cobra.Command, platform, _ string, _ *unixLifecycleOpti
 	return withExitCode(errors.New("`enterprise "+platform+"` manages Linux and macOS hosts; use `enterprise windows` on Windows"), 1639)
 }
 
-// runEnterpriseSecret is the Windows seam for `enterprise secret`; the
-// Windows lifecycle stream implements the protected-DACL store.
-func runEnterpriseSecret(*cobra.Command, string, *enterpriseSecretOptions) error {
-	return withExitCode(errors.New("`enterprise secret` is not available on Windows in this build"), 1603)
-}
+// runEnterpriseSecret is implemented in enterprise_secret_windows.go.

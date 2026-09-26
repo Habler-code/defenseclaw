@@ -57,6 +57,14 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	strict := l.opts.Action == ActionVerify
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.describe(ctx, record, true)
+	l.describeMachinePolicy(record)
+	if strict {
+		for _, warning := range r.Warnings {
+			if warning.Code == codeMachinePolicyIncomplete {
+				problems = append(problems, warning.Message)
+			}
+		}
+	}
 	if strict {
 		for _, problem := range problems {
 			r.AddError(codeVerify, problem)

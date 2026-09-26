@@ -198,6 +198,10 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 	if _, asked := discovered["newbie"]; asked {
 		t.Fatal("discovery must not run for a user whose home is unavailable")
 	}
+	if len(report.EligibleAccounts) != 1 || report.EligibleAccounts[0].User != "alice" ||
+		report.EligibleAccounts[0].Home != alice || report.EligibleAccounts[0].HomeInode == 0 {
+		t.Fatalf("eligible accounts must list available homes only: %+v", report.EligibleAccounts)
+	}
 	for _, needle := range []string{"svc: non-interactive login shell", "lowuid: uid 5 outside", "outside: home"} {
 		found := false
 		for _, skipped := range report.Skipped {

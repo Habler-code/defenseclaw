@@ -68,6 +68,10 @@ type Deployment struct {
 	// lifecycle created (vendor machine-policy parents). Uninstall removes
 	// them only while they are empty.
 	CreatedDirs []string `json:"created_dirs"`
+	// MachinePolicyConnectors are the connectors whose DefenseClaw hooks the
+	// last transaction left in place in vendor machine policy; the runtime
+	// descriptor records exactly this set.
+	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
 }
 
 // Pending is the intent record of an in-flight transaction.

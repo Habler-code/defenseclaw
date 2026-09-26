@@ -92,6 +92,21 @@ type UnixEnumerationReport struct {
 	Revoked    int      `json:"revoked"`
 	Skipped    []string `json:"skipped,omitempty"`
 	Connectors []string `json:"connectors"`
+	// EligibleAccounts are the accounts that passed every enrollment filter
+	// and whose home is available this cycle, including users with only
+	// machine-policy connectors (no manifest rows). The guardian runs the
+	// per-user foreign-hook cleanup for them.
+	EligibleAccounts []UnixEligibleAccount `json:"-"`
+}
+
+// UnixEligibleAccount is one enrolled-or-eligible account in the
+// root-only eligible-accounts record next to the manifest.
+type UnixEligibleAccount struct {
+	User      string `json:"user"`
+	UID       int    `json:"uid"`
+	GID       int    `json:"gid"`
+	Home      string `json:"home"`
+	HomeInode uint64 `json:"home_inode,omitempty"`
 }
 
 type unixCandidate struct {
@@ -290,6 +305,11 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			continue
 		}
 		report.Eligible++
+		if check.State == HomeAvailable {
+			report.EligibleAccounts = append(report.EligibleAccounts, UnixEligibleAccount{
+				User: name, UID: account.UID, GID: account.GID, Home: home, HomeInode: check.Inode,
+			})
+		}
 		var versions, reasons map[string]string
 		if check.State == HomeAvailable && opts.Discover != nil {
 			var err error

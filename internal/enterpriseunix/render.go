@@ -45,6 +45,9 @@ type renderInputs struct {
 	Config         *validatedConfig
 	Secrets        []string // credential names present in the secrets dir
 	LoadCredential bool
+	// MachinePolicy are the connectors the descriptor records as protected
+	// by vendor machine policy.
+	MachinePolicy []string
 }
 
 // renderFiles returns every non-binary file the deployment consists of.
@@ -192,12 +195,12 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 		ServiceGID:              in.Account.GID,
 		APIAddr:                 e.Layout.APIAddr,
 		HookSocket:              e.Layout.HookSocketPath,
-		MachinePolicyConnectors: []string{},
+		MachinePolicyConnectors: append([]string{}, in.MachinePolicy...),
 		DisableSelfUpdate:       true,
 		InstalledAt:             in.InstalledAt,
 	}
+	sort.Strings(d.MachinePolicyConnectors)
 	if in.Config != nil {
-		d.MachinePolicyConnectors = in.Config.machinePolicyEnabled(e.GOOS)
 		d.DisableSelfUpdate = in.Config.SelfUpdateDisabled
 	}
 	return managed.MarshalRuntimeDescriptor(d)

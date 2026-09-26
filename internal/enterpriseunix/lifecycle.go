@@ -368,6 +368,13 @@ type plan struct {
 	stale       []string
 	systemd     int
 	installedAt string
+	// intended are the machine-policy connectors the config asks for;
+	// machinePolicy is the subset the descriptor records (all of intended
+	// unless a previous transaction with the same config could not place
+	// some of them).
+	intended      []string
+	machinePolicy []string
+	render        renderInputs
 }
 
 // buildPlan computes the desired state without mutating the host. account
@@ -442,6 +449,18 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	}
 	loadCredential := env.GOOS == "linux" && p.systemd >= loadCredentialSystemd
 
+	p.intended, err = env.MachinePolicy.Intended(validated.Loaded)
+	if err != nil {
+		return nil, &codedError{code: codeMachinePolicy, err: err}
+	}
+	p.machinePolicy = p.intended
+	if record != nil && record.ConfigSHA256 == validated.SHA && record.MachinePolicyConnectors != nil {
+		// Same config: keep what the last transaction could actually place,
+		// so a connector whose vendor file refuses DefenseClaw's entry does
+		// not make every ensure re-apply and restart the services.
+		p.machinePolicy = intersectSorted(record.MachinePolicyConnectors, p.intended)
+	}
+
 	p.dirs = env.managedDirs(account, loadCredential)
 	for _, connector := range validated.machinePolicyEnabled(env.GOOS) {
 		for _, dir := range machinePolicyDirs(env.GOOS, connector) {
@@ -449,10 +468,12 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
-	files, err := env.renderFiles(renderInputs{
+	p.render = renderInputs{
 		Account: account, Channel: p.channel, Version: p.version, InstalledAt: p.installedAt,
 		Config: validated, Secrets: p.secrets, LoadCredential: loadCredential,
-	})
+		MachinePolicy: p.machinePolicy,
+	}
+	files, err := env.renderFiles(p.render)
 	if err != nil {
 		return nil, &codedError{code: codeApply, err: err}
 	}
@@ -582,6 +603,14 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
+		if record == nil {
+			// A failed first install leaves no DefenseClaw entries behind in
+			// vendor machine policy; an upgrade or repair keeps the previous
+			// deployment's entries, which name the same hook binary.
+			if _, err := env.MachinePolicy.RemoveAll(); err != nil {
+				r.AddWarning(codeMachinePolicy, "remove machine policy after the failed install: "+err.Error())
+			}
+		}
 		if err := l.rollback(ctx, snap, previouslyActive); err != nil {
 			r.AddError(codeRollbackFailed, err.Error())
 		} else {
@@ -603,6 +632,12 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 	changed, err := l.applyFiles(p)
 	if err != nil {
 		return failAndRollback(codeApply, err)
+	}
+	// Vendor machine policy goes in before the services start so the
+	// gateway loads a descriptor that names exactly the connectors whose
+	// hooks are in place.
+	if err := l.publishMachinePolicy(p, changed); err != nil {
+		return failAndRollback(errorCode(err, codeMachinePolicy), err)
 	}
 	restartSockets := record != nil && record.ProductVersion != p.version && p.channel == ChannelPackage
 	for _, unit := range units {
@@ -642,6 +677,7 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 		InstalledAt: p.installedAt, UpdatedAt: env.Now().UTC().Format(time.RFC3339), NoStart: l.opts.NoStart,
 		ServiceUser: account.Name, ServiceUID: account.UID, ServiceGID: account.GID,
 		ConfigSHA256: p.config.SHA, SecretsSHA256: p.secretsSHA, Files: map[string]string{},
+		MachinePolicyConnectors: append([]string{}, p.machinePolicy...),
 	}
 	if record != nil {
 		newRecord.CreatedServiceAccount = record.CreatedServiceAccount
@@ -919,17 +955,20 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if problems := l.verifyInstalled(ctx, record, false); len(problems) > 0 {
 		return false, ""
 	}
+	if l.machinePolicyDrift(p) {
+		return false, ""
+	}
 	return true, "up_to_date"
 }
 
 func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
+	l.republishMachinePolicy(record)
 	var err error
 	if env.GOOS == "linux" {
 		err = env.Services.Start(ctx, Unit{Name: unitGuardianOneshot})
 	} else {
-		_, err = env.Runner.Run(ctx, filepath.Join(env.P(env.Layout.BinDir), binGateway),
-			"enterprise", "hooks", "reconcile", "--manifest", env.Layout.ManifestPath, "--json")
+		_, err = env.runGatewayCLI(ctx, "enterprise", "hooks", "reconcile", "--manifest", env.Layout.ManifestPath, "--json")
 	}
 	if err != nil {
 		r.AddError(codeReconcile, err.Error())
@@ -954,6 +993,26 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	var errs []error
+	// Per-user registrations go first, while the binaries they name still
+	// exist: each user's worker removes only DefenseClaw's own entries.
+	if record != nil && exists(filepath.Join(env.P(env.Layout.BinDir), binGateway)) {
+		if _, err := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json"); err != nil {
+			r.AddWarning(codePerUserHooks, "some per-user DefenseClaw hook registrations were not removed (they name a binary this uninstall removes): "+err.Error())
+		}
+	}
+	// DefenseClaw's vendor machine policy entries go next, while the hook
+	// binary they name still exists; administrator entries stay byte for
+	// byte (enterprisepolicy restores the recorded preimage or edits only
+	// DefenseClaw's own entries).
+	if policy, err := env.MachinePolicy.RemoveAll(); err != nil {
+		errs = append(errs, fmt.Errorf("remove machine policy: %w", err))
+	} else {
+		for _, state := range policy.States {
+			if state.Changed {
+				r.MachinePolicy[state.Connector] = state.ToStatus()
+			}
+		}
+	}
 	for _, unit := range ordered {
 		_ = env.Services.Stop(ctx, unit)
 		if unit.Activate {

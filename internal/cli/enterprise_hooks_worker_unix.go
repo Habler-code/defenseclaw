@@ -32,6 +32,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -50,12 +51,16 @@ const (
 	enterpriseHookWorkerStderrLimit     = 64 << 10
 	enterpriseHookWorkerParallelism     = 4
 
-	enterpriseHookWorkerOpApply    = "apply"
-	enterpriseHookWorkerOpDiscover = "discover"
+	enterpriseHookWorkerOpApply          = "apply"
+	enterpriseHookWorkerOpDiscover       = "discover"
+	enterpriseHookWorkerOpForeignCleanup = "foreign_cleanup"
 
 	enterpriseHookWorkerModeInstall        = "install"
 	enterpriseHookWorkerModeVerify         = "verify"
 	enterpriseHookWorkerModeVerifyOrRepair = "verify_or_repair"
+	// enterpriseHookWorkerModeRemove tears down DefenseClaw's own per-user
+	// registration (standalone uninstall).
+	enterpriseHookWorkerModeRemove = "remove"
 )
 
 // enterpriseHookWorkerTimeout bounds one worker process.
@@ -108,6 +113,28 @@ type enterpriseHookWorkerRequest struct {
 	Standalone bool                         `json:"standalone"`
 	Targets    []enterpriseHookWorkerTarget `json:"targets,omitempty"`
 	Connectors []string                     `json:"connectors,omitempty"`
+	// ForeignCleanup asks the worker to remove unapproved foreign hooks
+	// from the user's own vendor config (foreign_cleanup operation).
+	ForeignCleanup []enterpriseHookWorkerForeignCleanup `json:"foreign_cleanup,omitempty"`
+}
+
+// enterpriseHookWorkerForeignCleanup is one connector's foreign-hook
+// cleanup; the parent resolves the policy from the administrator's config,
+// which the worker cannot read.
+type enterpriseHookWorkerForeignCleanup struct {
+	Connector     string                                 `json:"connector"`
+	HookBinary    string                                 `json:"hook_binary"`
+	Policy        enterprisepolicy.PublicConnectorPolicy `json:"policy"`
+	OwnedCommands []string                               `json:"owned_commands,omitempty"`
+}
+
+// enterpriseHookWorkerCleanupReport summarizes one connector's cleanup.
+// It is user-influenced and only logged.
+type enterpriseHookWorkerCleanupReport struct {
+	Removed   []string `json:"removed,omitempty"`
+	Reported  []string `json:"reported,omitempty"`
+	BackupDir string   `json:"backup_dir,omitempty"`
+	Error     string   `json:"error,omitempty"`
 }
 
 type enterpriseHookWorkerTargetResult struct {
@@ -120,11 +147,12 @@ type enterpriseHookWorkerTargetResult struct {
 }
 
 type enterpriseHookWorkerResponse struct {
-	Version  int                                `json:"version"`
-	Targets  []enterpriseHookWorkerTargetResult `json:"targets,omitempty"`
-	Versions map[string]string                  `json:"versions,omitempty"`
-	Reasons  map[string]string                  `json:"reasons,omitempty"`
-	Error    string                             `json:"error,omitempty"`
+	Version  int                                          `json:"version"`
+	Targets  []enterpriseHookWorkerTargetResult           `json:"targets,omitempty"`
+	Versions map[string]string                            `json:"versions,omitempty"`
+	Reasons  map[string]string                            `json:"reasons,omitempty"`
+	Cleanup  map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
+	Error    string                                       `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -209,6 +237,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			}
 		}
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons}, 0)
+	case enterpriseHookWorkerOpForeignCleanup:
+		return respond(enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, time.Now())}, 0)
 	default:
 		return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("unknown operation %q", request.Operation)}, 3)
 	}
@@ -268,6 +298,7 @@ func lowerRlimit(resource int, limit uint64) {
 var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
+	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
 )
 
 func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWorkerRequest) enterpriseHookWorkerResponse {
@@ -293,6 +324,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				outcome.Repaired = err == nil
 			}
+		case enterpriseHookWorkerModeRemove:
+			err = enterpriseHookWorkerRemover(ctx, opts)
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}
@@ -306,7 +339,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		} else {
 			outcome.OK = true
-			outcome.Result = &result
+			if target.Mode != enterpriseHookWorkerModeRemove {
+				outcome.Result = &result
+			}
 		}
 		results = append(results, outcome)
 	}

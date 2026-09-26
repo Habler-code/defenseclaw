@@ -207,6 +207,12 @@ func runEnterpriseHooksEnumerateCycle(
 	if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(manifestPath), state); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
 	}
+	// The guardian runs the per-user foreign-hook cleanup for every eligible
+	// account, including users whose connectors are all machine policy and
+	// who therefore have no manifest rows.
+	if err := enterprisehooks.WriteUnixEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifestPath), cycle.EligibleAccounts); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the eligible accounts: %v\n", err)
+	}
 	return report, nil
 }
 

@@ -218,6 +218,9 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	env.Services = h.services
 	h.accounts = &fakeAccounts{accounts: map[string]Account{}}
 	env.Accounts = h.accounts
+	// The real machine-policy writers run inside the temporary root; only
+	// the root-ownership ancestor checks are off.
+	env.MachinePolicy = &policyManager{env: env, skipTrust: true}
 	env.HealthGet = func(context.Context) (int, []byte, error) {
 		gateway := unitGateway
 		if goos == "darwin" {

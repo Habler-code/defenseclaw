@@ -44,6 +44,13 @@ type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (CommandResult, error)
 }
 
+// EnvRunner is a Runner that can add environment variables to the fixed
+// minimal environment; the lifecycle uses it to run the gateway CLI with
+// the same managed pins the guardian service gets.
+type EnvRunner interface {
+	RunEnv(ctx context.Context, env []string, name string, args ...string) (CommandResult, error)
+}
+
 // ErrCommandNotFound reports that none of a command's absolute candidate
 // paths exists on the host.
 var ErrCommandNotFound = errors.New("command not found")
@@ -76,6 +83,11 @@ type ExecRunner struct {
 // Run executes name (a key of commandCandidates, or an absolute path) with
 // args and a clean environment.
 func (r ExecRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	return r.RunEnv(ctx, nil, name, args...)
+}
+
+// RunEnv is Run with extra KEY=VALUE environment entries.
+func (r ExecRunner) RunEnv(ctx context.Context, extra []string, name string, args ...string) (CommandResult, error) {
 	path, err := resolveCommand(name)
 	if err != nil {
 		return CommandResult{ExitCode: -1}, err
@@ -87,7 +99,7 @@ func (r ExecRunner) Run(ctx context.Context, name string, args ...string) (Comma
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
+	cmd.Env = append([]string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}, extra...)
 	cmd.Dir = "/"
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &stdout, remaining: 4 << 20}
@@ -156,9 +168,10 @@ type Env struct {
 	Root   string
 	Layout managed.StandaloneLayout
 
-	Runner   Runner
-	Services ServiceManager
-	Accounts AccountManager
+	Runner        Runner
+	Services      ServiceManager
+	Accounts      AccountManager
+	MachinePolicy MachinePolicyManager
 
 	Now     func() time.Time
 	Geteuid func() int
@@ -227,6 +240,9 @@ func (e *Env) fillDefaults() {
 	if e.Accounts == nil {
 		e.Accounts = newAccountManager(e)
 	}
+	if e.MachinePolicy == nil {
+		e.MachinePolicy = newMachinePolicyManager(e)
+	}
 	if e.LockTimeout <= 0 {
 		e.LockTimeout = 2 * time.Minute
 	}
@@ -236,6 +252,32 @@ func (e *Env) fillDefaults() {
 	if e.PollInterval <= 0 {
 		e.PollInterval = 500 * time.Millisecond
 	}
+}
+
+// serviceEnvironment is the managed environment the guardian service gets
+// (the systemd units and launchd plists set the same pins).
+func (e *Env) serviceEnvironment() []string {
+	env := []string{
+		"DEFENSECLAW_HOME=" + e.Layout.DataDir,
+		"DEFENSECLAW_CONFIG=" + e.Layout.ConfigPath,
+		managed.DeploymentModeEnv + "=" + managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv + "=" + managed.ProfileStandalone,
+		"DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=" + e.Layout.GuardianAuthDir,
+	}
+	if e.GOOS == "darwin" {
+		env = append(env, "DEFENSECLAW_UNIX_SERVICE_ACCOUNT="+e.Layout.ServiceUser)
+	}
+	return env
+}
+
+// runGatewayCLI runs the installed gateway binary with the service
+// environment, so its commands load the managed standalone config.
+func (e *Env) runGatewayCLI(ctx context.Context, args ...string) (CommandResult, error) {
+	gateway := filepath.Join(e.P(e.Layout.BinDir), binGateway)
+	if runner, ok := e.Runner.(EnvRunner); ok {
+		return runner.RunEnv(ctx, e.serviceEnvironment(), gateway, args...)
+	}
+	return e.Runner.Run(ctx, gateway, args...)
 }
 
 // P maps a canonical layout path onto the rooted filesystem.

@@ -38,6 +38,10 @@ func refusePerUserGatewayOnManagedHost() error {
 	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return nil
 	}
+	if where, present := managedHostWindowsStandalone(); present {
+		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the per-user gateway is disabled; "+
+			"an administrator can check the managed deployment with `defenseclaw-gateway enterprise windows status --profile standalone`", where)
+	}
 	path := managedHostDescriptorPath()
 	if path == "" {
 		return nil

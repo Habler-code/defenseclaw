@@ -58,6 +58,9 @@ type validatedConfig struct {
 	NoProxy                string
 	SelfUpdateDisabled     bool
 	MachinePolicyOwnership map[string]string
+	// Loaded is the runtime config the checks loaded; machine policy is
+	// published from it.
+	Loaded *config.Config
 }
 
 // envPinMu serializes the temporary process-environment pins validation
@@ -118,6 +121,7 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 		NoProxy:                strings.TrimSpace(cfg.Enterprise.Network.NoProxy),
 		SelfUpdateDisabled:     cfg.Enterprise.Coexistence.SelfUpdateDisabled(),
 		MachinePolicyOwnership: map[string]string{},
+		Loaded:                 cfg,
 	}
 	for name := range cfg.Guardrail.Connectors {
 		connector := strings.ToLower(strings.TrimSpace(name))

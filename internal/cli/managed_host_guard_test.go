@@ -21,9 +21,10 @@ import (
 
 func TestRefusePerUserGatewayOnManagedHost(t *testing.T) {
 	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
-	restore := managedHostDescriptorPath
+	restore, restoreWindows := managedHostDescriptorPath, managedHostWindowsStandalone
 	managedHostDescriptorPath = func() string { return descriptor }
-	defer func() { managedHostDescriptorPath = restore }()
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	defer func() { managedHostDescriptorPath, managedHostWindowsStandalone = restore, restoreWindows }()
 	t.Setenv(managed.DeploymentModeEnv, "")
 
 	if err := refusePerUserGatewayOnManagedHost(); err != nil {
@@ -39,5 +40,28 @@ func TestRefusePerUserGatewayOnManagedHost(t *testing.T) {
 	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	if err := refusePerUserGatewayOnManagedHost(); err != nil {
 		t.Fatalf("managed service refused: %v", err)
+	}
+}
+
+func TestRefusePerUserGatewayOnWindowsStandaloneHost(t *testing.T) {
+	restore, restoreWindows := managedHostDescriptorPath, managedHostWindowsStandalone
+	managedHostDescriptorPath = func() string { return "" }
+	defer func() { managedHostDescriptorPath, managedHostWindowsStandalone = restore, restoreWindows }()
+	t.Setenv(managed.DeploymentModeEnv, "")
+
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+		t.Fatalf("a host without a standalone deployment refused: %v", err)
+	}
+	managedHostWindowsStandalone = func() (string, bool) {
+		return `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json`, true
+	}
+	err := refusePerUserGatewayOnManagedHost()
+	if err == nil || !strings.Contains(err.Error(), "enterprise windows status") {
+		t.Fatalf("a Windows standalone host allowed a per-user gateway: %v", err)
+	}
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+		t.Fatalf("the managed gateway service refused: %v", err)
 	}
 }
