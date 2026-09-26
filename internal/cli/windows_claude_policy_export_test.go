@@ -21,6 +21,11 @@ func runWindowsClaudePolicyExportForTest(t *testing.T, args ...string) (string, 
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
+	// Cobra parses os.Args, which holds the test binary's own flags, when
+	// the args are nil, so a call without arguments must pass an empty slice.
+	if args == nil {
+		args = []string{}
+	}
 	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return out.String(), err
