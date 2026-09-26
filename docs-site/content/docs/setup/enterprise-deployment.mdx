@@ -331,7 +331,7 @@ The default managed layout is:
 | Broker, gateway/guardian/enumerator host, sensor helper, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
 | Managed config | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
 | Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
-| Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. |
+| Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. Signed-in users can open the socket, but the gateway serves a connection only when the connecting process is `UI\csc_ui.exe` under `Cisco\Cisco Secure Client` in Program Files (x86) or Program Files, and its embedded Authenticode signature is valid and signed by `Cisco Systems, Inc.` Administrators can change either list with `managed.allowed_windows_images` and `managed.allowed_windows_signers` in the managed config. |
 | Sensor-helper IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\sensor-helper.sock` | Installer-owned fixed path. The socket DACL admits LocalSystem, Administrators, and the exact gateway service SID; managed mode ignores `DEFENSECLAW_SENSOR_HELPER_SOCKET`. |
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
 | Guardian manifest | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml` | Administrators/LocalSystem write; guardian reads. |
@@ -487,6 +487,13 @@ the SHA-256 of the DER-encoded signing certificate, for example
 `(Get-FileHash -Algorithm SHA256 .\signer.cer).Hash`. A 40-character SHA-1
 thumbprint is rejected, and the parameter cannot be combined with
 `-AllowUnsigned`.
+
+The CMID broker service checks `cmidapi.dll` again each time it starts,
+immediately before loading it. WinVerifyTrust must accept the library's
+embedded Authenticode signature, and the signer must be `Cisco Systems, Inc.`.
+The broker holds the file open without write or delete sharing until the
+library has loaded. If the check fails, the broker stops and its log records
+`stage=provider-library-trust success=false` with the reason.
 
 The unsigned exception is itself fail-closed before module import. It is valid
 only for `Install`, `Upgrade`, or `Repair`, and only when the service names are
