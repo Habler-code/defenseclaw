@@ -6,15 +6,14 @@
 package cli
 
 import (
-	"bytes"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -37,14 +36,13 @@ import (
 const (
 	standaloneRuntimeReasonInvalid           = "enterprise_managed_runtime_state_invalid"
 	standaloneRuntimeReasonDescriptorMissing = "enterprise_managed_runtime_descriptor_missing"
-	standaloneMachinePolicyReadLimit         = 1 << 20
 )
 
 // Test seams.
 var (
 	standaloneHookGOOS               = runtime.GOOS
 	standaloneRuntimeDescriptorLoad  = managed.LoadRuntimeDescriptor
-	standaloneMachinePolicyMarkers   = defaultStandaloneMachinePolicyMarkers
+	standaloneMachinePolicyOptions   = defaultStandaloneMachinePolicyOptions
 	standaloneSecureClientInstallDir = "/opt/cisco/secureclient/defenseclaw"
 )
 
@@ -175,70 +173,26 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 }
 
 // standaloneMachinePolicyPresent reports whether DefenseClaw-owned vendor
-// machine policy still names the managed hook for connectorName.
+// machine policy may still name the managed hook for connectorName. It is
+// the machine-policy publisher's own owned-entry detection
+// (enterprisepolicy targets), leniently extended to drifted entries and
+// unreadable files so an uninstall leftover fails closed.
 func standaloneMachinePolicyPresent(goos, connectorName string) bool {
-	for _, marker := range standaloneMachinePolicyMarkers(goos, connectorName) {
-		info, err := os.Lstat(marker.path)
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		if marker.needle == "" {
-			return true
-		}
-		file, err := os.Open(marker.path)
-		if err != nil {
-			// Unreadable policy is treated as present: fail closed.
-			return true
-		}
-		data, readErr := io.ReadAll(io.LimitReader(file, standaloneMachinePolicyReadLimit))
-		_ = file.Close()
-		if readErr != nil || bytes.Contains(data, []byte(marker.needle)) {
-			return true
-		}
+	opts, ok := standaloneMachinePolicyOptions(goos)
+	if !ok {
+		return false
 	}
-	return false
+	return enterprisepolicy.MachinePolicyMayRemain(opts, connectorName)
 }
 
-type standaloneMachinePolicyMarker struct {
-	path   string
-	needle string // required content; "" means the file itself is DefenseClaw-owned
-}
-
-// defaultStandaloneMachinePolicyMarkers lists the DefenseClaw-owned vendor
-// machine-policy files per connector. The machine-policy publisher must
-// keep these names (or update this table) so an uninstall that left policy
-// behind is detected.
-func defaultStandaloneMachinePolicyMarkers(goos, connectorName string) []standaloneMachinePolicyMarker {
-	const hookNeedle = "defenseclaw-hook"
-	claudeDir := "/etc/claude-code"
-	cursorHooks := "/etc/cursor/hooks.json"
-	openCodeDir := "/etc/opencode"
-	ampSettings := "/etc/ampcode/managed-settings.json"
-	if goos == "darwin" {
-		claudeDir = "/Library/Application Support/ClaudeCode"
-		cursorHooks = "/Library/Application Support/Cursor/hooks.json"
-		openCodeDir = "/Library/Application Support/opencode"
-		ampSettings = "/Library/Application Support/ampcode/managed-settings.json"
+// defaultStandaloneMachinePolicyOptions resolves the machine policy paths
+// of the standalone layout for goos.
+func defaultStandaloneMachinePolicyOptions(goos string) (enterprisepolicy.Options, bool) {
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		return enterprisepolicy.Options{}, false
 	}
-	switch connectorName {
-	case "codex":
-		return []standaloneMachinePolicyMarker{{path: "/etc/codex/requirements.toml", needle: hookNeedle}}
-	case "claudecode":
-		return []standaloneMachinePolicyMarker{{path: filepath.Join(claudeDir, "managed-settings.d", "90-defenseclaw.json")}}
-	case "cursor":
-		return []standaloneMachinePolicyMarker{{path: cursorHooks, needle: hookNeedle}}
-	case "copilot":
-		return []standaloneMachinePolicyMarker{{path: "/etc/github-copilot/policy.d/90-defenseclaw.json"}}
-	case "opencode":
-		return []standaloneMachinePolicyMarker{
-			{path: filepath.Join(openCodeDir, "opencode.json"), needle: "defenseclaw"},
-			{path: filepath.Join(openCodeDir, "opencode.jsonc"), needle: "defenseclaw"},
-		}
-	case "amp":
-		return []standaloneMachinePolicyMarker{{path: ampSettings, needle: "defenseclaw"}}
-	default:
-		return nil
-	}
+	return enterprisepolicy.LayoutOptions(layout, "", ""), true
 }
 
 func pathExists(path string) bool {

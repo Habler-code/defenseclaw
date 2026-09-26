@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -18,17 +19,17 @@ func withStandaloneHookRuntime(
 	t *testing.T,
 	goos string,
 	load func(string) (*managed.RuntimeDescriptor, error),
-	markers func(string, string) []standaloneMachinePolicyMarker,
+	policy func(string) (enterprisepolicy.Options, bool),
 	secureClientDir string,
 ) {
 	t.Helper()
-	oldGOOS, oldLoad, oldMarkers, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyMarkers, standaloneSecureClientInstallDir
+	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
-	standaloneMachinePolicyMarkers = markers
+	standaloneMachinePolicyOptions = policy
 	standaloneSecureClientInstallDir = secureClientDir
 	t.Cleanup(func() {
-		standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyMarkers, standaloneSecureClientInstallDir = oldGOOS, oldLoad, oldMarkers, oldSC
+		standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir = oldGOOS, oldLoad, oldPolicy, oldSC
 		standaloneHookRuntime.Lock()
 		standaloneHookRuntime.prepared = false
 		standaloneHookRuntime.descriptor = nil
@@ -50,7 +51,24 @@ func testDescriptor() *managed.RuntimeDescriptor {
 	}
 }
 
-func noMarkers(string, string) []standaloneMachinePolicyMarker { return nil }
+func noMarkers(string) (enterprisepolicy.Options, bool) { return enterprisepolicy.Options{}, false }
+
+// rootedMachinePolicy resolves the real standalone machine policy paths
+// under root, as the publisher writes them.
+func rootedMachinePolicy(root string) func(string) (enterprisepolicy.Options, bool) {
+	return func(goos string) (enterprisepolicy.Options, bool) {
+		layout, err := managed.StandaloneLayoutFor(goos)
+		if err != nil {
+			return enterprisepolicy.Options{}, false
+		}
+		opts := enterprisepolicy.LayoutOptions(layout, "", "")
+		opts.Root = root
+		opts.StateDir = filepath.Join(root, opts.StateDir)
+		opts.PublicPolicyPath = filepath.Join(root, opts.PublicPolicyPath)
+		opts.SkipTrustChecks = true
+		return opts, true
+	}
+}
 
 func TestStandaloneHookRuntimeUsesDescriptor(t *testing.T) {
 	withStandaloneHookRuntime(t, "linux",
@@ -85,15 +103,16 @@ func TestStandaloneHookRuntimeUsesDescriptor(t *testing.T) {
 
 func TestStandaloneHookRuntimeNoopOnlyAfterUninstall(t *testing.T) {
 	dir := t.TempDir()
-	policy := filepath.Join(dir, "90-defenseclaw.json")
-	markers := func(goos, connector string) []standaloneMachinePolicyMarker {
-		if connector == "claudecode" {
-			return []standaloneMachinePolicyMarker{{path: policy}}
-		}
-		if connector == "codex" {
-			return []standaloneMachinePolicyMarker{{path: filepath.Join(dir, "requirements.toml"), needle: "defenseclaw-hook"}}
-		}
-		return nil
+	markers := rootedMachinePolicy(dir)
+	policyOpts, _ := markers("linux")
+	claudeDir, _ := enterprisepolicy.ClaudeManagedDir(policyOpts)
+	policy := filepath.Join(claudeDir, "managed-settings.d", enterprisepolicy.DefenseClawDropInName)
+	if err := os.MkdirAll(filepath.Dir(policy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	requirements, _ := enterprisepolicy.CodexRequirementsPath(policyOpts)
+	if err := os.MkdirAll(filepath.Dir(requirements), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	missing := func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor }
 	withStandaloneHookRuntime(t, "linux", missing, markers, filepath.Join(dir, "no-secure-client"))
@@ -118,7 +137,6 @@ func TestStandaloneHookRuntimeNoopOnlyAfterUninstall(t *testing.T) {
 		t.Fatalf("fail-closed options wrong: %+v", opts)
 	}
 
-	requirements := filepath.Join(dir, "requirements.toml")
 	if err := os.WriteFile(requirements, []byte("[hooks]\n# other admin hook\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -165,13 +183,50 @@ func TestStandaloneHookRuntimeKeepsSecureClientMacFailClosed(t *testing.T) {
 
 func TestStandaloneMachinePolicyMarkersCoverPublishedConnectors(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
-		for _, connector := range []string{"codex", "claudecode", "cursor", "copilot", "opencode", "amp"} {
-			if len(defaultStandaloneMachinePolicyMarkers(goos, connector)) == 0 {
-				t.Errorf("%s/%s has no machine-policy marker", goos, connector)
+		opts, ok := defaultStandaloneMachinePolicyOptions(goos)
+		if !ok {
+			t.Fatalf("%s has no standalone layout", goos)
+		}
+		for _, connector := range []string{"codex", "claudecode", "cursor", "copilot", "opencode"} {
+			target, ok := enterprisepolicy.TargetFor(connector)
+			if !ok {
+				t.Fatalf("%s has no machine policy target", connector)
+			}
+			if paths, err := target.Paths(opts); err != nil || len(paths) == 0 {
+				t.Errorf("%s/%s has no machine-policy file: %v", goos, connector, err)
 			}
 		}
 	}
-	if markers := defaultStandaloneMachinePolicyMarkers("linux", "antigravity"); markers != nil {
-		t.Fatalf("per-user-only connector must not have machine-policy markers: %+v", markers)
+	// Per-user-only connectors (Amp has no machine plugin path) never keep a
+	// managed hook alive after uninstall.
+	for _, connector := range []string{"antigravity", "amp"} {
+		if _, ok := enterprisepolicy.TargetFor(connector); ok {
+			t.Fatalf("per-user-only connector %s must not have a machine policy target", connector)
+		}
+	}
+}
+
+func TestStandaloneMachinePolicyPresenceUsesPublisherDetection(t *testing.T) {
+	dir := t.TempDir()
+	withStandaloneHookRuntime(t, "linux",
+		func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor },
+		rootedMachinePolicy(dir), filepath.Join(dir, "no-secure-client"))
+	opts, _ := rootedMachinePolicy(dir)("linux")
+	connectors := []string{"claudecode", "codex", "copilot", "cursor"}
+	if _, err := enterprisepolicy.Publish(opts, connectors); err != nil {
+		t.Fatal(err)
+	}
+	for _, connector := range connectors {
+		if enterpriseManagedHookRuntimeNoop(connector) {
+			t.Fatalf("%s: published machine policy without a descriptor must fail closed", connector)
+		}
+	}
+	if _, err := enterprisepolicy.RemoveAll(opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, connector := range connectors {
+		if !enterpriseManagedHookRuntimeNoop(connector) {
+			t.Fatalf("%s: a clean uninstall must be a no-op (reason %q)", connector, enterpriseManagedHookRuntimeFailureReason())
+		}
 	}
 }

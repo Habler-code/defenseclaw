@@ -1694,6 +1694,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
 					row.Result = &result
+					reconcileEnterpriseForeignHooks(opts)
 				}
 			}
 		}
