@@ -1164,7 +1164,7 @@ func (c OTelConfig) ValidateNamedDestinations() error {
 // capability as a canonical destination; the legacy decoder uses the same
 // predicate only to avoid rejecting a managed source before migration.
 func (c *Config) HasManagedAIDLogSink() bool {
-	return c != nil && managed.IsManagedEnterprise(c.DeploymentMode) &&
+	return c != nil && c.SecureClientIntegration() &&
 		strings.TrimSpace(c.CiscoAIDefense.Endpoint) != ""
 }
 
@@ -2631,6 +2631,7 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 	}
 	return ObservabilityV8ManagedAIDOptions{
 		DeploymentMode:    candidate.DeploymentMode,
+		Profile:           candidate.EnterpriseProfile(),
 		Endpoint:          candidate.CiscoAIDefense.Endpoint,
 		SourceContentHash: ObservabilityV8SourceContentHash(raw),
 	}, nil
@@ -2901,6 +2902,12 @@ func loadConfigSource(
 		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
+			}
+			return nil, err
+		}
+		if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
 			}
 			return nil, err
 		}

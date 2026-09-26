@@ -488,6 +488,10 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 		m.recordLoadError(ctx, "managed_downgrade")
 		return fmt.Errorf("config reload cannot downgrade deployment_mode from managed_enterprise")
 	}
+	if oldCfg != nil && oldCfg.EnterpriseProfile() != next.EnterpriseProfile() {
+		m.recordLoadError(ctx, "enterprise_profile_change")
+		return fmt.Errorf("config reload cannot change the enterprise profile from %q to %q; reinstall through the lifecycle", oldCfg.EnterpriseProfile(), next.EnterpriseProfile())
+	}
 	// AVC env_config.json overlay. When present and well-formed the
 	// endpoint from env_config wins over whatever the installer wrote
 	// into config.yaml, so a region change delivered AFTER install

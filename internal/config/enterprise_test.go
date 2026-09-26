@@ -11,6 +11,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -76,6 +78,10 @@ func TestEnterprisePredicates(t *testing.T) {
 	var nilCfg *Config
 	if nilCfg.ManagedAIDOnly() || nilCfg.StandaloneEnterprise() {
 		t.Fatal("nil config predicates must be false")
+	}
+	unresolved := &Config{DeploymentMode: "managed_enterprise"}
+	if !unresolved.ManagedAIDOnly() || unresolved.EnterpriseProfile() != managed.ProfileSecureClient {
+		t.Fatal("a managed config built without the loader must keep the Secure Client posture")
 	}
 }
 
@@ -161,5 +167,57 @@ enterprise:
 		if err := validate(name+".yaml", []byte(doc)); err == nil {
 			t.Errorf("v8 schema accepted %s", name)
 		}
+	}
+}
+
+func TestStandaloneDropsSecureClientSurfaces(t *testing.T) {
+	standalone := &Config{
+		DeploymentMode: "managed_enterprise",
+		Enterprise:     EnterpriseConfig{Profile: "standalone"},
+		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://us.api.inspect.aidefense.security.cisco.com"},
+	}
+	if standalone.HasManagedAIDLogSink() {
+		t.Fatal("standalone must not require the CMID-authenticated AI Defense sink")
+	}
+	if standalone.ManagedIPCEnabled() {
+		t.Fatal("standalone has no Secure Client GUI and must not expose IPC")
+	}
+	secureClient := &Config{
+		DeploymentMode: "managed_enterprise",
+		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://us.api.inspect.aidefense.security.cisco.com"},
+	}
+	if !secureClient.HasManagedAIDLogSink() || !secureClient.ManagedIPCEnabled() {
+		t.Fatal("Secure Client surfaces must stay enabled for an unprofiled managed config")
+	}
+}
+
+func TestManagedAIDDestinationSkippedForStandalone(t *testing.T) {
+	plan := &ObservabilityV8Plan{}
+	got, err := WithObservabilityV8ManagedAIDDestination(plan, ObservabilityV8ManagedAIDOptions{
+		DeploymentMode: "managed_enterprise",
+		Profile:        "standalone",
+		Endpoint:       "https://us.api.inspect.aidefense.security.cisco.com",
+	})
+	if err != nil || got != plan {
+		t.Fatalf("standalone must leave the observability plan untouched: plan=%p got=%p err=%v", plan, got, err)
+	}
+}
+
+func TestStandalonePolicyInputsMustBeAdministratorControlled(t *testing.T) {
+	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
+	cfg.PolicyDir = filepath.Join(t.TempDir(), "absent")
+	if err := validateManagedStandalonePolicyInputs(cfg); err != nil {
+		t.Fatalf("absent policy dirs fall back to embedded rule packs: %v", err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("a root-owned temp dir is trusted; the negative case needs a non-root owner")
+	}
+	cfg.PolicyDir = t.TempDir()
+	if err := validateManagedStandalonePolicyInputs(cfg); err == nil || !strings.Contains(err.Error(), "not administrator-controlled") {
+		t.Fatalf("user-owned policy dir must be rejected, got %v", err)
+	}
+	secureClient := &Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()}
+	if err := validateManagedStandalonePolicyInputs(secureClient); err != nil {
+		t.Fatalf("Secure Client never consults local policy inputs: %v", err)
 	}
 }

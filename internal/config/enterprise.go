@@ -11,7 +11,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -206,12 +208,18 @@ func normalizeHookDigests(values []string) []string {
 }
 
 // EnterpriseProfile is the effective profile of a managed deployment, or ""
-// when the deployment is not managed. The loader resolves and stores it.
+// when the deployment is not managed. The loader resolves the per-OS
+// default and stores it; a managed Config built without the loader keeps
+// the historical Secure Client posture, so no code path silently gains or
+// loses local detectors because it skipped resolution.
 func (c *Config) EnterpriseProfile() string {
 	if c == nil || !managed.IsManagedEnterprise(c.DeploymentMode) {
 		return ""
 	}
-	return managed.NormalizeEnterpriseProfile(c.Enterprise.Profile)
+	if profile := managed.NormalizeEnterpriseProfile(c.Enterprise.Profile); profile != "" {
+		return profile
+	}
+	return managed.ProfileSecureClient
 }
 
 // ManagedAIDOnly reports the Secure Client decision posture: Cisco AI
@@ -239,15 +247,14 @@ func (e EnterpriseCoexistenceConfig) SelfUpdateDisabled() bool {
 }
 
 var (
-	enterpriseCredentialNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-	enterpriseConnectorNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
-	enterpriseSHA256Pattern         = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	enterpriseConnectorNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+	enterpriseSHA256Pattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // ValidEnterpriseCredentialName reports whether name is a safe protected
 // credential name (it becomes a file name under the secrets directory).
 func ValidEnterpriseCredentialName(name string) bool {
-	return enterpriseCredentialNamePattern.MatchString(name)
+	return managed.ValidCredentialName(name)
 }
 
 // resolveEnterpriseConfig resolves the profile against the service pin and
@@ -311,7 +318,7 @@ func validateEnterpriseConfig(cfg *Config) error {
 	ai := e.Inspection.AIDefense
 	if ai.Enabled {
 		if !ValidEnterpriseCredentialName(ai.Credential) {
-			return fmt.Errorf("config: enterprise.inspection.ai_defense.credential %q must be a protected credential name matching %s", ai.Credential, enterpriseCredentialNamePattern.String())
+			return fmt.Errorf("config: enterprise.inspection.ai_defense.credential %q must be a protected credential name (lowercase letters, digits and dashes)", ai.Credential)
 		}
 	} else if strings.TrimSpace(ai.Credential) != "" && !ValidEnterpriseCredentialName(ai.Credential) {
 		return fmt.Errorf("config: enterprise.inspection.ai_defense.credential %q is not a valid credential name", ai.Credential)
@@ -415,6 +422,53 @@ func validateEnterpriseHomeRoot(root string) error {
 	for _, forbidden := range []string{"/", "/tmp", "/var/tmp", "/dev/shm", "/etc", "/usr", "/bin", "/sbin", "/lib", "/opt", "/proc", "/sys", "/run", "/var"} {
 		if strings.TrimRight(clean, "/") == forbidden || clean == forbidden {
 			return fmt.Errorf("config: enterprise.enrollment.home_roots entry %q is not an allowed home parent", root)
+		}
+	}
+	return nil
+}
+
+// validateManagedStandalonePolicyInputs requires every policy input the
+// standalone local engine reads to be unwritable by standard users. The
+// Secure Client profile never consults these (its local detectors are off),
+// so the check applies only to standalone. Absent directories are fine:
+// the engine falls back to its embedded rule packs.
+func validateManagedStandalonePolicyInputs(cfg *Config) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	serviceAccount := os.Getenv(managed.WindowsServiceAccountEnv)
+	seen := map[string]bool{}
+	check := func(label, dir string) error {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || seen[dir] {
+			return nil
+		}
+		seen[dir] = true
+		if _, err := os.Lstat(dir); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("config: inspect %s %s: %w", label, dir, err)
+		}
+		if err := managed.ValidateTrustedServiceRuntimeDir(dir, label, serviceAccount); err != nil {
+			return fmt.Errorf("config: managed standalone %s is not administrator-controlled: %w", label, err)
+		}
+		return nil
+	}
+	if err := check("policy_dir", cfg.PolicyDir); err != nil {
+		return err
+	}
+	if err := check("guardrail.rule_pack_dir", cfg.Guardrail.RulePackDir); err != nil {
+		return err
+	}
+	names := make([]string, 0, len(cfg.Guardrail.Connectors))
+	for name := range cfg.Guardrail.Connectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := check("guardrail.connectors."+name+".rule_pack_dir", cfg.EffectiveRulePackDirForConnector(name)); err != nil {
+			return err
 		}
 	}
 	return nil

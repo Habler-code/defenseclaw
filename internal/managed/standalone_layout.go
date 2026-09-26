@@ -157,6 +157,30 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 	}, nil
 }
 
+// StandaloneSecretsDirForConfig derives the protected secrets directory from
+// the trusted managed config path, so certification roots and production
+// roots resolve the same way: <config dir>/secrets on unix and
+// <state root>\secrets (the parent of etc\) on Windows.
+func StandaloneSecretsDirForConfig(goos, configPath string) string {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return ""
+	}
+	if goos == "windows" {
+		configDir := windowsParent(configPath)
+		return windowsParent(configDir) + `\secrets`
+	}
+	return path.Join(path.Dir(path.Clean(configPath)), "secrets")
+}
+
+func windowsParent(value string) string {
+	value = strings.TrimRight(value, `\`)
+	if index := strings.LastIndex(value, `\`); index > 0 {
+		return value[:index]
+	}
+	return value
+}
+
 func windowsDriveAbsolute(value string) bool {
 	if len(value) < 3 {
 		return false

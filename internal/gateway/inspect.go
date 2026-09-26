@@ -32,7 +32,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -207,7 +206,7 @@ func clampPromptDirectionToolVerdict(verdict *ToolInspectVerdict, direction stri
 // bypassed. Boot- and reload-reliable: a.scannerCfg.DeploymentMode is
 // the config the APIServer was constructed / reloaded with.
 func (a *APIServer) managedAIDOnly() bool {
-	return a != nil && a.scannerCfg != nil && managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode)
+	return a != nil && a.scannerCfg != nil && a.scannerCfg.ManagedAIDOnly()
 }
 
 // inspectManagedAIDOnly is the managed_enterprise hook-lane inspection

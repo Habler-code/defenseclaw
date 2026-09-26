@@ -497,7 +497,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// redaction behavior for an already-running embedder or a later retry. Cisco
 	// AI Defense failure diagnostics remain sink-redacted in every posture; this
 	// flag must never authorize raw upstream response bytes in gateway logs.
-	setManagedEnterpriseRedactionPosture(managed.IsManagedEnterprise(cfg.DeploymentMode))
+	setManagedEnterpriseRedactionPosture(cfg.ManagedAIDOnly())
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
 	return sidecar, nil
 }
@@ -999,7 +999,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// and watches its parent dir for late arrivals (AVC packaging can
 	// drop the file AFTER DefenseClaw is installed). OSS installs skip
 	// this call and get the pre-overlay behavior verbatim.
-	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+	if s.currentConfig().SecureClientIntegration() {
 		envConfigPath, err := config.ResolveDefaultEnvConfigPath()
 		if err != nil {
 			return fmt.Errorf("resolve managed env_config path: %w", err)
@@ -1774,6 +1774,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// mutating process-global state. The actual toggles are applied only after
 	// the candidate runtime graph has passed its canaries and committed.
 	nextManagedEnterprise := managed.IsManagedEnterprise(next.DeploymentMode)
+	// Only the Secure Client profile runs the AID-only posture; a
+	// standalone deployment keeps the local engine and ordinary redaction.
+	nextManagedAIDOnly := next.ManagedAIDOnly()
 	// The v8 runtime graph is the first mutation and the commit boundary. Its
 	// reload builds and canary-validates the complete candidate off-path, then
 	// atomically publishes it. Everything below is deliberately infallible, so
@@ -1797,7 +1800,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// process-wide privacy kill switch to mutate on reload. Keep only the
 	// managed-enterprise local-agent carve-out and cloud-controlled
 	// per-inspection redaction gate in sync with the committed deployment mode.
-	setManagedEnterpriseRedactionPosture(nextManagedEnterprise)
+	setManagedEnterpriseRedactionPosture(nextManagedAIDOnly)
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
 
 	appliedCfg := current
@@ -1930,7 +1933,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			// keeping stale state that points at the old endpoint.
 			api.SetCiscoInspector(nil)
 		}
-		if nextManagedEnterprise {
+		if nextManagedAIDOnly {
 			if proxy := s.proxySnapshot(); proxy != nil {
 				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
 			}
@@ -2258,7 +2261,10 @@ func (s *Sidecar) ensureActiveHookRegistration(ctx context.Context, connectorNam
 // entirely rather than silently falling back to API-key auth.
 func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 	cfg := s.currentConfig()
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if cfg.StandaloneEnterprise() {
+		return s.newStandaloneInspector(ctx, cfg)
+	}
+	if cfg.ManagedAIDOnly() {
 		// Re-check cloudreg.Registered() on every hot-reload (T5.3).
 		// Factory registration is set once at init() time and does not
 		// change during runtime, but a config reload that switches
@@ -3634,7 +3640,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// variant, and flip the merge dispatch to mergeVerdictsManaged.
 		// Fail-closed: if the managed cloud auth provider can't
 		// initialize, remote inspection stays disabled entirely.
-		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+		if s.currentConfig().ManagedAIDOnly() {
 			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
 			// AID-only posture: every local detector (guardrail regex,
 			// CodeGuard/ClawShield) and explicit local policy (static
@@ -4189,21 +4195,24 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 		return nil
 	}
 
-	// Managed mode disables the local detectors, so remote inspection is
-	// all that stands between a tool call and its upstream. A build with
-	// no credential factory can never reach it.
-	if !cloudreg.Registered() {
-		err := fmt.Errorf(
-			"managed_enterprise requires managed-cloud support: %w",
-			cloudreg.ErrNoProviderRegistered,
-		)
-		s.health.SetGuardrail(StateError, err.Error(), nil)
-		return err
-	}
-	// A registered factory that fails now may only be waiting on the
-	// local agent, so probe once and report rather than refuse.
-	if _, err := s.ensureCMIDProvider(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: inspection unavailable at boot: %v\n", err)
+	// The Secure Client profile disables the local detectors, so remote
+	// inspection is all that stands between a tool call and its upstream,
+	// and a build with no credential factory can never reach it. The
+	// standalone profile decides locally and needs no cloud provider.
+	if s.currentConfig().ManagedAIDOnly() {
+		if !cloudreg.Registered() {
+			err := fmt.Errorf(
+				"managed_enterprise requires managed-cloud support: %w",
+				cloudreg.ErrNoProviderRegistered,
+			)
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return err
+		}
+		// A registered factory that fails now may only be waiting on the
+		// local agent, so probe once and report rather than refuse.
+		if _, err := s.ensureCMIDProvider(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: inspection unavailable at boot: %v\n", err)
+		}
 	}
 
 	type managedConnectorRegistration struct {
@@ -4282,6 +4291,15 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
 		}
 		inspectionAvailable, inspectionDetail := s.inspectionAvailability()
+		standalone := s.currentConfig().StandaloneEnterprise()
+		if standalone {
+			// The local policy engine always inspects; AI Defense only
+			// augments it, so its outage degrades rather than disables.
+			if !inspectionAvailable && inspectionDetail != "" {
+				inspectionDetail = "ai_defense: " + inspectionDetail
+			}
+			inspectionAvailable = true
+		}
 		detail := map[string]interface{}{
 			"summary":              summary,
 			"connectors":           succeeded,

@@ -1,0 +1,74 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+// errStandaloneAIDefenseDisabled marks a standalone deployment that did not
+// opt into Cisco AI Defense. It is not an error condition: the local engine
+// is the decision-maker.
+var errStandaloneAIDefenseDisabled = errors.New("ai defense is not enabled for this standalone deployment")
+
+// newStandaloneInspector builds the optional Cisco AI Defense client of a
+// standalone managed deployment. The API key comes only from the protected
+// credential named in enterprise.inspection.ai_defense; config api_key,
+// api_key_env and the data-dir .env are never consulted, so neither a
+// user nor a compromised service-writable file can substitute a key. A
+// missing or untrusted credential leaves the local engine deciding alone.
+func (s *Sidecar) newStandaloneInspector(ctx context.Context, cfg *config.Config) Inspector {
+	c, err := newStandaloneCiscoInspectClient(cfg)
+	if err != nil {
+		if errors.Is(err, errStandaloneAIDefenseDisabled) {
+			s.setInspectionAvailability(nil)
+			return nil
+		}
+		s.setInspectionAvailability(err)
+		EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
+			"standalone managed_enterprise: Cisco AI Defense disabled, local policy engine continues: "+err.Error())
+		return nil
+	}
+	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	c.bindObservabilityV8(metricRuntime)
+	s.setInspectionAvailability(nil)
+	return c
+}
+
+func newStandaloneCiscoInspectClient(cfg *config.Config) (*CiscoInspectClient, error) {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil, errors.New("not a standalone managed deployment")
+	}
+	ai := cfg.Enterprise.Inspection.AIDefense
+	if !ai.Enabled {
+		return nil, errStandaloneAIDefenseDisabled
+	}
+	secretsDir := managed.StandaloneSecretsDirForConfig(runtime.GOOS, cfg.ConfigFilePath)
+	key, _, err := managed.ResolveServiceCredential(ai.Credential, secretsDir)
+	if err != nil {
+		return nil, fmt.Errorf("credential %q: %w", ai.Credential, err)
+	}
+	aid := cfg.CiscoAIDefense
+	aid.APIKeyEnv = ""
+	aid.APIKey = string(key)
+	client := NewCiscoInspectClient(&aid, "")
+	if client == nil {
+		return nil, errors.New("cisco ai defense client could not be constructed")
+	}
+	return client, nil
+}

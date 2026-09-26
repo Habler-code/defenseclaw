@@ -65,6 +65,38 @@ _OPENCODE_REGISTRATION_SOURCES = frozenset({"manual", "automatic"})
 _RUNTIME_HEALTHY_STATES = frozenset({"running", "active", "ready", "up", "healthy", "ok"})
 
 
+
+def _enterprise_profile(cfg) -> str:
+    """Return the managed_enterprise profile, or "" for unmanaged installs.
+
+    Mirrors internal/managed/profile.go: the service pin wins, then the
+    config's ``enterprise.profile``, then the per-OS default (standalone on
+    Linux, secure_client elsewhere). Read-only; never raises.
+    """
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return ""
+    pinned = os.environ.get("DEFENSECLAW_ENTERPRISE_PROFILE", "").strip().lower()
+    if pinned:
+        return pinned
+    configured = ""
+    try:
+        import yaml
+
+        with open(config_path()) as handle:
+            raw = yaml.safe_load(handle) or {}
+        enterprise = raw.get("enterprise") if isinstance(raw, dict) else None
+        if isinstance(enterprise, dict):
+            configured = str(enterprise.get("profile") or "").strip().lower()
+    except (OSError, ValueError, ImportError):
+        configured = ""
+    except Exception:  # noqa: BLE001 - status must never fail on a malformed config
+        configured = ""
+    if configured:
+        return configured
+    import sys
+
+    return "standalone" if sys.platform.startswith("linux") else "secure_client"
+
 def _opencode_registration_source_valid(value: object) -> bool:
     """Accept only an exact source emitted by gateway registration."""
 
@@ -247,6 +279,9 @@ def status(app: AppContext, as_json: bool) -> None:
     _status_row("Environment", cfg.environment)
     if getattr(cfg, "deployment_mode", ""):
         _status_row("Deployment", cfg.deployment_mode)
+    profile = _enterprise_profile(cfg)
+    if profile:
+        _status_row("Enterprise", f"{profile} (managed by your organization)")
     _status_row("Data dir", cfg.data_dir)
     _status_row("Config", str(config_path()))
     _status_row("Audit DB", cfg.audit_db)
@@ -1197,6 +1232,7 @@ def _status_payload(app) -> dict:
     payload: dict = {
         "environment": cfg.environment,
         "deployment_mode": getattr(cfg, "deployment_mode", ""),
+        "enterprise_profile": _enterprise_profile(cfg),
         "data_dir": cfg.data_dir,
         "config": str(config_path()),
         "audit_db": cfg.audit_db,

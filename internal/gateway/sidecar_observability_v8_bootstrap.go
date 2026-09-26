@@ -870,6 +870,7 @@ func sidecarObservabilityV8ManagedOptionsFromConfig(
 	}
 	return config.ObservabilityV8ManagedAIDOptions{
 		DeploymentMode:    cfg.DeploymentMode,
+		Profile:           cfg.EnterpriseProfile(),
 		Endpoint:          cfg.CiscoAIDefense.Endpoint,
 		SourceContentHash: config.ObservabilityV8SourceContentHash(raw),
 	}
