@@ -55,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
+	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -1007,32 +1008,81 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// API never comes up, and every connector hook posting to this port fails.
 	// Retrying for a few seconds lets the OS reclaim the port so the restarted
 	// gateway binds the same address the agent's hooks call.
-	ln, lnErr := listenWithRetry(ctx, a.addr, 30*time.Second)
+	//
+	// Under systemd socket activation the listener is inherited instead: PID 1
+	// holds 127.0.0.1:<port> across gateway restarts, so there is no window in
+	// which a local user could bind it (acquireAPIListener).
+	ln, lnErr := a.acquireAPIListener(ctx)
 	if lnErr != nil {
 		a.health.SetAPI(StateError, lnErr.Error(), nil)
 		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
 	}
 
-	errCh := make(chan error, 1)
+	// The standalone managed profile additionally serves the agent-facing
+	// routes on a unix socket where each caller is identified by its
+	// kernel-verified uid (see managed_hook_peer.go). A failure here leaves
+	// the TCP API up; hooks that require the socket fail closed on their own.
+	hookSrv, hookLn, hookErr := a.newManagedHookSocketServer(ctx, func(h http.Handler) http.Handler {
+		h = a.metricsMiddleware(h)
+		h = CorrelationMiddleware(reg)(h)
+		h = requestIDMiddleware(h)
+		return inboundTraceContextMiddleware(h)
+	})
+	apiDetails := map[string]interface{}{"addr": a.addr}
+	if hookErr != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] standalone hook socket unavailable: %v\n", hookErr)
+		apiDetails["hook_socket_error"] = hookErr.Error()
+	}
+
+	errCh := make(chan error, 2)
 	go func() {
 		fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
-		close(errCh)
 	}()
+	if hookSrv != nil {
+		apiDetails["hook_socket"] = hookLn.Addr().String()
+		go func() {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] standalone hook socket listening on %s\n", hookLn.Addr())
+			if err := hookSrv.Serve(hookLn); err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("hook socket: %w", err)
+			}
+		}()
+	}
 
-	a.health.SetAPI(StateRunning, "", map[string]interface{}{"addr": a.addr})
+	a.health.SetAPI(StateRunning, "", apiDetails)
+	// Readiness and watchdog for Type=notify units; both are no-ops outside
+	// systemd (NOTIFY_SOCKET / WATCHDOG_USEC unset).
+	if _, err := systemd.Notify(systemd.StateReady); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] systemd readiness notification failed: %v\n", err)
+	}
+	watchdogCtx, stopWatchdog := context.WithCancel(ctx)
+	defer stopWatchdog()
+	go systemd.RunWatchdog(watchdogCtx, nil)
+
+	shutdown := func() error {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var hookShutdownErr error
+		if hookSrv != nil {
+			hookShutdownErr = hookSrv.Shutdown(shutdownCtx)
+		}
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		return hookShutdownErr
+	}
 
 	select {
 	case err := <-errCh:
 		a.health.SetAPI(StateError, err.Error(), nil)
+		_ = shutdown()
 		return fmt.Errorf("api: listen %s: %w", a.addr, err)
 	case <-ctx.Done():
 		a.health.SetAPI(StateStopped, "", nil)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		_, _ = systemd.Notify(systemd.StateStopping)
+		return shutdown()
 	}
 }
 

@@ -316,6 +316,11 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			}
 		}
 	}
+	if enterpriseManaged {
+		// Unix standalone profile: bind the transport to the root-owned
+		// runtime descriptor (no-op elsewhere).
+		applyStandaloneManagedHookTransport(&opts, connector)
+	}
 
 	return opts
 }

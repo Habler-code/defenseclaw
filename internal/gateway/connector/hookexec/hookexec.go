@@ -125,6 +125,18 @@ type Options struct {
 	// that must own the connected loopback listener before any HTTP bytes are
 	// written. It is ignored outside ManagedEnterprise mode.
 	ManagedGatewayServiceName string
+	// ManagedStandalone selects the unix standalone-profile transport: the
+	// hook trusts the gateway only after the kernel reports that the
+	// listener runs as root or ManagedServiceUID. It is ignored outside
+	// ManagedEnterprise mode.
+	ManagedStandalone bool
+	// ManagedUnixSocket is the standalone hook socket. When set, the hook
+	// dials it instead of loopback TCP and sends no bearer token: the
+	// gateway authorizes the caller by its kernel-verified uid.
+	ManagedUnixSocket string
+	// ManagedServiceUID is the gateway service account uid from the
+	// root-owned runtime descriptor.
+	ManagedServiceUID int
 
 	// MaxBody overrides the stdin cap in bytes (default defaultMaxBody).
 	MaxBody int64
@@ -253,11 +265,20 @@ func Run(ctx context.Context, opts Options) int {
 	if opts.HTTPClient == nil {
 		if opts.ManagedEnterprise {
 			var err error
-			opts.HTTPClient, err = managedEnterpriseHTTPClient(
-				requestTimeout,
-				opts.APIAddr,
-				opts.ManagedGatewayServiceName,
-			)
+			if opts.ManagedStandalone {
+				opts.HTTPClient, err = managedStandaloneHTTPClient(
+					requestTimeout,
+					opts.APIAddr,
+					opts.ManagedUnixSocket,
+					opts.ManagedServiceUID,
+				)
+			} else {
+				opts.HTTPClient, err = managedEnterpriseHTTPClient(
+					requestTimeout,
+					opts.APIAddr,
+					opts.ManagedGatewayServiceName,
+				)
+			}
 			if err != nil {
 				return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
 			}
@@ -278,6 +299,12 @@ func Run(ctx context.Context, opts Options) int {
 	}
 
 	var token string
+	if opts.ManagedEnterprise && opts.ManagedStandalone && opts.ManagedUnixSocket != "" {
+		// The standalone hook socket authenticates this process by its
+		// kernel-verified uid. No bearer is read or sent, so there is no
+		// user-readable credential to steal or replay.
+		return doRequest(ctx, opts, sp, failMode, payload, "")
+	}
 	if opts.ManagedEnterprise && opts.AuthenticatedManagedToken != nil {
 		// The resolver authenticated this token as part of one immutable
 		// runtime generation. Do not touch the legacy token paths here: doing
