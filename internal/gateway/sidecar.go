@@ -191,9 +191,10 @@ type Sidecar struct {
 
 	// Last outcome of building the managed cloud auth provider, so
 	// /health can report whether inspection is reachable.
-	inspectionMu        sync.RWMutex
-	inspectionAvailable bool
-	inspectionDetail    string
+	inspectionMu             sync.RWMutex
+	inspectionAvailable      bool
+	inspectionVerdictFailure bool // last unavailability came from an inspection without a verdict
+	inspectionDetail         string
 	// inspectionLastProbe rate-limits probeManagedInspection; guarded by
 	// inspectionMu.
 	inspectionLastProbe time.Time
@@ -1953,7 +1954,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if nextManagedEnterprise {
 			if proxy := s.proxySnapshot(); proxy != nil {
 				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
-				proxy.SetManagedUnavailableAction(s.currentConfig().CiscoAIDefense.UnavailableAction)
+				proxy.SetManagedUnavailableAction(managedAIDEffectiveUnavailableAction(s.currentConfig()))
 			}
 		}
 	}
@@ -2575,6 +2576,7 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 func (s *Sidecar) setInspectionAvailability(err error) {
 	s.inspectionMu.Lock()
 	s.inspectionAvailable = err == nil
+	s.inspectionVerdictFailure = errors.Is(err, errManagedAIDNoVerdict)
 	s.inspectionDetail = ""
 	if err != nil {
 		s.inspectionDetail = err.Error()
@@ -3655,7 +3657,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// initialize, remote inspection stays disabled entirely.
 		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
 			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
-			proxy.SetManagedUnavailableAction(s.currentConfig().CiscoAIDefense.UnavailableAction)
+			proxy.SetManagedUnavailableAction(managedAIDEffectiveUnavailableAction(s.currentConfig()))
 			// AID-only posture: every local detector (guardrail regex,
 			// CodeGuard/ClawShield) and explicit local policy (static
 			// block/allow, MCP block, block-list, approval, multi-turn,
@@ -6223,6 +6225,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if inspector != nil {
 		api.SetCiscoInspector(inspector)
 	}
+	// A managed build with no managed-cloud credential factory can never
+	// inspect, so its hook lane blocks requests that need inspection
+	// whatever cisco_ai_defense.unavailable_action says.
+	api.SetManagedInspectionUnsupported(managedInspectionUnsupported(s.currentConfig()))
 	s.setManagedHookInspectorWired(inspector != nil)
 	// Wire the LLM judge onto the API server so hook connectors listed
 	// in guardrail.judge.hook_connectors get live-content adjudication
