@@ -63,6 +63,10 @@ func NativeHookRuntimeNoop() bool { return false }
 
 func NativeConnectorHookNoop([]string) bool { return false }
 
+// implicitEnterpriseManagedHook is Windows-only: unix standalone hooks select
+// the managed runtime from the root-owned descriptor.
+func implicitEnterpriseManagedHook() bool { return false }
+
 func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	layout, err := managed.StandaloneLayoutFor(standaloneHookGOOS)

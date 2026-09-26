@@ -67,6 +67,9 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !enterpriseManaged && implicitEnterpriseManagedHook() {
+				enterpriseManaged = true
+			}
 			if enterpriseManaged && enterpriseManagedHookRuntimeNoop(connector) {
 				return nil
 			}

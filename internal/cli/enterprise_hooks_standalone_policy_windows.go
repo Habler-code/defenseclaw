@@ -1,0 +1,160 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+)
+
+// The Windows standalone guardian owns the machine policy targets that the
+// Windows lifecycle does not (GitHub Copilot, and OpenCode once its managed
+// plugin ships) and the public summary the hook-side foreign-hook guard
+// reads. It republishes them before every reconcile, so a removed or edited
+// DefenseClaw entry is repaired within one cycle.
+
+func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, bool, error) {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return enterprisepolicy.Options{}, nil, false, nil
+	}
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return enterprisepolicy.Options{}, nil, true, err
+	}
+	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
+	if err != nil {
+		return enterprisepolicy.Options{}, nil, true, err
+	}
+	return opts, enterprisepolicy.StandaloneConnectors(cfg), true, nil
+}
+
+// enterpriseHookStandalonePlatformPrepare publishes the Go-owned Windows
+// machine policy and summary. Failure is reported, not fatal: rows that
+// depend on the policy (Copilot) fail their own verification.
+func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
+	opts, connectors, standalone, err := windowsStandaloneGuardianOptions()
+	if !standalone {
+		return
+	}
+	if err == nil {
+		_, err = enterprisepolicy.PublishWindowsGoOwned(opts, connectors)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
+	}
+}
+
+// windowsStandalonePerUserEnrollmentKeep builds the manifest predicate the
+// per-user enrollment pruning uses.
+func windowsStandalonePerUserEnrollmentKeep(manifest enterprisehooks.Manifest) func(string, string) bool {
+	allowed := map[string]bool{}
+	for _, target := range manifest.Targets {
+		if !target.IsEnabled() {
+			continue
+		}
+		allowed[strings.ToLower(strings.TrimSpace(target.Connector))+"\x00"+strings.ToUpper(strings.TrimSpace(target.SID))] = true
+	}
+	return func(connectorName, sid string) bool {
+		return allowed[connectorName+"\x00"+strings.ToUpper(strings.TrimSpace(sid))]
+	}
+}
+
+// pruneWindowsStandalonePerUserEnrollments revokes per-user connector
+// enrollment for SIDs the manifest no longer authorizes, so a removed user
+// or disabled connector fails closed before any target runtime is touched.
+func pruneWindowsStandalonePerUserEnrollments(manifest enterprisehooks.Manifest, hookBinary string) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	return enterprisehooks.PruneWindowsPerUserManagedEnrollments(
+		filepath.Clean(hookBinary),
+		windowsStandalonePerUserEnrollmentKeep(manifest),
+	)
+}
+
+var enterpriseHookWindowsForeignCleanupState struct {
+	sync.Mutex
+	last        time.Time
+	fingerprint string
+}
+
+var enterpriseHookWindowsForeignCleanupInterval = 5 * time.Minute
+
+// enterpriseHookStandalonePlatformFinish removes unapproved foreign hooks
+// for every verified Windows user and every guarded connector the user has
+// no manifest row for; rows run the cleanup for their own connector as they
+// verify. Cleanup runs as the user and is best effort: the hook-side guard
+// still denies tool calls while an unapproved hook remains.
+func enterpriseHookStandalonePlatformFinish(_ context.Context, stderr io.Writer, rows []enterpriseHookReconcileRow, now time.Time) {
+	_, connectors, standalone, err := windowsStandaloneGuardianOptions()
+	if !standalone || err != nil || len(connectors) == 0 {
+		return
+	}
+	type user struct {
+		creds   enterprisehooks.TargetCredentials
+		dataDir string
+		rows    map[string]bool
+	}
+	users := map[string]*user{}
+	order := []string{}
+	for _, row := range rows {
+		if !row.OK || strings.TrimSpace(row.SID) == "" || strings.TrimSpace(row.UserHome) == "" {
+			continue
+		}
+		key := strings.ToUpper(strings.TrimSpace(row.SID))
+		current, ok := users[key]
+		if !ok {
+			dataDir := filepath.Join(filepath.Clean(row.UserHome), ".defenseclaw")
+			if row.Result != nil && strings.TrimSpace(row.Result.DataDir) != "" {
+				dataDir = row.Result.DataDir
+			}
+			current = &user{
+				creds:   enterprisehooks.TargetCredentials{UserHome: row.UserHome, UID: -1, GID: -1, SID: row.SID},
+				dataDir: dataDir,
+				rows:    map[string]bool{},
+			}
+			users[key] = current
+			order = append(order, key)
+		}
+		current.rows[strings.ToLower(strings.TrimSpace(row.Connector))] = true
+	}
+	fingerprint := strings.Join(order, ",") + "|" + strings.Join(connectors, ",")
+	enterpriseHookWindowsForeignCleanupState.Lock()
+	due := now.Sub(enterpriseHookWindowsForeignCleanupState.last) >= enterpriseHookWindowsForeignCleanupInterval ||
+		fingerprint != enterpriseHookWindowsForeignCleanupState.fingerprint
+	if due {
+		enterpriseHookWindowsForeignCleanupState.last = now
+		enterpriseHookWindowsForeignCleanupState.fingerprint = fingerprint
+	}
+	enterpriseHookWindowsForeignCleanupState.Unlock()
+	if !due {
+		return
+	}
+	for _, key := range order {
+		current := users[key]
+		for _, name := range connectors {
+			if current.rows[name] {
+				continue
+			}
+			result, err := enterpriseForeignHookCleanup(current.creds, name, current.dataDir)
+			for _, finding := range result.Removed {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
+					finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
+			}
+			if err != nil {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s %s: %v\n", name, current.creds.UserHome, err)
+			}
+		}
+	}
+}

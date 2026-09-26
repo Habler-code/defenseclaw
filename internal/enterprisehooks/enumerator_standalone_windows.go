@@ -105,6 +105,14 @@ func standaloneWindowsAgentVersionExplain(profileHome, connectorName string) (st
 		return version, ""
 	}
 	reasons := []string{reason}
+	if filepath.IsAbs(strings.TrimSpace(profileHome)) {
+		if native := discoverWindowsStandalonePerUserAgentVersion(
+			filepath.Clean(strings.TrimSpace(profileHome)),
+			connectorName,
+		); native != "" {
+			return native, ""
+		}
+	}
 	if connectorName == "claudecode" && filepath.IsAbs(strings.TrimSpace(profileHome)) {
 		native, nativeReason := discoverWindowsNativeClaudeVersion(filepath.Clean(strings.TrimSpace(profileHome)))
 		if native != "" {

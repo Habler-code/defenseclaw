@@ -38,7 +38,7 @@ var hookForeignGuardSummaryPath = func() (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return filepath.Join(layout.ConfigDir, enterprisepolicy.PublicPolicyFileName), true
+	return enterprisepolicy.PublicPolicyPathFor(layout), true
 }
 
 var hookForeignGuardLoad = enterprisepolicy.LoadPublicPolicy

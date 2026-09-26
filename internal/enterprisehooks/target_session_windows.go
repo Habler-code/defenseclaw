@@ -18,8 +18,10 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 		return errors.New("enterprise hooks: pending proof requires an enabled deferred manifest target")
 	}
 	connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-	switch connectorName {
-	case "codex", "claudecode", "cursor":
+	_, perUser := windowsStandalonePerUserConnector(connectorName)
+	switch {
+	case connectorName == "codex" || connectorName == "claudecode" || connectorName == "cursor":
+	case perUser && windowsEnterpriseStandaloneProcess():
 	default:
 		return fmt.Errorf(
 			"enterprise hooks: deferred pending proof does not support connector %q",

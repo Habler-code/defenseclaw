@@ -152,6 +152,12 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 		if name == "codex" {
 			continue
 		}
+		if _, perUser := windowsStandalonePerUserConnector(name); perUser {
+			// A per-user connector has no machine policy to stage; the SID
+			// stays unenrolled, and its hook fails closed, until the guardian
+			// installs its runtime in the user session.
+			continue
+		}
 		sid, err := validateWindowsEnterpriseTargetSID(target.sid)
 		if err != nil {
 			return rollback(err)

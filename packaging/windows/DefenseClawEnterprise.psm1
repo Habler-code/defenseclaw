@@ -11515,7 +11515,14 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Target {
     catch {
         throw 'schema-6 managed-hook teardown target has an invalid SID'
     }
-    if ($connector -cnotin @('claudecode', 'codex', 'cursor') -or
+    # Standalone per-user connectors join the teardown only under the
+    # standalone profile; Secure Client keeps its three machine-policy
+    # connectors exactly.
+    $teardownConnectors = @('claudecode', 'codex', 'cursor')
+    if (Test-DefenseClawStandaloneProfile) {
+        $teardownConnectors += @('amp', 'antigravity', 'copilot', 'devin', 'hermes', 'opencode')
+    }
+    if ($connector -cnotin $teardownConnectors -or
         $sid -cne $canonicalSID -or
         $agentVersion -cne $agentVersion.Trim() -or
         $agentVersion -match '[\x00-\x1f\x7f]' -or

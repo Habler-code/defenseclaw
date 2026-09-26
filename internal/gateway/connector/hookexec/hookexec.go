@@ -783,6 +783,9 @@ func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	logHookFailure(opts, sp, reason, "transport", failMode)
+	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		return code
+	}
 	if opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")) {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
@@ -797,6 +800,9 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 }
 
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
+	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		return code
+	}
 	if !sp.failOpenOnly && (opts.StrictAvailability || opts.ManagedEnterprise) {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
@@ -812,6 +818,9 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 func handleOversized(opts Options, sp spec, failMode string) int {
 	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode)
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
+	if code, handled := managedCopilotFailClosed(opts, sp, "stdin body exceeded cap"); handled {
+		return code
+	}
 	if !sp.failOpenOnly && failMode == "closed" {
 		return emitHookResult(opts, sp, sp.oversizedClosed)
 	}
@@ -823,6 +832,9 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 // override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	logHookFailure(opts, sp, reason, "transport", failMode)
+	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		return code
+	}
 	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
@@ -854,6 +866,9 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	reason = responseFailureReason(reason)
 	logHookFailure(opts, sp, reason, "response", failMode)
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		return code
+	}
 	if sp.failOpenOnly || failMode == "open" {
 		return emitHookResult(opts, sp, sp.openAllow)
 	}
@@ -865,6 +880,33 @@ func responseFailureReason(reason string) string {
 		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
 	}
 	return reason
+}
+
+// managedCopilotFailClosed denies an administrator-managed Copilot tool call
+// when DefenseClaw itself cannot decide. Copilot has no fail-closed hook
+// contract (its own timeouts and non-JSON errors allow), so per-user Copilot
+// hooks fail open; a managed hook still owns Copilot's native structured
+// deny for preToolUse and permissionRequest and uses it. Other events cannot
+// block and keep the fail-open result.
+func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) {
+	if !opts.ManagedEnterprise || sp.connector != "copilot" {
+		return 0, false
+	}
+	const message = "DefenseClaw policy service is unavailable."
+	var body string
+	// Exact reviewed event names only: an unreviewed spelling never reaches
+	// the gateway and never synthesizes enforcement.
+	switch opts.Event {
+	case "preToolUse":
+		body = `{"permissionDecision":"deny","permissionDecisionReason":"` + message + `"}`
+	case "permissionRequest":
+		body = `{"behavior":"deny","message":"` + message + `"}`
+	default:
+		return 0, false
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
+	fmt.Fprintln(opts.Stdout, body)
+	return 0, true
 }
 
 // emit writes the connector-native failure body (if any) and returns its exit

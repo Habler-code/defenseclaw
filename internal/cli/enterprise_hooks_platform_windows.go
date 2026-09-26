@@ -77,6 +77,26 @@ func syncEnterpriseHookManagedEnrollments(
 	apiAddr string,
 	publishExact bool,
 ) error {
+	if cfg != nil && cfg.StandaloneEnterprise() {
+		// Standalone per-user connectors carry their own machine enrollment;
+		// revoke SIDs the manifest no longer authorizes first so they fail
+		// closed even when a later step fails.
+		codexOpts, err := resolveWindowsCodexRequirementsLayout("reconcile")
+		if err != nil {
+			return err
+		}
+		if err := pruneWindowsStandalonePerUserEnrollments(manifest, codexOpts.HookBinary); err != nil {
+			return err
+		}
+	}
+	return syncEnterpriseHookManagedMachineEnrollments(manifest, apiAddr, publishExact)
+}
+
+func syncEnterpriseHookManagedMachineEnrollments(
+	manifest enterprisehooks.Manifest,
+	apiAddr string,
+	publishExact bool,
+) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}

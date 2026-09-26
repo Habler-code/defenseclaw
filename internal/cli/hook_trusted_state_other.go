@@ -12,6 +12,7 @@ func NativeHookRuntimeNoop() bool                   { return false }
 func NativeConnectorHookNoop([]string) bool         { return false }
 func enterpriseManagedHookRuntimeNoop(string) bool  { return false }
 func enterpriseManagedHookRuntimeForceClosed() bool { return false }
+func implicitEnterpriseManagedHook() bool           { return false }
 func enterpriseManagedHookRuntimeFailureReason() string {
 	return ""
 }

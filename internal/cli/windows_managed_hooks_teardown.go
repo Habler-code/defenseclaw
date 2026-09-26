@@ -567,6 +567,9 @@ func prepareWindowsManagedHooksTeardown(
 			removeReport.SurvivingOwnedPathReferences,
 		)
 	}
+	if err := removeWindowsManagedHooksStandalonePerUserWiring(identity); err != nil {
+		return restoreOnFailure(err, 0)
+	}
 	if err := removeWindowsManagedHooksRuntimeSelectors(
 		identity.Targets,
 		identity.HookBinary,
@@ -638,6 +641,9 @@ func rollbackWindowsManagedHooksTeardown(
 				journal.HookBinary,
 				journal.SelectorTargets,
 			); err != nil {
+				return err
+			}
+			if err := restoreWindowsManagedHooksStandalonePerUserEnrollments(journal); err != nil {
 				return err
 			}
 			current, err := captureWindowsManagedHooksTeardownMachineState(
@@ -1100,6 +1106,11 @@ func windowsManagedHooksTeardownSelectorExpected(
 	if activationState != windowsManagedHooksActivated {
 		return false
 	}
+	if hookBinary, perUser := enterprisehooks.IsWindowsStandalonePerUserConnector(target.Connector); perUser && !hookBinary {
+		// Plugin connectors never execute the hook binary and never publish a
+		// runtime selector.
+		return false
+	}
 	for _, pending := range pendingTargets {
 		if pending.Connector == target.Connector &&
 			strings.EqualFold(pending.SID, target.SID) {
@@ -1162,6 +1173,9 @@ func verifyWindowsManagedHooksTeardownClean(
 			"Codex machine requirements are not clean after managed-hook teardown",
 		)
 	}
+	if err := verifyWindowsManagedHooksStandalonePerUserClean(targets); err != nil {
+		return 0, err
+	}
 	for _, target := range targets {
 		snapshot, err := enterprisehooks.CaptureWindowsManagedRuntimeSelectorTarget(
 			windowsManagedHooksRuntimeSelectorOptions(target, opts.HookBinary),
@@ -1210,6 +1224,9 @@ func verifyWindowsManagedHooksTeardownInstalled(
 		currentCursor,
 		cursorActive,
 	); err != nil {
+		return err
+	}
+	if err := validateWindowsManagedHooksStandalonePerUserEnrollment(identity); err != nil {
 		return err
 	}
 	if selectorTargets != nil {
@@ -1444,7 +1461,8 @@ func windowsManagedHooksTeardownTargets(
 			return nil, nil, nil, nil, fmt.Errorf("invalid managed-hook teardown SID %q", target.SID)
 		}
 		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-		if connectorName != "claudecode" && connectorName != "codex" && connectorName != "cursor" {
+		if connectorName != "claudecode" && connectorName != "codex" && connectorName != "cursor" &&
+			!windowsManagedHooksStandalonePerUserTarget(connectorName) {
 			return nil, nil, nil, nil, fmt.Errorf(
 				"managed-hook teardown does not support connector %q",
 				target.Connector,

@@ -1381,6 +1381,9 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 	}
 }
 
+// Per-user Copilot hooks fail open on every DefenseClaw-side failure;
+// administrator-managed (standalone enterprise) Copilot hooks deny the tool
+// call with Copilot's native structured decision instead.
 func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 	type failureCase struct {
 		name   string
@@ -1406,23 +1409,29 @@ func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := run(t, "copilot", tc.rt, func(o *Options) {
-				o.Event = "preToolUse"
-				o.FailMode = "closed"
-				o.StrictAvailability = true
-				o.ManagedEnterprise = true
-				if tc.mutate != nil {
-					tc.mutate(o)
+		for _, managedHook := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, managedHook), func(t *testing.T) {
+				result := run(t, "copilot", tc.rt, func(o *Options) {
+					o.Event = "preToolUse"
+					o.FailMode = "closed"
+					o.StrictAvailability = true
+					o.ManagedEnterprise = managedHook
+					if tc.mutate != nil {
+						tc.mutate(o)
+					}
+				})
+				want := ""
+				if managedHook {
+					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
+				}
+				if result.code != 0 || result.stdout != want {
+					t.Fatalf(
+						"Copilot failure result: code=%d stdout=%q stderr=%q, want stdout %q",
+						result.code, result.stdout, result.stderr, want,
+					)
 				}
 			})
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf(
-					"Copilot failure synthesized enforcement: code=%d stdout=%q stderr=%q",
-					result.code, result.stdout, result.stderr,
-				)
-			}
-		})
+		}
 	}
 }
 

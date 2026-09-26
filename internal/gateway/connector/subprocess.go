@@ -656,7 +656,7 @@ func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if name != "codex" && name != "claudecode" && name != "cursor" && name != "copilot" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -683,7 +683,7 @@ func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if name != "codex" && name != "claudecode" && name != "cursor" && name != "copilot" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")

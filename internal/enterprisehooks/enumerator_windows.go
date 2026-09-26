@@ -773,7 +773,7 @@ func effectiveWindowsHookConnectors(cfg *config.Config) []string {
 		if trimmed == "" {
 			return
 		}
-		if _, ok := windowsHookConnectors[trimmed]; !ok {
+		if !windowsEnumeratorHookConnector(trimmed) {
 			return
 		}
 		if explicitlyDisabled {

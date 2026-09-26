@@ -58,6 +58,8 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		result, err = installWindowsCodexManagedResult(ctx, opts)
 	case "cursor":
 		result, err = installWindowsCursorManagedResult(ctx, opts)
+	case "copilot":
+		result, err = installWindowsRuntimeOnlyManagedResult(ctx, opts)
 	default:
 		result, err = installWindowsGenericManagedResult(ctx, opts)
 	}
@@ -69,12 +71,15 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 // Windows deployment never permits Codex or Claude hooks to inherit a
 // fail-open normal-mode setting.
 func windowsEnterpriseHookFailMode(connectorName, configured string) string {
-	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	switch name {
 	case "codex", "claudecode", "cursor":
 		return "closed"
-	default:
-		return strings.TrimSpace(configured)
 	}
+	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
+		return "closed"
+	}
+	return strings.TrimSpace(configured)
 }
 
 func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
@@ -96,6 +101,8 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 		result, err = verifyWindowsCodexManagedResult(ctx, opts)
 	case "cursor":
 		result, err = verifyWindowsCursorManagedResult(ctx, opts)
+	case "copilot":
+		result, err = verifyWindowsRuntimeOnlyManagedResult(ctx, opts)
 	default:
 		result, err = verifyWindowsGenericManagedResult(ctx, opts)
 	}
@@ -470,6 +477,8 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 		return InstallResult{}, err
 	}
 	var result InstallResult
+	var generation WindowsManagedRuntimeGenerationPublication
+	generationUsed := false
 	err = connector.WithUserHomeDir(target.home, func() error {
 		configPaths := connector.HookConfigPathsForConnector(target.conn, target.setup)
 		footprint := connector.AgentPaths{}
@@ -488,7 +497,12 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			} else if !verifiedSID.Equals(target.sid) {
 				return fmt.Errorf("enterprise hooks: target profile SID changed before impersonated setup")
 			}
-			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, opts.AllowMissingHookConfigRepair); err != nil {
+			// A standalone per-user connector has no machine policy to carry
+			// DefenseClaw, so the guardian may create its per-user hook config
+			// for a user whose installed agent the enumerator discovered.
+			_, perUserStandalone := windowsStandalonePerUserConnector(target.conn.Name())
+			allowMissingConfig := opts.AllowMissingHookConfigRepair || perUserStandalone
+			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
 			}
 			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
@@ -529,6 +543,10 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
 				return rollback(err)
 			}
+			generation, generationUsed, err = prepareWindowsPerUserManagedGeneration(target, lockEntry.ContractID)
+			if err != nil {
+				return rollback(err)
+			}
 			cleanupWindowsGenericFootprintQuarantines(target, configPaths, footprint)
 			result = InstallResult{
 				Connector:       target.conn.Name(),
@@ -546,6 +564,19 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 	})
 	if err != nil {
 		return InstallResult{}, err
+	}
+	if generationUsed {
+		// Register the SID only after its target-owned runtime is hardened and
+		// verified. Until the enrollment publishes, a managed invocation for
+		// this SID fails closed as unregistered.
+		if err := commitWindowsPerUserManagedRegistration(target, generation); err != nil {
+			rollbackErr := connector.WithUserHomeDir(target.home, func() error {
+				return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
+					return target.conn.Teardown(ctx, target.setup)
+				})
+			})
+			return InstallResult{}, errors.Join(err, rollbackErr)
+		}
 	}
 	return result, nil
 }
@@ -581,6 +612,9 @@ func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions)
 		)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: load managed hook contract: %w", err)
+		}
+		if err := verifyWindowsPerUserManagedRegistration(target, lock.ContractID); err != nil {
+			return err
 		}
 		result = InstallResult{
 			Connector:       target.conn.Name(),
@@ -1227,6 +1261,20 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
+	if name := strings.ToLower(strings.TrimSpace(opts.ConnectorName)); windowsStandaloneRuntimeOnlyConnector(name) {
+		reg := opts.Registry
+		if reg == nil {
+			reg = newWindowsEnterpriseConnectorRegistry()
+		}
+		conn, ok := reg.Get(name)
+		if !ok {
+			return fmt.Errorf("enterprise hooks: unknown connector %q", name)
+		}
+		if err := windowsEnterpriseConnectorCertification(name, conn); err != nil {
+			return err
+		}
+		return removeWindowsRuntimeOnlyManagedRuntime(opts, name)
+	}
 	return removeWindowsGenericManagedRuntime(ctx, opts)
 }
 
@@ -1252,6 +1300,33 @@ func removeWindowsGenericManagedRuntime(ctx context.Context, opts InstallOptions
 	targetSID, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
 	if err != nil {
 		return err
+	}
+	if hookBinary, perUser := windowsStandalonePerUserConnector(conn.Name()); perUser && hookBinary {
+		home, verifiedSID, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
+		if err != nil {
+			return err
+		}
+		if !verifiedSID.Equals(targetSID) {
+			return fmt.Errorf("enterprise hooks: target profile SID changed before managed revocation")
+		}
+		dataDir, err := resolveWindowsEnterpriseDataDir(home, opts.DataDir)
+		if err != nil {
+			return err
+		}
+		hookExecutable, err := windowsEnterpriseHookExecutable()
+		if err != nil {
+			return err
+		}
+		// Revoke the machine enrollment first: from here the SID's hook fails
+		// closed as unregistered even if the per-user teardown below fails.
+		if err := revokeWindowsPerUserManagedRegistration(
+			conn.Name(),
+			targetSID,
+			dataDir,
+			filepath.Clean(hookExecutable),
+		); err != nil {
+			return err
+		}
 	}
 	return windowsEnterpriseTargetImpersonation(targetSID, opts.UserHome, func() error {
 		home, verifiedSID, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
@@ -1343,6 +1418,7 @@ func newWindowsEnterpriseConnectorRegistry() *connector.Registry {
 	registry.RegisterBuiltin(connector.NewCodexConnector())
 	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
 	registry.RegisterBuiltin(connector.NewCursorConnector())
+	RegisterWindowsStandalonePerUserConnectors(registry)
 	return registry
 }
 
@@ -1364,6 +1440,12 @@ func certifyWindowsEnterpriseConnector(name string, conn connector.Connector) er
 			return fmt.Errorf("enterprise hooks: connector %q is not the certified built-in Windows implementation", name)
 		}
 	default:
+		if _, perUser := windowsStandalonePerUserConnector(name); perUser {
+			return certifyWindowsStandalonePerUserConnector(strings.ToLower(strings.TrimSpace(name)), conn)
+		}
+		if reason := WindowsEnterpriseRefusedConnectorReason(name); reason != "" {
+			return fmt.Errorf("enterprise hooks: connector %q is refused on native Windows: %s", name, reason)
+		}
 		return fmt.Errorf("enterprise hooks: connector %q is not certified for native Windows enterprise callbacks", name)
 	}
 	return nil

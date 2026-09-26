@@ -41,9 +41,20 @@ func LayoutOptions(layout managed.StandaloneLayout, programFiles, programData st
 		WindowsProgramData:  programData,
 		HookBinary:          HookBinaryPath(layout),
 		StateDir:            joinFor(target, layout.LifecycleDir, "machine-policy"),
-		PublicPolicyPath:    joinFor(target, layout.ConfigDir, PublicPolicyFileName),
+		PublicPolicyPath:    PublicPolicyPathFor(layout),
 		OpenCodePluginPath:  OpenCodeManagedPluginPath(layout),
 	}
+}
+
+// PublicPolicyPathFor is where the public machine policy summary lives: next
+// to the managed config on Linux and macOS, and in the user-readable hook
+// runtime directory on Windows, whose state root standard users cannot read.
+func PublicPolicyPathFor(layout managed.StandaloneLayout) string {
+	target := Options{GOOS: layout.GOOS}
+	if layout.GOOS == "windows" {
+		return joinFor(target, layout.HookRuntimeDir, PublicPolicyFileName)
+	}
+	return joinFor(target, layout.ConfigDir, PublicPolicyFileName)
 }
 
 // StandaloneOptions derives Options from the fixed standalone layout and

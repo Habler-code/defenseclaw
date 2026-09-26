@@ -179,6 +179,7 @@ func newWindowsEnterpriseCertifiedConnectorRegistry() *connector.Registry {
 	registry.RegisterBuiltin(connector.NewCodexConnector())
 	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
 	registry.RegisterBuiltin(connector.NewCursorConnector())
+	enterprisehooks.RegisterWindowsStandalonePerUserConnectors(registry)
 	return registry
 }
 
@@ -1583,6 +1584,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		)
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
+	enterpriseHookStandalonePlatformPrepare(os.Stderr)
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
@@ -1751,6 +1753,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			enrollmentErr,
 		)
 	}
+	enterpriseHookStandalonePlatformFinish(ctx, os.Stderr, rows, time.Now())
 	run.Rows = rows
 	run.Failures = failures
 	run.Pending = pending

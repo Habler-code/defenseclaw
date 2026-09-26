@@ -57,7 +57,12 @@ type StandaloneLayout struct {
 	// Local IPC endpoints. The directories are writable only by root or
 	// the service identity so a standard user cannot pre-create an
 	// impostor socket.
-	HookSocketDir   string
+	HookSocketDir string
+	// HookRuntimeDir (Windows only) holds the user-readable, administrator-
+	// written hook runtime state: the per-user connector enrollments and
+	// runtime selectors and the public machine policy summary. The state
+	// root is not readable by standard users, so it cannot live there.
+	HookRuntimeDir  string
 	HookSocketPath  string
 	SensorSocketDir string
 
@@ -153,6 +158,7 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		LogDir:          state + `\logs`,
 		HookSocketDir:   install + `\ipc`,
 		HookSocketPath:  "",
+		HookRuntimeDir:  programData + `\Cisco\DefenseClaw-HookRuntime`,
 		SensorSocketDir: install + `\ipc`,
 		ServiceUser:     `NT SERVICE\` + StandaloneWindowsGatewaySvc,
 		ServiceGroup:    "",
