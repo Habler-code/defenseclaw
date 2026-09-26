@@ -252,6 +252,9 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 }
 
 func runStart(cmd *cobra.Command, _ []string) error {
+	if err := refusePerUserGatewayBesideEnterprise(); err != nil {
+		return err
+	}
 	rotationTransaction := rotationTransactionRequested(cmd)
 	controllerOwnsReadiness := upgradeControllerOwnsGatewayStartReadiness(rotationTransaction)
 	var expectedConnectorState rotationConnectorState
@@ -705,6 +708,9 @@ func waitForRunningDaemonReadinessWithVersion(
 }
 
 func runRestart(cmd *cobra.Command, _ []string) error {
+	if err := refusePerUserGatewayBesideEnterprise(); err != nil {
+		return err
+	}
 	d := daemon.New(config.DefaultDataPath())
 	// Restart may stop an otherwise healthy managed gateway. Validate every
 	// process-identity artifact before that first side effect so malformed or

@@ -703,3 +703,51 @@ def test_dot_source_is_the_only_no_run_seam() -> None:
     assert "if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) { exit 0 }" in text
     assert "DEFENSECLAW_" + "INSTALLER_TEST" not in text
     assert "AllowUnsigned" not in text
+
+
+def test_enterprise_deployment_is_refused_before_any_release_work() -> None:
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+    guard = text[text.index("function Assert-NoEnterpriseDeployment") :]
+    guard = guard[: guard.index("\nfunction ")]
+    assert '[string]$ServiceName = "DefenseClawGateway"' in guard
+    assert "Get-Service -Name $ServiceName -ErrorAction SilentlyContinue" in guard
+    assert "\\defenseclaw-gateway.exe" in guard
+    assert "cannot be installed beside it" in guard
+    main = text[text.index("function Main {") :]
+    assert main.index("Assert-NoEnterpriseDeployment") < main.index("Resolve-RemoteVersion")
+    assert main.index("Assert-NoEnterpriseDeployment") < main.index("Stage-LocalBundle")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_enterprise_gateway_service_blocks_per_user_install() -> None:
+    completed = _run_powershell(
+        rf"""
+{_dot_source("-Yes -Version 1.2.3")}
+function Resolve-RemoteVersion {{ throw 'NETWORK_OR_RELEASE_RESOLUTION_CALLED' }}
+function Get-Service {{ param([string]$Name) [pscustomobject]@{{ Name = $Name }} }}
+function Get-ItemProperty {{
+  [pscustomobject]@{{ ImagePath = '"C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe"' }}
+}}
+try {{ $null = Main; throw 'expected failure' }} catch {{ "ERROR=$($_.Exception.Message)" }}
+"""
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "enterprise deployment is installed" in completed.stdout
+    assert "DefenseClawGateway" in completed.stdout
+    assert "NETWORK_OR_RELEASE_RESOLUTION_CALLED" not in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_unrelated_or_absent_gateway_service_does_not_block_per_user_install() -> None:
+    completed = _run_powershell(
+        rf"""
+{_dot_source()}
+Assert-NoEnterpriseDeployment -ServiceName 'DefenseClawGatewayAbsent_0123456789'
+function Get-Service {{ param([string]$Name) [pscustomobject]@{{ Name = $Name }} }}
+function Get-ItemProperty {{ [pscustomobject]@{{ ImagePath = 'C:\Windows\system32\svchost.exe -k Other' }} }}
+Assert-NoEnterpriseDeployment
+'ALLOWED'
+"""
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "ALLOWED" in completed.stdout
