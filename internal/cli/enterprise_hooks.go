@@ -450,7 +450,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
-	result, err := enterprisehooks.Install(ctx, opts)
+	result, err := enterpriseHookInstallTarget(ctx, opts)
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
@@ -482,6 +482,12 @@ type enterpriseHookReconcileRow struct {
 	Pending bool                           `json:"pending,omitempty"`
 	Error   string                         `json:"error,omitempty"`
 	Result  *enterprisehooks.InstallResult `json:"result,omitempty"`
+	// UID and HomeInode identify a standalone Unix target so the gateway
+	// can authorize a hook caller by kernel-verified uid, including
+	// directory users a cgo-free build cannot name-resolve. Other
+	// deployments never set them, so their records are unchanged.
+	UID       int    `json:"uid,omitempty"`
+	HomeInode uint64 `json:"home_inode,omitempty"`
 }
 
 type enterpriseHookReconcileRun struct {
@@ -1194,6 +1200,9 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks verify: config is not loaded")
 	}
+	if enterpriseHooksStandaloneUnixActive() {
+		return runEnterpriseHookVerifyAttemptStandaloneUnix(ctx)
+	}
 	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := enterpriseHookManifestFileTrustCheck(enterpriseHookManifest); err != nil {
 			return run, fmt.Errorf("enterprise hooks verify: manifest trust check failed: %w", err)
@@ -1531,6 +1540,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
+	if enterpriseHooksStandaloneUnixActive() {
+		return runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
+	}
 	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
 		return run, err
 	}
@@ -1755,6 +1767,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if enterpriseHookWatchDebounce <= 0 {
 		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
 	}
+	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
@@ -2082,6 +2095,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				cancelRepairRetry()
 			}
 		case <-ticker.C:
+			if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {
+				return nil
+			}
 			if _, err := reconcile("interval"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
 			}
@@ -2116,6 +2132,10 @@ func isMissingManifestErr(err error) bool {
 // a reason to fail the guardian's core reconcile path.
 func writeGuardianStateOrLog(w io.Writer, state string) {
 	if enterpriseHookManifest == "" {
+		return
+	}
+	if enterpriseHooksStandaloneUnixActive() {
+		writeEnterpriseHookStandaloneGuardianStateOrLog(w, state)
 		return
 	}
 	statePath := guardianstate.PathForStateRoot(filepath.Dir(filepath.Clean(enterpriseHookManifest)))
@@ -2976,6 +2996,12 @@ func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookRecon
 			merged[key] = row
 			continue
 		}
+		// A standalone Unix target whose home is pending is not protected
+		// right now; its identity binding, not the ledger, keeps its
+		// repair rights.
+		if row.Pending && enterpriseHooksStandaloneUnixActive() {
+			continue
+		}
 		if prior, ok := previousByKey[key]; ok {
 			merged[key] = prior
 		}
@@ -3070,6 +3096,9 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 	if name := strings.TrimSpace(userName); name != "" &&
 		!(runtime.GOOS == "windows" && target.home != "") {
 		u, err := user.Lookup(name)
+		if err != nil {
+			u, err = enterpriseHookStandaloneLookupFallback(name, err)
+		}
 		if err != nil {
 			return target, fmt.Errorf("enterprise hooks: lookup user %q: %w", name, err)
 		}

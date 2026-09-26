@@ -51,11 +51,22 @@ func verifyEnterpriseHookManagedEnrollments(
 
 func enterpriseHooksNativePlatformPreflight() error { return nil }
 
-func enterpriseHooksNativeMutationIdentityPreflight() error { return nil }
+// enterpriseHooksNativeMutationIdentityPreflight is a no-op except for the
+// standalone profile, whose guardian must be root with CAP_SETUID and
+// CAP_SETGID to start per-user workers.
+func enterpriseHooksNativeMutationIdentityPreflight() error {
+	return enterpriseHookStandaloneMutationPreflight()
+}
 
 func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) error {
+	var err error
 	if cmd == enterpriseHooksStatusCmd {
-		return enterpriseHooksConfigOnlyPersistentPreRun(cmd, args)
+		err = enterpriseHooksConfigOnlyPersistentPreRun(cmd, args)
+	} else {
+		err = enterpriseHooksFullRootPersistentPreRun(cmd, args)
 	}
-	return enterpriseHooksFullRootPersistentPreRun(cmd, args)
+	if err == nil {
+		configureEnterpriseHooksStandaloneUnix(cmd.Context())
+	}
+	return err
 }

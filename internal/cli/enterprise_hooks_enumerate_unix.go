@@ -1,0 +1,315 @@
+//go:build !windows
+
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+)
+
+// `enterprise hooks enumerate` is the standalone Unix enumerator: it
+// discovers eligible local and directory users, discovers their agent
+// versions in their own worker, and publishes the guardian manifest. The
+// guardian's file watch picks the new manifest up.
+
+const enterpriseHookEnumeratorStateFile = ".targets-enumerator-state.json"
+
+type enterpriseHooksEnumerateOptions struct {
+	manifest   string
+	descriptor string
+	interval   time.Duration
+	jsonOut    bool
+	dryRun     bool
+}
+
+var enterpriseHooksEnumerateOpts = enterpriseHooksEnumerateOptions{}
+
+var enterpriseHooksEnumerateCmd = &cobra.Command{
+	Use:   "enumerate",
+	Short: "Publish the standalone guardian's per-user targets (Linux and macOS)",
+	Long: `Discover the users this host should protect and publish the hook guardian
+manifest. Candidates are local and directory (SSSD, LDAP, AD, systemd-userdb)
+accounts, users with a login session, owners of homes under the allowed home
+roots, and enterprise.enrollment.include_users. Each is filtered by uid range,
+login shell, home trust and the include/exclude user and group lists, and its
+agent versions are discovered with that user's own credentials.
+
+A directory outage never revokes a known user; only repeated definitive
+"no such user" answers do. Byte-identical manifests are not rewritten.
+
+Standalone profile only. With enterprise.enrollment.mode=manifest the
+administrator publishes the manifest and this command does nothing.`,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		return runEnterpriseHooksEnumerate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), enterpriseHooksEnumerateOpts)
+	},
+}
+
+func init() {
+	flags := enterpriseHooksEnumerateCmd.Flags()
+	flags.StringVar(&enterpriseHooksEnumerateOpts.manifest, "manifest", "", "absolute path of the guardian targets.yaml to maintain (required)")
+	flags.StringVar(&enterpriseHooksEnumerateOpts.descriptor, "descriptor", "", "managed runtime descriptor (default: the standalone layout's)")
+	flags.DurationVar(&enterpriseHooksEnumerateOpts.interval, "interval", 0, "run every interval as a service; 0 runs one cycle")
+	flags.BoolVar(&enterpriseHooksEnumerateOpts.jsonOut, "json", false, "print each cycle's report as JSON")
+	flags.BoolVar(&enterpriseHooksEnumerateOpts.dryRun, "dry-run", false, "print the manifest instead of publishing it")
+	_ = flags.MarkHidden("descriptor")
+	enterpriseHooksCmd.AddCommand(enterpriseHooksEnumerateCmd)
+}
+
+type enterpriseHooksEnumerateReport struct {
+	enterprisehooks.UnixEnumerationReport
+	Manifest string `json:"manifest"`
+	Changed  bool   `json:"changed"`
+	Idle     bool   `json:"idle,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+func runEnterpriseHooksEnumerate(ctx context.Context, stdout, stderr io.Writer, opts enterpriseHooksEnumerateOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	manifestPath := filepath.Clean(strings.TrimSpace(opts.manifest))
+	if strings.TrimSpace(opts.manifest) == "" || !filepath.IsAbs(manifestPath) {
+		return errors.New("enterprise hooks enumerate: --manifest must be an absolute path")
+	}
+	if opts.interval < 0 {
+		return errors.New("enterprise hooks enumerate: --interval must not be negative")
+	}
+	if !enterpriseHooksStandaloneUnixActive() {
+		return errors.New("enterprise hooks enumerate: available only in the standalone enterprise profile")
+	}
+	if !opts.dryRun {
+		if err := enterpriseHookStandaloneMutationPreflight(); err != nil {
+			return err
+		}
+	}
+	state := enterprisehooks.LoadUnixEnumeratorState(enterpriseHookEnumeratorStatePath(manifestPath))
+	for {
+		report, err := runEnterpriseHooksEnumerateCycle(ctx, stderr, manifestPath, opts, state)
+		if err != nil {
+			if opts.interval == 0 {
+				return err
+			}
+			fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
+		} else {
+			printEnterpriseHooksEnumerateReport(stdout, stderr, report, opts.jsonOut)
+		}
+		if opts.interval == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(opts.interval):
+		}
+	}
+}
+
+func enterpriseHookEnumeratorStatePath(manifestPath string) string {
+	return filepath.Join(filepath.Dir(manifestPath), enterpriseHookEnumeratorStateFile)
+}
+
+// enterpriseHooksEnumerateConfigLoader is replaceable in tests.
+var enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) {
+	loaded, _, err := loadGatewayConfigV8(config.ConfigPath())
+	return loaded, err
+}
+
+func runEnterpriseHooksEnumerateCycle(
+	ctx context.Context,
+	stderr io.Writer,
+	manifestPath string,
+	opts enterpriseHooksEnumerateOptions,
+	state *enterprisehooks.UnixEnumeratorState,
+) (enterpriseHooksEnumerateReport, error) {
+	report := enterpriseHooksEnumerateReport{Manifest: manifestPath}
+	// Reload each cycle so an administrator's enrollment change applies
+	// without restarting the service.
+	current, err := enterpriseHooksEnumerateConfigLoader()
+	if err != nil {
+		return report, fmt.Errorf("load managed config: %w", err)
+	}
+	if !current.StandaloneEnterprise() {
+		return report, errors.New("the managed config is no longer the standalone profile")
+	}
+	if strings.EqualFold(strings.TrimSpace(current.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+		report.Idle = true
+		report.Reason = "enterprise.enrollment.mode is manifest; the administrator publishes targets"
+		return report, nil
+	}
+	machinePolicy, err := enterpriseHooksEnumerateMachinePolicyConnectors(opts.descriptor)
+	if err != nil {
+		return report, err
+	}
+	resolver := unixidentity.NewCachingResolver(enterpriseHooksEnumerateResolver(ctx))
+	uidMin, uidMax := unixidentity.DefaultUIDRange()
+	homeRoots := append(enterprisehooks.DefaultUnixHomeRoots(runtime.GOOS), current.Enterprise.Enrollment.HomeRoots...)
+	manifest, cycle, err := enterprisehooks.EnumerateUnix(ctx, current, newEnterpriseHooksConnectorRegistry(), enterprisehooks.UnixEnumerateOptions{
+		ExistingManifestPath:    manifestPath,
+		Resolver:                resolver,
+		HomeRoots:               homeRoots,
+		UIDMin:                  uidMin,
+		UIDMax:                  uidMax,
+		MachinePolicyConnectors: machinePolicy,
+		SessionUIDs:             enterpriseHookSessionUIDs,
+		Discover:                enterpriseHooksEnumerateDiscover,
+		MachineVersion:          enterprisehooks.DiscoverUnixMachineAgentVersion,
+		State:                   state,
+		Logger: func(subject, reason string) {
+			fmt.Fprintf(stderr, "[hook-enumerator] %s: %s\n", subject, reason)
+		},
+	})
+	if err != nil {
+		return report, err
+	}
+	report.UnixEnumerationReport = cycle
+	if opts.dryRun {
+		data, err := enterprisehooks.MarshalUnixTargetsManifest(manifest)
+		if err != nil {
+			return report, err
+		}
+		fmt.Fprintf(stderr, "%s", data)
+		return report, nil
+	}
+	report.Changed, err = enterprisehooks.WriteUnixTargetsManifestAtomic(manifestPath, manifest)
+	if err != nil {
+		return report, err
+	}
+	if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(manifestPath), state); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
+	}
+	return report, nil
+}
+
+// enterpriseHooksEnumerateResolver is replaceable in tests.
+var enterpriseHooksEnumerateResolver = func(ctx context.Context) unixidentity.Resolver {
+	return unixidentity.Default(ctx)
+}
+
+func enterpriseHooksEnumerateMachinePolicyConnectors(descriptorPath string) ([]string, error) {
+	descriptorPath = strings.TrimSpace(descriptorPath)
+	if descriptorPath == "" {
+		layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+		if err != nil {
+			return nil, err
+		}
+		descriptorPath = layout.DescriptorPath
+	}
+	descriptor, err := managed.LoadRuntimeDescriptor(descriptorPath)
+	if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load managed runtime descriptor: %w", err)
+	}
+	return append([]string{}, descriptor.MachinePolicyConnectors...), nil
+}
+
+// enterpriseHooksEnumerateDiscover asks the target user's worker for the
+// installed agent versions. The worker's answer is user-influenced, so
+// every version is re-validated here.
+func enterpriseHooksEnumerateDiscover(ctx context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
+	response, err := enterpriseHookWorkerRunner(ctx, enterpriseHookWorkerAccount{
+		UID:  account.UID,
+		GID:  account.GID,
+		User: account.Name,
+		Home: filepath.Clean(account.Home),
+	}, enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpDiscover, Standalone: true, Connectors: connectors})
+	if err != nil {
+		return nil, nil, err
+	}
+	wanted := map[string]bool{}
+	for _, name := range connectors {
+		wanted[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	versions := map[string]string{}
+	for name, version := range response.Versions {
+		if wanted[name] && enterprisehooks.ExtractUnixAgentVersion(version) == version {
+			versions[name] = version
+		}
+	}
+	reasons := map[string]string{}
+	for name, reason := range response.Reasons {
+		if wanted[name] {
+			if len(reason) > 256 {
+				reason = reason[:256]
+			}
+			reasons[name] = reason
+		}
+	}
+	return versions, reasons, nil
+}
+
+// enterpriseHookSessionUIDs lists uids with a live login session:
+// systemd-logind's per-user records on Linux, the console owner on macOS.
+var enterpriseHookSessionUIDs = func() []int {
+	if runtime.GOOS == "darwin" {
+		info, err := os.Stat("/dev/console")
+		if err != nil {
+			return nil
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != 0 {
+			return []int{int(st.Uid)}
+		}
+		return nil
+	}
+	return enterpriseHookSessionUIDsFrom("/run/systemd/users")
+}
+
+func enterpriseHookSessionUIDsFrom(dir string) []int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var uids []int
+	for _, entry := range entries {
+		uid, err := strconv.Atoi(entry.Name())
+		if err == nil && uid > 0 && strconv.Itoa(uid) == entry.Name() {
+			uids = append(uids, uid)
+		}
+	}
+	sort.Ints(uids)
+	return uids
+}
+
+func printEnterpriseHooksEnumerateReport(stdout, stderr io.Writer, report enterpriseHooksEnumerateReport, jsonOut bool) {
+	if jsonOut {
+		_ = json.NewEncoder(stdout).Encode(report)
+		return
+	}
+	if report.Idle {
+		fmt.Fprintf(stderr, "[hook-enumerator] idle: %s\n", report.Reason)
+		return
+	}
+	fmt.Fprintf(stderr, "[hook-enumerator] %d candidates, %d eligible, %d rows (%d new, %d deferred, %d revoked), manifest changed=%t\n",
+		report.Candidates, report.Eligible, report.Rows, report.New, report.Deferred, report.Revoked, report.Changed)
+}

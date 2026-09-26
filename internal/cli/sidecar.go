@@ -127,7 +127,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	// backward compatible with today.
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		sc.Health().SetDaemonConfigLoaded(true)
-		statePath := guardianstate.PathForDataDir(cfg.DataDir)
+		statePath := guardianstate.PathForPlatform(enterpriseHooksStandaloneUnixActive(), cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
 		sc.Health().SetGuardianStateReader(func() string {
 			return guardianstate.ReadState(statePath)
 		})

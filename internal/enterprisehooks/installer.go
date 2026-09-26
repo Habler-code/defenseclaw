@@ -109,6 +109,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if errEnterpriseHooksUnsupportedWindows != nil {
 		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
 	}
+	if err := refuseStandaloneRootInProcess("verify"); err != nil {
+		return InstallResult{}, err
+	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
 		return InstallResult{}, err
@@ -252,6 +255,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 	if errEnterpriseHooksUnsupportedWindows != nil {
 		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
+	}
+	if err := refuseStandaloneRootInProcess("install"); err != nil {
+		return InstallResult{}, err
 	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {

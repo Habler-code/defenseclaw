@@ -4352,6 +4352,9 @@ type managedGuardianAuthorizationTarget struct {
 	OK        bool                           `json:"ok"`
 	Error     string                         `json:"error,omitempty"`
 	Result    *enterprisehooks.InstallResult `json:"result,omitempty"`
+	// UID and HomeInode are written only by the standalone Unix guardian.
+	UID       int    `json:"uid,omitempty"`
+	HomeInode uint64 `json:"home_inode,omitempty"`
 }
 
 const managedGuardianAuthorizationMaxBytes int64 = 4 << 20
