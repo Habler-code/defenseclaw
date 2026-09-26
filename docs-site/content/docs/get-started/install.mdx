@@ -24,11 +24,9 @@ irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/ins
 ```
 
 When it finishes, run [`defenseclaw init`](/docs/get-started/quickstart) to
-configure DefenseClaw. To pick an agent during the install, pass options:
-
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector codex --quickstart
-```
+configure DefenseClaw. To pick an agent during the install, pass options: on
+macOS/Linux, end the command above with `bash -s -- --connector codex --quickstart`
+instead of `bash`; on Windows, run
 
 ```powershell
 & ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart
