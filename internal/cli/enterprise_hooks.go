@@ -1773,7 +1773,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	// runtime. The run still reports them as failures (#894). The exact
 	// publication is skipped (as before) when leaving them out would
 	// empty a connector's set, because an empty exact set tears down that
-	// connector's machine-wide hook policy.
+	// connector's machine-wide hook policy. Staging publishes the first
+	// Claude Code policy when every Claude Code target is still pending, so
+	// it gets the administrator's managed-hooks-only opt-out the per-target
+	// installs above get.
 	var enrollmentErr error
 	if failures == len(awaitingSignIn) {
 		publication := enterpriseHookManifestWithoutTargets(manifest, awaitingSignIn)
@@ -1781,6 +1784,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			publication,
 			pendingTargets,
 			apiAddr,
+			cfg.ClaudeCodeAllowUnmanagedHooks(),
 		)
 		if enrollmentErr == nil &&
 			!enterpriseHookPublicationDropsConnector(manifest, publication) {

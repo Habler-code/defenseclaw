@@ -139,6 +139,13 @@ func TestClaudeHKLMCarryingTheMatrixIsEffectiveOnWindows(t *testing.T) {
 		!strings.Contains(err.Error(), claudeCodeManagedHooksOnlyKey) {
 		t.Fatalf("HKLM carrying the matrix without the lock = %v, want a lock refusal", err)
 	}
+	// Deferred staging and install render through this call with the
+	// administrator's opt-out, which admits the policy.
+	optOut := opts
+	optOut.ClaudeCodeAllowUnmanagedHooks = true
+	if _, err := NewClaudeCodeConnector().ManagedHookPolicy(optOut); err != nil {
+		t.Fatalf("administrator opt-out still refused the HKLM matrix without the lock: %v", err)
+	}
 	claudeHKLMFixture(t, map[string]interface{}{
 		"model":                       "managed-by-mdm",
 		"hooks":                       exported["hooks"],

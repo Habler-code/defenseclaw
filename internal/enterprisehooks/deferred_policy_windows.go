@@ -26,6 +26,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 	manifest Manifest,
 	pending []ManifestTarget,
 	apiAddr string,
+	configuredClaudeAllowUnmanagedHooks bool,
 ) error {
 	if len(pending) == 0 {
 		return nil
@@ -123,11 +124,14 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			); err != nil {
 				return err
 			}
-			// Staging a SID must not change the machine-wide lock state.
-			claudeAllowUnmanagedHooks, err = currentWindowsClaudeManagedPolicyAllowsUnmanagedHooks()
-			if err != nil {
-				return err
-			}
+		}
+		claudeAllowUnmanagedHooks, err = deferredClaudeCodeAllowUnmanagedHooks(
+			active,
+			configuredClaudeAllowUnmanagedHooks,
+			currentWindowsClaudeManagedPolicyAllowsUnmanagedHooks,
+		)
+		if err != nil {
+			return err
 		}
 		for _, sid := range targets {
 			existingClaude[strings.ToUpper(strings.TrimSpace(sid))] = struct{}{}

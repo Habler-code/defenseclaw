@@ -14,9 +14,9 @@ import (
 
 // currentWindowsClaudeManagedPolicyAllowsUnmanagedHooks returns the lock state
 // of the active machine-wide Claude Code policy. Deferred staging only adds a
-// SID to that shared policy and has no administrator configuration of its own,
-// so it keeps the published lock state instead of resetting an opt-out. A
-// missing policy reports the secure default (locked).
+// SID to that shared policy, so it keeps the published lock state instead of
+// changing it (see deferredClaudeCodeAllowUnmanagedHooks). A missing policy
+// reports the secure default (locked).
 func currentWindowsClaudeManagedPolicyAllowsUnmanagedHooks() (bool, error) {
 	allow := false
 	err := windowsClaudeManagedPolicyTransaction(func() error {

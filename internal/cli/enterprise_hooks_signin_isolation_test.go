@@ -51,6 +51,9 @@ type signInIsolationFixture struct {
 	staged       [][]string
 	publications []signInIsolationPublication
 	classified   []string
+	// stagedClaudeAllowUnmanagedHooks is the claude_code.allow_unmanaged_hooks
+	// value each deferred staging call received.
+	stagedClaudeAllowUnmanagedHooks []bool
 }
 
 func publicationTargetNames(f *signInIsolationFixture, manifest enterprisehooks.Manifest) []string {
@@ -151,8 +154,13 @@ func runSignInIsolationReconcileWithOptions(
 		manifest enterprisehooks.Manifest,
 		_ []enterprisehooks.ManifestTarget,
 		_ string,
+		claudeCodeAllowUnmanagedHooks bool,
 	) error {
 		fixture.staged = append(fixture.staged, publicationTargetNames(fixture, manifest))
+		fixture.stagedClaudeAllowUnmanagedHooks = append(
+			fixture.stagedClaudeAllowUnmanagedHooks,
+			claudeCodeAllowUnmanagedHooks,
+		)
 		return nil
 	}
 	enterpriseHookReconcileSyncEnrollments = func(
@@ -357,5 +365,30 @@ func TestReconcileAwaitingSignInNeverAppliesToProtectedTargets(t *testing.T) {
 		if row.UserHome == homes["bob"] && !strings.Contains(row.Error, "no active interactive session") {
 			t.Fatalf("protected target failed for an unexpected reason: %+v", row)
 		}
+	}
+}
+
+// Deferred staging publishes the first Claude Code policy on a host whose
+// Claude Code targets are all still waiting for their users' first sign-in, so
+// it must get the administrator's claude_code.allow_unmanaged_hooks setting,
+// as the per-target installs do. Without it, staging rendered the lock and
+// refused an outranking HKLM policy that the opt-out admits.
+func TestReconcilePassesTheClaudeManagedHooksOptOutToDeferredStaging(t *testing.T) {
+	for _, optOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allow_unmanaged_hooks=%t", optOut), func(t *testing.T) {
+			stubSignInIsolationReconcile(t)
+			cfg.ClaudeCode.AllowUnmanagedHooks = optOut
+			fixture, run := runSignInIsolationReconcile(t, []signInIsolationTarget{
+				{name: "bob", sid: "S-1-5-21-1000-2000-3000-1105", connector: "claudecode", installErr: errSignInIsolationNoSession, awaitingSignIn: true},
+				{name: "carol", sid: "S-1-5-21-1000-2000-3000-1102", connector: "codex"},
+			})
+			if run.Failures != 1 || run.StateErr != nil {
+				t.Fatalf("run failures=%d state_err=%v, want the signed-out target as the only failure", run.Failures, run.StateErr)
+			}
+			got := fixture.stagedClaudeAllowUnmanagedHooks
+			if len(got) != 1 || got[0] != optOut {
+				t.Fatalf("deferred staging received claude_code.allow_unmanaged_hooks=%v, want [%t]", got, optOut)
+			}
+		})
 	}
 }

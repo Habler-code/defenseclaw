@@ -37,6 +37,7 @@ func stageEnterpriseHookDeferredManagedPolicies(
 	enterprisehooks.Manifest,
 	[]enterprisehooks.ManifestTarget,
 	string,
+	bool,
 ) error {
 	return nil
 }

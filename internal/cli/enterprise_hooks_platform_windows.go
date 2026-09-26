@@ -80,11 +80,13 @@ func stageEnterpriseHookDeferredManagedPolicies(
 	manifest enterprisehooks.Manifest,
 	pending []enterprisehooks.ManifestTarget,
 	apiAddr string,
+	claudeCodeAllowUnmanagedHooks bool,
 ) error {
 	return enterprisehooks.StageWindowsEnterpriseDeferredPolicies(
 		manifest,
 		pending,
 		apiAddr,
+		claudeCodeAllowUnmanagedHooks,
 	)
 }
 
