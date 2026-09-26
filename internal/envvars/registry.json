@@ -4763,12 +4763,12 @@
       "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
       "category": "security_opt_out",
       "purpose": "Retired 0.x upgrade override with no effect in 1.x. Still refused from .env files so an old dotenv cannot carry it forward.",
-      "default": "unset (fail-closed)",
+      "default": "unset (no effect)",
       "accepted_values": [
         "1",
         "unset"
       ],
-      "security_impact": "high",
+      "security_impact": "none",
       "surface_in_doctor": true,
       "consumers": [
         {
@@ -4781,7 +4781,8 @@
         }
       ],
       "since": "0.5.0",
-      "security_note": "Upgrade-artifact integrity — prevents installing a tampered tarball/wheel pulled from a hijacked release CDN or MITM."
+      "deprecated": true,
+      "replacement_hint": "Remove it; 1.x checks every release asset against checksums.txt and has no unverified mode."
     },
     {
       "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",

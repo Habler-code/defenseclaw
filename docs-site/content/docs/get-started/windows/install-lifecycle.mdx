@@ -123,8 +123,8 @@ recorded homes instead of following later profile or environment drift. The tran
 current and previous recorded Hermes home until reconciliation, rollback, or
 teardown has finished, so an environment change cannot strand an owned
 `config.yaml` registration. Restart OpenCode after lifecycle changes so the running
-client loads the reconciled plugin state. The packaged data root itself is
-fixed to the current Windows profile; see
+client loads the reconciled plugin state. The data root is the current profile's
+`.defenseclaw` unless `DEFENSECLAW_HOME` is set; see
 [Path and override rules](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
 
 Amp has no connector-home override: its system plugin uses
