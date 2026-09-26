@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -111,6 +112,49 @@ def test_installer_pins_module_signer_before_import() -> None:
         "Import-Module"
     )
     assert "AdditionalTrustedSignerSha256 = $trustedSigners" in main
+
+
+def test_endpoint_signer_pin_matches_the_assembly_publisher_contract() -> None:
+    """Every endpoint pin must accept exactly what Setup assembly accepts.
+
+    The Setup EXE carries no additional trusted signer, so if the publisher
+    enforced when the managed payload is assembled differs from the endpoint
+    pin, a cleanly assembled Setup fails every endpoint lifecycle action.
+    """
+    literal = r"'([^']+)'"
+    assembly_ps = read(ROOT / "packaging" / "scripts" / "lib" / "assert-cisco-signature.ps1")
+    assembly_sh = read(ROOT / "packaging" / "scripts" / "lib" / "assert-cisco-signature.sh")
+    broker = read(ROOT / "internal" / "managed" / "cmidbroker" / "library_trust.go")
+    publishers = {
+        "assembly (pwsh)": re.search(
+            r"^\$script:DefenseClawCiscoPublisherCN = " + literal, assembly_ps, re.MULTILINE
+        ),
+        "assembly (bash)": re.search(
+            r"^readonly _DEFENSECLAW_CISCO_PUBLISHER_CN=" + literal, assembly_sh, re.MULTILINE
+        ),
+        "lifecycle module": re.search(
+            r"^\$script:DefenseClawPayloadPublisher = " + literal, read(MODULE), re.MULTILINE
+        ),
+        "bootstrap installer": re.search(
+            r"\[string\]::Equals\(\$publisher, " + literal,
+            function_body(read(INSTALLER), "Assert-DefenseClawBootstrapModuleSigner"),
+        ),
+        "cmid broker": re.search(r'^const CMIDLibraryPublisher = "([^"]+)"', broker, re.MULTILINE),
+    }
+    missing = [name for name, match in publishers.items() if match is None]
+    assert not missing, f"publisher literal not found for: {missing}"
+    values = {name: match.group(1) for name, match in publishers.items()}
+    assert set(values.values()) == {"Cisco Systems, Inc."}, values
+
+    # Both sides compare the same certificate name form, and assembly checks
+    # every Authenticode payload file before it is embedded.
+    assert "X509NameType]::SimpleName" in assembly_ps
+    assert "Assert-CiscoSignature -Path (Join-Path $PayloadDir $name)" in read(
+        ROOT / "packaging" / "scripts" / "lib" / "assemble.ps1"
+    )
+    assert 'defenseclaw_assert_cisco_signature "${PAYLOAD_DIR}/${name}"' in read(
+        ROOT / "packaging" / "scripts" / "lib" / "assemble.sh"
+    )
 
 
 def test_cli_forwards_additional_signers_as_one_file_argument() -> None:
