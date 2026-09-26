@@ -304,13 +304,15 @@ function ConvertTo-ProcessArgument([string]$Value) {
 }
 
 function Get-Cosign {
-    # cosign 2.0 or later if it is installed (-CosignPath first), else "".
+    # cosign 2.0 or later if it is installed, else "". A -CosignPath that is
+    # not one stops the install rather than silently skipping the check.
     $cosign = if ($CosignPath) { $CosignPath } else {
         [string](Get-Command cosign.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
     }
     if ($cosign -and (Test-Path -LiteralPath $cosign) -and (Get-NativeOutput $cosign @("version")) -match 'GitVersion:\s*v?(\d+)\.' -and [int]$Matches[1] -ge 2) {
         return $cosign
     }
+    if ($CosignPath) { Die "-CosignPath $CosignPath is not cosign 2.0 or later; nothing was changed" }
     return ""
 }
 

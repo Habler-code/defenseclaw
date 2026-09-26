@@ -28,7 +28,7 @@
 set -eu
 
 dc_handoff() {
-    local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" yes="" plan=0 tag tmp expected
+    local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" yes="" plan=0 tag tmp expected major
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --yes|-y) yes="--yes" ;;
@@ -64,6 +64,22 @@ dc_handoff() {
             "https://github.com/${repo}/releases/download/${tag}/install.sh"
         curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt" \
             "https://github.com/${repo}/releases/download/${tag}/checksums.txt"
+        # With cosign 2.0 or later, check the release signature on checksums.txt.
+        major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
+        case "${major}" in
+            ''|*[!0-9]*) major=0 ;;
+        esac
+        if [ "${major}" -ge 2 ]; then
+            curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt.bundle" \
+                "https://github.com/${repo}/releases/download/${tag}/checksums.txt.bundle"
+            if ! cosign verify-blob --bundle "${tmp}/checksums.txt.bundle" \
+                --certificate-identity-regexp "^https://github\.com/$(printf '%s' "${repo}" | sed 's/[.]/\\./g')/\.github/workflows/release\.yaml@refs/heads/main$" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                "${tmp}/checksums.txt" >/dev/null 2>&1; then
+                echo "  ✗ the release signature on checksums.txt did not verify; nothing was changed" >&2
+                return 1
+            fi
+        fi
         set --
     fi
     expected="$(awk '$2=="install.sh"||$2=="*install.sh"{print $1}' "${tmp}/checksums.txt")"
