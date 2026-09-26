@@ -53,10 +53,24 @@ def test_module_claude_floor_is_the_lowest_claude_hook_contract() -> None:
     # Every writer and reader goes through the constant; only the legacy
     # read-compatibility list may still name an older floor.
     literals = set(re.findall(r"'(2\.1\.\d+)'", module))
-    assert literals == {floor, "2.1.152"}
+    # The merge client floor (#899) is a separate constant pinned to the
+    # connector by test_windows_enterprise_claude_hklm_policy.py.
+    merge = re.search(r"\$script:ClaudeManagedSourcesMergeMinimumClientVersion = '(2\.1\.\d+)'", module)
+    assert merge is not None
+    assert literals == {floor, "2.1.152", merge.group(1)}
     assert "$script:LegacyClaudeMinimumClientVersions = @('2.1.152')" in module
-    assert module.count("claude_minimum_client_version = $script:ClaudeMinimumClientVersion") == 2
-    assert "minimum_claude_version = $script:ClaudeMinimumClientVersion" in module
+    # Deployment metadata records the floor; Status reports it unless an
+    # HKLM merge policy raises it (#899).
+    assert module.count("claude_minimum_client_version = $script:ClaudeMinimumClientVersion") == 1
+    assert "$claudeMinimumClientVersion = $script:ClaudeMinimumClientVersion" in module
+    assert "claude_minimum_client_version = $claudeMinimumClientVersion" in module
+    # Attestation evidence records the attested floor, or the constant.
+    writer = module[module.index("function Write-DefenseClawAgentApplicationControlAttestation") :]
+    writer = writer[: writer.index("\nfunction ")]
+    record = writer[writer.index("minimum_claude_version = $(") :]
+    record = record[: record.index("claude_effective_policy_verified")]
+    assert "Test-DefenseClawClaudeMinimumClientVersion" in record
+    assert "$script:ClaudeMinimumClientVersion" in record
     # Existing evidence and metadata recorded the legacy floor and must stay
     # readable, or every lifecycle action on an existing deployment throws.
     assert module.count("-not (Test-DefenseClawClaudeMinimumClientVersion `") == 2
