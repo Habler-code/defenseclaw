@@ -1,0 +1,34 @@
+{
+  "darwin": {
+    "managed_path": "/opt/cisco/secureclient/defenseclaw/ipc/defenseclaw_ipc.sock",
+    "managed_path_with_env_override": "/opt/cisco/secureclient/defenseclaw/ipc/defenseclaw_ipc.sock",
+    "peer_auth_kind/managed": "UnixPeer",
+    "socket_env_var": "DEFENSECLAW_IPC_SOCKET",
+    "socket_file_name": "defenseclaw_ipc.sock",
+    "socket_mode/managed/": "0660",
+    "socket_mode/managed/0600": "0600",
+    "socket_mode/managed/0660": "0660",
+    "socket_mode/managed/0666": "error: ipc: socket_mode 0666 exceeds ceiling 0660 for this deployment",
+    "socket_mode/unmanaged/": "0600",
+    "socket_mode/unmanaged/0600": "0600",
+    "socket_mode/unmanaged/0660": "error: ipc: socket_mode 0660 exceeds ceiling 0600 for this deployment",
+    "socket_mode/unmanaged/0666": "error: ipc: socket_mode 0666 exceeds ceiling 0600 for this deployment",
+    "unmanaged_path_with_env_override": "/tmp/redirected.sock"
+  },
+  "windows": {
+    "managed_path": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock",
+    "managed_path_with_env_override": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock",
+    "peer_auth_kind/managed": "UnixPeerUnauthenticated",
+    "socket_env_var": "DEFENSECLAW_IPC_SOCKET",
+    "socket_file_name": "defenseclaw_ipc.sock",
+    "socket_mode/managed/": "0660",
+    "socket_mode/managed/0600": "0600",
+    "socket_mode/managed/0660": "0660",
+    "socket_mode/managed/0666": "error: ipc: socket_mode 0666 exceeds ceiling 0660 for this deployment",
+    "socket_mode/unmanaged/": "0600",
+    "socket_mode/unmanaged/0600": "0600",
+    "socket_mode/unmanaged/0660": "error: ipc: socket_mode 0660 exceeds ceiling 0600 for this deployment",
+    "socket_mode/unmanaged/0666": "error: ipc: socket_mode 0666 exceeds ceiling 0600 for this deployment",
+    "unmanaged_path_with_env_override": "/tmp/redirected.sock"
+  }
+}

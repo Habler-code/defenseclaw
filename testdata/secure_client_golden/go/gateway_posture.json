@@ -1,0 +1,133 @@
+[
+  {
+    "detail": "status=403 reason=managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian",
+    "scenario": "guardrail_config_patch/managed_with_token"
+  },
+  {
+    "detail": "status=0 reason=",
+    "scenario": "guardrail_config_patch/unmanaged_with_token"
+  },
+  {
+    "detail": "findings=0",
+    "scenario": "hook_codeguard/secret_write"
+  },
+  {
+    "detail": "true",
+    "scenario": "hook_lane_aid_only/managed"
+  },
+  {
+    "detail": "false",
+    "scenario": "hook_lane_aid_only/unmanaged"
+  },
+  {
+    "action": "allow",
+    "scenario": "hook_managed_aid_only/no_content",
+    "severity": "NONE"
+  },
+  {
+    "action": "allow",
+    "scenario": "hook_managed_aid_only/unwired",
+    "severity": "NONE"
+  },
+  {
+    "action": "block",
+    "aid_calls": 1,
+    "findings": [
+      "ai-defense:AID-POLICY"
+    ],
+    "scenario": "hook_message/malicious/aid_block",
+    "severity": "CRITICAL"
+  },
+  {
+    "action": "allow",
+    "aid_calls": 1,
+    "scenario": "hook_message/malicious/aid_no_verdict",
+    "severity": "NONE"
+  },
+  {
+    "action": "block",
+    "aid_calls": 1,
+    "findings": [
+      "ai-defense:AID-POLICY"
+    ],
+    "scenario": "hook_tool_policy/ls/aid_block",
+    "severity": "CRITICAL"
+  },
+  {
+    "action": "allow",
+    "aid_calls": 1,
+    "scenario": "hook_tool_policy/secret_write/aid_no_verdict",
+    "severity": "NONE"
+  },
+  {
+    "action": "allow",
+    "aid_calls": 1,
+    "scenario": "hook_tool_policy/shadow_read/aid_no_verdict",
+    "severity": "NONE"
+  },
+  {
+    "detail": "error=managed_enterprise requires managed-cloud support: cloudreg: no cloud credential provider registered — this build was compiled without managed-cloud support state=error credentials_installed=false",
+    "scenario": "multi_hook_guardrail/no_provider"
+  },
+  {
+    "detail": "inspector=<nil> available=false detail=cloudreg: no cloud credential provider registered — this build was compiled without managed-cloud support",
+    "scenario": "pick_inspector/managed/no_provider"
+  },
+  {
+    "detail": "inspector=*gateway.CiscoDefenseClawInspectClient",
+    "scenario": "pick_inspector/managed/registered_provider"
+  },
+  {
+    "detail": "inspector=<nil>",
+    "scenario": "pick_inspector/managed/registered_provider_no_endpoint"
+  },
+  {
+    "detail": "inspector=<nil>",
+    "scenario": "pick_inspector/unmanaged/no_api_key"
+  },
+  {
+    "action": "block",
+    "aid_calls": 1,
+    "findings": [
+      "AID-POLICY"
+    ],
+    "scenario": "proxy/managed/aid_block",
+    "severity": "CRITICAL"
+  },
+  {
+    "action": "allow",
+    "aid_calls": 1,
+    "scenario": "proxy/managed/aid_no_verdict",
+    "severity": "NONE"
+  },
+  {
+    "action": "allow",
+    "scenario": "proxy/managed/mid_stream_aid_block",
+    "severity": "NONE"
+  },
+  {
+    "action": "allow",
+    "scenario": "proxy/managed/unwired",
+    "severity": "NONE"
+  },
+  {
+    "action": "block",
+    "findings": [
+      "TRUST-JAILBREAK:Jailbreak attempt"
+    ],
+    "scenario": "proxy/unmanaged_local_baseline",
+    "severity": "CRITICAL"
+  },
+  {
+    "detail": "no_op",
+    "scenario": "toast_sender/managed"
+  },
+  {
+    "detail": "os_toast",
+    "scenario": "toast_sender/nil"
+  },
+  {
+    "detail": "os_toast",
+    "scenario": "toast_sender/unmanaged"
+  }
+]

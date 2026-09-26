@@ -1,0 +1,86 @@
+config_version: 8
+deployment_mode: managed_enterprise
+
+data_dir: "/opt/cisco/secureclient/defenseclaw/runtime"
+
+observability:
+  local:
+    path: "/opt/cisco/secureclient/defenseclaw/runtime/audit.db"
+    judge_bodies_path: "/opt/cisco/secureclient/defenseclaw/runtime/judge_bodies.db"
+  # Managed installs retain the previous secure-by-default behavior. To
+  # change redaction, edit this profile (or add per-bucket overrides) and
+  # validate the complete v8 source before restarting the daemon.
+  defaults:
+    redaction_profile: sensitive
+
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+  # Pin device_key_file into RUNTIME_DIR rather
+  # than letting the Go defaults compute it from DEFENSECLAW_HOME. The
+  # plist sets DEFENSECLAW_HOME to SUPPORT_DIR so managed_enterprise
+  # trust checks accept every ancestor of config.yaml. Keeping mutable
+  # runtime state below the dedicated runtime directory also preserves
+  # the root-owned managed-install layout.
+  device_key_file: "/opt/cisco/secureclient/defenseclaw/runtime/device.key"
+  # The skill/plugin/MCP watcher periodically re-scans agent component
+  # directories and invokes the 'defenseclaw' python scanner binary.
+  # In this managed_enterprise rollout we rely on AID cloud + local
+  # regex as the only content classifiers (see mergeVerdict /
+  # demoteLocalBlockForManaged in internal/gateway/guardrail.go); the
+  # watcher would otherwise fail-close every plugin operation when the
+  # python scanner isn't installed, and none of its verdicts feed into
+  # the enforced action path we're building. Turn it off.
+  watcher:
+    enabled: false
+
+guardrail:
+  enabled: true
+  mode: action
+  scanner_mode: both
+  # regex_only skips the LLM-judge routing; adjudication burns cycles
+  # and we don't ship an LLM key on managed installs.
+  detection_strategy: regex_only
+  judge:
+    enabled: false
+  connector: cursor
+
+# In managed_enterprise mode the gateway authenticates AI Defense
+# inspection with a bearer token sourced from the managed cloud auth
+# provider. The daemon calls
+# https://us.api.inspect.aidefense.security.cisco.com/api/v1/inspect/defense_claw with Authorization: Bearer
+# <token>. The endpoint is installer-set; --env selects which AID cloud
+# environment to target. See internal/gateway/cisco_inspect_defense_claw.go
+# and internal/managed/cloudreg for the client-side implementation.
+cisco_ai_defense:
+  endpoint: "https://us.api.inspect.aidefense.security.cisco.com"
+
+# Continuous AI discovery (endpoint inventory). Enabled in managed_enterprise
+# so the sidecar scans for supported connectors and broader "shadow AI" usage
+# signals. Observability v8 sends those observations through its canonical
+# runtime and configured destinations; the removed v7 emit_otel switch is not
+# restored. Other ai_discovery.* keys keep their built-in defaults (mode
+# enhanced, scan intervals). The scanner is a no-op unless enabled, so this
+# block is required for endpoint inventory to flow.
+#
+# home_dirs is populated from the same enumerate_local_users filter that
+# renders targets.yaml so per-user detectors (~/.claude/skills, ~/.codex/*,
+# etc.) resolve to every eligible local user's home — not just the daemon's
+# HOME (/var/root under root, which has no operator agent state).
+ai_discovery:
+  enabled: true
+
+# asset_policy is intentionally disabled in this managed_enterprise
+# rollout. The AID cloud is the single authoritative source of block
+# verdicts on this branch; asset_policy's mcp/skill/plugin allow-lists
+# and the component (plugin) scanner it feeds would compete with the
+# cloud's classification and (in the plugin case) fail-close every
+# request when the 'defenseclaw' python plugin-scanner isn't installed.
+# See internal/gateway/guardrail.go: mergeVerdict + demoteLocalBlockForManaged
+# for the analogous local-pattern demotion, and the installer PR notes
+# for the full "which sources enforce" decision matrix.
+asset_policy:
+  enabled: false
+
+application_protection:
+  enabled: false

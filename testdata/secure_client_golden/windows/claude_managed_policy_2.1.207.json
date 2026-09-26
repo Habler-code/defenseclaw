@@ -1,0 +1,498 @@
+{
+  "hooks": {
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": ".+"
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "async": true,
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 90,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 60,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume|clear|compact|fork"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 90,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 90,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "--connector",
+              "claudecode",
+              "--enterprise-managed"
+            ],
+            "command": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

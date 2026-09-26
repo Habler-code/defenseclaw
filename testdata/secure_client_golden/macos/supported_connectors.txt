@@ -1,0 +1,9 @@
+codex supported
+claudecode supported
+cursor supported
+amp supported
+opencode supported
+windsurf unsupported
+geminicli unsupported
+copilot unsupported
+hermes unsupported

@@ -1,0 +1,72 @@
+version: 1
+targets:
+  - user: "alice"
+    user_home: "/Users/alice"
+    uid: 501
+    gid: 20
+    connector: "codex"
+    agent_version: "0.130.0"
+    enabled: true
+  - user: "alice"
+    user_home: "/Users/alice"
+    uid: 501
+    gid: 20
+    connector: "claudecode"
+    agent_version: "2.5.0"
+    enabled: true
+  - user: "alice"
+    user_home: "/Users/alice"
+    uid: 501
+    gid: 20
+    connector: "cursor"
+    agent_version: "3.14.27"
+    enabled: true
+  - user: "alice"
+    user_home: "/Users/alice"
+    uid: 501
+    gid: 20
+    connector: "amp"
+    agent_version: "0.100.0"
+    enabled: true
+  - user: "alice"
+    user_home: "/Users/alice"
+    uid: 501
+    gid: 20
+    connector: "opencode"
+    agent_version: "1.18.19"
+    enabled: true
+  - user: "bob"
+    user_home: "/Users/bob"
+    uid: 502
+    gid: 20
+    connector: "codex"
+    agent_version: "0.130.0"
+    enabled: true
+  - user: "bob"
+    user_home: "/Users/bob"
+    uid: 502
+    gid: 20
+    connector: "claudecode"
+    agent_version: "2.5.0"
+    enabled: true
+  - user: "bob"
+    user_home: "/Users/bob"
+    uid: 502
+    gid: 20
+    connector: "cursor"
+    agent_version: "3.14.27"
+    enabled: true
+  - user: "bob"
+    user_home: "/Users/bob"
+    uid: 502
+    gid: 20
+    connector: "amp"
+    agent_version: "0.100.0"
+    enabled: true
+  - user: "bob"
+    user_home: "/Users/bob"
+    uid: 502
+    gid: 20
+    connector: "opencode"
+    agent_version: "1.18.19"
+    enabled: true

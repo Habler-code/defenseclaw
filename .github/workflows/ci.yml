@@ -678,6 +678,34 @@ jobs:
             "$RUNNER_TEMP/defenseclaw-gateway" \
             "$RUNNER_TEMP/defenseclaw-acp"
 
+  secure-client-golden:
+    # Production Secure Client (release-defenseclaw-enterprise-26.8.4) ships
+    # the macOS and Windows managed_enterprise lifecycle. Linux CI already
+    # runs the platform-independent Go goldens and the source tripwire, and
+    # Windows CI runs the Windows goldens; this job covers macOS.
+    name: Secure Client Golden (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Go Secure Client goldens
+        shell: bash
+        run: >-
+          go test -count=1 -run 'TestSecureClientGolden'
+          ./internal/config ./internal/ipc ./internal/sensor/acquire
+          ./internal/gateway/connector ./internal/gateway
+      - name: macOS installer Secure Client goldens
+        shell: bash
+        run: packaging/macos/tests/run_tests.sh packaging/macos/tests/test_secure_client_golden.sh
+      - name: Secure Client source tripwire
+        shell: bash
+        run: python3 scripts/secure_client_golden.py
+
   python-audit:
     name: Python Dependency Audit
     runs-on: ubuntu-latest

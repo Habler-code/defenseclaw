@@ -1,0 +1,8 @@
+aid_endpoint_for_env prod -> rc=0 endpoint=[https://us.api.inspect.aidefense.security.cisco.com]
+aid_endpoint_for_env preview -> rc=0 endpoint=[https://preview.api.inspect.aidefense.aiteam.cisco.com]
+aid_endpoint_for_env staging -> rc=1 endpoint=[]
+resolve_aid_endpoint prod '' -> rc=0 endpoint=[https://us.api.inspect.aidefense.security.cisco.com]
+resolve_aid_endpoint prod 'https://preview.api.inspect.aidefense.aiteam.cisco.com/' -> rc=0 endpoint=[https://preview.api.inspect.aidefense.aiteam.cisco.com]
+resolve_aid_endpoint prod 'http://insecure.example' -> rc=2 endpoint=[]
+resolve_aid_endpoint prod 'https://host/path' -> rc=2 endpoint=[]
+resolve_aid_endpoint prod 'https://[::1]:8443' -> rc=0 endpoint=[https://[::1]:8443]
