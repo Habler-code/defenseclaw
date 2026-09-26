@@ -519,19 +519,29 @@ function Test-FilesInUse {
             [IO.File]::AppendAllText((Join-Path $Zip "defenseclaw-hook.exe"), "rebuilt")
         }
     }
-    # A hook waiting for its payload, as an agent runs it.
-    $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
-    Start-Sleep -Seconds 2
-    if ($hook.HasExited) {
-        Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
+    # A hook waiting for its payload, as an agent runs it. The hook looks for
+    # its data dir in the real profile (its Known Folder, not the lane's
+    # USERPROFILE) and exits at once without one, so it gets an empty one
+    # while it runs unless there is a real install.
+    $realData = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".defenseclaw"
+    $madeData = -not (Test-Path -LiteralPath $realData)
+    if ($madeData) { New-Item -ItemType Directory -Path $realData | Out-Null }
+    try {
+        $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
+        Start-Sleep -Seconds 2
+        if ($hook.HasExited) {
+            Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
+        }
+        Write-Log "install $Target while defenseclaw-hook.exe runs"
+        Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
+        Assert-Versions $Target
+        Assert-Healthy
+        Check (-not $hook.HasExited) "the running hook was stopped"
+        Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not renamed aside"
+    } finally {
+        Stop-Held
+        if ($madeData) { Remove-Item -LiteralPath $realData -Recurse -Force -ErrorAction SilentlyContinue }
     }
-    Write-Log "install $Target while defenseclaw-hook.exe runs"
-    Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
-    Assert-Versions $Target
-    Assert-Healthy
-    Check (-not $hook.HasExited) "the running hook was stopped"
-    Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not renamed aside"
-    Stop-Held
 
     Write-Log "re-run while the CLI runs from the venv (must stop, nothing changed)"
     $holder = Start-Held (Join-Path $DcHome ".venv\Scripts\python.exe") @("-c", "import time; time.sleep(900)")
