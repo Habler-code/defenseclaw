@@ -69,7 +69,7 @@ readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # Data-dir entries that are install machinery, not user data.
-readonly NOT_DATA=".venv previous previous.new .repair .rollback-hold .staging .failed-* installer logs .install.lock backups"
+readonly NOT_DATA=".venv previous previous.new .repair .rollback-hold .rollback-hold.done .staging .failed-* installer logs .install.lock backups"
 readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none"
 
 if [[ -t 1 ]] || [[ "${FORCE_COLOR:-}" == "1" ]]; then
@@ -704,9 +704,14 @@ recover_interrupted_run() {
         fi
     done
     slot="${DEFENSECLAW_HOME}/.rollback-hold"
+    # A hold is deleted by renaming it first, so a half-deleted one is never read.
+    rm -rf "${slot}.done"
+    local restart=false origin
+    [[ "$(cat "${slot}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
     if [[ -f "${slot}/ROLLED_BACK" ]]; then
         # The rollback itself had finished; only renaming its hold was left.
         warn "An earlier rollback was interrupted; finishing it"
+        [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
         rm -rf "${PREVIOUS}" && mv "${slot}" "${PREVIOUS}"
     elif [[ -d "${slot}" ]]; then
         warn "An earlier rollback was interrupted; restoring the install it started from"
@@ -718,17 +723,26 @@ recover_interrupted_run() {
                 return_live_to "${PREVIOUS}" && : > "${slot}/RETURNED"
             fi
             if [[ -f "${slot}/RETURNED" ]] && unstash "${slot}"; then
-                if [[ -n "${APP_PATH}" && -d "${slot}/DefenseClawMac.app" ]]; then
-                    mv "${APP_PATH}" "${PREVIOUS}/DefenseClawMac.app" && mv "${slot}/DefenseClawMac.app" "${APP_PATH}"
+                # Put back an app the rollback had already moved aside, at the
+                # path it came from (none may be there now to detect).
+                origin="${APP_PATH:-$(cat "${slot}/APP_ORIGIN" 2>/dev/null || true)}"
+                if [[ -d "${slot}/DefenseClawMac.app" && -n "${origin}" ]]; then
+                    if [[ -e "${origin}" && ! -e "${PREVIOUS}/DefenseClawMac.app" ]]; then
+                        mv "${origin}" "${PREVIOUS}/DefenseClawMac.app" || true
+                    fi
+                    [[ -e "${origin}" ]] || mv "${slot}/DefenseClawMac.app" "${origin}" || true
                 fi
-                rm -rf "${slot}"
+                [[ -d "${slot}/DefenseClawMac.app" ]] || drop_hold "${slot}"
             fi
         else
             # Setting it aside stopped part-way; the live binaries were only copied.
-            unstash_tree "${slot}" && rm -rf "${slot}"
+            unstash_tree "${slot}" && drop_hold "${slot}"
         fi
     fi
     [[ ! -e "${slot}" ]] || die "Could not recover an interrupted rollback; ${slot} holds the install it set aside (see ${LOG})"
+    if [[ "${restart}" == true && -z "$(gateway_pid || true)" ]]; then
+        start_gateway || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+    fi
 }
 
 # undo_snapshot: put back what snapshot() moved before it failed.
@@ -914,6 +928,12 @@ unstash_tree() {
 
 # return_live_to SLOT: move what unstash brought in from SLOT back into it.
 # Only valid while the install unstash replaced is fully set aside elsewhere.
+# drop_hold HOLD: delete a rollback hold. The rename makes it vanish at once:
+# recovery must never find a half-deleted one and read its markers.
+drop_hold() {
+    mv "$1" "$1.done" && rm -rf "$1.done"
+}
+
 return_live_to() {
     # Never over or into anything already there: that would be the other install.
     local slot="$1" name
@@ -935,7 +955,7 @@ swap_with_previous() {
     rm -rf "${hold}"
     if ! stash_live "${hold}"; then
         if unstash_tree "${hold}"; then
-            rm -rf "${hold}"
+            drop_hold "${hold}"
             err "Could not set the current install aside; nothing was changed"
             return 1
         fi
@@ -949,7 +969,7 @@ swap_with_previous() {
         # unstash only copies previous/bin, so returning the rest restores previous/.
         # RETURNED tells an interrupted run's recovery that previous/ is whole again.
         if return_live_to "${PREVIOUS}" && : > "${hold}/RETURNED" && unstash "${hold}"; then
-            rm -rf "${hold}"
+            drop_hold "${hold}"
             err "Could not restore the previous install; the current one is back in place"
             return 1
         fi
@@ -957,6 +977,7 @@ swap_with_previous() {
         return 2
     fi
     if [[ -n "${APP_PATH}" && -d "${PREVIOUS}/DefenseClawMac.app" ]]; then
+        printf '%s\n' "${APP_PATH}" > "${hold}/APP_ORIGIN"
         if mv "${APP_PATH}" "${hold}/DefenseClawMac.app"; then
             mv "${PREVIOUS}/DefenseClawMac.app" "${APP_PATH}" \
                 || { mv "${hold}/DefenseClawMac.app" "${APP_PATH}"; warn "Could not swap the macOS app back; it stays at the newer version"; }

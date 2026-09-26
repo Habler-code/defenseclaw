@@ -89,7 +89,7 @@ $HookState = "defenseclaw-hook-state.json"
 $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($HookState)
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", "previous", "previous.new", ".repair", ".staging", ".failed-*",
-    "installer", "logs", ".install.lock", "backups", ".rollback-hold")
+    "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
     "opencode", "amp", "omnigent", "kiro", "none")
@@ -878,9 +878,13 @@ function Resume-InterruptedRun {
         }
     }
     $hold = Join-Path $DataDir ".rollback-hold"
+    # A hold is deleted by renaming it first, so a half-deleted one is never read.
+    Remove-Tree "$hold.done"
+    $restart = (Read-Text (Join-Path $hold "GATEWAY_WAS_RUNNING")) -eq "true"
     if (Test-Path -LiteralPath (Join-Path $hold "ROLLED_BACK")) {
         # The rollback itself had finished; only renaming its hold was left.
         Write-Warn "An earlier rollback was interrupted; finishing it"
+        $restart = $restart -or (Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")) -eq "true"
         Remove-Tree $Previous
         Move-Path $hold $Previous
     } elseif (Test-Path -LiteralPath $hold) {
@@ -899,8 +903,20 @@ function Resume-InterruptedRun {
             # Setting it aside stopped part-way; the live binaries were only copied.
             Restore-LiveTree $hold
         }
-        Remove-Tree $hold
+        Remove-Hold $hold
+    } else {
+        $restart = $false
     }
+    if ($restart -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
+        Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+    }
+}
+
+function Remove-Hold([string]$Hold) {
+    # The rename makes the hold vanish at once: recovery must never find a
+    # half-deleted one and read its markers.
+    Move-Path $Hold "$Hold.done"
+    Remove-Tree "$Hold.done"
 }
 
 function Save-Installer {
@@ -951,7 +967,7 @@ function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning) {
             Write-Err "Could not set the current install aside or put it back; run the installer again to recover it"
             return 2
         }
-        Invoke-Quietly { Remove-Tree $hold }
+        Invoke-Quietly { Remove-Hold $hold }
         Write-Err "Could not set the current install aside; nothing was changed"
         return 1
     }
@@ -966,7 +982,7 @@ function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning) {
             Write-Err "Could not restore the previous install or put the current one back; run the installer again to recover it"
             return 2
         }
-        Invoke-Quietly { Remove-Tree $hold }
+        Invoke-Quietly { Remove-Hold $hold }
         Write-Err "Could not restore the previous install; the current one is back in place"
         return 1
     }

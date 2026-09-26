@@ -2911,10 +2911,14 @@ def _select_windows_agents(data_dir: str) -> None:
     if os.name != "nt":
         return
     from defenseclaw import config as config_module
-    from defenseclaw.agent_selection import record_setup_agent_selections
+    from defenseclaw.agent_selection import record_setup_agent_selections, setup_agent_selection_connectors
 
     try:
-        connectors = config_module.load(data_dir=data_dir).active_connectors()
+        connectors = setup_agent_selection_connectors(config_module.load(data_dir=data_dir).active_connectors())
+        if not connectors:
+            # Nothing to select, so no receipt: the installer starts the new
+            # gateway only to seal one.
+            return
         selections, errors = record_setup_agent_selections(data_dir, connectors)
         if errors and selections:
             # A failed probe records nothing; keep the agents that were found.

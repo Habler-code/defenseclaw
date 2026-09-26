@@ -33,7 +33,6 @@ intact when diagnosing a problem.
 | `%USERPROFILE%\.defenseclaw\hooks\` | Generated hook assets, runtime state, and connector-scoped credential sidecars. | **Never edit, print, or copy credentials.** Reconcile with setup/doctor. |
 | `%USERPROFILE%\.defenseclaw\backups\` | Managed connector/upgrade recovery material and timestamped `config.yaml.before-redaction-*` pre-change policy backups. | Do not restore or delete manually; they may contain credential-bearing or unredacted policy state. |
 | `%USERPROFILE%\.defenseclaw\quarantine\` | DefenseClaw-owned quarantined skills/plugins and provenance. | Use `skill restore` or `plugin restore`; do not drag files back. |
-| `%USERPROFILE%\.defenseclaw\.upgrade-receipts\` | Private automatic-upgrade admission/recovery receipts when used. | Inspect metadata only; do not edit receipt JSON. |
 | `%USERPROFILE%\.defenseclaw\gateway.pid`, `watchdog.pid` | Protected process identity records, not bare kill instructions. | Do not delete while a process may be running. |
 | `%USERPROFILE%\.defenseclaw\gateway.jsonl` | Optional JSONL destination only when explicitly configured there. | Not a default log; manage through observability configuration. |
 | `%CODEX_HOME%\managed_config.toml` | Effective native Windows Codex hook policy. Default home is `%USERPROFILE%\.codex`. | Do not edit DefenseClaw-managed hooks; use setup/remove. |
@@ -305,11 +304,11 @@ residue automatically.
     numbered/text or `--json` command surfaces instead.
   </Accordion>
   <Accordion title="Uninstall leaves user data or connector residue">
-    Preserving `%USERPROFILE%\.defenseclaw` is the default. If connector cleanup
-    fails, even `DELETEUSERDATA=1` retains data and retry evidence. Run doctor,
-    repair the recorded connector registration, and retry the trusted
-    uninstaller. Do not manually delete backups or agent configuration while
-    teardown is unresolved.
+    `defenseclaw uninstall` keeps `%USERPROFILE%\.defenseclaw` unless you pass
+    `--all`. If connector cleanup fails, even `--all` keeps the data and what
+    it needs to retry. Run doctor, repair the recorded connector registration,
+    and run `defenseclaw uninstall` again. Do not manually delete backups or
+    agent configuration while teardown is unresolved.
   </Accordion>
 </Accordions>
 
@@ -318,7 +317,7 @@ residue automatically.
 Complete this without real secrets or destructive tools:
 
 - Open a new native PowerShell or cmd window and confirm `defenseclaw` and
-  `defenseclaw-gateway` resolve from the product `bin` directory.
+  `defenseclaw-gateway` resolve from `%USERPROFILE%\.local\bin`.
 - Run `defenseclaw version`; require the CLI and gateway generation to agree.
 - Run `defenseclaw-gateway status`, `defenseclaw status`, and
   `defenseclaw guardrail status`; require every intended supported

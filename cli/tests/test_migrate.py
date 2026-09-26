@@ -401,3 +401,19 @@ def test_windows_agent_selection_reports_nothing_when_the_retry_fails(data_dir: 
     assert "selected" not in out
     assert "run 'defenseclaw setup codex'" in out
     assert "run 'defenseclaw setup hermes'" in out
+
+
+def test_windows_agent_selection_writes_no_receipt_without_a_native_agent(data_dir: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from defenseclaw import agent_selection, config
+
+    monkeypatch.setattr(config, "load", lambda **_kwargs: SimpleNamespace(active_connectors=lambda: ["openclaw"]))
+    monkeypatch.setattr(
+        agent_selection,
+        "record_setup_agent_selections",
+        lambda *_args: pytest.fail("nothing to select, so no receipt"),
+    )
+    monkeypatch.setattr(os, "name", "nt")
+
+    migrations._select_windows_agents(str(data_dir))

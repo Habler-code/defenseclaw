@@ -34,7 +34,7 @@ Check them against the signed checksum list before running anything:
 cosign verify-blob --bundle checksums.txt.bundle \
   --certificate-identity https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
-sha256sum --check --ignore-missing checksums.txt
+sha256sum --check --ignore-missing checksums.txt   # macOS: shasum -a 256 --check --ignore-missing checksums.txt
 ```
 
 Then install them with `install.sh --local DIR` or `install.ps1 -Local DIR`,
