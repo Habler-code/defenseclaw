@@ -349,3 +349,25 @@ def test_windows_agent_selection_keeps_the_agents_it_found(data_dir: Path, monke
     out = capsys.readouterr().out
     assert r"selected C:\codex\codex.exe for the codex connector" in out
     assert "run 'defenseclaw setup hermes'" in out
+
+
+def test_v8_preflight_converts_without_the_retired_0_5_0_keys(data_dir: Path, monkeypatch) -> None:
+    body = "config_version: 7\nguardrail:\n  mode: observe\n  codex_enforcement_enabled: true\n  claudecode_enforcement_enabled: false\n"
+    config = _write_config(data_dir, body)
+    converted: list[bytes] = []
+
+    class StopError(Exception):
+        pass
+
+    def convert(source, *_args, **_kwargs):
+        converted.append(source)
+        raise StopError
+
+    monkeypatch.setattr(migrations, "convert_v7_observability_to_v8", convert)
+    ctx = migrations.MigrationContext(openclaw_home="", data_dir=str(data_dir), from_version="", to_version="1.0.0")
+
+    with pytest.raises(StopError):
+        migrations._preflight_observability_v8(ctx, str(data_dir / "scratch"))
+
+    assert converted == [b"config_version: 7\nguardrail:\n  mode: observe\n"]
+    assert config.read_text() == body

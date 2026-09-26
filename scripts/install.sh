@@ -391,9 +391,16 @@ if [[ "${ROLLBACK}" == true ]]; then
         || die "Rollback cancelled; nothing was changed"
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
+    # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
+    restart="${was_running}"
+    [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
-    swap_with_previous || die "Rollback failed part-way; see ${LOG}"
-    if [[ "${was_running}" == true ]] || [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]]; then
+    if ! swap_with_previous; then
+        # Each half of the swap undoes itself, so this install is back.
+        [[ "${was_running}" == true ]] && { start_gateway || true; }
+        die "Rollback failed part-way; see ${LOG}"
+    fi
+    if [[ "${restart}" == true ]]; then
         start_gateway && restart_openclaw \
             || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     fi

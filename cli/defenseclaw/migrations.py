@@ -421,6 +421,13 @@ def _preflight_observability_v8(
     source = _read_observability_v8_upgrade_source(config_path)
     if source is None:
         return
+    # The real migration strips these first (see _migrate_observability_v8).
+    try:
+        stripped, removed = _strip_legacy_guardrail_enforcement_keys(source.decode("utf-8"))
+    except UnicodeDecodeError:
+        removed = []
+    if removed:
+        source = stripped.encode("utf-8")
     environment = _observability_v8_upgrade_environment(environment_path)
     migration = convert_v7_observability_to_v8(
         source,
@@ -2052,6 +2059,35 @@ _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS: tuple[str, ...] = (
 )
 
 
+def _strip_legacy_guardrail_enforcement_keys(text: str) -> tuple[str, list[str]]:
+    """Return ``text`` without the guardrail.*_enforcement_enabled lines, and which were removed."""
+
+    block_match = _find_top_level_block(text, "guardrail")
+    if not block_match:
+        return text, []
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    new_body = block_match.group("body")
+
+    removed: list[str] = []
+    for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
+        # Delete the whole line carrying the legacy key (with its
+        # terminator). The pattern accepts any value form (quoted /
+        # unquoted bool, optional inline comment) and any leading
+        # indentation the operator chose. ``(?:\r?\n|$)`` removes the
+        # CRLF terminator with the line (no orphaned ``\r`` left behind)
+        # and also matches a final key line with no trailing newline.
+        pattern = re.compile(
+            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*(?:\r?\n|$)",
+            flags=re.MULTILINE,
+        )
+        new_body, count = pattern.subn("", new_body)
+        if count:
+            removed.append(key)
+    return text[:body_start] + new_body + text[body_end:], removed
+
+
 def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     """Drop legacy guardrail.*_enforcement_enabled keys from config.yaml.
 
@@ -2084,36 +2120,8 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     if text is None:
         return
 
-    block_match = _find_top_level_block(text, "guardrail")
-    if not block_match:
-        return
-
-    body_start = block_match.start("body")
-    body_end = block_match.end("body")
-    body = block_match.group("body")
-
-    removed: list[str] = []
-    new_body = body
-    for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
-        # Delete the whole line carrying the legacy key (with its
-        # terminator). The pattern accepts any value form (quoted /
-        # unquoted bool, optional inline comment) and any leading
-        # indentation the operator chose. ``(?:\r?\n|$)`` removes the
-        # CRLF terminator with the line (no orphaned ``\r`` left behind)
-        # and also matches a final key line with no trailing newline.
-        pattern = re.compile(
-            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*(?:\r?\n|$)",
-            flags=re.MULTILINE,
-        )
-        new_body, count = pattern.subn("", new_body)
-        if count:
-            removed.append(key)
-
+    new_text, removed = _strip_legacy_guardrail_enforcement_keys(text)
     if not removed:
-        return
-
-    new_text = text[:body_start] + new_body + text[body_end:]
-    if new_text == text:
         return
 
     if not _atomic_write_text(cfg_path, new_text):
