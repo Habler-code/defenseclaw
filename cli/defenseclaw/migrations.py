@@ -2823,7 +2823,9 @@ def migrate(
 
     ``from_version`` is the DefenseClaw version that wrote the data. It only
     matters for installs older than 0.8.5, whose chain position the config
-    alone cannot tell; without it the 0.x cursor is used, if present.
+    alone cannot tell, and only when the install has no 0.x migration cursor:
+    the cursor records which steps actually ran (a step that failed on an
+    earlier upgrade is retried), so it wins over a version number.
 
     ``check`` changes nothing: it reports the pending steps and raises
     :class:`ConfigTooNewError` for a config from a newer release. For a 0.x

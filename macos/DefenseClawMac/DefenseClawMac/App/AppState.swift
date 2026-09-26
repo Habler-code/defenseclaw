@@ -1185,13 +1185,14 @@ final class AppState {
 
         installerState = .downloading(version: version)
         let installer: URL
+        let signatureVerified: Bool
         do {
-            installer = try await updater.fetchInstaller(version: version)
+            (installer, signatureVerified) = try await updater.fetchInstaller(version: version)
         } catch {
             installerState = .failed(version: version, detail: error.localizedDescription)
             return
         }
-        if UpdateChecker.installedCosign() == nil {
+        if !signatureVerified {
             notify(
                 title: "DefenseClaw \(version): signature not checked",
                 body: "cosign 2.0 or later is not installed, so the release signature was not verified. The download was checked against the release's SHA-256 checksums.",
