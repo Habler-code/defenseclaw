@@ -253,6 +253,8 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
 
     cosign = _cosign()
     if cosign is None:
+        if not local_dir:
+            print("  ! cosign 2.0 or later is not installed; the installer is checked against checksums.txt only")
         return
     bundle = os.path.join(workdir, "checksums.txt.bundle")
     if local_dir:
@@ -283,6 +285,12 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ShimError(f"could not run cosign to verify release {version}: {exc}") from None
+    finally:
+        # The installer removes its launch dir only when it holds nothing else.
+        try:
+            os.remove(bundle)
+        except OSError:
+            pass
     if result.returncode != 0:
         raise ShimError(f"the release signature on checksums.txt for {version} did not verify")
 

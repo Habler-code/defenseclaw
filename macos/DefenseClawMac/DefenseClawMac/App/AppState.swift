@@ -1191,6 +1191,13 @@ final class AppState {
             installerState = .failed(version: version, detail: error.localizedDescription)
             return
         }
+        if UpdateChecker.installedCosign() == nil {
+            notify(
+                title: "DefenseClaw \(version): signature not checked",
+                body: "cosign 2.0 or later is not installed, so the release signature was not verified. The download was checked against the release's SHA-256 checksums.",
+                id: "installer-unsigned-\(Date().timeIntervalSince1970)"
+            )
+        }
 
         installerState = .running(version: version)
         let result = await runCommand(

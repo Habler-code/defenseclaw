@@ -292,9 +292,10 @@ residue automatically.
   </Accordion>
   <Accordion title="An upgrade is interrupted">
     Run `defenseclaw upgrade` (or the install command) again after closing the
-    TUI and other DefenseClaw commands. The installer is safe to re-run; a
-    failed attempt has already restored the previous install. To go back a
-    version, run `defenseclaw rollback`.
+    TUI and other DefenseClaw commands. An attempt that failed has already put
+    the previous install back; if one was cut off (a closed window, power
+    loss), the next run first restores the install it was replacing, then
+    carries on. To go back a version on purpose, run `defenseclaw rollback`.
   </Accordion>
   <Accordion title="The TUI renders poorly or cannot redraw">
     Prefer a current native Windows console host and resize to at least 80×24.

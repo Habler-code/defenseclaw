@@ -272,6 +272,19 @@ run_release_installer() {
         || die "Release ${version} has no checksums.txt"
     [[ "$(awk '$2=="install.sh"||$2=="*install.sh"{print $1}' "${tmp}/checksums.txt")" == "$(sha256_of "${tmp}/install.sh")" ]] \
         || die "install.sh for ${version} does not match its checksums.txt"
+    # With cosign, the installer about to run is checked like the assets it installs.
+    local major
+    major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
+    if [[ "${major:-0}" =~ ^[0-9]+$ && "${major:-0}" -ge 2 ]]; then
+        curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt.bundle" \
+            "https://github.com/${REPO}/releases/download/${version}/checksums.txt.bundle" \
+            || die "Release ${version} has no checksums.txt.bundle to verify with cosign"
+        cosign verify-blob --bundle "${tmp}/checksums.txt.bundle" \
+            --certificate-identity-regexp "^https://github\.com/${REPO//./\\.}/\.github/workflows/release\.yaml@refs/heads/main$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${tmp}/checksums.txt" >/dev/null 2>&1 \
+            || die "The release signature on ${version}'s checksums.txt did not verify"
+    fi
     [[ -z "${SELF_TMP}" ]] || rm -rf "${SELF_TMP}"
     exec bash "${tmp}/install.sh" "$@"
 }
@@ -710,8 +723,9 @@ recover_interrupted_run() {
     [[ "$(cat "${slot}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
     if [[ -f "${slot}/ROLLED_BACK" ]]; then
         # The rollback itself had finished; only renaming its hold was left.
+        # START_AFTER is its own decision; previous/ may be half deleted.
         warn "An earlier rollback was interrupted; finishing it"
-        [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
+        [[ "$(cat "${slot}/START_AFTER" 2>/dev/null)" == true ]] && restart=true
         rm -rf "${PREVIOUS}" && mv "${slot}" "${PREVIOUS}"
     elif [[ -d "${slot}" ]]; then
         warn "An earlier rollback was interrupted; restoring the install it started from"
@@ -731,6 +745,14 @@ recover_interrupted_run() {
                         mv "${origin}" "${PREVIOUS}/DefenseClawMac.app" || true
                     fi
                     [[ -e "${origin}" ]] || mv "${slot}/DefenseClawMac.app" "${origin}" || true
+                    # The rest of this run updates or rolls back the app it restored.
+                    [[ -d "${slot}/DefenseClawMac.app" || -n "${APP_PATH}" ]] || APP_PATH="${origin}"
+                fi
+                if [[ -d "${slot}/DefenseClawMac.app" ]]; then
+                    # Both places are taken (the user reinstalled the app): keep this copy.
+                    mkdir -p "${DEFENSECLAW_HOME}/backups" \
+                        && mv "${slot}/DefenseClawMac.app" "${DEFENSECLAW_HOME}/backups/DefenseClawMac-$(cat "${slot}/VERSION" 2>/dev/null || echo unknown)-$(date +%Y%m%dT%H%M%S).app" \
+                        && warn "Kept the app the rollback had set aside in ${DEFENSECLAW_HOME}/backups"
                 fi
                 [[ -d "${slot}/DefenseClawMac.app" ]] || drop_hold "${slot}"
             fi
@@ -953,6 +975,10 @@ swap_with_previous() {
     # not be put back (the next run of the installer finishes the recovery).
     local hold="${DEFENSECLAW_HOME}/.rollback-hold"
     rm -rf "${hold}"
+    # First, so recovery from any later point knows the version and gateway state.
+    mkdir -p "${hold}" || return 1
+    printf '%s\n' "${current}" > "${hold}/VERSION"
+    printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
     if ! stash_live "${hold}"; then
         if unstash_tree "${hold}"; then
             drop_hold "${hold}"
@@ -963,8 +989,6 @@ swap_with_previous() {
         return 2
     fi
     : > "${hold}/STASHED"
-    printf '%s\n' "${current}" > "${hold}/VERSION"
-    printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
     if ! unstash "${PREVIOUS}"; then
         # unstash only copies previous/bin, so returning the rest restores previous/.
         # RETURNED tells an interrupted run's recovery that previous/ is whole again.
@@ -985,6 +1009,7 @@ swap_with_previous() {
             warn "Could not swap the macOS app back; it stays at the newer version"
         fi
     fi
+    printf '%s\n' "${restart:-${was_running}}" > "${hold}/START_AFTER"
     date +%Y%m%dT%H%M%S > "${hold}/ROLLED_BACK"
     rm -rf "${PREVIOUS}"
     mv "${hold}" "${PREVIOUS}"

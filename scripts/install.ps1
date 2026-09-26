@@ -303,6 +303,24 @@ function ConvertTo-ProcessArgument([string]$Value) {
     return '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
 }
 
+function Get-Cosign {
+    # cosign 2.0 or later if it is installed (-CosignPath first), else "".
+    $cosign = if ($CosignPath) { $CosignPath } else {
+        [string](Get-Command cosign.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+    }
+    if ($cosign -and (Test-Path -LiteralPath $cosign) -and (Get-NativeOutput $cosign @("version")) -match 'GitVersion:\s*v?(\d+)\.' -and [int]$Matches[1] -ge 2) {
+        return $cosign
+    }
+    return ""
+}
+
+function Test-ReleaseSignature([string]$Cosign, [string]$Bundle, [string]$Checksums) {
+    # 0 when checksums.txt carries this repository's Release workflow signature.
+    $signer = "^https://github\.com/" + [regex]::Escape($Repo) + "/\.github/workflows/release\.yaml@refs/heads/main$"
+    return Invoke-Native $Cosign @("verify-blob", "--bundle", $Bundle, "--certificate-identity-regexp", $signer,
+        "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", $Checksums) -Quiet
+}
+
 function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     # Download that release's installer, verify it, and run it (-Version, or
     # an unstamped copy from the source tree). Named like the directories of
@@ -318,6 +336,16 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
         if (-not (Save-Url "$base/checksums.txt" "$tmp\checksums.txt")) { Die "Release $ReleaseVersion has no checksums.txt" }
         if ((Get-ListedSha256 "$tmp\checksums.txt" "install.ps1") -ne (Get-Sha256 "$tmp\install.ps1")) {
             Die "install.ps1 for $ReleaseVersion does not match its checksums.txt"
+        }
+        # With cosign, the installer about to run is checked like the assets it installs.
+        $cosign = Get-Cosign
+        if ($cosign) {
+            if (-not (Save-Url "$base/checksums.txt.bundle" "$tmp\checksums.txt.bundle")) {
+                Die "Release $ReleaseVersion has no checksums.txt.bundle to verify with cosign"
+            }
+            if ((Test-ReleaseSignature $cosign "$tmp\checksums.txt.bundle" "$tmp\checksums.txt") -ne 0) {
+                Die "The release signature on the checksums.txt of $ReleaseVersion did not verify"
+            }
         }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
         # Start the child on this console rather than through the pipeline, so its
@@ -883,8 +911,9 @@ function Resume-InterruptedRun {
     $restart = (Read-Text (Join-Path $hold "GATEWAY_WAS_RUNNING")) -eq "true"
     if (Test-Path -LiteralPath (Join-Path $hold "ROLLED_BACK")) {
         # The rollback itself had finished; only renaming its hold was left.
+        # START_AFTER is its own decision; previous\ may be half deleted.
         Write-Warn "An earlier rollback was interrupted; finishing it"
-        $restart = $restart -or (Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")) -eq "true"
+        $restart = $restart -or (Read-Text (Join-Path $hold "START_AFTER")) -eq "true"
         Remove-Tree $Previous
         Move-Path $hold $Previous
     } elseif (Test-Path -LiteralPath $hold) {
@@ -954,13 +983,16 @@ function Complete-Swap {
     Write-Ok "Installed DefenseClaw $Ver"
 }
 
-function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning) {
+function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning, [bool]$StartAfter) {
     # Exchange the live install and previous\ by renaming, so a second
     # -Rollback rolls forward again. Each half undoes itself on failure.
     # Returns 0 when swapped, 1 when the current install is back in place, 2
     # when it could not be put back (the next run of the installer recovers it).
     $hold = Join-Path $DataDir ".rollback-hold"
     New-InstallDirectory $hold
+    # First, so recovery from any later point knows the version and gateway state.
+    Set-Content -LiteralPath (Join-Path $hold "VERSION") -Value $Current -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $hold "GATEWAY_WAS_RUNNING") -Value ([string]$GatewayWasRunning).ToLowerInvariant() -Encoding Ascii
     try { Save-Live $hold } catch {
         Write-Err $_.Exception.Message
         try { Restore-LiveTree $hold } catch {
@@ -972,8 +1004,6 @@ function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning) {
         return 1
     }
     Set-Content -LiteralPath (Join-Path $hold "STASHED") -Value "" -Encoding Ascii
-    Set-Content -LiteralPath (Join-Path $hold "VERSION") -Value $Current -Encoding Ascii
-    Set-Content -LiteralPath (Join-Path $hold "GATEWAY_WAS_RUNNING") -Value ([string]$GatewayWasRunning).ToLowerInvariant() -Encoding Ascii
     try { Restore-Live $Previous } catch {
         Write-Err $_.Exception.Message
         # Restore-Live only copies previous\bin, so returning the rest restores previous\.
@@ -987,6 +1017,7 @@ function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning) {
         return 1
     }
     # Its data was written after the upgrade being undone: a later upgrade keeps it.
+    Set-Content -LiteralPath (Join-Path $hold "START_AFTER") -Value ([string]$StartAfter).ToLowerInvariant() -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $hold "ROLLED_BACK") -Value (Get-Date -Format "yyyyMMddTHHmmss") -Encoding Ascii
     Remove-Tree $Previous
     Move-Path $hold $Previous
@@ -1078,7 +1109,7 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $startAfter = $wasRunning -or (Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")) -eq "true"
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
-    $swapped = @(Switch-WithPrevious $current $wasRunning)[-1]
+    $swapped = @(Switch-WithPrevious $current $wasRunning $startAfter)[-1]
     if ($swapped -ne 0) {
         # 1: the swap undid itself, so this install is back and may run again.
         if ($swapped -eq 1 -and $wasRunning) { [void](Start-Gateway) }
@@ -1246,16 +1277,13 @@ function Invoke-Install {
 
     Write-Info "Downloading and verifying release assets"
     if (-not (Get-Asset "checksums.txt" (Join-Path $Staging "checksums.txt"))) { Die "Could not get checksums.txt for $Ver" }
-    $cosign = if ($CosignPath) { $CosignPath } else {
-        [string](Get-Command cosign.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
-    }
-    if ($cosign -and (Test-Path -LiteralPath $cosign) -and (Get-NativeOutput $cosign @("version")) -match 'GitVersion:\s*v?(\d+)\.' -and [int]$Matches[1] -ge 2) {
+    $cosign = Get-Cosign
+    if ($cosign) {
         $bundle = Join-Path $Staging "checksums.txt.bundle"
         if (Get-Asset "checksums.txt.bundle" $bundle) {
-            $signer = "^https://github\.com/" + $Repo.Replace(".", "\.") + "/\.github/workflows/release\.yaml@refs/heads/main$"
-            $verified = Invoke-Native $cosign @("verify-blob", "--bundle", $bundle, "--certificate-identity-regexp", $signer,
-                "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", (Join-Path $Staging "checksums.txt")) -Quiet
-            if ($verified -ne 0) { Die "The release signature on checksums.txt did not verify; nothing was changed" }
+            if ((Test-ReleaseSignature $cosign $bundle (Join-Path $Staging "checksums.txt")) -ne 0) {
+                Die "The release signature on checksums.txt did not verify; nothing was changed"
+            }
             Write-Ok "Release signature verified"
         } elseif (-not $Local) {
             # Every published release carries the bundle; a missing one is not a

@@ -234,6 +234,8 @@ def test_installed_cosign_checks_the_release_signature_first(
 
     calls = log.read_text().splitlines()
     assert any(call.startswith("verify-blob --bundle ") for call in calls)
+    # Nothing but the installer and checksums.txt, so the installer can remove the dir.
+    assert not list((tmp_path / "tmp").glob("*/checksums.txt.bundle"))
     assert any("--certificate-oidc-issuer https://token.actions.githubusercontent.com" in call for call in calls)
     if verify_rc == 0:
         assert rc == 0 and len(execs) == 1
@@ -501,9 +503,23 @@ def test_the_signer_pattern_escapes_the_repository_name(
 
 
 def test_the_update_notice_lookup_swallows_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
     def broken(*_args, **_kwargs):
         raise RuntimeError("no network stack")
 
+    uncaught: list[object] = []
     monkeypatch.setattr(upgrade_shim, "_latest_from_redirect", broken)
+    # An exception escaping the thread would print a traceback through this hook.
+    monkeypatch.setattr(threading, "excepthook", uncaught.append)
 
     assert update_notice._lookup_latest() == ""
+    assert uncaught == []
+
+
+def test_a_download_without_cosign_says_the_signature_was_not_checked(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    upgrade_shim._verify_release_signature("cisco-ai-defense/defenseclaw", "1.0.1", None, str(tmp_path), "")
+
+    assert "checked against checksums.txt only" in capsys.readouterr().out
