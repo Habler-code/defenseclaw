@@ -53,8 +53,9 @@ bytes of the already-signed inner payload.
 
 AVC Authenticode-signs all eight files under `payload/`. The signing wrapper may
 use its standard certificate and timestamp arguments, but every result must
-validate to the exact publisher common name `Cisco Systems, Inc.`. EXEs and the
-PowerShell script/module are all part of this signed set.
+validate to the exact publisher common name `Cisco Systems, Inc.`: the signing
+certificate's subject must carry exactly one CN attribute with that value. EXEs
+and the PowerShell script/module are all part of this signed set.
 
 Do not modify any payload byte after this step. The assembler verifies each
 signature and emits a SHA-256-bound manifest from these exact bytes.

@@ -187,7 +187,7 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 	defer library.Close()
 	logger.Printf(
 		"stage=provider-library-trust success=true signer=%q signer_sha256=%s",
-		library.Signer().SimpleName,
+		library.Signer().CommonName,
 		library.Signer().CertificateSHA256,
 	)
 	provider, err := cloudreg.New(cloudreg.Config{LibPath: options.cmidLibraryPath})
