@@ -517,6 +517,7 @@ and examples, see the [enterprise settings reference](/docs/enterprise/configura
 | `foreign_hooks` | `remove` \| `report` \| `allow` | `remove` |
 | `higher_precedence_sources` | `fail` \| `warn` | `fail` |
 | `allowed_hooks` | list of SHA-256 digests | none; the `default` list and the connector's list are merged |
+| `version_floor` | `enforce` \| `report` \| `off`; only under `connectors.claudecode` | `enforce`; see [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor) |
 
 How each OS applies these keys to each connector is on
 [Machine policy](/docs/enterprise/machine-policy).

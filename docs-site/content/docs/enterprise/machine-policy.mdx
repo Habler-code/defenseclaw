@@ -182,7 +182,10 @@ config and plugin, and the foreign-hook guard summary. See
   names its installer-bound event and hook contract.
 - **Settings.** `ownership`, `managed_hooks_only` and
   `higher_precedence_sources` do not change how Codex, Claude Code or
-  Cursor policy is written. `ownership` applies to Copilot and OpenCode.
+  Cursor policy is written. `ownership` applies to Copilot and OpenCode,
+  and `connectors.claudecode.ownership` also applies to the
+  [Claude Code version floor](#claude-code-version-floor) drop-in, but not
+  to `90-defenseclaw.json`.
   `managed_hooks_only` for `claudecode` turns the foreign-hook guard on or
   off, as above. `foreign_hooks` and `allowed_hooks` apply to the
   foreign-hook guard as on the other OSes.
@@ -243,7 +246,10 @@ Quote `"off"`: YAML 1.1 tools read a bare `off` as the boolean `false`,
 which the config refuses. Use `verify_only` when an MDM already writes the
 file. Export
 DefenseClaw's entries (below) and add them to the MDM's template. On
-Windows, `ownership` applies to Copilot and OpenCode only.
+Windows, `ownership` applies to Copilot and OpenCode, and to the Claude Code
+[version floor](#claude-code-version-floor) drop-in. The Windows lifecycle
+writes the Claude Code hook drop-in, `90-defenseclaw.json`, whatever
+`ownership` says.
 
 ## Claude Code version floor
 
@@ -257,9 +263,17 @@ the hook drop-in does not change.
 ```yaml title="config.yaml (excerpt)"
 enterprise:
   machine_policy:
-    claudecode:
-      version_floor: enforce   # enforce (default), report or "off"
+    connectors:
+      claudecode:
+        version_floor: enforce   # enforce (default), report or "off"
 ```
+
+`version_floor` is set only under `connectors.claudecode`; `default` and
+other connectors do not take it. As with any key under
+`enterprise.machine_policy.connectors`, naming `claudecode` there makes
+the Linux and macOS lifecycle publish DefenseClaw's Claude Code machine
+policy; see
+[Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 
 | `version_floor` | What DefenseClaw does |
 | --- | --- |
@@ -273,6 +287,16 @@ enterprise:
   that file alone and removes its own drop-in at the next reconcile, even
   when the value is below 2.1.154. `policy show` names the source and says
   when the value is below 2.1.154.
+- **A file at the drop-in's name is yours unless DefenseClaw wrote it.**
+  DefenseClaw treats `00-defenseclaw-version-floor.json` as its own only
+  while its ownership record names the file and the file's hash matches the
+  record. Any other file there is yours: the `version-floor` export you
+  deploy yourself (the same bytes DefenseClaw writes), or a floor DefenseClaw
+  wrote that you or your tools changed. DefenseClaw never rewrites or removes
+  it, under any `version_floor` or `ownership` setting or at uninstall, and
+  `policy show` reports its value as the administrator's. If that file does
+  not set a version, DefenseClaw cannot write its floor, and under `enforce`
+  `policy verify` fails until you add the key to it or remove it.
 - **A value that is not a version does not count.** Claude Code ignores
   it. When it is in a file that merges before DefenseClaw's drop-in
   (`managed-settings.json`, or a drop-in whose name sorts before
@@ -284,9 +308,17 @@ enterprise:
   profile, while `claudecode` is enabled with `ownership: merge`. Linux and
   macOS write it at install and every reconcile; on Windows the guardian
   writes it every cycle, under the same lock the lifecycle uses for
-  `90-defenseclaw.json`. Uninstall removes it. With `ownership: verify_only`,
-  deploy `policy export --connector claudecode --format version-floor`
-  yourself.
+  `90-defenseclaw.json`. Uninstall removes it.
+- **It follows `connectors.claudecode.ownership` on every OS.** `merge`
+  writes and repairs it. `verify_only` neither writes nor removes it: deploy
+  `policy export --connector claudecode --format version-floor` yourself.
+  `off` removes DefenseClaw's floor. This is also true on Windows, where the
+  lifecycle writes `90-defenseclaw.json` whatever `ownership` says.
+- **Coverage.** With `version_floor: enforce` and `ownership: merge`, a
+  floor that is missing or cannot apply (see the next bullet and the ones
+  above) is a conflict: `policy show` lists Claude Code as not covered, and
+  `policy verify` exits 1. The hook drop-in stays in place, and Claude
+  Code's hook calls are still inspected.
 - **Higher-precedence sources.** Claude Code builds older than 2.1.242
   ignore `"managedSourcesBehavior": "merge"` and read only the
   higher-precedence source (`HKLM\SOFTWARE\Policies\ClaudeCode\Settings`,

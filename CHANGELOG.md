@@ -116,12 +116,16 @@ stopped`. Nothing is changed; use the install command above.
   `managed-settings.d/00-defenseclaw-version-floor.json`, so older builds
   refuse to start; `90-defenseclaw.json` is unchanged. An administrator's own
   version wins and DefenseClaw withdraws its drop-in; a value that is not a
-  version does not count. `enterprise policy show|verify` report who sets the
+  version does not count. A file at the drop-in's name is DefenseClaw's only
+  while its ownership record names it with a matching hash, so an
+  administrator's own copy (for example the `version-floor` export) is never
+  rewritten or removed. `enterprise policy show|verify` report who sets the
   floor and fail when no floor reaches the builds it targets, for example
   while HKLM `Settings` or macOS managed preferences are in force without the
   key. `export --format version-floor` renders the drop-in, and
-  `enterprise.machine_policy.claudecode.version_floor: enforce | report |
-  off` (default `enforce`) controls it.
+  `enterprise.machine_policy.connectors.claudecode.version_floor: enforce |
+  report | off` (default `enforce`) controls it; the drop-in follows
+  `connectors.claudecode.ownership` on every OS, Windows included.
 
 ## [Unreleased] — Hook collector unification
 
