@@ -253,7 +253,7 @@ func RouteFor(connector, goos string) string {
 		return RouteMachinePolicy
 	case "kiro":
 		return RouteACP
-	case "geminicli", "windsurf", "openclaw", "zeptoclaw":
+	case "openclaw", "zeptoclaw":
 		return RouteUnsupported
 	case "openhands", "omnigent":
 		if goos == "windows" {

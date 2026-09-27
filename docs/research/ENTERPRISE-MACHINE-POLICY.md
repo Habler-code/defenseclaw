@@ -67,7 +67,6 @@ Legend: ✔ admin hook still ran / control held · ✘ bypass works ·
 | openhands | none; `~/.openhands/hooks.json`, project `.openhands/hooks.json` | — | none | verify per release | Linux/macOS per-user |
 | omnigent | none; `~/.omnigent/config.yaml` policy modules | — | none | — | Linux/macOS per-user |
 | kiro | none; workspace `.kiro/hooks/*.json`, user `~/.kiro/hooks/` | — | none | blocks only | `enterprise acp` mediation |
-| geminicli, windsurf | deprecated connectors (replaced by Antigravity, Devin) | — | — | — | teardown only |
 
 ## Claude Code
 
@@ -300,7 +299,6 @@ Source: https://antigravity.google/docs/hooks (retrieved 2026-09-26).
 | openhands | **No** | No | Verify per release | Project hooks layer with user hooks |
 | omnigent | **No** | No | — | Policy modules are Python code in the user profile |
 | kiro | **No** (ACP mediation) | No | — | Workspace hooks are user-controlled |
-| geminicli, windsurf | — (deprecated) | — | — | teardown only |
 
 Cross-cutting requirements for DefenseClaw's implementation:
 

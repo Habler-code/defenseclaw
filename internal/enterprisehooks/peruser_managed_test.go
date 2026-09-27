@@ -51,7 +51,7 @@ func TestWindowsStandalonePerUserConnectorRuntimeKinds(t *testing.T) {
 }
 
 func TestWindowsEnterpriseRefusedConnectorReasons(t *testing.T) {
-	for _, name := range []string{"openhands", "omnigent", "geminicli", "windsurf", "kiro"} {
+	for _, name := range []string{"openhands", "omnigent", "kiro"} {
 		if reason := WindowsEnterpriseRefusedConnectorReason(name); strings.TrimSpace(reason) == "" {
 			t.Fatalf("%s has no refusal reason", name)
 		}

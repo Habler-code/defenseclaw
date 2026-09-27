@@ -32,8 +32,8 @@ import (
 // per-user enterprise registration can run.
 var shellHookSocketConnectorTemplates = []string{
 	"antigravity-hook.sh", "claude-code-hook.sh", "codex-hook.sh", "copilot-hook.sh",
-	"cursor-hook.sh", "devin-hook.sh", "geminicli-hook.sh", "hermes-hook.sh",
-	"kiro-hook.sh", "openhands-hook.sh", "windsurf-hook.sh",
+	"cursor-hook.sh", "devin-hook.sh", "hermes-hook.sh",
+	"kiro-hook.sh", "openhands-hook.sh",
 }
 
 // TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured: every
@@ -166,10 +166,10 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 		ManagedHookSocket:  socketPath,
 		ManagedServiceUID:  os.Getuid(),
 	}
-	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewGeminiCLIConnector()); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewOpenHandsConnector()); err != nil {
 		t.Fatal(err)
 	}
-	hookPath := filepath.Join(hookDir, "geminicli-hook.sh")
+	hookPath := filepath.Join(hookDir, "openhands-hook.sh")
 	curlPath, _ := exec.LookPath("curl")
 	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 
@@ -179,7 +179,7 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "bash", hookPath)
 		cmd.Env = append(os.Environ(), "HOME="+filepath.Join(root, "home"))
-		cmd.Stdin = strings.NewReader(`{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"echo marker"}}`)
+		cmd.Stdin = strings.NewReader(`{"event_type":"PreToolUse","tool_name":"execute_bash","tool_input":{"command":"echo marker"}}`)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		err := cmd.Run()
@@ -199,8 +199,8 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 	gateway.mu.Lock()
 	requests, authorization, paths := gateway.requests, append([]string(nil), gateway.authorization...), append([]string(nil), gateway.paths...)
 	gateway.mu.Unlock()
-	if requests != 1 || paths[0] != "/api/v1/geminicli/hook" {
-		t.Fatalf("hook socket requests = %d %v, want one geminicli hook request", requests, paths)
+	if requests != 1 || paths[0] != "/api/v1/openhands/hook" {
+		t.Fatalf("hook socket requests = %d %v, want one openhands hook request", requests, paths)
 	}
 	if authorization[0] != "" {
 		t.Fatalf("the hook sent a bearer over the hook socket: %q", authorization[0])

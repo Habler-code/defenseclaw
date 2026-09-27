@@ -132,8 +132,8 @@ access. Status shows presence, modification time and a digest prefix only.
    socket, and the guardian refuses to render them without it.
 4. The gateway reads the caller's uid from the socket and checks the
    authorization ledger (L-08).
-5. The remaining TCP consumers (the Codex, Claude Code, Gemini CLI,
-   OpenHands and OmniGent telemetry exporters) present credentials bound to
+5. The remaining TCP consumers (the Codex, Claude Code, OpenHands and
+   OmniGent telemetry exporters) present credentials bound to
    the user's uid. The guardian derives them from a per-machine key kept in
    the gateway's data directory (`hooks/.user-scoped-token.key`) and renders
    them into the user's own hook directory and agent configuration. The
@@ -216,7 +216,7 @@ access. Status shows presence, modification time and a digest prefix only.
 3. A user can hold the TCP port while an administrator has stopped the
    gateway's socket unit (socket activation keeps it bound otherwise). Hooks
    and plugins use the socket and are unaffected. The Codex, Claude Code,
-   Gemini CLI, OpenHands and OmniGent telemetry exporters do not verify the
+   OpenHands and OmniGent telemetry exporters do not verify the
    listener, so while the port is held their telemetry, which can include
    prompt text, goes to the holder together with the sending user's
    per-user telemetry credential. The holder can replay a captured

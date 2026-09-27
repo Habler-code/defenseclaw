@@ -104,8 +104,8 @@ lifecycle creates `/opt/cisco/defenseclaw/run` (`0755`, owned by
 4. There is no TCP fallback. A descriptor that names no hook socket fails
    closed (`enterprise_managed_hook_socket_missing`), and the guardian
    renders per-user hooks and in-agent plugins only for the socket.
-5. Consumers that still use the TCP API (Codex, Claude Code, Gemini CLI and
-   OpenHands telemetry) authenticate with credentials bound to the user's
+5. Consumers that still use the TCP API (Codex, Claude Code and OpenHands
+   telemetry) authenticate with credentials bound to the user's
    uid (see L-08); the gateway attributes their events to that uid.
 
 ### Enrollment
@@ -160,7 +160,7 @@ not-found answers.
    needs `launch_activate_socket(3)`, which the cgo-free release build does
    not call), so during every gateway restart a local user can bind the
    port. Hooks and plugins use the hook socket and are
-   unaffected. The Codex, Claude Code, Gemini CLI, OpenHands and OmniGent
+   unaffected. The Codex, Claude Code, OpenHands and OmniGent
    telemetry exporters do not verify the listener: the holder receives
    their telemetry, which can include prompt text, and the sending user's
    per-user telemetry credential, and can replay that credential once the

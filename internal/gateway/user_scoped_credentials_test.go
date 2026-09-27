@@ -228,12 +228,12 @@ func TestUserScopedInspectCredentialIsBoundToItsUser(t *testing.T) {
 }
 
 // Per-user OTLP credentials cover the header form (Codex, Claude Code,
-// OpenHands) and the path form (Gemini CLI).
+// OpenHands) and the path form (Omnigent here).
 func TestUserScopedOTLPCredentialIsBoundToItsUser(t *testing.T) {
 	ledger := &userScopedTestLedger{}
 	ledger.set(
 		managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "codex", OK: true},
-		managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "geminicli", OK: true},
+		managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "omnigent", OK: true},
 	)
 	api, handler, observed := newUserScopedTestServer(t, true, ledger, map[string]string{"1001": "alice"})
 	codex := userScopedTestToken(t, connector.UserScopedOTLPCredential, "codex", "1001")
@@ -251,19 +251,19 @@ func TestUserScopedOTLPCredentialIsBoundToItsUser(t *testing.T) {
 	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/v1/logs", wide, source); code != http.StatusUnauthorized || observed.called {
 		t.Fatalf("connector-wide OTLP credential: status %d called=%v", code, observed.called)
 	}
-	wideGemini, err := connector.EnsureOTLPPathToken(api.configDataDir(), connector.OTLPScopeGeminiCLI)
+	wideOmnigent, err := connector.EnsureOTLPPathToken(api.configDataDir(), connector.OTLPScopeOmnigent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gemini := userScopedTestToken(t, connector.UserScopedOTLPCredential, "geminicli", "1001")
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/geminicli/"+gemini+"/v1/logs", "", nil); code != http.StatusOK || observed.userID != "1001" {
+	omnigent := userScopedTestToken(t, connector.UserScopedOTLPCredential, "omnigent", "1001")
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/omnigent/"+omnigent+"/v1/logs", "", nil); code != http.StatusOK || observed.userID != "1001" {
 		t.Fatalf("path-form OTLP: status %d %+v", code, *observed)
 	}
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/geminicli/"+wideGemini+"/v1/logs", "", nil); code != http.StatusUnauthorized || observed.called {
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/omnigent/"+wideOmnigent+"/v1/logs", "", nil); code != http.StatusUnauthorized || observed.called {
 		t.Fatalf("connector-wide path credential: status %d called=%v", code, observed.called)
 	}
-	// Codex's credential does not open Gemini CLI's source.
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/geminicli/"+codex+"/v1/logs", "", nil); code != http.StatusUnauthorized || observed.called {
+	// Codex's credential does not open Omnigent's source.
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/otlp/omnigent/"+codex+"/v1/logs", "", nil); code != http.StatusUnauthorized || observed.called {
 		t.Fatalf("another source's credential: status %d called=%v", code, observed.called)
 	}
 }

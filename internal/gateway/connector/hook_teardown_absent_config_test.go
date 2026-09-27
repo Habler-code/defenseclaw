@@ -19,17 +19,15 @@ import (
 )
 
 // Teardown (the managed uninstall runs it for every enrolled user) must not
-// create an agent's hooks file for a user who never had one. The JSON, YAML
-// and Gemini readers read a missing file as an empty document, and teardown
+// create an agent's hooks file for a user who never had one. The JSON and
+// YAML readers read a missing file as an empty document, and teardown
 // wrote that document back, so an uninstall left "{}" in ~/.cursor/hooks.json,
 // ~/.openhands/hooks.json and ~/.gemini/config/hooks.json for every user.
 func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 	overrides := map[string]*string{
 		"cursor":      &CursorHooksPathOverride,
 		"openhands":   &OpenHandsHooksPathOverride,
-		"windsurf":    &WindsurfHooksPathOverride,
 		"antigravity": &AntigravityHooksPathOverride,
-		"geminicli":   &GeminiSettingsPathOverride,
 		"devin":       &DevinHooksPathOverride,
 		"copilot":     &CopilotHooksPathOverride,
 	}
@@ -46,9 +44,7 @@ func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 	for _, conn := range []*hookOnlyConnector{
 		NewCursorConnector(),
 		NewOpenHandsConnector(),
-		NewWindsurfConnector(),
 		NewAntigravityConnector(),
-		NewGeminiCLIConnector(),
 		NewDevinConnector(),
 		NewCopilotConnector(),
 	} {

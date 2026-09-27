@@ -27,7 +27,7 @@ func TestPublishVerifyRemoveAll(t *testing.T) {
 	withHigherSources(t)
 	opts := testOptions(t)
 	opts = withPolicy(opts, "copilot", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = "off" })
-	connectors := []string{"cursor", "Codex", "claudecode", "copilot", "devin", "geminicli", "kiro"}
+	connectors := []string{"cursor", "Codex", "claudecode", "copilot", "devin", "openclaw", "kiro"}
 	result, err := Publish(opts, connectors)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestPublishVerifyRemoveAll(t *testing.T) {
 	for _, state := range result.States {
 		routes[state.Connector] = state.Route
 	}
-	if routes["devin"] != RoutePerUser || routes["geminicli"] != RouteUnsupported || routes["kiro"] != RouteACP || routes["copilot"] != RouteUnsupported {
+	if routes["devin"] != RoutePerUser || routes["openclaw"] != RouteUnsupported || routes["kiro"] != RouteACP || routes["copilot"] != RouteUnsupported {
 		t.Fatalf("routes: %v", routes)
 	}
 	if !result.Complete() {

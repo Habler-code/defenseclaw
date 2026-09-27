@@ -30,7 +30,7 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice}
 	f.writeManifest(t,
 		enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"},
-		enterprisehooks.ManifestTarget{User: "alice", Connector: "geminicli"},
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "openhands"},
 	)
 	run, err := runEnterpriseHookReconcileOnce(context.Background())
 	if err != nil {
@@ -42,7 +42,7 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 	}
 	identity := strconv.Itoa(uid)
 	targets := f.workerTargets()
-	for _, name := range []string{"codex", "geminicli"} {
+	for _, name := range []string{"codex", "openhands"} {
 		target, ok := targets[name+"@"+alice]
 		if !ok {
 			t.Fatalf("%s: no worker target", name)
