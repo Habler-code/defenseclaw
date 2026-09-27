@@ -2781,6 +2781,29 @@ def test_certification_manually_drives_every_public_windows_lifecycle_verb() -> 
     assert "os.SameFile(executableInfo, expectedInfo)" in lifecycle_cli
 
 
+def test_install_tree_inventory_accepts_managed_ipc_under_install_root() -> None:
+    module = read(MODULE)
+    inventory = module[
+        module.index("function Assert-DefenseClawManagedInstallTree") : module.index(
+            "function Assert-DefenseClawManagedTreeNoReparse"
+        )
+    ]
+    # The Secure Client IPC directory and socket live under InstallRoot.
+    assert "$Layout.ManagedIPCDirectory" in inventory
+    assert "$Layout.ManagedIPCSocketPath" in inventory
+    # Only the exact socket leaf is exempt from the reparse-point veto.
+    assert "$item.PSIsContainer -or" in inventory
+    install_root_removals = [
+        block
+        for block in module.split("Remove-DefenseClawManagedTree `")[1:]
+        if "-Label 'InstallRoot'" in block.split("\n\n", 1)[0]
+    ]
+    assert install_root_removals
+    for block in install_root_removals:
+        call = block.split("\n\n", 1)[0]
+        assert "-AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath" in call
+
+
 def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -> None:
     harness = read(HARNESS)
     proof = harness[

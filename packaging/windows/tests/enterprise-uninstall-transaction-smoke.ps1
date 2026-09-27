@@ -1174,6 +1174,12 @@ targets:
                 throw 'injected service contract drift at deletion boundary'
             }
         }
+        # Keep the real inventory check for the layout inventory cases.
+        $script:HarnessRealManagedInstallTree = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Assert-DefenseClawManagedInstallTree `
+                -CommandType Function
+        ).ScriptBlock
         function script:Assert-DefenseClawManagedInstallTree {
             param([Parameter(Mandatory)][hashtable]$Layout)
         }
@@ -2659,7 +2665,14 @@ targets:
             param(
                 [Parameter(Mandatory)][string]$Path,
                 [Parameter(Mandatory)][string]$RequiredBase,
-                [Parameter(Mandatory)][string]$Label
+                [Parameter(Mandatory)][string]$Label,
+                # Mirrors the production function's optional param
+                # (added when the InstallRoot teardown pipeline learned
+                # to tolerate the AF_UNIX socket reparse point). The
+                # smoke harness does not need the value; accepting the
+                # parameter keeps the mock signature-compatible with
+                # every module caller.
+                [string]$AllowAFUnixSocketAt = ''
             )
             $script:HarnessState.events.Add("remove-tree:$Label")
             if ($Label -eq 'StateRoot') {
@@ -8222,6 +8235,169 @@ targets:
         $layoutInventoryResults.Add([pscustomobject]@{
             name = 'guardian-state-identity-runtime-directory'
             identity_present = $true
+        })
+
+        function New-HarnessInventoryLayout {
+            param([Parameter(Mandatory)][string]$Root)
+            $bin = Microsoft.PowerShell.Management\Join-Path $Root 'bin'
+            $libexec = Microsoft.PowerShell.Management\Join-Path $Root 'libexec'
+            $ipc = Microsoft.PowerShell.Management\Join-Path $Root 'ipc'
+            $inventoryLayout = @{
+                InstallRoot = $Root
+                BinDirectory = $bin
+                LibexecDirectory = $libexec
+                ManagedIPCDirectory = $ipc
+                ManagedIPCSocketPath = (
+                    Microsoft.PowerShell.Management\Join-Path $ipc 'defenseclaw_ipc.sock'
+                )
+                BrokerPath = (
+                    Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-cmid-broker.exe'
+                )
+                GatewayPath = (
+                    Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-gateway.exe'
+                )
+                ACPPath = (
+                    Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-acp.exe'
+                )
+                HookPath = (
+                    Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe'
+                )
+                SensorHelperPath = (
+                    Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-sensor-helper.exe'
+                )
+                CLIPath = (
+                    Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw.exe'
+                )
+                InstallerPath = (
+                    Microsoft.PowerShell.Management\Join-Path $libexec 'install-enterprise.ps1'
+                )
+                ModulePath = (
+                    Microsoft.PowerShell.Management\Join-Path $libexec 'DefenseClawEnterprise.psm1'
+                )
+            }
+            foreach ($directory in @($bin, $libexec, $ipc)) {
+                Microsoft.PowerShell.Management\New-Item `
+                    -ItemType Directory `
+                    -Path $directory `
+                    -Force | Microsoft.PowerShell.Core\Out-Null
+            }
+            foreach ($file in @(
+                $inventoryLayout.BrokerPath,
+                $inventoryLayout.GatewayPath,
+                $inventoryLayout.ACPPath,
+                $inventoryLayout.HookPath,
+                $inventoryLayout.SensorHelperPath,
+                $inventoryLayout.CLIPath,
+                $inventoryLayout.InstallerPath,
+                $inventoryLayout.ModulePath
+            )) {
+                [IO.File]::WriteAllText($file, 'x', [Text.UTF8Encoding]::new($false))
+            }
+            return $inventoryLayout
+        }
+        function Get-HarnessInventoryFailure {
+            param(
+                [Parameter(Mandatory)][scriptblock]$Check,
+                [Parameter(Mandatory)][hashtable]$Layout
+            )
+            try {
+                & $Check -Layout $Layout
+                return ''
+            }
+            catch {
+                return [string]$_.Exception.Message
+            }
+        }
+
+        # The gateway creates <InstallRoot>\ipc and binds its AF_UNIX
+        # socket there, so an uninstall that starts while the gateway runs
+        # sees both. Every other directory or reparse point is refused.
+        $ipcLayout = New-HarnessInventoryLayout `
+            -Root (Microsoft.PowerShell.Management\Join-Path $TestRoot 'inv-ipc')
+        $ipcFailure = Get-HarnessInventoryFailure `
+            -Check $script:HarnessRealManagedInstallTree `
+            -Layout $ipcLayout
+        Assert-Harness `
+            -Condition ([string]::IsNullOrEmpty($ipcFailure)) `
+            -Message "install-tree inventory refused the managed IPC directory: $ipcFailure"
+        $socketCase = 'unavailable'
+        $unixEndpointType = 'System.Net.Sockets.UnixDomainSocketEndPoint' -as [type]
+        if ($null -ne $unixEndpointType) {
+            $ipcSocket = [Net.Sockets.Socket]::new(
+                [Net.Sockets.AddressFamily]::Unix,
+                [Net.Sockets.SocketType]::Stream,
+                [Net.Sockets.ProtocolType]::Unspecified
+            )
+            try {
+                # AF_UNIX paths are limited to 108 characters and TestRoot is
+                # longer than that, so bind relative to the IPC directory.
+                $previousDirectory = [Environment]::CurrentDirectory
+                [Environment]::CurrentDirectory = $ipcLayout.ManagedIPCDirectory
+                try {
+                    $ipcSocket.Bind($unixEndpointType::new('defenseclaw_ipc.sock'))
+                }
+                finally {
+                    [Environment]::CurrentDirectory = $previousDirectory
+                }
+                $socketIsReparse = (
+                    ([IO.File]::GetAttributes($ipcLayout.ManagedIPCSocketPath) -band
+                        [IO.FileAttributes]::ReparsePoint) -ne 0
+                )
+                $socketFailure = Get-HarnessInventoryFailure `
+                    -Check $script:HarnessRealManagedInstallTree `
+                    -Layout $ipcLayout
+            }
+            finally {
+                $ipcSocket.Dispose()
+            }
+            Assert-Harness `
+                -Condition ($socketIsReparse -and [string]::IsNullOrEmpty($socketFailure)) `
+                -Message "install-tree inventory refused the live managed IPC socket: $socketFailure"
+            $socketCase = 'exercised'
+        }
+        $layoutInventoryResults.Add([pscustomobject]@{
+            name = 'install-tree-managed-ipc-accepted'
+            socket_case = $socketCase
+        })
+
+        $strayLayout = New-HarnessInventoryLayout `
+            -Root (Microsoft.PowerShell.Management\Join-Path $TestRoot 'inv-stray')
+        Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path (Microsoft.PowerShell.Management\Join-Path $strayLayout.InstallRoot 'extra') `
+            -Force | Microsoft.PowerShell.Core\Out-Null
+        $strayFailure = Get-HarnessInventoryFailure `
+            -Check $script:HarnessRealManagedInstallTree `
+            -Layout $strayLayout
+        Assert-Harness `
+            -Condition ($strayFailure -match 'unexpected directory') `
+            -Message "install-tree inventory accepted an unexpected directory: $strayFailure"
+        $junctionLayout = New-HarnessInventoryLayout `
+            -Root (Microsoft.PowerShell.Management\Join-Path $TestRoot 'inv-junction')
+        $junctionTarget = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'inv-junction-target'
+        Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $junctionTarget `
+            -Force | Microsoft.PowerShell.Core\Out-Null
+        Microsoft.PowerShell.Management\New-Item `
+            -ItemType Junction `
+            -Path (Microsoft.PowerShell.Management\Join-Path $junctionLayout.ManagedIPCDirectory 'link') `
+            -Value $junctionTarget | Microsoft.PowerShell.Core\Out-Null
+        $junctionFailure = Get-HarnessInventoryFailure `
+            -Check $script:HarnessRealManagedInstallTree `
+            -Layout $junctionLayout
+        [IO.Directory]::Delete(
+            (Microsoft.PowerShell.Management\Join-Path $junctionLayout.ManagedIPCDirectory 'link')
+        )
+        Assert-Harness `
+            -Condition ($junctionFailure -match 'reparse point') `
+            -Message "install-tree inventory accepted a junction inside the IPC directory: $junctionFailure"
+        $layoutInventoryResults.Add([pscustomobject]@{
+            name = 'install-tree-unexpected-content-refused'
+            stray_directory = $strayFailure
+            junction = $junctionFailure
         })
 
         return [pscustomobject]@{
