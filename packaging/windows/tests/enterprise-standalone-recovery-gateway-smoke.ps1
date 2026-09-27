@@ -510,7 +510,9 @@ $failures = & $module {
         # cleanup runs with that gateway, and the generic file rollback puts
         # <InstallRoot>\bin back to its preimage: the prior release's gateway
         # after a failed upgrade, no gateway after a failed first install.
-        # Service control, the recovery binding and the ACL steps are stubbed.
+        # The Secure Client profile still stops at the staged gateway's
+        # failure. Service control, the recovery binding and the ACL steps
+        # are stubbed.
         function Assert-DefenseClawOwnedServiceOrAbsent {
         }
         function Test-DefenseClawServiceExists {
@@ -571,8 +573,14 @@ $failures = & $module {
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($priorGateway))
         [IO.File]::WriteAllText($priorGateway, 'prior-gateway', $utf8)
         $snapshotPath = [IO.Path]::Combine($stateRoot, 'install', 'transaction.json')
-        foreach ($existed in @($true, $false)) {
-            $label = if ($existed) { 'rollback of a failed upgrade' } else { 'rollback of a failed first install' }
+        foreach ($case in @(
+            @{ Profile = 'Standalone'; Existed = $true; Label = 'rollback of a failed upgrade' },
+            @{ Profile = 'Standalone'; Existed = $false; Label = 'rollback of a failed first install' },
+            @{ Profile = 'SecureClient'; Existed = $true; Label = 'Secure Client rollback' }
+        )) {
+            $existed = [bool]$case.Existed
+            $label = [string]$case.Label
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $case.Profile
             Reset-TestHost
             [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{}', $utf8)
             $snapshot = [ordered]@{
@@ -606,6 +614,18 @@ $failures = & $module {
                 $restoreError = $_.Exception.Message
             }
             $calls = @($script:TestCalls) -join '|'
+            if ($case.Profile -ceq 'SecureClient') {
+                # Secure Client keeps the staged gateway: its failure ends
+                # the recovery before any file is restored.
+                if (-not $restoreError.Contains($relaxedHooks) -or
+                    $calls -cne 'staged-gateway:restore|staged-gateway:retire' -or
+                    @($script:DefenseClawRecoveryGatewayRuns).Count -ne 0 -or
+                    $null -ne $script:DefenseClawRecoveryGatewayRefusal -or
+                    [IO.File]::ReadAllText($layout.GatewayPath).Trim() -cne 'staged-gateway') {
+                    $failures.Add("${label}: '$restoreError', calls $calls")
+                }
+                continue
+            }
             if (-not [string]::IsNullOrEmpty($restoreError) -or
                 $calls -cne 'staged-gateway:restore|staged-gateway:retire|setup-gateway:retire|cleanup:setup-gateway') {
                 $failures.Add("${label}: '$restoreError', calls $calls")
