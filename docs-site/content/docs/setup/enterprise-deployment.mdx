@@ -512,8 +512,11 @@ test run explicitly uses `-AllowUnsigned`.
 
 A valid signature is not sufficient on its own. The module, the installer, and
 every payload executable and library must be signed by a certificate whose
-subject name is exactly `Cisco Systems, Inc.`. An organization that re-signs
-the payload with its own code-signing certificate names that certificate with
+subject has exactly one common name (CN), and that common name is exactly
+`Cisco Systems, Inc.`. The CN attribute itself is compared, not the Windows
+display name, which shows the OU or O instead when a certificate has no CN.
+An organization that re-signs the payload with its own code-signing
+certificate names that certificate with
 `-AdditionalTrustedSignerSha256 <sha256>[,<sha256>...]` (CLI:
 `--additional-trusted-signer-sha256`, repeatable) on every lifecycle action for
 that deployment, including `Status`, `Repair`, and `Uninstall`. Each value is
@@ -524,10 +527,14 @@ thumbprint is rejected, and the parameter cannot be combined with
 
 The CMID broker service checks `cmidapi.dll` again each time it starts,
 immediately before loading it. WinVerifyTrust must accept the library's
-embedded Authenticode signature, and the signer must be `Cisco Systems, Inc.`.
-The broker holds the file open without write or delete sharing until the
-library has loaded. If the check fails, the broker stops and its log records
+embedded Authenticode signature, and the signer certificate's one subject
+common name must be `Cisco Systems, Inc.`. The broker holds the file open
+without write or delete sharing until the library has loaded. If the check fails, the broker stops and its log records
 `stage=provider-library-trust success=false` with the reason.
+
+The gateway never loads `cmidapi.dll` itself. If its service environment does
+not name the broker, managed inspection stays unavailable and `/health` gives
+the missing broker as the reason.
 
 The unsigned exception is itself fail-closed before module import. It is valid
 only for `Install`, `Upgrade`, or `Repair`, and only when the service names are

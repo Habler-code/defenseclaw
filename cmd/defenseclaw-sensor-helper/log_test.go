@@ -40,7 +40,7 @@ func TestNewHelperLoggerAppendsToServiceLog(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// The Windows opener additionally requires an administrator-only
 		// directory, which a test temp directory is not.
-		t.Skip("covered by the Windows trusted-directory contract")
+		t.Skip("covered by TestHelperLogAppendsAcrossRestartsInAdministratorOnlyDirectory")
 	}
 	path := filepath.Join(t.TempDir(), "sensor-helper.log")
 	if err := os.WriteFile(path, []byte("earlier run\n"), 0o600); err != nil {

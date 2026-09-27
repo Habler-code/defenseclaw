@@ -23,9 +23,12 @@ import (
 
 // registerFakeCloudProvider installs a credential factory for one test.
 // The OSS build registers none, so every managed test that expects to
-// get past the guardrail's boot gate has to opt in.
+// get past the guardrail's boot gate has to opt in. The fake is reached
+// through the in-process lane, which the Windows gateway otherwise
+// refuses in favour of the credential broker.
 func registerFakeCloudProvider(t *testing.T, provider cloudreg.Provider, buildErr error) {
 	t.Helper()
+	setCMIDDirectLaneRefused(t, false)
 	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
 		if buildErr != nil {
 			return nil, buildErr
@@ -33,6 +36,15 @@ func registerFakeCloudProvider(t *testing.T, provider cloudreg.Provider, buildEr
 		return provider, nil
 	})
 	t.Cleanup(func() { cloudreg.Register(nil) })
+}
+
+// setCMIDDirectLaneRefused sets whether the gateway refuses the in-process
+// credential lane for the rest of one test.
+func setCMIDDirectLaneRefused(t *testing.T, refused bool) {
+	t.Helper()
+	previous := cmidDirectLaneRefused
+	cmidDirectLaneRefused = refused
+	t.Cleanup(func() { cmidDirectLaneRefused = previous })
 }
 
 func managedInspectionSidecar(t *testing.T) *Sidecar {
