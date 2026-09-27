@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -47,6 +48,10 @@ var (
 	}
 )
 
+// codexRequirementsPinTempPrefix names DefenseClaw's staging files in the
+// requirements directory.
+const codexRequirementsPinTempPrefix = ".requirements.toml.defenseclaw-"
+
 func defaultCodexRequirementsPinPath() string {
 	if runtime.GOOS == "darwin" {
 		return "/private/etc/codex/requirements.toml"
@@ -59,11 +64,12 @@ func defaultCodexRequirementsPinPath() string {
 func InspectCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 	path := codexRequirementsPinPath()
 	result := CodexRequirementsPinResult{Path: path, State: CodexRequirementsPinAbsent}
-	dirExists, err := validateCodexRequirementsPinDir(filepath.Dir(path))
-	if err != nil || !dirExists {
+	dir := filepath.Dir(path)
+	dirInfo, err := validateCodexRequirementsPinDir(dir)
+	if err != nil || dirInfo == nil {
 		return result, err
 	}
-	raw, _, exists, err := readCodexRequirementsPinFile(path)
+	raw, info, exists, err := readCodexRequirementsPinFile(path)
 	if err != nil || !exists {
 		return result, err
 	}
@@ -72,6 +78,12 @@ func InspectCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 		return result, fmt.Errorf("enterprise hooks: %s: %w", path, err)
 	}
 	result.State = state
+	if state != CodexRequirementsPinAbsent {
+		// A pin Codex cannot read has no effect.
+		if err := requireCodexRequirementsPinReadable(dir, dirInfo, path, info); err != nil {
+			return result, err
+		}
+	}
 	return result, nil
 }
 
@@ -86,21 +98,14 @@ func EnsureCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 		return result, err
 	}
 	dir := filepath.Dir(path)
-	dirExists, err := validateCodexRequirementsPinDir(dir)
+	dirInfo, err := prepareCodexRequirementsPinDir(dir)
 	if err != nil {
 		return result, err
 	}
-	if !dirExists {
-		if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-			return result, fmt.Errorf("enterprise hooks: create %s: %w", dir, err)
-		}
-		if dirExists, err = validateCodexRequirementsPinDir(dir); err != nil {
-			return result, err
-		} else if !dirExists {
-			return result, fmt.Errorf("enterprise hooks: %s disappeared after creation", dir)
-		}
-	}
 	err = withCodexRequirementsPinDirLock(dir, func() error {
+		if err := ensureCodexRequirementsPinDirTraversable(dir, path, dirInfo); err != nil {
+			return err
+		}
 		raw, info, exists, err := readCodexRequirementsPinFile(path)
 		if err != nil {
 			return err
@@ -114,16 +119,21 @@ func EnsureCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 			return fmt.Errorf("enterprise hooks: %s: %w", path, err)
 		}
 		result.State = state
-		if !changed {
-			return nil
-		}
 		mode := os.FileMode(0o644)
 		gid := -1
 		if exists {
+			// The administrator's mode and group are kept, so they must already
+			// let Codex, running as the signed-in user, read the file.
+			if err := requireCodexRequirementsPinFileReadable(path, info); err != nil {
+				return err
+			}
 			mode = info.Mode().Perm()
 			if st, ok := info.Sys().(*syscall.Stat_t); ok {
 				gid = int(st.Gid)
 			}
+		}
+		if !changed {
+			return nil
 		}
 		if err := writeCodexRequirementsPinFile(path, rendered, mode, gid); err != nil {
 			return err
@@ -145,8 +155,8 @@ func RemoveCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 		return result, err
 	}
 	dir := filepath.Dir(path)
-	dirExists, err := validateCodexRequirementsPinDir(dir)
-	if err != nil || !dirExists {
+	dirInfo, err := validateCodexRequirementsPinDir(dir)
+	if err != nil || dirInfo == nil {
 		return result, err
 	}
 	err = withCodexRequirementsPinDirLock(dir, func() error {
@@ -195,30 +205,145 @@ func requireCodexRequirementsPinWriter() error {
 
 // validateCodexRequirementsPinDir requires a real directory owned by the
 // requirements owner that group and other cannot write, below trusted
-// ancestors. A missing directory is reported, not created.
-func validateCodexRequirementsPinDir(dir string) (bool, error) {
+// ancestors. A missing directory is reported as a nil FileInfo, not created.
+func validateCodexRequirementsPinDir(dir string) (os.FileInfo, error) {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := codexRequirementsPinAncestorTrust(filepath.Dir(dir)); err != nil {
-			return false, fmt.Errorf("enterprise hooks: untrusted Codex requirements parent: %w", err)
+			return nil, fmt.Errorf("enterprise hooks: untrusted Codex requirements parent: %w", err)
 		}
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("enterprise hooks: inspect %s: %w", dir, err)
+		return nil, fmt.Errorf("enterprise hooks: inspect %s: %w", dir, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return false, fmt.Errorf("enterprise hooks: %s is not a regular directory", dir)
+		return nil, fmt.Errorf("enterprise hooks: %s is not a regular directory", dir)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return false, fmt.Errorf("enterprise hooks: %s is writable by group or other (%04o)", dir, info.Mode().Perm())
+		return nil, fmt.Errorf("enterprise hooks: %s is writable by group or other (%04o)", dir, info.Mode().Perm())
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || int(st.Uid) != codexRequirementsPinOwnerUID {
-		return false, fmt.Errorf("enterprise hooks: %s is not owned by uid %d", dir, codexRequirementsPinOwnerUID)
+		return nil, fmt.Errorf("enterprise hooks: %s is not owned by uid %d", dir, codexRequirementsPinOwnerUID)
 	}
 	if err := codexRequirementsPinAncestorTrust(filepath.Dir(dir)); err != nil {
-		return false, fmt.Errorf("enterprise hooks: untrusted Codex requirements parent: %w", err)
+		return nil, fmt.Errorf("enterprise hooks: untrusted Codex requirements parent: %w", err)
+	}
+	return info, nil
+}
+
+// prepareCodexRequirementsPinDir validates the requirements directory and
+// creates it as 0755 when it is missing. The mode is set explicitly because
+// Mkdir honors the process umask, and the launchd hook guardian runs with
+// umask 077: a 0700 directory would keep Codex, which runs as the signed-in
+// user, from reading the requirements.
+func prepareCodexRequirementsPinDir(dir string) (os.FileInfo, error) {
+	info, err := validateCodexRequirementsPinDir(dir)
+	if err != nil || info != nil {
+		return info, err
+	}
+	if err := os.Mkdir(dir, 0o755); err == nil {
+		if err := os.Chmod(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("enterprise hooks: set mode on %s: %w", dir, err)
+		}
+	} else if !errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf("enterprise hooks: create %s: %w", dir, err)
+	}
+	info, err = validateCodexRequirementsPinDir(dir)
+	if err == nil && info == nil {
+		err = fmt.Errorf("enterprise hooks: %s disappeared after creation", dir)
+	}
+	return info, err
+}
+
+// codexRequirementsPinUsersCan reports whether users other than the owner get
+// the other permission bit, or the group bit through a group other than
+// root's (wheel on macOS), which no standard user belongs to.
+func codexRequirementsPinUsersCan(info os.FileInfo, other, group os.FileMode) bool {
+	perm := info.Mode().Perm()
+	if perm&other != 0 {
+		return true
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Gid != 0 && perm&group != 0
+}
+
+// requireCodexRequirementsPinReadable fails when Codex, running as the
+// signed-in user, could not traverse the directory or read the file, so the
+// pin would have no effect.
+func requireCodexRequirementsPinReadable(dir string, dirInfo os.FileInfo, path string, info os.FileInfo) error {
+	if !codexRequirementsPinUsersCan(dirInfo, 0o001, 0o010) {
+		return fmt.Errorf(
+			"enterprise hooks: users cannot traverse %s (%04o), so Codex, which runs as the signed-in user, cannot read %s; make the directory traversable, for example mode 0755",
+			dir, dirInfo.Mode().Perm(), path,
+		)
+	}
+	if info == nil {
+		return nil
+	}
+	return requireCodexRequirementsPinFileReadable(path, info)
+}
+
+func requireCodexRequirementsPinFileReadable(path string, info os.FileInfo) error {
+	if !codexRequirementsPinUsersCan(info, 0o004, 0o040) {
+		return fmt.Errorf(
+			"enterprise hooks: users cannot read %s (%04o), so Codex, which runs as the signed-in user, ignores its hooks pin; make the file readable, for example mode 0644",
+			path, info.Mode().Perm(),
+		)
+	}
+	return nil
+}
+
+// ensureCodexRequirementsPinDirTraversable makes sure Codex can reach the
+// requirements file. A directory users cannot traverse is repaired to 0755
+// only when it holds nothing but DefenseClaw's own requirements (as an
+// earlier build left it when it created the directory under umask 077);
+// otherwise the directory is the administrator's and the pin fails with
+// guidance instead of changing its mode.
+func ensureCodexRequirementsPinDirTraversable(dir, path string, dirInfo os.FileInfo) error {
+	if codexRequirementsPinUsersCan(dirInfo, 0o001, 0o010) {
+		return nil
+	}
+	owned, err := codexRequirementsPinDirHoldsOnlyDefenseClaw(dir, path)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return requireCodexRequirementsPinReadable(dir, dirInfo, path, nil)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return fmt.Errorf("enterprise hooks: set mode on %s: %w", dir, err)
+	}
+	return nil
+}
+
+// codexRequirementsPinDirHoldsOnlyDefenseClaw reports whether dir contains
+// nothing but a requirements file DefenseClaw created (only its own pin) and
+// DefenseClaw staging files.
+func codexRequirementsPinDirHoldsOnlyDefenseClaw(dir, path string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: list %s: %w", dir, err)
+	}
+	for _, entry := range entries {
+		switch name := entry.Name(); {
+		case strings.HasPrefix(name, codexRequirementsPinTempPrefix):
+			continue
+		case name == filepath.Base(path):
+			raw, _, exists, err := readCodexRequirementsPinFile(path)
+			if err != nil {
+				return false, err
+			}
+			if !exists {
+				continue
+			}
+			if _, removeFile, changed, err := removeCodexRequirementsPin(raw); err != nil || !changed || !removeFile {
+				return false, nil
+			}
+		default:
+			return false, nil
+		}
 	}
 	return true, nil
 }
@@ -283,7 +408,7 @@ func validateCodexRequirementsPinFileInfo(path string, info os.FileInfo) error {
 // in the same trusted directory, keeping the previous mode and group.
 func writeCodexRequirementsPinFile(path string, data []byte, mode os.FileMode, gid int) error {
 	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, ".requirements.toml.defenseclaw-*")
+	temp, err := os.CreateTemp(dir, codexRequirementsPinTempPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: stage %s: %w", path, err)
 	}

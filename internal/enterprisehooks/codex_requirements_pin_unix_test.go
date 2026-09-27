@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -87,10 +88,10 @@ func TestCodexRequirementsPinFileMergePreservesAdministratorFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := []byte("# fleet\nallowed_sandbox_modes = [\"read-only\"]\n\n[features]\nweb_search = true\n")
-	if err := os.WriteFile(path, original, 0o640); err != nil {
+	if err := os.WriteFile(path, original, 0o444); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o640); err != nil {
+	if err := os.Chmod(path, 0o444); err != nil {
 		t.Fatal(err)
 	}
 	result, err := EnsureCodexRequirementsHooksPin()
@@ -104,7 +105,7 @@ func TestCodexRequirementsPinFileMergePreservesAdministratorFile(t *testing.T) {
 	if !bytes.Contains(merged, []byte("[features]\nhooks = true "+codexRequirementsPinLineMarker+"\nweb_search = true\n")) {
 		t.Fatalf("pin was not merged into the administrator [features] table:\n%s", merged)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o640 {
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o444 {
 		t.Fatalf("merge changed the administrator file mode: %v, %v", info, err)
 	}
 	result, err = RemoveCodexRequirementsHooksPin()
@@ -242,5 +243,126 @@ func TestCodexRequirementsPinDefaultPathHasTrustedAncestors(t *testing.T) {
 	}
 	if path != "/etc/codex/requirements.toml" {
 		t.Fatalf("requirements path = %q", path)
+	}
+}
+
+func codexPinTestMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}
+
+// The launchd hook guardian runs with umask 077. The directory and file it
+// creates must still let Codex, which runs as the signed-in user, read the pin.
+func TestCodexRequirementsPinCreatesReadableRequirementsUnderGuardianUmask(t *testing.T) {
+	dir, path := codexPinTestLayout(t)
+	previous := syscall.Umask(0o077)
+	result, err := EnsureCodexRequirementsHooksPin()
+	syscall.Umask(previous)
+	if err != nil || !result.Changed || result.State != CodexRequirementsPinOwned {
+		t.Fatalf("ensure under umask 077 = %+v, %v", result, err)
+	}
+	for target, want := range map[string]os.FileMode{dir: 0o755, path: 0o644} {
+		if got := codexPinTestMode(t, target); got != want {
+			t.Fatalf("%s mode = %04o, want %04o so Codex running as the user can read the pin", target, got, want)
+		}
+	}
+	if result, err := InspectCodexRequirementsHooksPin(); err != nil || result.State != CodexRequirementsPinOwned {
+		t.Fatalf("inspect = %+v, %v", result, err)
+	}
+}
+
+// An earlier build created the directory as 0700. Ensure repairs a directory
+// that holds only DefenseClaw's own requirements, and Inspect reports the
+// unreadable pin until then.
+func TestCodexRequirementsPinRepairsItsOwnUntraversableDirectory(t *testing.T) {
+	dir, path := codexPinTestLayout(t)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owned, _, err := renderCodexRequirementsPin(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, owned, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectCodexRequirementsHooksPin(); err == nil || !strings.Contains(err.Error(), "cannot traverse") {
+		t.Fatalf("inspect of a pin in a 0700 directory = %v, want the traverse error", err)
+	}
+	if result, err := EnsureCodexRequirementsHooksPin(); err != nil || result.State != CodexRequirementsPinOwned {
+		t.Fatalf("ensure = %+v, %v", result, err)
+	}
+	if got := codexPinTestMode(t, dir); got != 0o755 {
+		t.Fatalf("DefenseClaw directory mode = %04o, want it repaired to 0755", got)
+	}
+	if _, err := InspectCodexRequirementsHooksPin(); err != nil {
+		t.Fatalf("inspect after repair: %v", err)
+	}
+
+	// The empty directory an earlier removal left behind is repaired too.
+	if _, err := RemoveCodexRequirementsHooksPin(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := EnsureCodexRequirementsHooksPin(); err != nil || !result.Changed {
+		t.Fatalf("ensure over an empty 0700 directory = %+v, %v", result, err)
+	}
+	if got := codexPinTestMode(t, dir); got != 0o755 {
+		t.Fatalf("empty DefenseClaw directory mode = %04o, want it repaired to 0755", got)
+	}
+}
+
+// Administrator requirements Codex cannot read are reported, not changed.
+func TestCodexRequirementsPinReportsRequirementsUsersCannotRead(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content  string
+		dirMode  os.FileMode
+		fileMode os.FileMode
+		inspect  bool
+	}{
+		"administrator pin in an untraversable directory":  {"[features]\nhooks = true\n", 0o700, 0o644, true},
+		"administrator file in an untraversable directory": {"[features]\nweb_search = true\n", 0o700, 0o644, false},
+		"unreadable administrator pin":                     {"[features]\nhooks = true\n", 0o755, 0o600, true},
+		"unreadable administrator file":                    {"[features]\nweb_search = true\n", 0o755, 0o600, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, path := codexPinTestLayout(t)
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, tc.fileMode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, tc.dirMode); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := EnsureCodexRequirementsHooksPin(); err == nil || !strings.Contains(err.Error(), "users cannot") {
+				t.Fatalf("ensure = %v, want the users-cannot-read error", err)
+			}
+			if _, err := InspectCodexRequirementsHooksPin(); (err != nil) != tc.inspect {
+				t.Fatalf("inspect error = %v, want error %t", err, tc.inspect)
+			}
+			if got := codexPinTestMode(t, dir); got != tc.dirMode {
+				t.Fatalf("administrator directory mode changed to %04o", got)
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != tc.content {
+				t.Fatalf("administrator requirements changed: %q, %v", data, err)
+			}
+		})
 	}
 }
