@@ -459,6 +459,14 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		// re-rendered on the next pass.
 		ForeignHookGuardBinary: standaloneForeignHookGuardBinary(enterpriseHookConnector),
 	}
+	// A single-target install renders the shared machine policy from the
+	// same deployment contract the guardian uses, so the next reconcile does
+	// not rewrite the body back.
+	machineContract, err := enterpriseHookInstallMachinePolicyContract(enterpriseHookConnector)
+	if err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
+	opts.MachinePolicyContractID = machineContract
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
@@ -1295,6 +1303,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		}
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
+	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -1367,6 +1376,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 			}
+			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
 			result, targetErr = enterprisehooks.Verify(ctx, opts)
 			if targetErr == nil {
@@ -1606,6 +1616,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
+	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -1683,7 +1694,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 				// Standalone Amp and OpenCode only; empty on Secure Client.
-				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
+				ForeignHookGuardBinary:  standaloneForeignHookGuardBinary(target.Connector),
+				MachinePolicyContractID: enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
 			}
 			if err == nil {
 				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
@@ -3277,4 +3289,13 @@ func intPtrValue(p *int) int {
 		return -1
 	}
 	return *p
+}
+
+// enterpriseHookMachinePolicyContractFor applies the deployment-wide
+// machine-policy contract to Claude rows only.
+func enterpriseHookMachinePolicyContractFor(connectorName, claudeMachineContract string) string {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "claudecode") {
+		return claudeMachineContract
+	}
+	return ""
 }

@@ -1823,6 +1823,17 @@ func managedPluginForeignHookGuardMarker(opts SetupOpts, declaration, terminator
 	return []byte(declaration + `"` + javaScriptStringContent(binary) + `"` + terminator)
 }
 
+// managedPluginInstallMarker returns the install marker an in-agent plugin
+// checks before failing closed, or "" when unused. Only a managed install
+// with an absolute marker renders one.
+func managedPluginInstallMarker(opts SetupOpts) string {
+	marker := strings.TrimSpace(opts.ManagedInstallMarker)
+	if !opts.ManagedEnterprise || marker == "" || !filepath.IsAbs(marker) {
+		return ""
+	}
+	return filepath.Clean(marker)
+}
+
 // setupPluginArtifact renders the embedded bridge-plugin template
 // (APIAddr / stable token-sidecar path / FailMode substituted) and writes it
 // to the host agent's auto-load plugin directory at 0o600. The scoped token is
@@ -1855,6 +1866,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		HookSocketJS:       javaScriptStringContent(hookSocket),
 		ServiceUID:         serviceUID,
 		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
+		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
 		FailMode:           failMode,
 		Managed:            opts.ManagedEnterprise,
 	})

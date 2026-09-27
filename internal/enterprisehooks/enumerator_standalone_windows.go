@@ -60,9 +60,13 @@ func applyStandaloneRowState(row *ManifestTarget, previous map[string]ManifestTa
 		return false
 	}
 	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
-		if ok, reason := windowsStandalonePerUserAdmission(row.UserHome, row.Connector, prev.AgentVersion); !ok {
-			logfSafely(logf, row.SID, fmt.Sprintf("(SID, %s) row dropped: %s", row.Connector, reason))
-			return false
+		// A disabled row is an administrator decision the guardian never
+		// installs; keep it so rediscovery cannot re-enable it.
+		if prev.IsEnabled() {
+			if ok, reason := windowsStandaloneRowAdmission(row.UserHome, row.Connector, prev.AgentVersion); !ok {
+				logfSafely(logf, row.SID, fmt.Sprintf("(SID, %s) row dropped: %s", row.Connector, reason))
+				return false
+			}
 		}
 		return applyPreviousRowState(row, previous, logf)
 	}
@@ -80,7 +84,7 @@ func applyStandaloneRowState(row *ManifestTarget, previous map[string]ManifestTa
 			return false
 		}
 	}
-	if ok, reason := windowsStandalonePerUserAdmission(row.UserHome, row.Connector, version); !ok {
+	if ok, reason := windowsStandaloneRowAdmission(row.UserHome, row.Connector, version); !ok {
 		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
 		return false
 	}

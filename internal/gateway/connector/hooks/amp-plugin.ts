@@ -37,6 +37,13 @@ const DC_SERVICE_UID = Number("{{.ServiceUID}}")
 // DefenseClaw checks it, since Amp does not order sibling handlers). Empty
 // skips the check (per-user installs).
 const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"
+// Windows standalone installs name an administrator-owned directory that
+// exists exactly while the deployment is installed. Uninstall removes it but
+// cannot remove this plugin from a signed-out user's profile, so once the
+// gateway is unreachable or the credential is gone AND the marker is gone,
+// the deployment was uninstalled and this plugin stops failing closed. A
+// standard user cannot remove the marker. Empty keeps the fail mode.
+const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
@@ -174,11 +181,18 @@ function assistantResponse(messages: ThreadMessage[]): string {
 // runForeignHookCheck asks the administrator-owned hook binary for the
 // foreign-hook guard's decision and resolves to a block reason, or "" when
 // no unapproved plugin or hook is present. A binary that cannot be run,
-// times out, or answers anything but {"deny": false} blocks.
+// times out, or answers anything but {"deny": false} blocks, unless the
+// managed deployment was uninstalled (its install marker is gone): uninstall
+// removes the hook binary too, and this plugin then stops failing closed as
+// it does for the gateway call.
 function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 	if (!DC_FOREIGN_GUARD) return Promise.resolve("")
 	return new Promise(resolve => {
-		const fail = (why: string) => resolve(`DefenseClaw could not check for unapproved plugins (${why}), so this tool call is blocked.`)
+		const fail = (why: string) => {
+			void deploymentRemoved().then(removed => resolve(removed
+				? ""
+				: `DefenseClaw could not check for unapproved plugins (${why}), so this tool call is blocked.`))
+		}
 		try {
 			const child = execFile(
 				DC_FOREIGN_GUARD,
@@ -211,6 +225,17 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 			fail(safeError(error))
 		}
 	})
+// deploymentRemoved reports whether the managed deployment that rendered this
+// plugin was uninstalled: its install marker is definitively absent. Any
+// other inspection result keeps the plugin enforcing.
+async function deploymentRemoved(): Promise<boolean> {
+	if (!DC_INSTALL_MARKER) return false
+	try {
+		await lstat(DC_INSTALL_MARKER)
+		return false
+	} catch (error) {
+		return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT"
+	}
 }
 
 function failureResponse(reason: string): GatewayResponse {
@@ -361,7 +386,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			token = DC_HOOK_SOCKET ? "" : await scopedHookToken()
 		} catch {
 			// Credential failures are categorically unsafe at the two Amp policy
-			// boundaries, regardless of the operator's transport fail mode.
+			// boundaries, regardless of the operator's transport fail mode,
+			// unless the managed deployment itself was uninstalled.
+			if (await deploymentRemoved()) return { action: "allow" }
 			if (actionable) {
 				return { action: "block", reason: "DefenseClaw hook credential is unavailable." }
 			}
@@ -392,6 +419,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 			return data
 		} catch (error) {
+			if (await deploymentRemoved()) return { action: "allow" }
 			return failureResponse(safeError(error))
 		} finally {
 			clearTimeout(timer)

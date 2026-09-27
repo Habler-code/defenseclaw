@@ -574,6 +574,18 @@ func RemoveWindowsPerUserManagedEnrollments(hookExecutable string, connectors []
 		if hookBinary, ok := windowsStandalonePerUserConnector(name); !ok || !hookBinary {
 			continue
 		}
+		// A connector that never ran has no directory, so it has no
+		// enrollment to revoke. Removal must not create the directory and its
+		// lock file on a host that is being cleaned.
+		directory, err := windowsPerUserManagedRuntimeDir(name)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("enterprise hooks: inspect %s enrollment directory: %w", name, err)
+		}
 		if err := updateWindowsPerUserManagedEnrollment(
 			name,
 			hookExecutable,

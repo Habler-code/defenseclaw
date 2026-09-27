@@ -96,11 +96,12 @@ var enterpriseHookWindowsForeignCleanupInterval = 5 * time.Minute
 var enterpriseHookWindowsGuardianOptions = windowsStandaloneGuardianOptions
 
 // enterpriseHookWindowsEligibleProfiles lists the profiles enrollment admits
-// (include_users, exclude_users and exempt_users, as the enumerator applies
-// them), so users without a per-user manifest row are cleaned too.
+// (exclude_users and exempt_users, as the enumerator applies them;
+// include_users is additive), so users without a per-user manifest row are
+// cleaned too.
 var enterpriseHookWindowsEligibleProfiles = func(ctx context.Context) ([]enterprisehooks.TargetCredentials, error) {
 	opts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{})
-	return enterprisehooks.WindowsStandaloneEligibleProfiles(ctx, opts.IncludeUsers, opts.ExcludeUsers)
+	return enterprisehooks.WindowsStandaloneEligibleProfiles(ctx, opts.ExcludeUsers, opts.ExemptUsers)
 }
 
 // enterpriseHookStandalonePlatformFinish removes unapproved foreign hooks

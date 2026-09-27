@@ -70,3 +70,15 @@ func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) er
 	}
 	return err
 }
+
+// enterpriseHookMachinePolicyContract is Windows-only: Unix machine policy
+// is not rendered per row.
+func enterpriseHookMachinePolicyContract(enterprisehooks.Manifest) string {
+	return ""
+}
+
+// enterpriseHookInstallMachinePolicyContract is Windows-only, like
+// enterpriseHookMachinePolicyContract.
+func enterpriseHookInstallMachinePolicyContract(string) (string, error) {
+	return "", nil
+}

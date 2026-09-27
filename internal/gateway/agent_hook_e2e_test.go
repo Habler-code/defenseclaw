@@ -61,6 +61,10 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		topLevelOutput  string // expected top-level JSON output key
 		expectAction    string
 		additionalAttrs map[string]string
+		// name distinguishes a second wire shape for the same connector.
+		name string
+		// argMetadata is merged into the Antigravity tool arguments.
+		argMetadata map[string]interface{}
 	}
 
 	shapes := []wireShape{
@@ -121,6 +125,21 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			expectAction:   "block",
 		},
 		{
+			// The live Antigravity CLI sends scheduling and status-line
+			// metadata beside CommandLine and Cwd.
+			name:           "antigravity-cli-metadata",
+			connector:      "antigravity",
+			event:          "PreToolUse",
+			toolName:       "run_command",
+			topLevelOutput: "hook_output",
+			expectAction:   "block",
+			argMetadata: map[string]interface{}{
+				"WaitMsBeforeAsync": 5000,
+				"toolAction":        "Running command",
+				"toolSummary":       "Run command",
+			},
+		},
+		{
 			connector:      "opencode",
 			event:          "tool.execute.before",
 			toolName:       "bash",
@@ -156,7 +175,11 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 
 	for _, sh := range shapes {
 		sh := sh
-		t.Run(sh.connector, func(t *testing.T) {
+		runName := sh.connector
+		if sh.name != "" {
+			runName = sh.name
+		}
+		t.Run(runName, func(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = sh.connector
@@ -180,16 +203,20 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				if runtime.GOOS == "windows" {
 					command, cwd = `Remove-Item -Recurse -Force C:\`, `C:\workspace`
 				}
+				args := map[string]interface{}{
+					"Cwd":         cwd,
+					"CommandLine": command,
+				}
+				for key, value := range sh.argMetadata {
+					args[key] = value
+				}
 				requestPayload = map[string]interface{}{
 					"conversationId": "session-antigravity",
 					"stepIdx":        1,
 					"workspacePaths": []string{cwd},
 					"toolCall": map[string]interface{}{
 						"name": sh.toolName,
-						"args": map[string]interface{}{
-							"Cwd":         cwd,
-							"CommandLine": command,
-						},
+						"args": args,
 					},
 				}
 			}

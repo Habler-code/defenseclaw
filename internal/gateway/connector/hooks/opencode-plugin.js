@@ -40,6 +40,13 @@ const DC_SERVICE_UID = Number("{{.ServiceUID}}");
 // (unapproved project or user plugins that could change a tool call after
 // DefenseClaw checks it). Empty skips the check (per-user installs).
 const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";
+// Windows standalone installs name an administrator-owned directory that
+// exists exactly while the deployment is installed. Uninstall removes it but
+// cannot remove this plugin from a signed-out user's profile, so once the
+// gateway is unreachable or the credential is gone AND the marker is gone,
+// the deployment was uninstalled and this plugin stops failing closed. A
+// standard user cannot remove the marker. Empty keeps the fail mode.
+const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -150,6 +157,19 @@ function defenseclawResolveMCPServer(toolName) {
   return { status: "authoritative", name: candidates[0].name };
 }
 
+// defenseclawDeploymentRemoved reports whether the managed deployment that
+// rendered this plugin was uninstalled: its install marker is definitively
+// absent. Any other inspection result keeps the plugin enforcing.
+async function defenseclawDeploymentRemoved() {
+  if (!DC_INSTALL_MARKER) return false;
+  try {
+    await lstat(DC_INSTALL_MARKER);
+    return false;
+  } catch (err) {
+    return !!err && err.code === "ENOENT";
+  }
+}
+
 async function defenseclawToken() {
   const file = await open(DC_TOKEN_FILE, "r");
   try {
@@ -235,11 +255,18 @@ async function defenseclawFetch(path, init) {
 // defenseclawForeignHookCheck asks the administrator-owned hook binary for
 // the foreign-hook guard's decision and resolves to a block reason, or ""
 // when no unapproved plugin or hook is present. A binary that cannot be
-// run, times out, or answers anything but {"deny": false} blocks.
+// run, times out, or answers anything but {"deny": false} blocks, unless
+// the managed deployment was uninstalled (its install marker is gone):
+// uninstall removes the hook binary too, and this plugin then stops failing
+// closed as it does for the gateway call.
 function defenseclawForeignHookCheck(event, cwd) {
   if (!DC_FOREIGN_GUARD) return Promise.resolve("");
   return new Promise((resolve) => {
-    const fail = (why) => resolve("DefenseClaw could not check for unapproved plugins (" + why + "), so this tool call is blocked.");
+    const fail = (why) => {
+      void defenseclawDeploymentRemoved().then((removed) => resolve(removed
+        ? ""
+        : "DefenseClaw could not check for unapproved plugins (" + why + "), so this tool call is blocked."));
+    };
     try {
       const child = execFile(
         DC_FOREIGN_GUARD,
@@ -282,7 +309,9 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
   } catch (_) {
     // Missing, unreadable, or malformed credentials are never safe at a
-    // pre-execution boundary, even when transport fail-open was selected.
+    // pre-execution boundary, even when transport fail-open was selected,
+    // unless the managed deployment itself was uninstalled.
+    if (await defenseclawDeploymentRemoved()) return null;
     if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
     return null;
   }
@@ -332,7 +361,8 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     return { reason: "", mode: data && data.mode || "" };
   } catch (err) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
-    // closed → block, open → allow.
+    // closed → block, open → allow. An uninstalled deployment allows.
+    if (await defenseclawDeploymentRemoved()) return null;
     if (DC_FAIL_MODE === "closed") {
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }

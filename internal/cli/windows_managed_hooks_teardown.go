@@ -1079,6 +1079,12 @@ func finalizeWindowsManagedHooksTeardown(
 		}
 		collected += removed
 	}
+	// Standalone: the per-user connector directories and the hook runtime
+	// root hold only lock files by now (verification proved enrollments,
+	// selectors and the summary gone), so an uninstall leaves none behind.
+	if _, err := enterprisehooks.RemoveWindowsStandaloneHookRuntimeDirectories(); err != nil {
+		return collected, fmt.Errorf("finalize standalone hook runtime directories: %w", err)
+	}
 	journal.Phase = "finalized"
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
 		return collected, err

@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -93,12 +94,29 @@ type EnumerateOptions struct {
 	// silences all diagnostics.
 	Logger EnumerationLogger
 
-	// IncludeUsers and ExcludeUsers filter profiles by account name
-	// (user or DOMAIN\user), SID, or profile directory name, compared
-	// case-insensitively. An empty IncludeUsers admits every profile. The
-	// standalone profile maps enterprise.enrollment onto these.
+	// IncludeUsers, ExcludeUsers and ExemptUsers carry
+	// enterprise.enrollment for the standalone profile. Entries match a
+	// profile by SID, profile directory name, or account name (user or
+	// DOMAIN\user), case-insensitively; exclusion wins.
+	//
+	// IncludeUsers is additive, as on Linux and macOS: it never excludes
+	// anyone. Every interactive profile in ProfileList is already a
+	// candidate on Windows, so it adds no filtering here.
+	//
+	// ExcludeUsers drops the profile's rows. ExemptUsers keeps the rows of
+	// the machine-policy connectors (claudecode, codex, cursor, copilot),
+	// whose hooks fail closed for an unregistered SID, so an exempt user is
+	// still inspected and logged there; the per-user connectors that write
+	// into the user's own agent configs get no new rows, and rows already
+	// enrolled are kept so their registration is not left to fail closed.
+	//
+	// A name-form entry needs the account name. When LookupAccountSid fails
+	// (for example a domain controller outage), the profile's existing rows
+	// are kept unchanged and no new rows are added; a lookup failure never
+	// revokes a user.
 	IncludeUsers []string
 	ExcludeUsers []string
+	ExemptUsers  []string
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -201,6 +219,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		return Manifest{}, err
 	}
 
+	lookupAccount := newWindowsEnrollmentAccountLookup()
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
@@ -215,11 +234,26 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
 			continue
 		}
-		if !windowsProfileAdmittedByEnrollment(profile, opts.IncludeUsers, opts.ExcludeUsers) {
-			logfSafely(opts.Logger, profile.SID, "excluded by enterprise.enrollment")
+		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
+		if decision == windowsEnrollmentExcluded {
+			logfSafely(opts.Logger, profile.SID, reason)
 			continue
 		}
+		if decision != windowsEnrollmentEnrolled {
+			logfSafely(opts.Logger, profile.SID, reason)
+		}
 		for _, conn := range connectors {
+			_, known := previous[previousManifestKey(profile.SID, conn)]
+			// An exempt user gets no new per-user connector rows, but keeps the
+			// ones already enrolled: dropping them would revoke the SID while
+			// its hook registration stays in the user's own agent config and
+			// fails closed as unregistered.
+			if decision == windowsEnrollmentExempt && !windowsStandaloneMachinePolicyConnector(conn) && !known {
+				continue
+			}
+			if decision == windowsEnrollmentUndecided && !known {
+				continue
+			}
 			dataDir := filepath.Join(filepath.Clean(profile.Home), ".defenseclaw")
 			row := ManifestTarget{
 				SID:       profile.SID,
@@ -505,44 +539,158 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	return true
 }
 
-// windowsProfileAdmittedByEnrollment applies enterprise.enrollment's user
-// filters to one profile. Exclusion wins over inclusion.
-func windowsProfileAdmittedByEnrollment(profile windowsUserProfile, include, exclude []string) bool {
-	if len(include) == 0 && len(exclude) == 0 {
+// windowsEnrollmentDecision is enterprise.enrollment's verdict for one
+// profile.
+type windowsEnrollmentDecision int
+
+const (
+	windowsEnrollmentEnrolled windowsEnrollmentDecision = iota
+	windowsEnrollmentExcluded
+	windowsEnrollmentExempt
+	// windowsEnrollmentUndecided means a name-form entry could not be
+	// evaluated because the account name did not resolve: keep the
+	// profile's existing rows, add none.
+	windowsEnrollmentUndecided
+)
+
+// windowsStandaloneMachinePolicyConnector reports whether a connector's hook
+// is machine policy on Windows, where an unregistered SID fails closed. An
+// exempt user keeps these rows so they are inspected rather than blocked.
+func windowsStandaloneMachinePolicyConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claudecode", "codex", "cursor", "copilot":
 		return true
-	}
-	names := windowsProfileEnrollmentNames(profile)
-	matches := func(list []string) bool {
-		for _, entry := range list {
-			entry = strings.TrimSpace(entry)
-			if entry == "" {
-				continue
-			}
-			for _, name := range names {
-				if strings.EqualFold(entry, name) {
-					return true
-				}
-			}
-		}
+	default:
 		return false
 	}
-	if matches(exclude) {
-		return false
-	}
-	return len(include) == 0 || matches(include)
 }
 
-func windowsProfileEnrollmentNames(profile windowsUserProfile) []string {
+// windowsEnrollmentAccountLookup resolves a profile SID to its account and
+// domain names.
+type windowsEnrollmentAccountLookup func(sid string) (account, domain string, err error)
+
+var (
+	// windowsEnrollmentLookupAccountSID is the LookupAccountSid seam.
+	windowsEnrollmentLookupAccountSID = func(sid string) (string, string, error) {
+		parsed, err := windows.StringToSid(sid)
+		if err != nil {
+			return "", "", err
+		}
+		account, domain, _, err := parsed.LookupAccount("")
+		return account, domain, err
+	}
+	// windowsEnrollmentLookupTimeout bounds one lookup, and
+	// windowsEnrollmentLookupBudget all lookups of one cycle, so an
+	// unreachable domain controller cannot stall the enumerator cycle.
+	windowsEnrollmentLookupTimeout = 3 * time.Second
+	windowsEnrollmentLookupBudget  = 15 * time.Second
+)
+
+// newWindowsEnrollmentAccountLookup returns one cycle's bounded lookup. The
+// budget counts only time spent waiting on lookups, not the profile probing
+// between them, so a slow host does not starve later profiles of a lookup a
+// healthy domain controller would answer. Once the budget is spent, further
+// lookups fail at once and their profiles keep their existing rows.
+func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
+	var spent time.Duration
+	return func(sid string) (string, string, error) {
+		remaining := windowsEnrollmentLookupBudget - spent
+		if remaining <= 0 {
+			return "", "", errors.New("account name lookup budget for this cycle is exhausted")
+		}
+		if remaining > windowsEnrollmentLookupTimeout {
+			remaining = windowsEnrollmentLookupTimeout
+		}
+		started := time.Now()
+		defer func() { spent += time.Since(started) }()
+		type result struct {
+			account, domain string
+			err             error
+		}
+		done := make(chan result, 1)
+		lookup := windowsEnrollmentLookupAccountSID
+		go func() {
+			account, domain, err := lookup(sid)
+			done <- result{account, domain, err}
+		}()
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case r := <-done:
+			if r.err == nil && strings.TrimSpace(r.account) == "" {
+				r.err = errors.New("account name lookup returned no name")
+			}
+			return r.account, r.domain, r.err
+		case <-timer.C:
+			return "", "", errors.New("account name lookup timed out")
+		}
+	}
+}
+
+// windowsProfileEnrollmentDecision applies enterprise.enrollment to one
+// profile. Exclusion wins over exemption. SID and profile-directory entries
+// are decided without a lookup; a name-form entry that did not already match
+// needs the account name, and a failed lookup leaves the profile undecided
+// instead of treating it as a non-match.
+func windowsProfileEnrollmentDecision(
+	profile windowsUserProfile,
+	exclude, exempt []string,
+	lookup windowsEnrollmentAccountLookup,
+) (windowsEnrollmentDecision, string) {
 	names := []string{profile.SID, filepath.Base(filepath.Clean(profile.Home))}
-	if sid, err := windows.StringToSid(profile.SID); err == nil {
-		if account, domain, _, err := sid.LookupAccount(""); err == nil && account != "" {
-			names = append(names, account)
-			if domain != "" {
-				names = append(names, domain+`\`+account)
+	if windowsEnrollmentListMatches(exclude, names) {
+		return windowsEnrollmentExcluded, "excluded by enterprise.enrollment.exclude_users"
+	}
+	if windowsEnrollmentListNeedsAccountName(exclude, names) || windowsEnrollmentListNeedsAccountName(exempt, names) {
+		account, domain, err := lookup(profile.SID)
+		if err != nil {
+			return windowsEnrollmentUndecided, fmt.Sprintf(
+				"account name lookup failed (%v); enterprise.enrollment names cannot be evaluated, keeping the existing rows unchanged",
+				err,
+			)
+		}
+		names = append(names, account)
+		if domain = strings.TrimSpace(domain); domain != "" {
+			names = append(names, domain+`\`+account)
+		}
+		if windowsEnrollmentListMatches(exclude, names) {
+			return windowsEnrollmentExcluded, "excluded by enterprise.enrollment.exclude_users"
+		}
+	}
+	if windowsEnrollmentListMatches(exempt, names) {
+		return windowsEnrollmentExempt, "exempt by enterprise.enrollment.exempt_users: machine-policy connectors only"
+	}
+	return windowsEnrollmentEnrolled, ""
+}
+
+func windowsEnrollmentListMatches(list, names []string) bool {
+	for _, entry := range list {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		for _, name := range names {
+			if strings.EqualFold(entry, strings.TrimSpace(name)) {
+				return true
 			}
 		}
 	}
-	return names
+	return false
+}
+
+// windowsEnrollmentListNeedsAccountName reports whether an entry that is not
+// a SID string matched none of the names known without a lookup.
+func windowsEnrollmentListNeedsAccountName(list, names []string) bool {
+	for _, entry := range list {
+		entry = strings.TrimSpace(entry)
+		if entry == "" || strings.HasPrefix(strings.ToUpper(entry), "S-1-") {
+			continue
+		}
+		if !windowsEnrollmentListMatches([]string{entry}, names) {
+			return true
+		}
+	}
+	return false
 }
 
 func previousManifestKey(sid, connector string) string {
@@ -569,11 +717,16 @@ type windowsUserProfile struct {
 }
 
 // WindowsStandaloneEligibleProfiles lists the interactive user profiles the
-// standalone profile's enrollment admits (the filters EnumerateWindows
-// applies), for guardian work that needs no per-user manifest row: a user
-// whose connectors are all machine policy still gets foreign hooks removed
-// from their user-level config.
-func WindowsStandaloneEligibleProfiles(ctx context.Context, include, exclude []string) ([]TargetCredentials, error) {
+// standalone profile's enrollment admits, for guardian work that needs no
+// per-user manifest row: a user whose connectors are all machine policy
+// still gets foreign hooks removed from their user-level config. It applies
+// the same decision EnumerateWindows does (windowsProfileEnrollmentDecision):
+// include_users is additive and filters nothing, excluded profiles are
+// skipped, and exempt profiles are kept because their machine-policy hooks
+// still run the foreign-hook guard. A profile whose name-form entries cannot
+// be evaluated (the account lookup failed) is skipped this pass, so a
+// directory outage never touches a user who may be excluded.
+func WindowsStandaloneEligibleProfiles(ctx context.Context, exclude, exempt []string) ([]TargetCredentials, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -581,9 +734,14 @@ func WindowsStandaloneEligibleProfiles(ctx context.Context, include, exclude []s
 	if err != nil {
 		return nil, err
 	}
+	lookupAccount := newWindowsEnrollmentAccountLookup()
 	out := make([]TargetCredentials, 0, len(profiles))
 	for _, profile := range profiles {
-		if !windowsProfileAdmittedByEnrollment(profile, include, exclude) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		decision, _ := windowsProfileEnrollmentDecision(profile, exclude, exempt, lookupAccount)
+		if decision != windowsEnrollmentEnrolled && decision != windowsEnrollmentExempt {
 			continue
 		}
 		out = append(out, TargetCredentials{UserHome: filepath.Clean(profile.Home), UID: -1, GID: -1, SID: profile.SID})

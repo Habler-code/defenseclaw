@@ -98,6 +98,30 @@ func windowsStandalonePlainExecutable(connectorName, candidate string) (string, 
 	return candidate, ""
 }
 
+// windowsStandaloneRowAdmission reports whether the guardian can manage one
+// standalone row. Every connector, machine-policy or per-user, needs a
+// version that resolves to a known hook contract: the lowest-contract floor
+// alone admits versions above a contract's upper bound, outside an
+// exact-version pin, or between bands, and those rows can never install. The
+// version must also clear the standalone floor, whose Windows platform
+// minimum can sit above a known contract's lower bound (Codex 0.131.0), since
+// install and verify refuse anything below it. A row that fails is skipped
+// with the returned reason, so one user's unsupported client fails closed for
+// that user instead of failing the reconcile, and withholding enrollment
+// publication, for everyone.
+func windowsStandaloneRowAdmission(profileHome, connectorName, version string) (bool, string) {
+	if resolution := connector.ResolveHookContract(connectorName, version); resolution.Status != connector.HookCompatibilityKnown {
+		return false, fmt.Sprintf("version %s is not verified against a known hook contract", version)
+	}
+	if minimum := windowsEnterpriseStandaloneAgentMinimum(connectorName); minimum != "" {
+		normalized := connector.NormalizeAgentVersion(connectorName, version)
+		if normalized == "" || compareWindowsEnterpriseVersion(normalized, minimum) < 0 {
+			return false, fmt.Sprintf("version %s is below the Windows enterprise minimum %s", version, minimum)
+		}
+	}
+	return windowsStandalonePerUserAdmission(profileHome, connectorName, version)
+}
+
 // windowsStandalonePerUserAdmission reports whether the guardian can manage a
 // per-user connector install for one user: the discovered version must have a
 // known hook contract and any protected executable must be present. Rows that

@@ -515,10 +515,14 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 			t.Fatal(err)
 		}
 	}
+	// Elevated runners assign BUILTIN\Administrators as the default owner;
+	// establish the target-owned precondition like the home above.
+	setWindowsTestPathExactOwner(t, trustedDir, targetSID)
 	if err := setWindowsUserPathProtection(trustedDir, targetSID, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{hookExe, gatewayExe} {
+		setWindowsTestPathExactOwner(t, path, targetSID)
 		if err := setWindowsUserPathProtection(path, targetSID, false); err != nil {
 			t.Fatal(err)
 		}

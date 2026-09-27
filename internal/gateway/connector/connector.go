@@ -109,6 +109,16 @@ type SetupOpts struct {
 	// plugins call the gateway directly and never run `defenseclaw hook`.
 	// Empty (per-user installs, Secure Client) keeps the plugin unchanged.
 	ForeignHookGuardBinary string
+	// ManagedInstallMarker is an administrator-owned directory that exists
+	// exactly while the managed deployment rendering an in-agent plugin
+	// (OpenCode, Amp) is installed; the Windows standalone guardian passes
+	// its hook runtime directory, which uninstall removes last. Uninstall
+	// cannot remove the plugin from a signed-out user's own profile, so when
+	// the gateway is unreachable or the credential is gone and this marker no
+	// longer exists, the plugin treats the deployment as uninstalled and
+	// stops failing closed. Ignored unless ManagedEnterprise is set and the
+	// path is absolute; empty keeps the fail mode unconditional.
+	ManagedInstallMarker string
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,

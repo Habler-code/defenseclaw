@@ -224,6 +224,21 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		return runEnterpriseWindowsEnumerateAuditCycle(cycleCtx, stderr, cfg, manifestPath, start)
 	}
 
+	if reason := standaloneWindowsEnumerateIdleReason(cfg); reason != "" {
+		fmt.Fprintf(stderr, "[hook-enumerator] cycle idle: %s\n", reason)
+		// The administrator's targets still need the gateway's inventory
+		// read access; the pass only adds that grant and never publishes.
+		if authored, loadErr := enterprisehooks.LoadManifest(manifestPath); loadErr == nil {
+			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", enumerationLoggerForStderr(stderr)); grantErr != nil {
+				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
+			}
+		}
+		return nil
+	}
+	for _, warning := range standaloneWindowsEnumerateWarnings(cfg) {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s\n", warning)
+	}
+
 	logf := enumerationLoggerForStderr(stderr)
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
@@ -504,15 +519,44 @@ func isEnterpriseWindowsEnumerateConfigMissing(err error) bool {
 }
 
 // standaloneWindowsEnumerateOptions adds the standalone profile's enrollment
-// filters to an enumeration: enterprise.enrollment's include, exclude and
-// exempt users select the profiles. Secure Client options are returned
-// unchanged.
+// filters to an enumeration: include_users is additive, exclude_users drops
+// a profile, and exempt_users keeps only its machine-policy rows so it is
+// inspected instead of failing closed as unregistered. Secure Client options
+// are returned unchanged.
 func standaloneWindowsEnumerateOptions(cfg *config.Config, opts enterprisehooks.EnumerateOptions) enterprisehooks.EnumerateOptions {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return opts
 	}
 	enrollment := cfg.Enterprise.Enrollment
 	opts.IncludeUsers = append([]string(nil), enrollment.IncludeUsers...)
-	opts.ExcludeUsers = append(append([]string(nil), enrollment.ExcludeUsers...), enrollment.ExemptUsers...)
+	opts.ExcludeUsers = append([]string(nil), enrollment.ExcludeUsers...)
+	opts.ExemptUsers = append([]string(nil), enrollment.ExemptUsers...)
 	return opts
+}
+
+// standaloneWindowsEnumerateIdleReason reports why a standalone enumerator
+// cycle must not publish: enterprise.enrollment.mode manifest hands
+// targets.yaml to the administrator, as on Linux and macOS.
+func standaloneWindowsEnumerateIdleReason(cfg *config.Config) string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+		return "enterprise.enrollment.mode is manifest; the administrator publishes targets"
+	}
+	return ""
+}
+
+// standaloneWindowsEnumerateWarnings lists enrollment settings the Windows
+// enumerator does not apply, so they are never ignored silently.
+func standaloneWindowsEnumerateWarnings(cfg *config.Config) []string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	enrollment := cfg.Enterprise.Enrollment
+	var warnings []string
+	if len(enrollment.IncludeGroups) != 0 || len(enrollment.ExcludeGroups) != 0 {
+		warnings = append(warnings, "enterprise.enrollment.include_groups and exclude_groups are not applied on Windows; select users with exclude_users")
+	}
+	return warnings
 }

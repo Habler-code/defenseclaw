@@ -53,6 +53,9 @@ type templateData struct {
 	// HookSocketJS is the standalone gateway's unix hook socket, escaped for a
 	// JavaScript double-quoted string; empty keeps the TCP transport.
 	HookSocketJS string
+	// InstallMarkerJS is the managed deployment's install marker, escaped for
+	// a JavaScript double-quoted string; empty when unused.
+	InstallMarkerJS string
 	// ServiceUID is the standalone gateway's service uid trusted as the
 	// hook socket owner (with root); 0 when unused.
 	ServiceUID int

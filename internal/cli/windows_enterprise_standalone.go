@@ -95,6 +95,9 @@ var (
 	// no-op.
 	windowsEnterpriseStandaloneFootprint = windowsEnterpriseStandaloneFootprintPresent
 	windowsEnterpriseEnsureDriftDetector = windowsEnterpriseEnsureDrift
+	// windowsEnterpriseEnsureConfigLoader reads the standalone config ensure
+	// enumerates the first guardian manifest from.
+	windowsEnterpriseEnsureConfigLoader = config.LoadFromFile
 
 	windowsEnterpriseMessageCodePattern = regexp.MustCompile(`^([a-z][a-z0-9_]{2,63}):\s`)
 )
@@ -798,7 +801,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if plan.Action == "install" && strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
 		manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, cmd, actionOpts.configPath)
 		if err != nil {
-			result.AddError("manifest_staging_failed", err.Error())
+			result.AddError(windowsEnterpriseEnsureStagingErrorCode(err), err.Error())
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		cleanupManifest = cleanup
@@ -832,7 +835,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		if strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
 			manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, cmd, actionOpts.configPath)
 			if err != nil {
-				result.AddError("manifest_staging_failed", err.Error())
+				result.AddError(windowsEnterpriseEnsureStagingErrorCode(err), err.Error())
 				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 			}
 			defer cleanup()
@@ -1138,6 +1141,22 @@ func parseWindowsEnterpriseVersion(value string) ([]int, string, bool) {
 	return parsed, prerelease, true
 }
 
+// errWindowsEnterpriseEnsureManifestRequired refuses a first install that
+// would enumerate targets.yaml while enterprise.enrollment.mode is manifest.
+var errWindowsEnterpriseEnsureManifestRequired = errors.New(
+	"enterprise.enrollment.mode is manifest: ensure needs --manifest with the administrator's targets.yaml",
+)
+
+// windowsEnterpriseEnsureStagingErrorCode classifies a first-manifest
+// staging failure. A missing --manifest in manifest mode is an argument
+// error the MDM must fix, not a transient failure to retry.
+func windowsEnterpriseEnsureStagingErrorCode(err error) string {
+	if errors.Is(err, errWindowsEnterpriseEnsureManifestRequired) {
+		return "invalid_arguments"
+	}
+	return "manifest_staging_failed"
+}
+
 // stageWindowsEnterpriseEnsureManifest builds the first guardian manifest
 // with the same enumerator the installed service runs, from the supplied
 // standalone config, in a protected administrator-only directory.
@@ -1158,10 +1177,16 @@ func stageWindowsEnterpriseEnsureManifest(
 		managed.DeploymentModeEnv:    managed.DeploymentModeManagedEnterprise,
 		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
 	})
-	cfg, loadErr := config.LoadFromFile(absolute)
+	cfg, loadErr := windowsEnterpriseEnsureConfigLoader(absolute)
 	restore()
 	if loadErr != nil {
 		return "", nil, fmt.Errorf("load the standalone config for enumeration: %w", loadErr)
+	}
+	// In manifest mode the administrator owns targets.yaml and the installed
+	// enumerator stays idle, so a manifest staged here from discovery would
+	// never be updated or pruned again.
+	if strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+		return "", nil, errWindowsEnterpriseEnsureManifestRequired
 	}
 	programData, err := windowsEnterpriseProgramDataResolver()
 	if err != nil {

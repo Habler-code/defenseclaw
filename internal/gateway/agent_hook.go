@@ -1912,7 +1912,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
-				Args:                     req.ToolArgs,
+				Args:                     agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs),
 				CWD:                      req.CWD,
 				ActiveHome:               trustedActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,

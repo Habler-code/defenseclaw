@@ -1,0 +1,104 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package enterprisehooks
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
+
+// Only the standalone in-agent plugin connectors carry the install marker;
+// every hook-binary and machine-policy connector, and Secure Client, keep an
+// unconditional fail mode.
+func TestWindowsStandalonePluginInstallMarkerNamesTheHookRuntimeRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
+	previousRoot := windowsStandaloneHookRuntimeRoot
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	t.Cleanup(func() {
+		windowsStandaloneHookRuntimeRoot = previousRoot
+		windowsEnterpriseStandaloneProcess = previousStandalone
+	})
+	windowsStandaloneHookRuntimeRoot = func() (string, error) { return root, nil }
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+
+	for _, name := range []string{"opencode", "amp"} {
+		if got, err := windowsStandalonePluginInstallMarker(name); err != nil || got != root {
+			t.Fatalf("%s install marker = %q, %v; want %q", name, got, err, root)
+		}
+	}
+	for _, name := range []string{"antigravity", "copilot", "devin", "hermes", "claudecode", "codex", "cursor"} {
+		if got, err := windowsStandalonePluginInstallMarker(name); got != "" || err != nil {
+			t.Fatalf("%s must not carry an install marker, got %q, %v", name, got, err)
+		}
+	}
+
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	if got, err := windowsStandalonePluginInstallMarker("opencode"); got != "" || err != nil {
+		t.Fatalf("Secure Client install marker = %q, %v; want none", got, err)
+	}
+
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsStandaloneHookRuntimeRoot = func() (string, error) { return `DefenseClaw-HookRuntime`, nil }
+	if _, err := windowsStandalonePluginInstallMarker("opencode"); err == nil {
+		t.Fatal("a relative install marker was accepted")
+	}
+}
+
+// The guardian creates the marker before it renders a plugin that names it,
+// and verification reports a missing or substituted marker instead of a
+// healthy deployment whose plugins would no longer fail closed.
+func TestWindowsStandalonePluginInstallMarkerIsCreatedAndVerified(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("resolve test SID: %v", err)
+	}
+	previousOwner := windowsManagedPolicyOwnerSID
+	previousAncestor := windowsManagedPolicyAncestorTrustCheck
+	previousDir := windowsManagedPolicyDirTrustCheck
+	t.Cleanup(func() {
+		windowsManagedPolicyOwnerSID = previousOwner
+		windowsManagedPolicyAncestorTrustCheck = previousAncestor
+		windowsManagedPolicyDirTrustCheck = previousDir
+	})
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return user.User.Sid, nil }
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+
+	marker := filepath.Join(t.TempDir(), "Cisco", "DefenseClaw-HookRuntime")
+	if err := verifyWindowsStandalonePluginInstallMarker(marker); err == nil || !strings.Contains(err.Error(), "is missing") {
+		t.Fatalf("missing marker verify = %v, want a refusal", err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := ensureWindowsStandalonePluginInstallMarker(marker); err != nil {
+			t.Fatalf("ensure marker (attempt %d): %v", attempt, err)
+		}
+	}
+	if err := verifyWindowsStandalonePluginInstallMarker(marker); err != nil {
+		t.Fatalf("verify created marker: %v", err)
+	}
+
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyWindowsStandalonePluginInstallMarker(marker); err == nil {
+		t.Fatal("a file in place of the install marker verified")
+	}
+
+	if err := ensureWindowsStandalonePluginInstallMarker(""); err != nil {
+		t.Fatalf("no marker to ensure: %v", err)
+	}
+	if err := verifyWindowsStandalonePluginInstallMarker(""); err != nil {
+		t.Fatalf("no marker to verify: %v", err)
+	}
+}

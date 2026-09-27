@@ -80,6 +80,12 @@ type InstallOptions struct {
 	// installs must leave this false so broad discovery cannot create new app
 	// profiles from scratch.
 	AllowMissingHookConfigRepair bool
+
+	// MachinePolicyContractID is the hook contract a standalone Windows
+	// deployment renders its single machine-wide Claude policy from (see
+	// WindowsStandaloneClaudeMachinePolicyContract). Empty, and every
+	// Secure Client process, render the row's own contract.
+	MachinePolicyContractID string
 }
 
 var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken

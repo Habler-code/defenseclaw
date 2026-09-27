@@ -9,9 +9,19 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 )
+
+// windowsEnterpriseStandaloneDeferredDataDirAbsent reports whether a pending
+// proof may treat the data-directory validation error as "no runtime": only in
+// a standalone process, and only when the directory itself does not exist.
+// Reparse points, foreign owners, wrong types and every other inspection
+// failure stay hard errors, and Secure Client keeps requiring the directory.
+func windowsEnterpriseStandaloneDeferredDataDirAbsent(err error) bool {
+	return windowsEnterpriseStandaloneProcess() && errors.Is(err, fs.ErrNotExist)
+}
 
 func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget) error {
 	if !target.IsEnabled() || !target.IsDeferred() {
@@ -37,10 +47,16 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 		return err
 	}
 	if err := validateWindowsUserPathElement(dataDir, targetSID, true, true, true); err != nil {
-		return fmt.Errorf(
-			"enterprise hooks: deferred target data directory is untrusted: %w",
-			err,
-		)
+		if !windowsEnterpriseStandaloneDeferredDataDirAbsent(err) {
+			return fmt.Errorf(
+				"enterprise hooks: deferred target data directory is untrusted: %w",
+				err,
+			)
+		}
+		// Standalone writes every discovered row deferred, including users
+		// DefenseClaw has never touched. An absent canonical data directory
+		// holds no runtime, so it proves the pending state as well as a
+		// trusted empty one; the selector-absence proof below still runs.
 	}
 	hookExecutable, err := windowsEnterpriseHookExecutable()
 	if err != nil {

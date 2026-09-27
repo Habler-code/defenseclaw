@@ -69,6 +69,13 @@ func devinConfigRoot(opts SetupOpts) string {
 		return filepath.Clean(root)
 	}
 	if runtime.GOOS == "windows" {
+		// A privileged service acting for another user (the managed
+		// guardian under WithUserHomeDir) must resolve that user's roaming
+		// AppData, not its own environment's %APPDATA%. A redirected
+		// roaming AppData is not followed.
+		if home := activeUserHomeOverride(); home != "" {
+			return filepath.Join(filepath.Clean(home), "AppData", "Roaming", "devin")
+		}
 		if root := strings.TrimSpace(os.Getenv("APPDATA")); root != "" {
 			return filepath.Join(filepath.Clean(root), "devin")
 		}

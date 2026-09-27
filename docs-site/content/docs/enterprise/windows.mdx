@@ -107,7 +107,9 @@ $Stage = 'C:\ProgramData\DefenseClaw-Staging\<version>'
 
 The stage directory must be administrator-owned and not writable by users.
 The installer enumerates eligible profiles itself; administrators do not
-author `targets.yaml`.
+author `targets.yaml`. With `enterprise.enrollment.mode: manifest` you publish
+`targets.yaml` yourself: pass it with `--manifest`, or a first install stops
+with `invalid_arguments`.
 
 Exit codes follow Windows Installer conventions so MDM retry logic works:
 
@@ -144,6 +146,13 @@ These are for detection only. Enforcement and `verify` never trust them.
 A CLI-replacing upgrade must run from the new release's staged CLI, not the
 installed one. Uninstall on a host without DefenseClaw succeeds and changes
 nothing.
+
+Uninstall revokes every per-user enrollment but does not edit the agent
+configuration inside users' profiles. The OpenCode and Amp plugins it
+installed stop enforcing once uninstall removes
+`C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. Devin, Hermes and
+Antigravity hook registrations stay in each user's configuration and point
+at the removed `defenseclaw-hook.exe`.
 
 ## Per-user installs
 

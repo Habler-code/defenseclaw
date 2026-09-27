@@ -293,14 +293,16 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if !sameWindowsEnterprisePath(state.HookExecutable, hookExecutable) {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: managed policy executable %s does not match trusted hook executable %s", state.HookExecutable, hookExecutable)
 	}
-	expectedPolicy, err := provider.ManagedHookPolicy(setupOpts)
+	// Standalone verifies every row against the one deployment-wide body.
+	policySetup := claudeMachinePolicySetup(setupOpts, opts.MachinePolicyContractID, windowsEnterpriseStandaloneProcess())
+	expectedPolicy, err := provider.ManagedHookPolicy(policySetup)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: build canonical Claude Code managed policy: %w", err)
 	}
 	if !bytes.Equal(policySnapshot.data, expectedPolicy) {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: Claude Code managed policy differs from the canonical DefenseClaw hook matrix")
 	}
-	if err := provider.VerifyManagedHookPolicy(policySnapshot.data, setupOpts); err != nil {
+	if err := provider.VerifyManagedHookPolicy(policySnapshot.data, policySetup); err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: verify Claude Code managed policy: %w", err)
 	}
 
@@ -478,6 +480,11 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
 		setup.ManagedTargetSID = targetSID.String()
 	}
+	marker, err := windowsStandalonePluginInstallMarker(name)
+	if err != nil {
+		return windowsGenericManagedTarget{}, err
+	}
+	setup.ManagedInstallMarker = marker
 	return windowsGenericManagedTarget{
 		home:           home,
 		dataDir:        dataDir,
@@ -507,6 +514,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 	generationUsed := false
 	if _, perUser := windowsStandalonePerUserConnector(target.conn.Name()); perUser {
 		if err := ensureWindowsStandaloneHookRuntimeAncestorReadable(); err != nil {
+			return InstallResult{}, err
+		}
+		if err := ensureWindowsStandalonePluginInstallMarker(target.setup.ManagedInstallMarker); err != nil {
 			return InstallResult{}, err
 		}
 	}
@@ -639,6 +649,9 @@ func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions)
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
 	if err != nil {
+		return InstallResult{}, err
+	}
+	if err := verifyWindowsStandalonePluginInstallMarker(target.setup.ManagedInstallMarker); err != nil {
 		return InstallResult{}, err
 	}
 	var result InstallResult
