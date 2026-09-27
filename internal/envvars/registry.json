@@ -4583,6 +4583,25 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_GUARDIAN_WATCH_SIGNAL_ROOT",
+      "category": "test_fixture",
+      "purpose": "Passes a temporary state root from the guardian watch SIGTERM test to its re-executed child, which runs the real watch loop there so the test can check that a stop signal withdraws readiness.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_watch_signal_unix_test.go",
+          "description": "macOS and Linux test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_KEY",
       "category": "test_fixture",
       "purpose": "Placeholder LLM key used in test fixtures only.",
