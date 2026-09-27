@@ -309,17 +309,20 @@ func TestRootInstallAndVerifyDelegateToTargetWorker(t *testing.T) {
 	}
 }
 
+// targetInstallOptionsNotCarried lists the InstallOptions fields the Unix
+// worker request deliberately does not carry, with the reason.
+var targetInstallOptionsNotCarried = map[string]string{
+	"Registry": "rebuilt from the built-in connectors in the worker",
+	"OwnerSID": "Windows-only target identity",
+	// Machine-policy inputs consumed only by the native Windows installer.
+	"ClaudeCodeAllowUnmanagedHooks": "native Windows only",
+	"CursorApprovedForeignHooks":    "native Windows only",
+}
+
 // Every InstallOptions field must be carried to the worker or be deliberately
 // rebuilt or ignored there; a new option that silently disappears would make
 // the root guardian install something other than what it was asked to.
 func TestTargetInstallRequestCarriesEveryInstallOption(t *testing.T) {
-	notCarried := map[string]string{
-		"Registry": "rebuilt from the built-in connectors in the worker",
-		"OwnerSID": "Windows-only target identity",
-		// Machine-policy inputs consumed only by the native Windows installer.
-		"ClaudeCodeAllowUnmanagedHooks": "native Windows only",
-		"CursorApprovedForeignHooks":    "native Windows only",
-	}
 	request := reflect.TypeOf(targetInstallRequest{})
 	carried := map[string]reflect.Type{}
 	for i := 0; i < request.NumField(); i++ {
@@ -328,7 +331,7 @@ func TestTargetInstallRequestCarriesEveryInstallOption(t *testing.T) {
 	options := reflect.TypeOf(InstallOptions{})
 	for i := 0; i < options.NumField(); i++ {
 		field := options.Field(i)
-		if _, skip := notCarried[field.Name]; skip {
+		if _, skip := targetInstallOptionsNotCarried[field.Name]; skip {
 			continue
 		}
 		typ, ok := carried[field.Name]
@@ -338,6 +341,55 @@ func TestTargetInstallRequestCarriesEveryInstallOption(t *testing.T) {
 		}
 		if typ != field.Type {
 			t.Errorf("InstallOptions.%s is %s but the worker request carries %s", field.Name, field.Type, typ)
+		}
+	}
+}
+
+// TestTargetInstallRequestRoundTripsEveryCarriedOption sets every carried
+// InstallOptions field to a distinct non-zero value and requires the worker
+// to decode exactly those values. The request struct declaring a field is
+// not enough: newTargetInstallRequest and installOptions copy field by field
+// in both directions, and a field either of them misses would reach the
+// worker as its zero value.
+func TestTargetInstallRequestRoundTripsEveryCarriedOption(t *testing.T) {
+	var opts InstallOptions
+	sent := reflect.ValueOf(&opts).Elem()
+	for i := 0; i < sent.NumField(); i++ {
+		field := sent.Type().Field(i)
+		if _, skip := targetInstallOptionsNotCarried[field.Name]; skip {
+			continue
+		}
+		value := sent.Field(i)
+		switch value.Kind() {
+		case reflect.String:
+			value.SetString("value-" + field.Name)
+		case reflect.Bool:
+			value.SetBool(true)
+		case reflect.Int:
+			value.SetInt(int64(1000 + i))
+		default:
+			t.Fatalf("InstallOptions.%s has kind %s; teach this test to set it", field.Name, value.Kind())
+		}
+	}
+	opts.UserHome = "/home/example-target"
+	target := TargetCredentials{UserHome: opts.UserHome, UID: opts.OwnerUID, GID: opts.OwnerGID}
+	payload, err := json.Marshal(newTargetInstallRequest(opts, target.UserHome, target.UID, target.GID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeTargetInstallRequest(target, payload)
+	if err != nil {
+		t.Fatalf("decode worker request: %v", err)
+	}
+	received := reflect.ValueOf(decoded)
+	for i := 0; i < sent.NumField(); i++ {
+		name := sent.Type().Field(i).Name
+		if _, skip := targetInstallOptionsNotCarried[name]; skip {
+			continue
+		}
+		want, got := sent.Field(i).Interface(), received.Field(i).Interface()
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("InstallOptions.%s = %#v after the worker boundary, want %#v", name, got, want)
 		}
 	}
 }
