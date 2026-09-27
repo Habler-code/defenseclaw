@@ -217,10 +217,15 @@ func TestCodexRequirementsPinRemovalReportsUnremovableOwnedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	end := []byte(codexRequirementsPinRegionEnd + "\n")
 	for name, edited := range map[string][]byte{
-		"missing END marker": bytes.Replace(rendered, []byte(codexRequirementsPinRegionEnd+"\n"), nil, 1),
-		"stray BEGIN marker": append([]byte(codexRequirementsPinRegionBegin+"\n"), rendered...),
-		"edited region":      bytes.Replace(rendered, []byte("hooks = true\n"), []byte("hooks = true\nweb_search = true\n"), 1),
+		"missing END marker":        bytes.Replace(rendered, end, nil, 1),
+		"stray BEGIN marker":        append([]byte(codexRequirementsPinRegionBegin+"\n"), rendered...),
+		"missing BEGIN marker":      bytes.Replace(rendered, []byte(codexRequirementsPinRegionBegin+"\n"), nil, 1),
+		"stray leading END":         append(append([]byte(nil), end...), rendered...),
+		"stray trailing END":        append(append([]byte(nil), rendered...), end...),
+		"edited region":             bytes.Replace(rendered, []byte("hooks = true\n"), []byte("hooks = true\nweb_search = true\n"), 1),
+		"CRLF missing BEGIN marker": bytes.ReplaceAll(bytes.Replace(rendered, []byte(codexRequirementsPinRegionBegin+"\n"), nil, 1), []byte("\n"), []byte("\r\n")),
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, changed, err := removeCodexRequirementsPin(edited)
@@ -229,6 +234,11 @@ func TestCodexRequirementsPinRemovalReportsUnremovableOwnedBytes(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "delete the lines marked") {
 				t.Fatalf("removal guidance = %q", err)
+			}
+			// The pin is still in force and DefenseClaw marked it, so it is
+			// not reported as the administrator's own pin.
+			if state, err := inspectCodexRequirementsPin(edited); err != nil || state != CodexRequirementsPinOwned {
+				t.Fatalf("inspect = %q, %v; want owned", state, err)
 			}
 		})
 	}

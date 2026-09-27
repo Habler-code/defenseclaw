@@ -564,3 +564,40 @@ func TestCodexRequirementsPinKeepsConcurrentAdministratorUpdates(t *testing.T) {
 		t.Fatalf("the administrator's replacement was removed: %q", data)
 	}
 }
+
+// A region whose BEGIN marker was deleted still pins hooks on. Removal must
+// fail with guidance, so the uninstaller warns, instead of reporting an
+// administrator pin and leaving Codex hooks forced on.
+func TestCodexRequirementsPinFileReportsRegionWithoutBeginMarker(t *testing.T) {
+	dir, path := codexPinTestLayout(t)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("model = \"o5\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := EnsureCodexRequirementsHooksPin(); err != nil || !result.Changed {
+		t.Fatalf("ensure = %+v, %v", result, err)
+	}
+	rendered, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := bytes.Replace(rendered, []byte(codexRequirementsPinRegionBegin+"\n"), nil, 1)
+	if bytes.Equal(edited, rendered) {
+		t.Fatalf("rendered requirements have no region:\n%s", rendered)
+	}
+	if err := os.WriteFile(path, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := InspectCodexRequirementsHooksPin(); err != nil || result.State != CodexRequirementsPinOwned {
+		t.Fatalf("inspect = %+v, %v; want owned", result, err)
+	}
+	result, err := RemoveCodexRequirementsHooksPin()
+	if !errors.Is(err, errCodexRequirementsPinUnremovable) || result.Changed || result.RemovedFile {
+		t.Fatalf("remove = %+v, %v; want the manual-removal guidance", result, err)
+	}
+	if data, _ := os.ReadFile(path); !bytes.Equal(data, edited) {
+		t.Fatalf("failed removal changed the requirements: %q", data)
+	}
+}

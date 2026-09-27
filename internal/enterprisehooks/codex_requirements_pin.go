@@ -190,7 +190,8 @@ func renderCodexRequirementsPin(raw []byte) (rendered []byte, changed bool, err 
 // removeFile is true when nothing but whitespace remains, which is the case
 // when DefenseClaw created the file. changed is false when the document holds
 // no DefenseClaw pin. DefenseClaw bytes that cannot be removed exactly, such
-// as a region whose END marker was deleted, fail closed with guidance.
+// as a region whose BEGIN or END marker was deleted, fail closed with
+// guidance.
 func removeCodexRequirementsPin(raw []byte) (rendered []byte, removeFile, changed bool, err error) {
 	model, err := parseCodexRequirementsPinModel(raw)
 	if err != nil {
@@ -210,7 +211,10 @@ func removeCodexRequirementsPin(raw []byte) (rendered []byte, removeFile, change
 			begin = index
 		case codexRequirementsPinRegionEnd:
 			if begin < 0 {
-				continue
+				// An END marker without an open BEGIN: the region's start is
+				// unknown, so DefenseClaw's hooks = true above it would
+				// otherwise stay in force as if the administrator had set it.
+				return nil, false, false, errCodexRequirementsPinUnremovable
 			}
 			for drop := begin; drop <= index; drop++ {
 				keep[drop] = false
@@ -339,6 +343,7 @@ func codexRequirementsPinHasOwnedBytes(raw []byte) bool {
 	for _, line := range codexRequirementsPinLines(raw) {
 		switch codexRequirementsPinTrim(raw[line[0]:line[1]]) {
 		case codexRequirementsPinRegionBegin,
+			codexRequirementsPinRegionEnd,
 			"hooks = true " + codexRequirementsPinLineMarker,
 			"features.hooks = true " + codexRequirementsPinLineMarker:
 			return true
