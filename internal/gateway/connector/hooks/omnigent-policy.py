@@ -45,6 +45,8 @@ _API_ADDR = _decoded("{{API_ADDR_B64}}")
 _TOKEN_FILE = _decoded("{{TOKEN_FILE_B64}}")
 _FAIL_MODE = _decoded("{{FAIL_MODE_B64}}")
 _LISTENER_CHECK = _decoded("{{LISTENER_CHECK_B64}}")
+# "1" when the enterprise guardian installed this module, else "".
+_MANAGED_HOOK = "1" if _decoded("{{MANAGED_HOOK_B64}}") == "1" else ""
 _LISTENER_CHECK_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _LISTENER_UNVERIFIED = "cannot verify the owner of the gateway listener"
 _ENDPOINT = f"http://{_API_ADDR}/api/v1/omnigent/hook"
@@ -386,11 +388,12 @@ def _listener_refusal() -> str:
 
     Runs the shell hooks' listener-owner check (the self-contained block of
     hooks/_hardening.sh, substituted at setup time) on Linux and macOS: every
-    listener on the gateway port must belong to this user or root, so another
+    listener on the gateway port must belong to this user or root for a
+    per-user install, or to the managed gateway for a managed one, so another
     local user who binds the port while the gateway is down never receives
     the credential or the request. The check runs with a fixed PATH and
     environment, so the process environment cannot choose the tools it
-    relies on.
+    relies on or switch between the per-user and managed trust sets.
     """
     if not (sys.platform.startswith("linux") or sys.platform == "darwin"):
         return ""
@@ -399,7 +402,11 @@ def _listener_refusal() -> str:
     try:
         completed = subprocess.run(
             ["/bin/sh", "-c", _LISTENER_CHECK, "defenseclaw-listener-check", _API_ADDR],
-            env={"PATH": _LISTENER_CHECK_PATH, "LC_ALL": "C"},
+            env={
+                "PATH": _LISTENER_CHECK_PATH,
+                "LC_ALL": "C",
+                "DEFENSECLAW_MANAGED_HOOK": _MANAGED_HOOK,
+            },
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

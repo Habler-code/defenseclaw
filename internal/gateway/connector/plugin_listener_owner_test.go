@@ -8,11 +8,13 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -254,23 +256,15 @@ func TestAmpPluginChecksGatewayListenerOwner(t *testing.T) {
 	}
 }
 
-// TestOmnigentPolicyChecksGatewayListenerOwner runs the rendered OmniGent
-// policy module: it sends the scoped bearer only after the hooks'
-// listener-owner check accepts the gateway port. OmniGent has no managed
-// install, so only the per-user cases apply.
-func TestOmnigentPolicyChecksGatewayListenerOwner(t *testing.T) {
-	python := omnigentTestPython(t)
-	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := `
-import importlib.util, json, socket, sys
+// omnigentListenerHarness imports a rendered OmniGent policy module, counts
+// the requests it hands to its transport (which then fails), and prints the
+// verdict as a pluginHarnessResult.
+const omnigentListenerHarness = `
+import importlib.util, json, sys
 calls = 0
 spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-real_open = module._DIRECT_OPENER.open
 def counting_open(request, *args, **kwargs):
     global calls
     calls += 1
@@ -280,32 +274,228 @@ verdict = module.defenseclaw_policy({"type": "request", "data": "hello"})
 blocked = verdict.get("result") != "ALLOW"
 print(json.dumps({"blocked": blocked, "reason": verdict.get("reason", ""), "calls": calls}))
 `
-	for i, sc := range pluginListenerScenarios(t, false) {
+
+// runOmnigentListenerHarness runs the harness against modulePath with the
+// given interpreter command prefix and environment.
+func runOmnigentListenerHarness(t *testing.T, prefix []string, env []string, modulePath string) pluginHarnessResult {
+	t.Helper()
+	args := append(append([]string{}, prefix[1:]...), "-c", omnigentListenerHarness, modulePath)
+	cmd := exec.Command(prefix[0], args...)
+	cmd.Env = env
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("execute policy: %v\n%s", err, output)
+	}
+	var got pluginHarnessResult
+	if err := json.Unmarshal(output, &got); err != nil {
+		t.Fatalf("policy output %q: %v", output, err)
+	}
+	return got
+}
+
+// omnigentExpectation adjusts a scenario for the harness transport: a
+// request that is handed over then fails, so a closed module denies it.
+func omnigentExpectation(sc pluginListenerScenario) pluginListenerScenario {
+	if sc.wantCalls == 1 && sc.failMode == "closed" {
+		sc.wantBlocked, sc.wantReason = true, "bridge error"
+	}
+	return sc
+}
+
+// TestOmnigentPolicyChecksGatewayListenerOwner runs the rendered OmniGent
+// policy module: it sends the scoped bearer only after the hooks'
+// listener-owner check accepts the gateway port. The enterprise guardian
+// installs the module as a managed hook runtime, so the managed cases apply
+// too. The module's process environment carries the opposite
+// DEFENSECLAW_MANAGED_HOOK value: only the rendered setting may choose the
+// trust set.
+func TestOmnigentPolicyChecksGatewayListenerOwner(t *testing.T) {
+	python := omnigentTestPython(t)
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range pluginListenerScenarios(t, true) {
 		t.Run(sc.name, func(t *testing.T) {
 			root := t.TempDir()
 			tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("c", 64))
 			modulePath := filepath.Join(root, "defenseclaw_omnigent_policy.py")
-			rendered := renderOmnigentPolicy(string(templateBytes), sc.addr, tokenPath, sc.failMode)
+			rendered := renderOmnigentPolicy(string(templateBytes), sc.addr, tokenPath, sc.failMode, sc.managed)
 			if err := os.WriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command(python, "-c", script, modulePath)
-			cmd.Env = []string{"PATH=/nonexistent", "HOME=" + root}
-			output, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("execute policy %d: %v\n%s", i, err, output)
+			inherited := "1"
+			if sc.managed {
+				inherited = "0"
 			}
-			var got pluginHarnessResult
-			if err := json.Unmarshal(output, &got); err != nil {
-				t.Fatalf("policy output %q: %v", output, err)
-			}
-			want := sc
-			if want.wantCalls == 1 {
-				// The fixture transport fails after the request is handed
-				// over, so the closed mode denies it.
-				want.wantBlocked, want.wantReason = true, "bridge error"
-			}
-			checkPluginScenario(t, want, got)
+			env := []string{"PATH=/nonexistent", "HOME=" + root, "DEFENSECLAW_MANAGED_HOOK=" + inherited}
+			checkPluginScenario(t, omnigentExpectation(sc), runOmnigentListenerHarness(t, []string{python}, env, modulePath))
 		})
+	}
+}
+
+// TestOmnigentSetupRendersManagedListenerTrust installs the module through
+// Setup: a managed install (SetupOpts.ManagedEnterprise, as the enterprise
+// guardian and a managed reconcile set it) refuses a listener the hook user
+// owns, and a per-user install sends to it.
+func TestOmnigentSetupRendersManagedListenerTrust(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root's own listener is the managed gateway; TestOmnigentPolicyManagedListenerAcrossAccounts covers root")
+	}
+	python := omnigentTestPython(t)
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("netstat"); err != nil {
+			t.Skip("netstat is required")
+		}
+	}
+	own := trustedHookListenerAddr(t)
+	for _, sc := range []pluginListenerScenario{
+		{name: "per-user", addr: own, failMode: "closed", wantCalls: 1},
+		{name: "managed", addr: own, failMode: "closed", managed: true,
+			wantBlocked: true, wantReason: "not the managed gateway"},
+	} {
+		t.Run(sc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dataDir := filepath.Join(root, "defenseclaw")
+			configPath := filepath.Join(root, ".omnigent", "config.yaml")
+			sitePackages := filepath.Join(root, "venv", "site-packages")
+			withOmnigentPathOverrides(t, configPath, sitePackages)
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte("server: https://example.test\npolicy_modules: []\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			conn := NewOmnigentConnector()
+			if _, err := EnsureHookAPIToken(dataDir, conn.Name()); err != nil {
+				t.Fatal(err)
+			}
+			opts := SetupOpts{
+				DataDir:           dataDir,
+				APIAddr:           sc.addr,
+				APIToken:          strings.Repeat("d", 64),
+				HookFailMode:      sc.failMode,
+				ManagedEnterprise: sc.managed,
+			}
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			env := []string{"PATH=/nonexistent", "HOME=" + root}
+			got := runOmnigentListenerHarness(t, []string{python}, env, omnigentPolicyModulePath(opts))
+			checkPluginScenario(t, omnigentExpectation(sc), got)
+		})
+	}
+}
+
+// TestOmnigentPolicyManagedListenerAcrossAccounts runs the rendered module
+// as an unprivileged account against listeners that other accounts own: a
+// managed module sends to a root listener and, on Linux, to one the
+// packaged defenseclaw service account owns (the managed gateway's User=),
+// and refuses the hook user's own listener; a per-user module refuses the
+// service account's listener. It needs root and DEFENSECLAW_TEST_OTHER_UID
+// naming an unprivileged uid, so it runs on the disposable test hosts.
+func TestOmnigentPolicyManagedListenerAcrossAccounts(t *testing.T) {
+	other := os.Getenv("DEFENSECLAW_TEST_OTHER_UID")
+	if other == "" || os.Geteuid() != 0 {
+		t.Skip("requires root and DEFENSECLAW_TEST_OTHER_UID")
+	}
+	otherUID, err := strconv.Atoi(other)
+	if err != nil || otherUID <= 0 {
+		t.Fatalf("DEFENSECLAW_TEST_OTHER_UID=%q is not an unprivileged uid", other)
+	}
+	const python = "/usr/bin/python3"
+	if _, err := os.Stat(python); err != nil {
+		t.Skip("requires /usr/bin/python3")
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("netstat"); err != nil {
+			t.Skip("netstat is required")
+		}
+	}
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// t.TempDir's parent is private to root; the module runs as another uid.
+	dir, err := os.MkdirTemp("", "dc-omnigent-listener-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(dir, ".hook-omnigent.token")
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("c", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(tokenPath, otherUID, -1); err != nil {
+		t.Fatal(err)
+	}
+	holdAs := func(account string) string {
+		t.Helper()
+		probe, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := probe.Addr().(*net.TCPAddr).Port
+		_ = probe.Close()
+		holder := exec.Command("/usr/bin/sudo", "-u", account, python, "-c",
+			fmt.Sprintf(`import socket,time
+s=socket.socket(); s.bind(("127.0.0.1",%d)); s.listen(1); print("up",flush=True); time.sleep(30)`, port))
+		stdout, err := holder.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := holder.Start(); err != nil {
+			t.Fatalf("start listener as %s: %v", account, err)
+		}
+		t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+		buf := make([]byte, 3)
+		if _, err := stdout.Read(buf); err != nil {
+			t.Fatalf("listener as %s did not start: %v", account, err)
+		}
+		return fmt.Sprintf("127.0.0.1:%d", port)
+	}
+	run := func(t *testing.T, i int, sc pluginListenerScenario) {
+		t.Helper()
+		modulePath := filepath.Join(dir, fmt.Sprintf("policy_%d.py", i))
+		rendered := renderOmnigentPolicy(string(templateBytes), sc.addr, tokenPath, sc.failMode, sc.managed)
+		if err := os.WriteFile(modulePath, []byte(rendered), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		prefix := []string{"/usr/bin/sudo", "-u", "#" + other, "/usr/bin/env", "-i",
+			"PATH=/usr/bin:/bin", "HOME=" + dir, python}
+		checkPluginScenario(t, omnigentExpectation(sc), runOmnigentListenerHarness(t, prefix, nil, modulePath))
+	}
+
+	rootListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rootListener.Close()
+	scenarios := []pluginListenerScenario{
+		{name: "managed root listener", addr: rootListener.Addr().String(), failMode: "closed", managed: true, wantCalls: 1},
+		{name: "managed hook user listener", addr: holdAs("#" + other), failMode: "closed", managed: true,
+			wantBlocked: true, wantReason: "not the managed gateway"},
+	}
+	if runtime.GOOS == "linux" {
+		if raw, err := exec.Command("/usr/bin/id", "-u", "defenseclaw").Output(); err == nil {
+			service := strings.TrimSpace(string(raw))
+			serviceAddr := holdAs("defenseclaw")
+			scenarios = append(scenarios,
+				pluginListenerScenario{name: "managed service account listener", addr: serviceAddr, failMode: "closed", managed: true, wantCalls: 1},
+				pluginListenerScenario{name: "per-user service account listener", addr: serviceAddr, failMode: "closed",
+					wantBlocked: true, wantReason: "held by " + service + ", not this user's gateway"},
+			)
+		} else {
+			t.Log("no defenseclaw service account; service-account cases skipped")
+		}
+	}
+	for i, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) { run(t, i, sc) })
 	}
 }
