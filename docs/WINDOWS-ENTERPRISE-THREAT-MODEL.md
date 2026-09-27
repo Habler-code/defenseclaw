@@ -262,6 +262,12 @@ enrollment authority; and the guardian is the per-user repair authority.
    root. A row discovered after install whose user has not signed in since
    has no such root and stays a reported failure until that user signs in;
    see Guardian reconcile item 10 for why it no longer blocks other SIDs.
+   For Claude Code the proof also requires a recorded `agent_version` that
+   has a hook contract, because deferred staging renders the machine policy
+   from it. A loadable legacy row at 2.1.152 or 2.1.153 whose SID an earlier
+   release did not already stage is therefore a reported failure, not
+   pending, so staging never fails on it and rolls back the other pending
+   SIDs.
 3. Before publication, the enumerator authenticates the committed manifest's
    ancestry, exact administrator-file descriptor, regular-file/link identity,
    and schema. It stages the new manifest under the same contract and replaces

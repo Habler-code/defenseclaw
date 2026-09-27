@@ -38,8 +38,10 @@ func IsWindowsTargetSessionUnavailable(err error) bool {
 
 // RequireWindowsEnterpriseDeferredTargetPending proves that an enabled,
 // administrator-authored deferred row has no selected immutable runtime for
-// its exact SID and connector. A caller may report the row as pending only
-// after both this proof and an exact WTS-session absence proof succeed.
+// its exact SID and connector, and that deferred staging can cover it (a
+// Claude Code row's recorded version must have a hook contract unless its
+// SID is already staged). A caller may report the row as pending only after
+// both this proof and an exact WTS-session absence proof succeed.
 func RequireWindowsEnterpriseDeferredTargetPending(target ManifestTarget) error {
 	return requireWindowsEnterpriseDeferredTargetPendingPlatform(target)
 }

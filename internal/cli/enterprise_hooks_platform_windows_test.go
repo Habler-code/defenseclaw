@@ -236,6 +236,82 @@ func TestReconcileSignedOutEnumeratorRowWithoutRootDoesNotBlockOthers(t *testing
 	}
 }
 
+// TestReconcileUnstageableLegacyClaudeRowDoesNotRollBackStaging is the #894
+// review scenario for a loadable legacy Claude Code row: a deferred,
+// never-protected row at 2.1.152 (an earlier installer's placeholder for a
+// signed-out user with no detected client) whose SID was never staged. It
+// used to be reported pending, and deferred staging then failed on it and
+// rolled back staging for every other pending SID. The pending proof now
+// refuses it (TestWindowsDeferredPendingProofRequiresStageableClaudePolicy
+// covers the proof; it reads the machine Claude Code policy, so it is
+// stubbed here), which makes it a failure awaiting first sign-in: staging
+// runs for the other pending target only, and the exact publication leaves
+// the row out.
+func TestReconcileUnstageableLegacyClaudeRowDoesNotRollBackStaging(t *testing.T) {
+	stubSignInIsolationReconcile(t)
+	previousSession := enterpriseHookWindowsTargetSessionCheck
+	previousPending := enterpriseHookWindowsDeferredPendingCheck
+	previousUnselected := enterpriseHookWindowsTargetUnselectedCheck
+	t.Cleanup(func() {
+		enterpriseHookWindowsTargetSessionCheck = previousSession
+		enterpriseHookWindowsDeferredPendingCheck = previousPending
+		enterpriseHookWindowsTargetUnselectedCheck = previousUnselected
+	})
+	const (
+		pendingSID     = "S-1-5-21-1000-2000-3000-1102"
+		placeholderSID = "S-1-5-21-1000-2000-3000-1106"
+		refusal        = "enterprise hooks: deferred Claude Code machine policy cannot be staged for this target: " +
+			"enterprise hooks: connector claudecode agent_version 2.1.152 is below the Windows enterprise minimum 2.1.154"
+	)
+	enterpriseHookWindowsTargetSessionCheck = func(sid, _ string) error {
+		if strings.EqualFold(sid, pendingSID) || strings.EqualFold(sid, placeholderSID) {
+			return &enterprisehooks.WindowsTargetSessionUnavailableError{SID: sid}
+		}
+		return nil
+	}
+	var proved []string
+	enterpriseHookWindowsDeferredPendingCheck = func(target enterprisehooks.ManifestTarget) error {
+		proved = append(proved, target.SID)
+		if strings.EqualFold(target.SID, placeholderSID) {
+			return errors.New(refusal)
+		}
+		return nil
+	}
+	enterpriseHookWindowsTargetUnselectedCheck = func(enterprisehooks.ManifestTarget) error { return nil }
+
+	fixture, run := runSignInIsolationReconcileWithOptions(t, []signInIsolationTarget{
+		{name: "alice", sid: "S-1-5-21-1000-2000-3000-1101", connector: "claudecode"},
+		{name: "carol", sid: pendingSID, connector: "codex", deferred: true},
+		{name: "placeholder", sid: placeholderSID, connector: "claudecode", deferred: true, agentVersion: "2.1.152"},
+	}, signInIsolationOptions{realClassifier: true})
+	if run.Failures != 1 || run.Pending != 1 {
+		t.Fatalf("run failures=%d pending=%d, want the placeholder as the only failure and carol pending", run.Failures, run.Pending)
+	}
+	if strings.Join(proved, ",") != pendingSID+","+placeholderSID {
+		t.Fatalf("pending proof consulted for %v, want carol and the placeholder", proved)
+	}
+	for _, row := range run.Rows {
+		if row.UserHome != fixture.homes["placeholder"] {
+			continue
+		}
+		if row.OK || row.Pending || row.Error != refusal {
+			t.Fatalf("placeholder row = %+v, want the pending proof's staging refusal", row)
+		}
+	}
+	if strings.Join(fixture.classified, ",") != "placeholder" {
+		t.Fatalf("sign-in classifier consulted for %v, want only the placeholder", fixture.classified)
+	}
+	if got := fixture.stagedPending; len(got) != 1 || strings.Join(got[0], ",") != "carol" {
+		t.Fatalf("deferred staging pending sets = %v, want one call staging only carol", got)
+	}
+	if got := fixture.staged; len(got) != 1 || strings.Join(got[0], ",") != "alice,carol" {
+		t.Fatalf("deferred staging manifests = %v, want one call authorizing alice and carol", got)
+	}
+	if got := exactPublications(fixture); len(got) != 1 || strings.Join(got[0], ",") != "alice,carol" {
+		t.Fatalf("exact enrollment publications = %v, want one publication of alice and carol", got)
+	}
+}
+
 func TestExpandEnterpriseHookProfileImagePathUsesTrustedSystemDrive(t *testing.T) {
 	previous := enterpriseHookWindowsSystemDirectory
 	t.Cleanup(func() { enterpriseHookWindowsSystemDirectory = previous })
