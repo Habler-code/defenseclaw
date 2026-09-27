@@ -18,6 +18,7 @@
   },
   "files": [
     "node-os.d.ts",
+    "node-child-process.d.ts",
     "symbol-observable.d.ts",
     "../../internal/gateway/connector/hooks/amp-plugin.ts"
   ]
