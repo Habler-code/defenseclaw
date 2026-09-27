@@ -180,6 +180,89 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	}
 }
 
+// TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket covers an upgrade:
+// hooks installed for the TCP transport (before the standalone hook socket
+// was configured) must fail Verify once a socket is configured, so the
+// guardian's verify-or-repair pass reinstalls them, and must pass again only
+// after an Install renders the socket transport.
+func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	tcpOpts := InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "test-token",
+		OTLPPathToken: strings.Repeat("d", 64),
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "codex-cli 0.142.0",
+		Registry:      connector.NewDefaultRegistry(),
+	}
+	socketOpts := tcpOpts
+	socketOpts.ManagedHookSocket = "/var/run/defenseclaw/hook.sock"
+	socketOpts.ManagedServiceUID = 461
+	hookScript := filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")
+	readHook := func() string {
+		t.Helper()
+		data, err := os.ReadFile(hookScript)
+		if err != nil {
+			t.Fatalf("read codex hook: %v", err)
+		}
+		return string(data)
+	}
+	const transportDrift = "different gateway transport"
+
+	if _, err := Install(context.Background(), tcpOpts); err != nil {
+		t.Fatalf("Install (TCP): %v", err)
+	}
+	if strings.Contains(readHook(), "--unix-socket") {
+		t.Fatal("TCP install rendered the hook socket transport")
+	}
+	if _, err := Verify(context.Background(), tcpOpts); err != nil {
+		t.Fatalf("Verify (TCP install, TCP configured): %v", err)
+	}
+	if _, err := Verify(context.Background(), socketOpts); err == nil || !strings.Contains(err.Error(), transportDrift) {
+		t.Fatalf("Verify (TCP install, socket configured) = %v, want transport drift", err)
+	}
+
+	if _, err := Install(context.Background(), socketOpts); err != nil {
+		t.Fatalf("Install (socket): %v", err)
+	}
+	hook := readHook()
+	if !strings.Contains(hook, "--unix-socket") || !strings.Contains(hook, "DEFENSECLAW_HOOK_SOCKET='/var/run/defenseclaw/hook.sock'") {
+		t.Fatal("socket install did not render the hook socket transport")
+	}
+	if _, err := Verify(context.Background(), socketOpts); err != nil {
+		t.Fatalf("Verify (socket install, socket configured): %v", err)
+	}
+
+	otherUID := socketOpts
+	otherUID.ManagedServiceUID = 462
+	otherPath := socketOpts
+	otherPath.ManagedHookSocket = "/run/defenseclaw/hook.sock"
+	for name, opts := range map[string]InstallOptions{
+		"TCP configured":         tcpOpts,
+		"other service uid":      otherUID,
+		"other hook socket path": otherPath,
+	} {
+		if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), transportDrift) {
+			t.Fatalf("Verify (socket install, %s) = %v, want transport drift", name, err)
+		}
+	}
+}
+
 func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)

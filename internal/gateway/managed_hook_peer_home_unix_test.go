@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -120,5 +121,44 @@ func TestManagedHookConnContextRecordsTheCallersHome(t *testing.T) {
 	peer := managedHookPeerFor(peercred.Credentials{UID: 1001, GID: 1001, PID: 42})
 	if peer.Home != "/home/alice" || peer.UID != 1001 {
 		t.Fatalf("peer=%+v", peer)
+	}
+}
+
+// TestManagedHookPeerNameResolvesDirectoryUsers: a directory (LDAP, SSSD,
+// AD) account is not in /etc/passwd, which is all os/user reads in a
+// cgo-free build. The hook-socket caller's name must come from the same
+// platform account database as its home, so exempt_users entries naming
+// such an account match and its events carry the name.
+func TestManagedHookPeerNameResolvesDirectoryUsers(t *testing.T) {
+	const directoryUID = 1_870_400_123 // outside any local passwd range
+	previous := managedHookPeerHomes
+	managedHookPeerHomes = &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver {
+			return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{
+				directoryUID: {Name: "svc-release", UID: directoryUID, Home: "/home/svc-release"},
+				1005:         {Name: "mismatch", UID: 4242, Home: "/home/mismatch"},
+			}}
+		},
+		now: time.Now,
+	}
+	t.Cleanup(func() { managedHookPeerHomes = previous })
+
+	peer := managedHookPeerFor(peercred.Credentials{UID: directoryUID, GID: directoryUID, PID: 42})
+	if peer.Name != "svc-release" || peer.Home != "/home/svc-release" {
+		t.Fatalf("directory caller peer = %+v, want name svc-release and its home", peer)
+	}
+	if name := managedHookPeerName(1005); name != "" {
+		t.Fatalf("an answer for another uid must not name the caller: %q", name)
+	}
+	if name := managedHookPeerName(4040); name != "" {
+		t.Fatalf("an unknown uid must stay unnamed: %q", name)
+	}
+
+	authorizer := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{
+		UnenrolledUsers: config.EnterpriseUnenrolledDeny,
+		ExemptUsers:     []string{"svc-release"},
+	}, nil, func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+	if decision := authorizer.decide(peer, "claudecode"); !decision.Allow || !decision.Exempt {
+		t.Fatalf("exempt directory user by name: %+v, want an exempt allow", decision)
 	}
 }

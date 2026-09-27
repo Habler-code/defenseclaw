@@ -5091,6 +5091,8 @@ func priorConnectorSetupOpts(applied multiConnectorSetupRollbackPoint) (connecto
 	prior.HookExecutable = posture.HookExecutable
 	prior.CodexEnforcement = posture.CodexEnforcement
 	prior.ClaudeCodeEnforcement = posture.ClaudeCodeEnforcement
+	prior.ManagedHookSocket = posture.HookSocket
+	prior.ManagedServiceUID = posture.HookSocketServiceUID
 	return prior, nil
 }
 

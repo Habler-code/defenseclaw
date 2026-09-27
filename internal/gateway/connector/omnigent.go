@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -280,7 +281,11 @@ func (c *OmnigentConnector) setupLocked(ctx context.Context, opts SetupOpts) (re
 		return rollback(fmt.Errorf("omnigent resolve absolute scoped hook credential path: %w", err))
 	}
 	failMode := normalizeHookFailMode(opts.HookFailMode)
-	rendered := renderOmnigentPolicy(string(templateBytes), opts.APIAddr, tokenPath, failMode)
+	// A managed standalone install on a unix host sends the bridge through
+	// the gateway's peer-authorized hook socket, like every other per-user
+	// hook there; everywhere else the socket is empty and TCP is kept.
+	hookSocket, serviceUID := managedPluginHookSocket(opts)
+	rendered := renderOmnigentPolicyWithTransport(string(templateBytes), opts.APIAddr, tokenPath, failMode, hookSocket, serviceUID)
 	if err := atomicWriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 		return rollback(fmt.Errorf("omnigent write policy module: %w", err))
 	}
@@ -845,11 +850,24 @@ func validateOmnigentInterpreter(path string) error {
 }
 
 func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string) string {
+	return renderOmnigentPolicyWithTransport(template, apiAddr, tokenFile, failMode, "", 0)
+}
+
+// renderOmnigentPolicyWithTransport also names the standalone hook socket
+// and the gateway service uid trusted beside root as its owner; an empty
+// socket keeps the bridge on the TCP transport with its scoped credential.
+func renderOmnigentPolicyWithTransport(template, apiAddr, tokenFile, failMode, hookSocket string, serviceUID int) string {
 	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+	uid := ""
+	if hookSocket != "" && serviceUID > 0 {
+		uid = strconv.Itoa(serviceUID)
+	}
 	replacer := strings.NewReplacer(
 		"{{API_ADDR_B64}}", encode(strings.TrimSpace(apiAddr)),
 		"{{TOKEN_FILE_B64}}", encode(tokenFile),
 		"{{FAIL_MODE_B64}}", encode(normalizeHookFailMode(failMode)),
+		"{{HOOK_SOCKET_B64}}", encode(hookSocket),
+		"{{SERVICE_UID_B64}}", encode(uid),
 	)
 	return replacer.Replace(template)
 }

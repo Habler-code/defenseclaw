@@ -282,6 +282,14 @@ type HookRegistrationPosture struct {
 	HookExecutable        string `json:"hook_executable,omitempty"`
 	CodexEnforcement      bool   `json:"codex_enforcement,omitempty"`
 	ClaudeCodeEnforcement bool   `json:"claudecode_enforcement,omitempty"`
+	// HookSocket and HookSocketServiceUID record the standalone unix hook
+	// socket transport the hooks were rendered with (see
+	// managedPluginHookSocket). Both are empty for the TCP transport, so
+	// locks written by per-user, Secure Client and Windows installs are
+	// unchanged. HookTransportDrifted compares them with the configured
+	// transport.
+	HookSocket           string `json:"hook_socket,omitempty"`
+	HookSocketServiceUID int    `json:"hook_socket_service_uid,omitempty"`
 }
 
 // LoadActiveConnector reads the previously active connector name from
@@ -1123,6 +1131,7 @@ func newHookContractLockEntry(
 	}
 	resolution := resolveHookContractForOptions(name, opts)
 	contract := resolution.Contract
+	hookSocket, hookSocketServiceUID := managedPluginHookSocket(opts)
 	entry := HookContractLockEntry{
 		Connector:              normalizeConnectorName(name),
 		RawAgentVersion:        resolution.RawVersion,
@@ -1145,6 +1154,8 @@ func newHookContractLockEntry(
 			HookExecutable:        opts.HookExecutable,
 			CodexEnforcement:      opts.CodexEnforcement,
 			ClaudeCodeEnforcement: opts.ClaudeCodeEnforcement,
+			HookSocket:            hookSocket,
+			HookSocketServiceUID:  hookSocketServiceUID,
 		},
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1417,6 +1428,29 @@ func canonicalSurfaceStrings(values []string) []string {
 
 func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
 	return HookContractCompatibilityDrifted(previous, current)
+}
+
+// HookTransportDrifted reports whether the hooks recorded by lock were
+// rendered for a different gateway transport than opts now selects: TCP
+// against the standalone unix hook socket, another socket path, or another
+// trusted service uid. A lock written before the transport was recorded
+// counts as TCP, so hooks installed before an upgrade that added the socket
+// fail verification and the guardian reinstalls them.
+//
+// Unix verification does not compare hook bytes, so without this check a
+// target protected before the socket was configured would keep posting to
+// the TCP port with the shared connector bearer. Like script digests, this
+// is a repair signal and is deliberately not part of HookContractLockDrifted.
+func HookTransportDrifted(lock HookContractLockEntry, opts SetupOpts) bool {
+	wantSocket, wantUID := managedPluginHookSocket(opts)
+	haveSocket, haveUID := "", 0
+	if posture := lock.RegistrationPosture; posture != nil {
+		haveSocket, haveUID = posture.HookSocket, posture.HookSocketServiceUID
+	}
+	if haveSocket == "" {
+		haveUID = 0
+	}
+	return haveSocket != wantSocket || haveUID != wantUID
 }
 
 func cursorHookContractUnchanged(previous, current HookContractLockEntry) bool {

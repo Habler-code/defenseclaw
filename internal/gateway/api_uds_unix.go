@@ -21,7 +21,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
@@ -69,7 +71,7 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 			}
 			path = layout.HookSocketPath
 		}
-		listener, err = bindManagedHookSocket(path)
+		listener, err = bindManagedHookSocketWhenFree(ctx, path)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -111,12 +113,42 @@ func managedHookPeerFor(credentials peercred.Credentials) managedHookPeer {
 	}
 }
 
+// errHookSocketInUse reports a hook socket path that another live listener
+// still serves.
+var errHookSocketInUse = errors.New("hook socket is served by another live listener")
+
+// hookSocketHeldRetryInterval paces bindManagedHookSocketWhenFree; it is
+// replaceable by tests.
+var hookSocketHeldRetryInterval = 100 * time.Millisecond
+
+// bindManagedHookSocketWhenFree binds the hook socket, waiting up to the API
+// bind budget while another live listener still serves the path. That is a
+// gateway that is still shutting down during an overlapping restart, which
+// releases the path within seconds, or a second gateway under the same
+// account, which must be left alone: after the budget this returns the error
+// and the caller runs without the socket.
+func bindManagedHookSocketWhenFree(ctx context.Context, path string) (net.Listener, error) {
+	deadline := time.Now().Add(apiListenRetryBudget)
+	for {
+		listener, err := bindManagedHookSocket(path)
+		if err == nil || !errors.Is(err, errHookSocketInUse) || !time.Now().Before(deadline) {
+			return listener, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(hookSocketHeldRetryInterval):
+		}
+	}
+}
+
 // bindManagedHookSocket binds the hook socket when the service manager did
 // not pass one (macOS, or Linux without socket activation). The directory
 // must already exist, belong to root or this service account and be
 // writable by no one else — the lifecycle creates it — so a standard user
 // can never have planted a socket there first. A stale socket this account
-// owns is replaced; anything else is refused.
+// owns is replaced; a socket another listener still answers on is left
+// alone (errHookSocketInUse), and anything else is refused.
 func bindManagedHookSocket(path string) (net.Listener, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, fmt.Errorf("api: hook socket path %q is not absolute and clean", path)
@@ -144,7 +176,14 @@ func bindManagedHookSocket(path string) (net.Listener, error) {
 		if !ok || int(stat.Uid) != os.Geteuid() {
 			return nil, fmt.Errorf("api: refusing to replace hook socket %s owned by another account", path)
 		}
-		if err := os.Remove(path); err != nil {
+		// Only this account can create sockets here, so a listener that
+		// answers is another gateway under it; removing its socket would
+		// cut every user off that gateway while it keeps running. Only a
+		// socket that refuses connections is stale.
+		if err := hookSocketStale(path); err != nil {
+			return nil, fmt.Errorf("api: %s: %w", path, err)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("api: remove stale hook socket: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -154,11 +193,67 @@ func bindManagedHookSocket(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("api: listen %s: %w", path, err)
 	}
+	owned, err := newOwnedHookSocketListener(listener, path)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
 	// Every local user may connect; the server authorizes each caller by
 	// its kernel-verified uid.
 	if err := os.Chmod(path, 0o666); err != nil {
-		_ = listener.Close()
+		_ = owned.Close()
 		return nil, fmt.Errorf("api: chmod hook socket: %w", err)
 	}
-	return listener, nil
+	return owned, nil
+}
+
+// hookSocketStale returns nil when nothing listens on the socket at path
+// (the connection is refused, or the path went away), and an error wrapping
+// errHookSocketInUse when a listener answers or staleness cannot be shown.
+func hookSocketStale(path string) error {
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err == nil {
+		_ = conn.Close()
+		return errHookSocketInUse
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", errHookSocketInUse, err)
+}
+
+// ownedHookSocketListener removes the socket path on Close only while the
+// path is still the socket this listener bound. Go's own unlink-on-close
+// removes whatever is at the path, which after a takeover is another
+// gateway's live socket.
+type ownedHookSocketListener struct {
+	*net.UnixListener
+	path  string
+	bound os.FileInfo
+	once  sync.Once
+}
+
+func newOwnedHookSocketListener(listener net.Listener, path string) (*ownedHookSocketListener, error) {
+	unixListener, ok := listener.(*net.UnixListener)
+	if !ok {
+		return nil, fmt.Errorf("api: hook socket listener %s is not a unix socket", listener.Addr())
+	}
+	bound, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("api: inspect bound hook socket: %w", err)
+	}
+	unixListener.SetUnlinkOnClose(false)
+	return &ownedHookSocketListener{UnixListener: unixListener, path: path, bound: bound}, nil
+}
+
+// Close removes the path while the listener still answers on it, as Go
+// does: a gateway starting meanwhile finds the socket live and waits
+// instead of replacing it.
+func (l *ownedHookSocketListener) Close() error {
+	l.once.Do(func() {
+		if current, err := os.Lstat(l.path); err == nil && os.SameFile(current, l.bound) {
+			_ = os.Remove(l.path)
+		}
+	})
+	return l.UnixListener.Close()
 }

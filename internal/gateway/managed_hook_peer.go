@@ -18,7 +18,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	osuser "os/user"
 	"strconv"
 	"strings"
 	"sync"
@@ -274,17 +273,6 @@ func readManagedHookLedger(path string) (managedHookLedger, error) {
 		return managedHookLedger{}, fmt.Errorf("decode hook guardian authorization: %w", err)
 	}
 	return ledger, nil
-}
-
-// managedHookPeerName resolves the caller's account name for attribution
-// and ledger matching. A lookup failure leaves the name empty; the uid is
-// still authoritative.
-var managedHookPeerName = func(uid int) string {
-	account, err := osuser.LookupId(strconv.Itoa(uid))
-	if err != nil || account == nil {
-		return ""
-	}
-	return sanitizeLLMEventUser(account.Username)
 }
 
 // managedHookIdentityHeaders are the caller-supplied identity headers the

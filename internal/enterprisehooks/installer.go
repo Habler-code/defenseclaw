@@ -63,9 +63,10 @@ type InstallOptions struct {
 	RecoveryHookContractEntryUpdatedAt string
 	WorkspaceDir                       string
 	Registry                           *connector.Registry
-	// ManagedHookSocket and ManagedServiceUID route in-agent plugins through
-	// the standalone gateway's peer-authorized unix hook socket (see
-	// connector.SetupOpts). Empty keeps the TCP transport.
+	// ManagedHookSocket and ManagedServiceUID route in-agent plugins and
+	// connector shell hooks through the standalone gateway's peer-authorized
+	// unix hook socket (see connector.SetupOpts). Empty keeps the TCP
+	// transport.
 	ManagedHookSocket string
 	ManagedServiceUID int
 
@@ -175,6 +176,10 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		HILTEnabled:       opts.HILTEnabled,
 		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
+		// The configured transport, compared below with the one the
+		// installed hooks were rendered for.
+		ManagedHookSocket: strings.TrimSpace(opts.ManagedHookSocket),
+		ManagedServiceUID: opts.ManagedServiceUID,
 	}
 	if setupOpts.AgentVersion == "" {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
@@ -232,6 +237,15 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			}
 			if connector.HookContractLockDrifted(lock, current) {
 				return fmt.Errorf("enterprise hooks: connector %s hook contract lock drift detected", conn.Name())
+			}
+			// Unix verification reads only the agent config reference and
+			// the lock, not the hook bytes. Hooks installed before the
+			// standalone hook socket was configured (for example by an
+			// earlier release) would otherwise pass and keep posting to the
+			// TCP port with the shared connector bearer; failing here makes
+			// the guardian's verify-or-repair pass reinstall them.
+			if connector.HookTransportDrifted(lock, setupOpts) {
+				return fmt.Errorf("enterprise hooks: connector %s hooks were installed for a different gateway transport than the configured hook socket", conn.Name())
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),

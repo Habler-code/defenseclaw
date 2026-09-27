@@ -34,6 +34,17 @@ var managedHookPeerHome = func(uid int) string {
 	return managedHookPeerHomes.lookup(uid)
 }
 
+// managedHookPeerName resolves the caller's account name for attribution,
+// exempt_users and ledger matching through the same account database as
+// the home. os/user in a cgo-free build reads only /etc/passwd, so LDAP,
+// SSSD, AD and userdb callers would otherwise have no name: exempt_users
+// entries naming them would never match and their events would carry no
+// user name. A lookup failure leaves the name empty; the uid is still
+// authoritative.
+var managedHookPeerName = func(uid int) string {
+	return managedHookPeerHomes.lookupName(uid)
+}
+
 var managedHookPeerHomes = &managedHookPeerHomeCache{
 	newResolver: func() unixidentity.Resolver {
 		return unixidentity.Default(context.Background())
@@ -49,9 +60,11 @@ type managedHookPeerHomeCache struct {
 	now         func() time.Time
 }
 
-func (c *managedHookPeerHomeCache) lookup(uid int) string {
+// account resolves uid through the cached platform resolver; false when the
+// account is unknown or the answer names a different uid.
+func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool) {
 	if uid < 0 {
-		return ""
+		return unixidentity.Account{}, false
 	}
 	c.mu.Lock()
 	if c.resolver == nil || c.now().Sub(c.resolvedAt) > managedHookPeerHomeTTL {
@@ -61,13 +74,31 @@ func (c *managedHookPeerHomeCache) lookup(uid int) string {
 	resolver := c.resolver
 	c.mu.Unlock()
 	if resolver == nil {
-		return ""
+		return unixidentity.Account{}, false
 	}
 	account, err := resolver.LookupUID(uid)
 	if err != nil || account.UID != uid {
+		return unixidentity.Account{}, false
+	}
+	return account, true
+}
+
+// lookup returns the caller's normalized home, or "".
+func (c *managedHookPeerHomeCache) lookup(uid int) string {
+	account, ok := c.account(uid)
+	if !ok {
 		return ""
 	}
 	return normalizeManagedHookPeerHome(account.Home)
+}
+
+// lookupName returns the caller's sanitized account name, or "".
+func (c *managedHookPeerHomeCache) lookupName(uid int) string {
+	account, ok := c.account(uid)
+	if !ok {
+		return ""
+	}
+	return sanitizeLLMEventUser(account.Name)
 }
 
 // normalizeManagedHookPeerHome keeps only an absolute, clean home below the

@@ -69,6 +69,11 @@ type templateData struct {
 	// Copilot has the same 30-second command-hook envelope and needs an
 	// explicit byte-stream adapter for the GUI-subsystem launcher on Windows.
 	CopilotHookTimeoutMS int
+	// HookSocketTransportSH is the standalone unix-socket transport block a
+	// connector shell hook runs before it builds its bearer header (see
+	// shellHookSocketTransport). Empty keeps the TCP transport, and the
+	// rendered hook is then byte-identical to one without the block.
+	HookSocketTransportSH string
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -487,6 +492,14 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 }
 
 func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool) error {
+	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, extras, managed, connectorName, scopedToken, "")
+}
+
+// writeHookScriptsCommonWithTransport is writeHookScriptsCommonWithOptions
+// plus the connector scripts' standalone socket transport block (empty for
+// TCP). The shared inspect-* scripts keep TCP: no per-user enterprise hook
+// registration invokes them.
+func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -517,6 +530,9 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
 		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
 		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
+		// Rendered only when a managed standalone install names a hook
+		// socket; see WriteHookScriptsForConnectorObjectWithOpts.
+		HookSocketTransportSH: socketTransport,
 	}
 	// The inspect-* family has one physical copy per data directory.  Its
 	// bytes must therefore depend only on install-wide inputs; connector mode,
@@ -1350,7 +1366,15 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 		// proxy connector's master token as connector-scoped.
 		scopedToken = !IsProxyConnector(c.Name())
 	}
-	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken)
+	// A managed standalone install on a unix host sends connector shell hooks
+	// through the gateway's peer-authorized unix hook socket, as it already
+	// does for in-agent plugins. Every other install (per-user, Secure
+	// Client, Windows) has no socket here and keeps the TCP transport.
+	socketTransport := ""
+	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
+		socketTransport = shellHookSocketTransport(socket, serviceUID)
+	}
+	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken, socketTransport)
 }
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render

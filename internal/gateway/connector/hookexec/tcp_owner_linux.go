@@ -33,6 +33,14 @@ import (
 // listening socket's creator, so an impostor listener shows the impostor's
 // uid. NETLINK_SOCK_DIAG answers unprivileged callers (it is what ss(8)
 // uses); /proc/net/tcp is the bounded fallback.
+//
+// Only a full socket carries its owner. sock_diag reports uid 0 for a
+// request socket (TCP_NEW_SYN_RECV: the handshake completed but the
+// listener has not taken the connection, which TCP_DEFER_ACCEPT prolongs)
+// and for a TIME_WAIT socket, whoever owns the listener. So sock_diag is
+// trusted only for an ESTABLISHED server socket; anything else is resolved
+// through /proc/net/tcp, which prints the listener's uid for a request
+// socket, and a row whose uid the kernel does not record is refused.
 func tcpListenerOwnerUID(conn net.Conn) (int, error) {
 	local, localOK := conn.LocalAddr().(*net.TCPAddr)
 	remote, remoteOK := conn.RemoteAddr().(*net.TCPAddr)
@@ -66,8 +74,19 @@ type tcpTuple struct {
 // below this; the netlink path is exact and preferred).
 const procNetTCPLimit = 32 << 20
 
+// Kernel TCP states (include/net/tcp_states.h) that carry the owner uid of
+// the server side of a just-connected socket.
+const (
+	tcpStateEstablished = 1 // TCP_ESTABLISHED
+	tcpStateSynRecv     = 3 // TCP_SYN_RECV
+)
+
 // procNetTCPOwnerUID parses /proc/net/tcp and returns the uid of the row
-// whose local/remote endpoints equal tuple.
+// whose local/remote endpoints equal tuple. Only ESTABLISHED and SYN_RECV
+// rows count: the kernel prints the socket owner for the first and the
+// listener's owner for a request socket, but uid 0 for every TIME_WAIT
+// socket (which also covers an orphaned FIN_WAIT2), so a row in any other
+// state proves nothing about who is listening.
 func procNetTCPOwnerUID(r io.Reader, tuple tcpTuple) (int, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 4096), 4096)
@@ -95,6 +114,13 @@ func procNetTCPOwnerUID(r io.Reader, tuple tcpTuple) (int, error) {
 		if !localIP.Equal(tuple.localIP) || localPort != tuple.localPort ||
 			!remoteIP.Equal(tuple.remoteIP) || remotePort != tuple.remotePort {
 			continue
+		}
+		state, err := strconv.ParseUint(fields[3], 16, 8)
+		if err != nil {
+			return 0, fmt.Errorf("parse /proc/net/tcp state %q: %w", fields[3], err)
+		}
+		if state != tcpStateEstablished && state != tcpStateSynRecv {
+			return 0, fmt.Errorf("server socket is in TCP state %d, which does not record its owner", state)
 		}
 		uid, err := strconv.ParseUint(fields[7], 10, 32)
 		if err != nil {
@@ -180,7 +206,13 @@ func inetDiagRequest(tuple tcpTuple) []byte {
 	return message
 }
 
-// parseInetDiagReply extracts idiag_uid from the reply for tuple.
+// errInetDiagOwnerNotRecorded marks a sock_diag reply that names the socket
+// but whose idiag_uid is not the owner (see tcpListenerOwnerUID).
+var errInetDiagOwnerNotRecorded = errors.New("sock_diag reports no owner for a server socket that is not ESTABLISHED")
+
+// parseInetDiagReply extracts idiag_uid from the reply for tuple. The uid
+// counts only when the socket is ESTABLISHED (idiag_state): the kernel
+// fills idiag_uid with 0 for request and TIME_WAIT sockets.
 func parseInetDiagReply(data []byte, tuple tcpTuple) (int, error) {
 	for len(data) >= unix.SizeofNlMsghdr {
 		length := int(binary.NativeEndian.Uint32(data[0:4]))
@@ -210,6 +242,9 @@ func parseInetDiagReply(data []byte, tuple tcpTuple) (int, error) {
 			dst := net.IP(id[20:24])
 			if sport == tuple.localPort && dport == tuple.remotePort &&
 				bytes.Equal(src.To4(), tuple.localIP.To4()) && bytes.Equal(dst.To4(), tuple.remoteIP.To4()) {
+				if body[1] != tcpStateEstablished {
+					return 0, errInetDiagOwnerNotRecorded
+				}
 				return int(binary.NativeEndian.Uint32(body[64:68])), nil
 			}
 		}

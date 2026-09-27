@@ -1786,9 +1786,9 @@ func geminiManagedHookGroupCurrent(raw interface{}, expectedCommand string) bool
 }
 
 // managedPluginHookSocket returns the unix hook socket and trusted service
-// uid an in-agent plugin must use, or ("", 0) to keep the TCP transport. Only
-// a managed install on a unix host with an absolute socket path switches
-// transports; Windows plugins keep TCP.
+// uid an in-agent plugin or connector shell hook must use, or ("", 0) to keep
+// the TCP transport. Only a managed install on a unix host with an absolute
+// socket path switches transports; Windows hooks and plugins keep TCP.
 func managedPluginHookSocket(opts SetupOpts) (string, int) {
 	socket := strings.TrimSpace(opts.ManagedHookSocket)
 	if !opts.ManagedEnterprise || socket == "" || runtime.GOOS == "windows" || !filepath.IsAbs(socket) {

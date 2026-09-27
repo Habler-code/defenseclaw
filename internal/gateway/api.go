@@ -1018,16 +1018,18 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// Under systemd socket activation the listener is inherited instead: PID 1
 	// holds 127.0.0.1:<port> across gateway restarts, so there is no window in
 	// which a local user could bind it (acquireAPIListener).
-	ln, lnErr := a.acquireAPIListener(ctx)
-	if lnErr != nil {
-		a.health.SetAPI(StateError, lnErr.Error(), nil)
-		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
-	}
-
+	//
 	// The standalone managed profile additionally serves the agent-facing
 	// routes on a unix socket where each caller is identified by its
 	// kernel-verified uid (see managed_hook_peer.go). A failure here leaves
 	// the TCP API up; hooks that require the socket fail closed on their own.
+	// The socket is bound and served before the TCP listener and does not
+	// depend on it: without socket activation (macOS) a local user can hold
+	// the TCP port while the gateway restarts, and that must not take the
+	// socket — whose directory no standard user can write — down with it
+	// for every user on the host. newManagedHookSocketServer returns no
+	// server outside the standalone profile, so there the TCP bind below
+	// behaves exactly as before.
 	hookSrv, hookLn, hookErr := a.newManagedHookSocketServer(ctx, func(h http.Handler) http.Handler {
 		h = a.metricsMiddleware(h)
 		h = CorrelationMiddleware(reg)(h)
@@ -1041,12 +1043,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}
 
 	errCh := make(chan error, 2)
-	go func() {
-		fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
 	if hookSrv != nil {
 		apiDetails["hook_socket"] = hookLn.Addr().String()
 		go func() {
@@ -1057,7 +1053,46 @@ func (a *APIServer) Run(ctx context.Context) error {
 		}()
 	}
 
-	a.health.SetAPI(StateRunning, "", apiDetails)
+	serveTCP := func(ln net.Listener) {
+		go func() {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+	}
+	// tcpBound delivers a listener the standalone bind retry below won; it
+	// stays nil (never ready) when the first bind succeeded.
+	var tcpBound chan net.Listener
+	retryCtx, stopRetry := context.WithCancel(ctx)
+	defer stopRetry()
+	ln, lnErr := a.acquireAPIListener(ctx)
+	switch {
+	case lnErr == nil:
+		serveTCP(ln)
+		a.health.SetAPI(StateRunning, "", apiDetails)
+	case hookSrv != nil && isAddrInUse(lnErr) && ctx.Err() == nil:
+		// Another process holds the TCP port. Keep serving the hook socket,
+		// report the API as failed, and take the port when it is released
+		// instead of exiting into a restart loop that also drops the socket.
+		fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; the hook socket stays up while the API bind is retried: %v\n", a.addr, lnErr)
+		retryDetails := make(map[string]interface{}, len(apiDetails)+1)
+		for key, value := range apiDetails {
+			retryDetails[key] = value
+		}
+		retryDetails["tcp_bind_retrying"] = true
+		a.health.SetAPI(StateError, lnErr.Error(), retryDetails)
+		tcpBound = make(chan net.Listener)
+		go a.retryAPIListenerBind(retryCtx, tcpBound)
+	default:
+		a.health.SetAPI(StateError, lnErr.Error(), nil)
+		if hookSrv != nil {
+			_ = hookSrv.Close()
+			_ = hookLn.Close()
+		}
+		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
+	}
+
 	// Readiness and watchdog for Type=notify units; both are no-ops outside
 	// systemd (NOTIFY_SOCKET / WATCHDOG_USEC unset).
 	if _, err := systemd.Notify(systemd.StateReady); err != nil {
@@ -1080,15 +1115,22 @@ func (a *APIServer) Run(ctx context.Context) error {
 		return hookShutdownErr
 	}
 
-	select {
-	case err := <-errCh:
-		a.health.SetAPI(StateError, err.Error(), nil)
-		_ = shutdown()
-		return fmt.Errorf("api: listen %s: %w", a.addr, err)
-	case <-ctx.Done():
-		a.health.SetAPI(StateStopped, "", nil)
-		_, _ = systemd.Notify(systemd.StateStopping)
-		return shutdown()
+	for {
+		select {
+		case ln := <-tcpBound:
+			tcpBound = nil
+			fmt.Fprintf(os.Stderr, "[sidecar-api] %s was released; the API is bound again\n", a.addr)
+			serveTCP(ln)
+			a.health.SetAPI(StateRunning, "", apiDetails)
+		case err := <-errCh:
+			a.health.SetAPI(StateError, err.Error(), nil)
+			_ = shutdown()
+			return fmt.Errorf("api: listen %s: %w", a.addr, err)
+		case <-ctx.Done():
+			a.health.SetAPI(StateStopped, "", nil)
+			_, _ = systemd.Notify(systemd.StateStopping)
+			return shutdown()
+		}
 	}
 }
 

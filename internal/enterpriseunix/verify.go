@@ -59,6 +59,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	l.describe(ctx, record, true)
 	l.describeMachinePolicy(record)
 	if strict {
+		l.warnUnprivilegedUserNamespaces()
+	}
+	if strict {
 		for _, warning := range r.Warnings {
 			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeHookContractUnverified || warning.Code == codeGuardianTargetFailed {
 				problems = append(problems, warning.Message)

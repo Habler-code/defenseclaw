@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"time"
 
@@ -22,6 +23,14 @@ import (
 
 // inheritedAPIListener is replaceable by tests.
 var inheritedAPIListener = func() (net.Listener, bool, error) { return systemd.Listener("api") }
+
+// apiListenRetryBudget bounds the first bind's address-in-use retry;
+// apiListenHeldRetryInterval paces the standalone retry that follows while
+// the hook socket keeps serving. Both are replaceable by tests.
+var (
+	apiListenRetryBudget       = 30 * time.Second
+	apiListenHeldRetryInterval = 2 * time.Second
+)
 
 // acquireAPIListener returns the API listener: the socket-activated "api"
 // descriptor when systemd passed one, otherwise a bound listener. An
@@ -40,7 +49,39 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 		}
 		return listener, nil
 	}
-	return listenWithRetry(ctx, a.addr, 30*time.Second)
+	return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
+}
+
+// retryAPIListenerBind keeps trying to bind the API address after the first
+// bind found it held, and hands the listener to Run through bound. It stops
+// when ctx ends, closing a listener Run did not take, and logs a held port
+// once a minute rather than on every attempt.
+func (a *APIServer) retryAPIListenerBind(ctx context.Context, bound chan<- net.Listener) {
+	var lc net.ListenConfig
+	ticker := time.NewTicker(apiListenHeldRetryInterval)
+	defer ticker.Stop()
+	lastLogged := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		ln, err := lc.Listen(ctx, "tcp", a.addr)
+		if err != nil {
+			if time.Since(lastLogged) >= time.Minute {
+				fmt.Fprintf(os.Stderr, "[sidecar-api] %s still unavailable; retrying the API bind: %v\n", a.addr, err)
+				lastLogged = time.Now()
+			}
+			continue
+		}
+		select {
+		case bound <- ln:
+		case <-ctx.Done():
+			_ = ln.Close()
+		}
+		return
+	}
 }
 
 func inheritedAddrMatches(actual net.Addr, configured string) error {

@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -72,6 +73,9 @@ func TestBindManagedHookSocket(t *testing.T) {
 		t.Fatalf("stale own socket not replaced: %v", err)
 	}
 	_ = listener.Close()
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("closing the hook socket listener left its path behind: %v", err)
+	}
 
 	regular := filepath.Join(dir, "regular")
 	if err := os.WriteFile(regular, nil, 0o600); err != nil {
@@ -88,6 +92,111 @@ func TestBindManagedHookSocket(t *testing.T) {
 	}
 	if _, err := bindManagedHookSocket("relative.sock"); err == nil {
 		t.Fatal("relative socket path must be refused")
+	}
+}
+
+// TestBindManagedHookSocketLeavesALiveSocketAlone: a socket another listener
+// under this account still answers on (a second gateway) is neither removed
+// nor replaced, and it keeps serving.
+func TestBindManagedHookSocketLeavesALiveSocketAlone(t *testing.T) {
+	path := filepath.Join(shortGatewaySocketDir(t), "hook.sock")
+	live, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	if listener, err := bindManagedHookSocket(path); !errors.Is(err, errHookSocketInUse) {
+		if listener != nil {
+			_ = listener.Close()
+		}
+		t.Fatalf("bind over a live socket = %v, want errHookSocketInUse", err)
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		t.Fatalf("the live socket stopped answering after a refused bind: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// TestBindManagedHookSocketWaitsForALiveListenerToLeave: during an
+// overlapping restart the new gateway waits for the old one to release the
+// socket and then binds it, instead of replacing it or running without it.
+func TestBindManagedHookSocketWaitsForALiveListenerToLeave(t *testing.T) {
+	path := filepath.Join(shortGatewaySocketDir(t), "hook.sock")
+	live, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreBudget := apiListenRetryBudget
+	restoreInterval := hookSocketHeldRetryInterval
+	t.Cleanup(func() {
+		apiListenRetryBudget = restoreBudget
+		hookSocketHeldRetryInterval = restoreInterval
+	})
+	apiListenRetryBudget = 10 * time.Second
+	hookSocketHeldRetryInterval = 20 * time.Millisecond
+	const hold = 300 * time.Millisecond
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(hold)
+		_ = live.Close()
+		close(released)
+	}()
+	listener, err := bindManagedHookSocketWhenFree(context.Background(), path)
+	if err != nil {
+		t.Fatalf("bind after the live listener left: %v", err)
+	}
+	defer listener.Close()
+	select {
+	case <-released:
+	default:
+		t.Fatal("the hook socket was bound while another listener still served it")
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		t.Fatalf("the new hook socket does not answer: %v", err)
+	}
+	_ = conn.Close()
+
+	// A listener that is still live when the budget ends is left alone.
+	apiListenRetryBudget = 100 * time.Millisecond
+	if again, err := bindManagedHookSocketWhenFree(context.Background(), path); !errors.Is(err, errHookSocketInUse) {
+		if again != nil {
+			_ = again.Close()
+		}
+		t.Fatalf("bind over a socket that stays live = %v, want errHookSocketInUse", err)
+	}
+}
+
+// TestHookSocketListenerCloseRemovesOnlyItsOwnSocket: a gateway that exits
+// after its path was taken over must not delete the socket now at the path.
+func TestHookSocketListenerCloseRemovesOnlyItsOwnSocket(t *testing.T) {
+	path := filepath.Join(shortGatewaySocketDir(t), "hook.sock")
+	first, err := bindManagedHookSocket(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	second, err := bindManagedHookSocket(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if err := first.Close(); err != nil {
+		t.Fatalf("close the first listener: %v", err)
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		t.Fatalf("closing the first listener removed the second listener's socket: %v", err)
+	}
+	_ = conn.Close()
+	if err := second.Close(); err != nil {
+		t.Fatalf("close the second listener: %v", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("closing the second listener left its socket behind: %v", err)
 	}
 }
 
