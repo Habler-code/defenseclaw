@@ -572,7 +572,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 		// guardian's LocalSystem process token. Only the certified built-in,
 		// filesystem-only connector contract with process-launching options
 		// disabled may cross this boundary.
-		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
+		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() (setupErr error) {
 			if _, verifiedSID, err := validateWindowsEnterpriseHome(target.home, target.sid.String()); err != nil {
 				return err
 			} else if !verifiedSID.Equals(target.sid) {
@@ -586,7 +586,18 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
 			}
-			if err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint); err != nil {
+			relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
+			// Hardening below only runs when the setup succeeds. A failed setup
+			// must not leave the relaxed directories owner-private.
+			defer func() {
+				if setupErr == nil || len(relaxed) == 0 {
+					return
+				}
+				if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, relaxed); restoreErr != nil {
+					setupErr = fmt.Errorf("%w (restore relaxed setup directories failed: %v)", setupErr, restoreErr)
+				}
+			}()
+			if err != nil {
 				return err
 			}
 			// Hash the guardian-selected image as the target user and record
