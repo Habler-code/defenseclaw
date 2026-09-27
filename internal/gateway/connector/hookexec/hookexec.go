@@ -126,13 +126,14 @@ type Options struct {
 	// written. It is ignored outside ManagedEnterprise mode.
 	ManagedGatewayServiceName string
 
-	// ApprovedForeignHooks is the administrator allowlist (sha256 handler
-	// digests) for the managed Cursor foreign-hook guard, read from protected
+	// ApprovedForeignHooks is the administrator allowlist (sha256 approval
+	// digests, each covering one handler registration with its event and
+	// scope) for the managed Cursor foreign-hook guard, read from protected
 	// machine state. It is ignored outside ManagedEnterprise mode.
 	ApprovedForeignHooks []string
 	// ForeignHookTrustedExecutable is the administrator-owned hook executable
 	// running this invocation; an exact DefenseClaw registration of it in a
-	// user or project hook file is not foreign.
+	// user, project or plugin hook file is not foreign.
 	ForeignHookTrustedExecutable string
 	// ForeignHookHomes overrides the user profile directories the guard scans
 	// (default: os.UserHomeDir). Tests use it; production leaves it empty.

@@ -141,7 +141,9 @@ policy only when the DefenseClaw hooks stay effective:
   object to the MDM/GPO policy. Claude then loads only that policy, so add the
   printed `"allowManagedHooksOnly": true` as well: enrollment refuses a policy
   that carries the hooks without it unless the DefenseClaw config sets
-  `claude_code.allow_unmanaged_hooks: true`.
+  `claude_code.allow_unmanaged_hooks: true` (or
+  `connector_hooks.claudecode.allow_unmanaged_hooks: true`; either key enables
+  the opt-out).
 
 While that managed-hooks-only lock is enforced, an HKLM policy that sets
 `allowManagedHooksOnly: false` is refused under either option. A policy that
