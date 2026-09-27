@@ -1068,3 +1068,128 @@ func TestRootGuardianResolvesWatchPathsInWorkerDespiteFIFOCache(t *testing.T) {
 		t.Fatalf("root owned shared-writer files = %v, missing %s", set.Ownership.SharedWriter, f.codexConfig)
 	}
 }
+
+// A target user can stop or block their own worker until its deadline. In a
+// reconcile pass that costs that user's targets one deadline, not one per
+// worker, and never delays other users' workers.
+func TestTargetWorkerStallGuardSkipsOnlyTheStalledUserForThePass(t *testing.T) {
+	calls := map[int]int{}
+	original := targetWorkerRunner
+	targetWorkerRunner = func(_ context.Context, target TargetCredentials, _ string, _ json.RawMessage) (json.RawMessage, error) {
+		calls[target.UID]++
+		switch target.UID {
+		case 1001:
+			return nil, fmt.Errorf("enterprise hooks: target worker for uid 1001 did not finish: %w", context.DeadlineExceeded)
+		case 1002:
+			return nil, errors.New("enterprise hooks: target worker for uid 1002 failed: exit status 1")
+		}
+		return json.RawMessage(`{}`), nil
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+	stalled := TargetCredentials{UserHome: "/home/stalled", UID: 1001, GID: 1001}
+	failing := TargetCredentials{UserHome: "/home/failing", UID: 1002, GID: 1002}
+	healthy := TargetCredentials{UserHome: "/home/healthy", UID: 1003, GID: 1003}
+
+	pass := WithTargetWorkerStallGuard(context.Background())
+	var skipped error
+	for i := 0; i < 3; i++ {
+		_, err := runTargetWorker(pass, stalled, targetOperationVerify, nil)
+		if i > 0 {
+			skipped = err
+		}
+		if _, err := runTargetWorker(pass, failing, targetOperationVerify, nil); err == nil {
+			t.Fatal("failing worker reported success")
+		}
+		if _, err := runTargetWorker(pass, healthy, targetOperationVerify, nil); err != nil {
+			t.Fatalf("healthy worker: %v", err)
+		}
+	}
+	if calls[1001] != 1 || calls[1002] != 3 || calls[1003] != 3 {
+		t.Fatalf("worker calls = %v, want one for the stalled user and every call for the others", calls)
+	}
+	if skipped == nil || !strings.Contains(skipped.Error(), "did not finish in this reconcile pass") {
+		t.Fatalf("skipped worker error = %v", skipped)
+	}
+
+	// The next pass tries the user again; without a guard every call runs.
+	if _, err := runTargetWorker(WithTargetWorkerStallGuard(context.Background()), stalled, targetOperationVerify, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("next pass = %v, want a new worker attempt", err)
+	}
+	for i := 0; i < 2; i++ {
+		_, _ = runTargetWorker(context.Background(), stalled, targetOperationVerify, nil)
+	}
+	if calls[1001] != 4 {
+		t.Fatalf("stalled user worker calls = %d, want 4", calls[1001])
+	}
+}
+
+// In a guarded pass a root guardian that saw a user's worker miss its
+// deadline does not start more workers for that user: not the repair after
+// the failed verification, and not the watch-path resolution.
+func TestRootReconcilePassSkipsFurtherWorkersAfterADeadline(t *testing.T) {
+	target := currentTestTarget(t)
+	stubTargetProcessEUID(t, 0)
+	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
+	var operations []string
+	original := targetWorkerRunner
+	targetWorkerRunner = func(_ context.Context, _ TargetCredentials, operation string, _ json.RawMessage) (json.RawMessage, error) {
+		operations = append(operations, operation)
+		return nil, fmt.Errorf("enterprise hooks: target worker for uid %d did not finish: %w", target.UID, context.DeadlineExceeded)
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+
+	pass := WithTargetWorkerStallGuard(context.Background())
+	if _, err := Verify(pass, opts); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Verify = %v, want the worker deadline", err)
+	}
+	if _, err := Install(pass, opts); err == nil || !strings.Contains(err.Error(), "did not finish in this reconcile pass") {
+		t.Fatalf("Install after a stalled worker = %v, want an immediate skip", err)
+	}
+	if set := ResolveWatchPaths(pass, opts); set.DirsErr == nil || set.OwnershipErr == nil {
+		t.Fatalf("ResolveWatchPaths after a stalled worker = %+v, want an immediate skip", set)
+	}
+	if !slices.Equal(operations, []string{targetOperationVerify}) {
+		t.Fatalf("worker operations = %v, want only the verification that stalled", operations)
+	}
+}
+
+func TestTargetWorkerStallGuardRecognizesARealWorkerDeadline(t *testing.T) {
+	target := currentTestTarget(t)
+	pass := WithTargetWorkerStallGuard(context.Background())
+	ctx, cancel := context.WithTimeout(pass, 300*time.Millisecond)
+	defer cancel()
+	if _, err := runTargetWorker(ctx, target, testTargetOperationSleep, json.RawMessage(`null`)); err == nil ||
+		!strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("hung worker = %v, want a deadline failure", err)
+	}
+	if _, err := runTargetWorker(pass, target, testTargetOperationIdentity, json.RawMessage(`"x"`)); err == nil ||
+		!strings.Contains(err.Error(), "did not finish in this reconcile pass") {
+		t.Fatalf("worker after a real deadline = %v, want an immediate skip", err)
+	}
+}
+
+// Root counterpart of the deadline subprocess test: the guardian stops a
+// dropped worker that does not finish, and the pass starts no further
+// workers for that user.
+func TestRootGuardianWorkerDeadlineSkipsThatUserForThePass(t *testing.T) {
+	f := newRootWorkerFixture(t)
+	target := TargetCredentials{UserHome: f.home, UID: f.uid, GID: f.gid}
+	pass := WithTargetWorkerStallGuard(context.Background())
+	ctx, cancel := context.WithTimeout(pass, 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := RunTargetOperation(ctx, target, testTargetOperationSleep, nil, nil); err == nil || !strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("hung root worker = %v, want a deadline failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("hung root worker was stopped after %s", elapsed)
+	}
+	var identity testTargetIdentity
+	if err := RunTargetOperation(pass, target, testTargetOperationIdentity, "root", &identity); err == nil ||
+		!strings.Contains(err.Error(), "did not finish in this reconcile pass") {
+		t.Fatalf("root worker after a deadline = %v, want an immediate skip", err)
+	}
+	if err := RunTargetOperation(context.Background(), target, testTargetOperationIdentity, "root", &identity); err != nil || identity.UID != f.uid {
+		t.Fatalf("root worker outside the pass = %+v, %v", identity, err)
+	}
+}

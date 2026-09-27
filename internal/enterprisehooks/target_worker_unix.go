@@ -327,7 +327,7 @@ func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operat
 	if err != nil {
 		return InstallResult{}, err
 	}
-	raw, err := targetWorkerRunner(ctx, call.target, operation, call.payload)
+	raw, err := runTargetWorker(ctx, call.target, operation, call.payload)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -352,7 +352,7 @@ func resolveWatchPathsThroughTargetWorker(ctx context.Context, opts InstallOptio
 	if err != nil {
 		return WatchPathSet{}, err
 	}
-	raw, err := targetWorkerRunner(ctx, call.target, targetOperationWatchPaths, call.payload)
+	raw, err := runTargetWorker(ctx, call.target, targetOperationWatchPaths, call.payload)
 	if err != nil {
 		return WatchPathSet{}, err
 	}
@@ -381,6 +381,24 @@ func resolveWatchPathsThroughTargetWorker(ctx context.Context, opts InstallOptio
 	return set, nil
 }
 
+// runTargetWorker runs one operation in a worker unless an earlier worker
+// for the same user did not finish in this reconcile pass (see
+// WithTargetWorkerStallGuard).
+func runTargetWorker(ctx context.Context, target TargetCredentials, operation string, payload json.RawMessage) (json.RawMessage, error) {
+	guard := targetWorkerStallGuardFrom(ctx)
+	if guard != nil && guard.isStalled(target.UID) {
+		return nil, fmt.Errorf(
+			"enterprise hooks: skipping the target worker for uid %d: an earlier worker for this user did not finish in this reconcile pass",
+			target.UID,
+		)
+	}
+	raw, err := targetWorkerRunner(ctx, target, operation, payload)
+	if err != nil && guard != nil && errors.Is(err, context.DeadlineExceeded) {
+		guard.markStalled(target.UID)
+	}
+	return raw, err
+}
+
 // runTargetOperation validates the target and runs op with its credentials.
 func runTargetOperation(
 	ctx context.Context,
@@ -402,7 +420,7 @@ func runTargetOperation(
 		if targetWorkerActive.Load() {
 			return nil, errTargetWorkerRecursion
 		}
-		return targetWorkerRunner(ctx, target, name, payload)
+		return runTargetWorker(ctx, target, name, payload)
 	}
 	var result json.RawMessage
 	err = withOwnerCredentials(uid, gid, func() error {

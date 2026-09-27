@@ -1434,7 +1434,11 @@ worker permanently switches to the target user's UID, primary GID, and no other
 groups before it opens any path in that user's home, then validates, installs,
 or repairs the target and exits. The worker also works out which of the user's
 directories and files the guardian watches for changes, so the guardian never
-reads the user's files itself. Every file change is therefore checked by the
+reads the user's files itself. Each worker has a two-minute deadline. If a
+user's worker does not finish in time, the guardian stops it, reports that
+target as failed, and starts no more workers for that user in the same
+reconcile pass, so one user cannot hold up repairs for the others; the next
+pass tries that user again. Every file change is therefore checked by the
 kernel against the user's own permissions, and connector files keep the user's
 ownership. The worker needs only `CAP_SETUID` and `CAP_SETGID` for that switch;
 it does not depend on the units' `NoNewPrivileges=false`. On macOS the root

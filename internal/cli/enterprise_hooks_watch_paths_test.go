@@ -52,3 +52,31 @@ func TestReconcileTakesWatchPathsFromResolveWatchPaths(t *testing.T) {
 		t.Fatalf("owned files = %v / %v, want only alice's", run.WatchExclusiveFiles, run.WatchSharedFiles)
 	}
 }
+
+// Every reconcile pass runs under a target worker stall guard, so a target
+// user who stops or blocks their own worker costs the pass one worker
+// deadline instead of one per worker.
+func TestReconcileRunsEachPassUnderATargetWorkerStallGuard(t *testing.T) {
+	stubSignInIsolationReconcile(t)
+	previous := enterpriseHookReconcileWatchPaths
+	t.Cleanup(func() { enterpriseHookReconcileWatchPaths = previous })
+	var unguarded []string
+	enterpriseHookReconcileWatchPaths = func(ctx context.Context, _ enterprisehooks.InstallOptions) enterprisehooks.WatchPathSet {
+		if !enterprisehooks.TargetWorkerStallGuardActive(ctx) {
+			unguarded = append(unguarded, "watch paths")
+		}
+		return enterprisehooks.WatchPathSet{}
+	}
+	runSignInIsolationReconcileWithOptions(t, []signInIsolationTarget{
+		{name: "alice", sid: "S-1-5-21-1000-2000-3000-1101", connector: "codex"},
+	}, signInIsolationOptions{
+		observeInstallContext: func(ctx context.Context) {
+			if !enterprisehooks.TargetWorkerStallGuardActive(ctx) {
+				unguarded = append(unguarded, "install")
+			}
+		},
+	})
+	if len(unguarded) != 0 {
+		t.Fatalf("reconcile ran %v without a target worker stall guard", unguarded)
+	}
+}

@@ -1571,6 +1571,10 @@ func enterpriseHookVerifyDispositionIssues(
 }
 
 func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcileRun, error) {
+	// Targets are reconciled one after another; a user whose per-target
+	// worker misses its deadline gets no further workers in this pass, so
+	// they cannot hold up the other users' repairs.
+	ctx = enterprisehooks.WithTargetWorkerStallGuard(ctx)
 	run := enterpriseHookReconcileRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
