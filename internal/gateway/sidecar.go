@@ -2478,7 +2478,8 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 	prov, buildErr := s.buildCMIDProvider(ctx)
 	s.setInspectionAvailability(buildErr)
 	// buildCMIDProvider returns (nil, err) only on hard failures
-	// (unregistered factory, untrusted path). A transient Refresh
+	// (unregistered factory, untrusted path, a Windows gateway without
+	// the credential broker). A transient Refresh
 	// error returns (prov, err) — cache the provider so subsequent
 	// Token() calls can retry dlopen from the CMID module's own
 	// acquire loop, and the inspection lane self-heals once the
@@ -2496,6 +2497,20 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 	s.cmidProviderInst = cloudreg.WithTokenCache(prov, cmidProviderTokenCacheTTL)
 	return s.cmidProviderInst, buildErr
 }
+
+// errCMIDBrokerRequired refuses the in-process lane on Windows. The installer
+// always gives the gateway service the credential broker's environment, and
+// the broker verifies cmidapi.dll's Authenticode signer before each load
+// (cmidbroker.OpenTrustedLibrary). Loaded in-process instead, the library
+// would face only the path-trust check below.
+var errCMIDBrokerRequired = errors.New(
+	"the Windows gateway loads the managed cloud auth library only through the credential broker, " +
+		"and the broker service environment is not set")
+
+// cmidDirectLaneRefused is true where the gateway must never load the managed
+// cloud auth library in-process. It is a variable so tests that register a
+// fake provider can use the direct lane on Windows.
+var cmidDirectLaneRefused = runtime.GOOS == "windows"
 
 func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
 	brokerConfig, brokerConfigured, brokerConfigErr := cmidbroker.ConfigFromEnvironment(os.Getenv)
@@ -2517,6 +2532,12 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 		}
 		s.logCMIDBuildLane("broker")
 		return provider, nil
+	}
+	// A build with no provider cannot load anything; cloudreg.New below
+	// reports ErrNoProviderRegistered for it, which describes it better.
+	if cmidDirectLaneRefused && cloudreg.Registered() {
+		s.logCMIDBuildError("broker-required", errCMIDBrokerRequired)
+		return nil, errCMIDBrokerRequired
 	}
 
 	libPath := strings.TrimSpace(s.currentConfig().CloudAuth.LibPath)

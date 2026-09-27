@@ -573,7 +573,7 @@
       "name": "DEFENSECLAW_CMID_BROKER_AUTH_KEY",
       "category": "credential",
       "purpose": "Select the protected 32-byte key used by the Windows gateway to authenticate credential broker responses.",
-      "default": "unset (legacy in-process provider path)",
+      "default": "unset (the Windows gateway then refuses the in-process provider path)",
       "accepted_values": [
         "absolute installer-owned broker-auth.key path",
         "unset"
@@ -593,7 +593,7 @@
       "name": "DEFENSECLAW_CMID_BROKER_PIPE",
       "category": "runtime_path",
       "purpose": "Identify the exact local named pipe used by the restricted Windows gateway to reach the isolated managed credential provider broker.",
-      "default": "unset (legacy in-process provider path)",
+      "default": "unset (the Windows gateway then refuses the in-process provider path)",
       "accepted_values": [
         "\\\\.\\pipe\\DefenseClawCMIDBroker",
         "installer-owned certification pipe",
@@ -614,7 +614,7 @@
       "name": "DEFENSECLAW_CMID_BROKER_SERVICE_NAME",
       "category": "runtime_path",
       "purpose": "Bind the gateway broker client to the exact installer-owned LocalSystem credential broker service.",
-      "default": "unset (legacy in-process provider path)",
+      "default": "unset (the Windows gateway then refuses the in-process provider path)",
       "accepted_values": [
         "DefenseClawCMIDBroker",
         "installer-owned certification broker service",

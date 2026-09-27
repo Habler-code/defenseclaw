@@ -9,11 +9,15 @@
 package gateway
 
 import (
+	"errors"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
 )
 
 const untrustedLibraryRefusal = "refusing untrusted managed cloud auth library"
@@ -57,5 +61,44 @@ func TestEnsureCMIDProviderLeavesAnUnsetLibraryPathToTheProvider(t *testing.T) {
 	_, err := sidecar.ensureCMIDProvider(t.Context())
 	if err != nil && strings.Contains(err.Error(), untrustedLibraryRefusal) {
 		t.Fatalf("an unset library path must not be treated as untrusted: %v", err)
+	}
+}
+
+func TestOnlyTheWindowsGatewayRefusesTheInProcessCMIDLane(t *testing.T) {
+	if want := runtime.GOOS == "windows"; cmidDirectLaneRefused != want {
+		t.Fatalf("in-process lane refused = %t on %s, want %t", cmidDirectLaneRefused, runtime.GOOS, want)
+	}
+}
+
+func TestEnsureCMIDProviderNeedsTheBrokerWhereTheInProcessLaneIsRefused(t *testing.T) {
+	for _, name := range []string{
+		cmidbroker.PipeEnv,
+		cmidbroker.BrokerServiceEnv,
+		cmidbroker.AuthKeyEnv,
+		cmidbroker.GatewayServiceEnv,
+	} {
+		t.Setenv(name, "")
+	}
+	constructed := false
+	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
+		constructed = true
+		return newFakeCloudProvider("token"), nil
+	})
+	t.Cleanup(func() { cloudreg.Register(nil) })
+	setCMIDDirectLaneRefused(t, true)
+	sidecar := managedInspectionSidecar(t)
+
+	// A managed build with a real provider on a gateway whose service
+	// environment has no broker: the library must not be loaded in-process,
+	// where only path trust would apply.
+	prov, err := sidecar.ensureCMIDProvider(t.Context())
+	if !errors.Is(err, errCMIDBrokerRequired) {
+		t.Fatalf("error = %v, want %v", err, errCMIDBrokerRequired)
+	}
+	if prov != nil || constructed {
+		t.Fatalf("provider = %v, constructed = %t; the in-process lane must not be reached", prov, constructed)
+	}
+	if available, detail := sidecar.inspectionAvailability(); available || !strings.Contains(detail, "credential broker") {
+		t.Fatalf("inspection availability = %t (%q), want unavailable naming the broker", available, detail)
 	}
 }

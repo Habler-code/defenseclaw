@@ -508,6 +508,10 @@ common name must be `Cisco Systems, Inc.`. The broker holds the file open
 without write or delete sharing until the library has loaded. If the check fails, the broker stops and its log records
 `stage=provider-library-trust success=false` with the reason.
 
+The gateway never loads `cmidapi.dll` itself. If its service environment does
+not name the broker, managed inspection stays unavailable and `/health` gives
+the missing broker as the reason.
+
 The unsigned exception is itself fail-closed before module import. It is valid
 only for `Install`, `Upgrade`, or `Repair`, and only when the service names are
 the exact case-sensitive `DefenseClawCertGateway_<10-lowercase-hex>` and
