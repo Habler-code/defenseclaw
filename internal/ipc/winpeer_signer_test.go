@@ -12,10 +12,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"slices"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 var (
@@ -118,6 +120,33 @@ func TestWindowsImageSignerRequiresOneSubjectCommonName(t *testing.T) {
 			}
 		})
 	}
+
+	// Go's x509 parser drops a trailing NUL from a BMPString; the shared
+	// parser keeps it, as the broker and the lifecycle module do, so the
+	// name no longer matches the allowed signer.
+	t.Run("BMPString common name with a trailing NUL", func(t *testing.T) {
+		units := utf16.Encode([]rune(testCiscoSigner + "\x00"))
+		value := make([]byte, 0, 2*len(units))
+		for _, unit := range units {
+			value = append(value, byte(unit>>8), byte(unit))
+		}
+		bmp := asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagBMPString, Bytes: value}
+		encoded := signerCertificateWithSubject(t, pkix.RDNSequence{
+			organization,
+			{{Type: testOIDCommonName, Value: bmp}},
+		})
+		signer, err := windowsImageSignerFromCertificate(encoded)
+		if err != nil {
+			t.Fatalf("windowsImageSignerFromCertificate: %v", err)
+		}
+		if want := testCiscoSigner + "\x00"; signer.CommonName != want {
+			t.Fatalf("common name = %q, want %q", signer.CommonName, want)
+		}
+		want := fmt.Sprintf("peer image signer %q is not allowed", testCiscoSigner+"\x00")
+		if reason := policy.signerRejection(signer); reason != want {
+			t.Fatalf("rejection = %q, want %q", reason, want)
+		}
+	})
 
 	if _, err := windowsImageSignerFromCertificate([]byte{0x30, 0x00}); err == nil {
 		t.Fatal("windowsImageSignerFromCertificate accepted a malformed certificate")
