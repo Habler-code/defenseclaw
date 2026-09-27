@@ -179,6 +179,17 @@ homes work once they are mounted.
 - A reused uid, or a home recreated with a different inode, is treated as a
   new identity and enrolled from scratch.
 - Windows keeps an existing disabled row disabled across cycles.
+- On Windows, when a user's per-user row is revoked (the user is excluded,
+  deleted, or the connector is disabled), the guardian removes DefenseClaw's
+  own hook registration or plugin from that user's agent configuration,
+  running as the user; the user's own hooks stay. A signed-out user has no
+  session to act under, so the cleanup is recorded and runs at their next
+  sign-in. That includes a user whose profile folder is absent while they
+  are signed out (a roaming profile whose local copy is deleted, or an
+  FSLogix container); the record is dropped without a cleanup only when the
+  account is gone too. A user who is enrolled again before then keeps the
+  record until the guardian has reinstalled and protects them, so a second
+  revocation before that still cleans them.
 
 ## New users
 

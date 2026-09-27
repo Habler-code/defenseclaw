@@ -7,6 +7,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -80,6 +81,10 @@ type windowsManagedHooksTeardownResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// windowsManagedHooksTeardownReport is the helper's JSON contract with the
+// lifecycle. The user_registrations_* fields are set only by a standalone
+// finalize: DefenseClaw registrations removed from users' agent
+// configurations, and the users it could not reach.
 type windowsManagedHooksTeardownReport struct {
 	SchemaVersion                int                                 `json:"schema_version"`
 	Action                       string                              `json:"action"`
@@ -98,8 +103,34 @@ type windowsManagedHooksTeardownReport struct {
 	RollbackCompleted            bool                                `json:"rollback_completed"`
 	FinalizationCompleted        bool                                `json:"finalization_completed"`
 	CollectedGenerationCount     int                                 `json:"collected_generation_count"`
+	UserRegistrationsRemoved     int                                 `json:"user_registrations_removed"`
+	UserRegistrationsPending     []string                            `json:"user_registrations_pending,omitempty"`
+	UserRegistrationsFailed      []string                            `json:"user_registrations_failed,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
+}
+
+// windowsManagedHooksStandaloneUserRegistrationRemover is replaceable in
+// tests.
+var windowsManagedHooksStandaloneUserRegistrationRemover = removeWindowsManagedHooksStandalonePerUserRegistrations
+
+// completeWindowsManagedHooksTeardownUserCleanup runs after a successful
+// standalone finalize: the uninstall has committed, so DefenseClaw's own
+// registrations are removed from users' agent configurations and the
+// outcome is reported. It never fails finalize. Secure Client finalize is
+// unchanged.
+func completeWindowsManagedHooksTeardownUserCleanup(
+	report *windowsManagedHooksTeardownReport,
+	runtimeDir string,
+	manifest enterprisehooks.Manifest,
+) {
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return
+	}
+	cleanup := windowsManagedHooksStandaloneUserRegistrationRemover(context.Background(), runtimeDir, manifest)
+	report.UserRegistrationsRemoved = len(cleanup.Removed)
+	report.UserRegistrationsPending = cleanup.Pending
+	report.UserRegistrationsFailed = cleanup.Failed
 }
 
 func newWindowsManagedHooksTeardownCommand() *cobra.Command {
@@ -417,6 +448,9 @@ func runWindowsManagedHooksTeardown(
 			report.SafeToRemoveBinary = true
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
+		}
+		if err == nil {
+			completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest)
 		}
 	}
 	if err != nil {

@@ -155,12 +155,34 @@ but could not enroll (`hook_contract_unverified`, `agent_unprotected`); see
 [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled).
 `include_groups` and `exclude_groups` apply on Windows as described there.
 
-Uninstall revokes every per-user enrollment but does not edit the agent
-configuration inside users' profiles. The OpenCode and Amp plugins it
-installed stop enforcing once uninstall removes
-`C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. Devin, Hermes and
-Antigravity hook registrations stay in each user's configuration and point
-at the removed `defenseclaw-hook.exe`.
+Uninstall revokes every per-user enrollment first. Once it has committed,
+it removes DefenseClaw's own hook registrations and plugins (Amp,
+Antigravity, Devin, Hermes, OpenCode, and a DefenseClaw Copilot user hook
+file) from the agent configuration of every signed-in user, running as that
+user. Only DefenseClaw's entries are removed; the user's own hooks and
+settings stay. Cleanups the guardian still owed to revoked users are
+included.
+
+Acting as a user needs that user's session token, which only LocalSystem
+can obtain. An MDM uninstall runs as LocalSystem (Intune install behavior
+**System**). An uninstall run from an elevated administrator prompt, or from
+Add/Remove Programs, cannot act as other users, so it removes no per-user
+registrations. Users who are signed out during the uninstall keep theirs as
+well: no guardian is left to clean them at their next sign-in. The uninstall
+result names what stays: the `user_registrations_pending` warning lists each
+connector and user SID it could not act as, and `user_registrations_failed`
+lists removals that failed. To clean every user, run the uninstall as
+LocalSystem while they are signed in.
+
+What stays is inert. Uninstall has already revoked every enrollment. The
+OpenCode and Amp plugins stop enforcing once uninstall removes
+`C:\ProgramData\Cisco\DefenseClaw-HookRuntime` and the install marker. The
+Devin, Hermes and Antigravity hooks point at the removed
+`defenseclaw-hook.exe`, so each hook call fails to start. None of these
+agents blocks on that: Devin blocks only on exit code 2 (a missing command
+exits 127), and Hermes and Antigravity do not enforce a nonzero hook exit. A
+DefenseClaw Copilot user hook that stays fails open, like every Copilot
+integration failure.
 
 ## Per-user installs
 

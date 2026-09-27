@@ -74,6 +74,7 @@ func newPerUserManagedHarness(t *testing.T) perUserManagedHarness {
 	}
 	target := user.User.Sid
 	for _, path := range []string{dataDir, hookDir} {
+		setWindowsTestPathExactOwner(t, path, target)
 		if err := setWindowsUserPathProtection(path, target, true); err != nil {
 			t.Fatalf("protect target directory %s: %v", path, err)
 		}

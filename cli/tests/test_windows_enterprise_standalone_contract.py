@@ -400,6 +400,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
+    "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )
 
 

@@ -22,3 +22,7 @@ func enterpriseHookStandalonePlatformFinish(context.Context, io.Writer, []enterp
 }
 
 func pruneWindowsStandalonePerUserEnrollments(enterprisehooks.Manifest, string) error { return nil }
+
+func enterpriseHookStandalonePlatformRevokeUsers(context.Context, io.Writer, enterprisehooks.Manifest) error {
+	return nil
+}

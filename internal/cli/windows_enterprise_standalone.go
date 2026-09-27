@@ -78,6 +78,12 @@ type windowsEnterpriseInstallerReport struct {
 	TrustMode                         string   `json:"trust_mode"`
 	Error                             string   `json:"error"`
 	Errors                            []string `json:"errors"`
+	// A committed standalone uninstall reports the DefenseClaw per-user
+	// registrations it could not remove from users' agent configurations.
+	// They are decoded leniently: a malformed value must not hide the
+	// lifecycle's report.
+	UserRegistrationsPending json.RawMessage `json:"user_registrations_pending"`
+	UserRegistrationsFailed  json.RawMessage `json:"user_registrations_failed"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed or transaction_pending field): the
@@ -400,6 +406,66 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
 	}
+	addWindowsEnterpriseUserRegistrationWarnings(result, report)
+}
+
+// windowsEnterpriseUserRegistrationListMax bounds how many connector/SID
+// labels one warning names.
+const windowsEnterpriseUserRegistrationListMax = 20
+
+// addWindowsEnterpriseUserRegistrationWarnings tells the administrator which
+// DefenseClaw per-user registrations an uninstall left in place: those of
+// users who were signed out, of every user when the uninstall did not run as
+// LocalSystem, and removals that failed. They stay inert (enrollment
+// revoked, hook runtime and binary removed).
+func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if pending := windowsEnterpriseReportStrings(report.UserRegistrationsPending); len(pending) > 0 {
+		result.AddWarning("user_registrations_pending", fmt.Sprintf(
+			"uninstall could not act as %d user connector registration(s) (the user was signed out, or the uninstall did not run as LocalSystem); DefenseClaw's inert registration stays in that user's agent configuration: %s",
+			len(pending),
+			windowsEnterpriseBoundedLabels(pending),
+		))
+	}
+	if failed := windowsEnterpriseReportStrings(report.UserRegistrationsFailed); len(failed) > 0 {
+		result.AddWarning("user_registrations_failed", fmt.Sprintf(
+			"removing DefenseClaw per-user registrations failed: %s",
+			windowsEnterpriseBoundedLabels(failed),
+		))
+	}
+}
+
+// windowsEnterpriseReportStrings decodes a string list the lifecycle
+// forwarded; a single string is one item and anything else is ignored.
+func windowsEnterpriseReportStrings(raw json.RawMessage) []string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw, &list); err != nil {
+		var single string
+		if json.Unmarshal(raw, &single) != nil {
+			return nil
+		}
+		list = []string{single}
+	}
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		if item = strings.Join(strings.Fields(item), " "); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func windowsEnterpriseBoundedLabels(items []string) string {
+	if len(items) <= windowsEnterpriseUserRegistrationListMax {
+		return strings.Join(items, "; ")
+	}
+	return fmt.Sprintf(
+		"%s; and %d more",
+		strings.Join(items[:windowsEnterpriseUserRegistrationListMax], "; "),
+		len(items)-windowsEnterpriseUserRegistrationListMax,
+	)
 }
 
 // windowsEnterpriseUnprotectedAgentsReader reads the enumerator's

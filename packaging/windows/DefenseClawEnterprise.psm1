@@ -18909,6 +18909,75 @@ function Add-DefenseClawSelfUninstallResult {
     return $Result
 }
 
+function Add-DefenseClawUserRegistrationCleanupResult {
+    # A standalone finalize removes DefenseClaw's own registrations from users'
+    # agent configurations, as each user, and reports the users it could not
+    # reach (signed out, or an uninstall not run as LocalSystem). The uninstall
+    # result carries that report so the administrator sees what stays. Secure
+    # Client results are unchanged.
+    param(
+        [Parameter(Mandatory)]$Result,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [AllowNull()]$Finalization
+    )
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        return $Result
+    }
+    $report = $null
+    foreach ($candidate in @($Finalization)) {
+        if ($null -ne $candidate -and
+            $null -ne $candidate.PSObject.Properties['action']) {
+            $report = $candidate
+        }
+    }
+    $removed = [int64]0
+    $lists = [ordered]@{
+        user_registrations_pending = [string[]]@()
+        user_registrations_failed = [string[]]@()
+    }
+    if ($null -ne $report) {
+        $property = $report.PSObject.Properties['user_registrations_removed']
+        if ($null -ne $property -and
+            $property.Value -isnot [bool] -and
+            $property.Value -is [ValueType]) {
+            $removed = [Math]::Max(
+                [int64]0,
+                [Math]::Min([int64]100000, [int64]$property.Value)
+            )
+        }
+        foreach ($name in @($lists.Keys)) {
+            $property = $report.PSObject.Properties[$name]
+            if ($null -eq $property -or $null -eq $property.Value) {
+                continue
+            }
+            $lists[$name] = [string[]]@(
+                @($property.Value) |
+                    Microsoft.PowerShell.Utility\Select-Object -First 4096 |
+                    Microsoft.PowerShell.Core\ForEach-Object {
+                        ConvertTo-DefenseClawBoundedDiagnostic `
+                            -Value ([string]$_) `
+                            -MaxLength 1024
+                    }
+            )
+        }
+    }
+    $Result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name user_registrations_removed `
+            -Value $removed `
+            -Force
+    foreach ($name in @($lists.Keys)) {
+        $Result |
+            Microsoft.PowerShell.Utility\Add-Member `
+                -MemberType NoteProperty `
+                -Name $name `
+                -Value $lists[$name] `
+                -Force
+    }
+    return $Result
+}
+
 function Add-DefenseClawUninstallContractResult {
     param([Parameter(Mandatory)]$Result)
     $Result |
@@ -19677,6 +19746,7 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     $cleanupGatewaySID = Resolve-DefenseClawRetiredGatewayServiceSID `
         -GatewayServiceName $GatewayServiceName `
         -GatewayServiceSID $GatewayServiceSID
+    $finalization = $null
     if (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.InstallRoot `
             -PathType Container) {
@@ -19686,10 +19756,10 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             -GatewayServiceName $GatewayServiceName `
             -AllowLegacyInactive
         if ($teardownPhase -ceq 'prepared') {
-            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+            $finalization = Complete-DefenseClawCommittedManagedHooksFinalization `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName)
+                -GuardianServiceName $GuardianServiceName
         }
         elseif ($teardownPhase -ceq 'finalized') {
             # Finalization no longer needs the executable tree. Validate the
@@ -19731,6 +19801,12 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
                 -Name cached_enterprise_clients_require_reload `
                 -Value $true `
                 -Force
+        if ($null -ne $finalization) {
+            $result = Add-DefenseClawUserRegistrationCleanupResult `
+                -Result $result `
+                -Layout $Layout `
+                -Finalization $finalization
+        }
         return $result
     }
     [void](Revoke-DefenseClawManagedIPCServiceAccess `
@@ -19748,6 +19824,12 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             -Name cached_enterprise_clients_require_reload `
             -Value $true `
             -Force
+    if ($null -ne $finalization) {
+        $result = Add-DefenseClawUserRegistrationCleanupResult `
+            -Result $result `
+            -Layout $Layout `
+            -Finalization $finalization
+    }
     return $result
 }
 
@@ -21700,11 +21782,12 @@ function Invoke-DefenseClawUninstallLifecycle {
         }
         throw $operationError
     }
+    $finalization = $null
     try {
-        [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+        $finalization = Complete-DefenseClawCommittedManagedHooksFinalization `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName)
+            -GuardianServiceName $GuardianServiceName
         if ($null -ne $selfUninstallReceipt) {
             $retiredRoot = [string]$selfUninstallReceipt.retired_install_root
             [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
@@ -21782,6 +21865,10 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Name cached_enterprise_clients_require_reload `
             -Value $true `
             -Force
+    $result = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result $result `
+        -Layout $Layout `
+        -Finalization $finalization
     if ($null -ne $selfUninstallReceipt) {
         return Add-DefenseClawSelfUninstallResult `
             -Result $result `

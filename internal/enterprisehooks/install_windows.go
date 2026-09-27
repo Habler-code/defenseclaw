@@ -1423,7 +1423,7 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 		if err := windowsEnterpriseConnectorCertification(name, conn); err != nil {
 			return err
 		}
-		return removeWindowsRuntimeOnlyManagedRuntime(opts, name)
+		return removeWindowsRuntimeOnlyManagedRuntime(ctx, opts, conn)
 	}
 	return removeWindowsGenericManagedRuntime(ctx, opts)
 }
@@ -1451,6 +1451,15 @@ func removeWindowsGenericManagedRuntime(ctx context.Context, opts InstallOptions
 	if err != nil {
 		return err
 	}
+	// Removal renders the connector's hook command the way install did, so
+	// a command that names the hook binary (Hermes' direct hook) is found
+	// and removed. Only hook-binary connectors need the binary to exist.
+	hookExecutable, hookExecutableErr := windowsEnterpriseHookExecutable()
+	if hookExecutableErr == nil {
+		hookExecutable = filepath.Clean(hookExecutable)
+	} else {
+		hookExecutable = ""
+	}
 	if hookBinary, perUser := windowsStandalonePerUserConnector(conn.Name()); perUser && hookBinary {
 		home, verifiedSID, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
 		if err != nil {
@@ -1463,9 +1472,8 @@ func removeWindowsGenericManagedRuntime(ctx context.Context, opts InstallOptions
 		if err != nil {
 			return err
 		}
-		hookExecutable, err := windowsEnterpriseHookExecutable()
-		if err != nil {
-			return err
+		if hookExecutableErr != nil {
+			return hookExecutableErr
 		}
 		// Revoke the machine enrollment first: from here the SID's hook fails
 		// closed as unregistered even if the per-user teardown below fails.
@@ -1473,7 +1481,7 @@ func removeWindowsGenericManagedRuntime(ctx context.Context, opts InstallOptions
 			conn.Name(),
 			targetSID,
 			dataDir,
-			filepath.Clean(hookExecutable),
+			hookExecutable,
 		); err != nil {
 			return err
 		}
@@ -1493,6 +1501,7 @@ func removeWindowsGenericManagedRuntime(ctx context.Context, opts InstallOptions
 		setup := connector.SetupOpts{
 			DataDir:           dataDir,
 			ManagedEnterprise: true,
+			HookExecutable:    hookExecutable,
 		}
 		if err := validateWindowsEnterpriseImpersonationSetup(setup); err != nil {
 			return err
@@ -1520,6 +1529,11 @@ func removeWindowsGenericManagedRuntime(ctx context.Context, opts InstallOptions
 					targetSID,
 					err,
 				)
+			}
+			// A user who deleted the DefenseClaw data directory has no hook
+			// contract left to clear; the registration above is what mattered.
+			if _, statErr := os.Lstat(dataDir); errors.Is(statErr, os.ErrNotExist) {
+				return nil
 			}
 			if err := connector.ClearHookContractLockEntryForMode(dataDir, conn.Name(), true); err != nil {
 				return fmt.Errorf("enterprise hooks: clear connector %s hook contract lock: %w", conn.Name(), err)

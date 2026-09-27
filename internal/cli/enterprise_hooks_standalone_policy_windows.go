@@ -7,8 +7,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +19,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 // The Windows standalone guardian owns the machine policy targets that the
@@ -104,6 +108,118 @@ func pruneWindowsStandalonePerUserEnrollments(manifest enterprisehooks.Manifest,
 		filepath.Clean(hookBinary),
 		windowsStandalonePerUserEnrollmentKeep(manifest),
 	)
+}
+
+// enterpriseHookWindowsUserCleanupAttempt removes one user's DefenseClaw
+// registration; replaceable in tests.
+var enterpriseHookWindowsUserCleanupAttempt enterpriseHookUserCleanupAttempt = attemptWindowsStandaloneUserCleanup
+
+// enterpriseHookWindowsRequireTargetSession and
+// enterpriseHookWindowsUserCleanupIdentity are replaceable in tests.
+var (
+	enterpriseHookWindowsRequireTargetSession = enterprisehooks.RequireWindowsEnterpriseTargetSession
+	enterpriseHookWindowsUserCleanupIdentity  = enterprisehooks.RequireWindowsEnterpriseTargetImpersonationIdentity
+)
+
+func windowsStandalonePerUserCleanupConnector(name string) bool {
+	_, perUser := enterprisehooks.IsWindowsStandalonePerUserConnector(name)
+	return perUser
+}
+
+// enterpriseHookStandalonePlatformRevokeUsers removes DefenseClaw's own hook
+// registrations and plugins (Amp, Antigravity, Copilot, Devin, Hermes,
+// OpenCode) from the agent configuration of every user whose row the
+// manifest no longer enrolls. Each removal is the connector's teardown run
+// as that user, so the user's own hooks and settings stay. A signed-out
+// user's cleanup is recorded and retried on every reconcile; the sign-in
+// notification starts one.
+func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.Writer, manifest enterprisehooks.Manifest) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !enterprisehooks.WindowsStandaloneProcess() {
+		return nil
+	}
+	return reconcileEnterpriseHookUserCleanups(
+		ctx,
+		stderr,
+		cfg.DataDir,
+		manifest,
+		windowsStandalonePerUserCleanupConnector,
+		enterpriseHookWindowsUserCleanupAttempt,
+		time.Now(),
+	)
+}
+
+// enterpriseHookWindowsUserProfileRemoved is replaceable in tests.
+var enterpriseHookWindowsUserProfileRemoved = windowsStandaloneUserProfileRemoved
+
+// windowsStandaloneUserProfileRemoved reports whether a user whose profile
+// folder is missing can never sign in again: the SID has no ProfileList
+// entry and resolves to no account. A missing folder alone does not say
+// that. A roaming profile whose cached copy is deleted at sign-out, or an
+// FSLogix profile container, has no local folder (and often no ProfileList
+// entry) while the user is signed out, and the user's agent configuration
+// comes back with the profile at the next sign-in. Any answer other than
+// "no such account" keeps the cleanup waiting.
+func windowsStandaloneUserProfileRemoved(rawSID string) bool {
+	sid, err := windows.StringToSid(strings.TrimSpace(rawSID))
+	if err != nil {
+		return false
+	}
+	key, err := registry.OpenKey(
+		registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\`+sid.String(),
+		registry.QUERY_VALUE,
+	)
+	if err == nil {
+		key.Close()
+		return false
+	}
+	if !errors.Is(err, registry.ErrNotExist) {
+		return false
+	}
+	_, _, _, err = sid.LookupAccount("")
+	return errors.Is(err, windows.ERROR_NONE_MAPPED)
+}
+
+// attemptWindowsStandaloneUserCleanup runs the per-user removal for one
+// entry under the user's own session token. No session means pending, and
+// so does a missing profile folder while the account can still sign in; a
+// profile removed with its account leaves nothing to clean.
+func attemptWindowsStandaloneUserCleanup(
+	ctx context.Context,
+	entry enterpriseHookUserCleanup,
+) (enterpriseHookUserCleanupOutcome, error) {
+	home := filepath.Clean(strings.TrimSpace(entry.UserHome))
+	if !filepath.IsAbs(home) {
+		return enterpriseHookUserCleanupFailed, fmt.Errorf("user home %q is not absolute", entry.UserHome)
+	}
+	if _, err := os.Lstat(home); errors.Is(err, os.ErrNotExist) {
+		if enterpriseHookWindowsUserProfileRemoved(entry.SID) {
+			return enterpriseHookUserCleanupDone, nil
+		}
+		return enterpriseHookUserCleanupPending, nil
+	}
+	if err := enterpriseHookWindowsRequireTargetSession(entry.SID, home); err != nil {
+		if enterprisehooks.IsWindowsTargetSessionUnavailable(err) {
+			return enterpriseHookUserCleanupPending, nil
+		}
+		return enterpriseHookUserCleanupFailed, err
+	}
+	err := enterpriseHooksRemoveManagedPolicy(ctx, enterprisehooks.InstallOptions{
+		ConnectorName: strings.ToLower(strings.TrimSpace(entry.Connector)),
+		UserHome:      home,
+		OwnerSID:      strings.TrimSpace(entry.SID),
+		DataDir:       strings.TrimSpace(entry.DataDir),
+		Registry:      enterpriseHooksCertifiedRegistryFactory(),
+	})
+	switch {
+	case err == nil:
+		return enterpriseHookUserCleanupDone, nil
+	case enterprisehooks.IsWindowsTargetSessionUnavailable(err):
+		// The user signed out between the session check and the removal.
+		return enterpriseHookUserCleanupPending, nil
+	default:
+		return enterpriseHookUserCleanupFailed, err
+	}
 }
 
 var enterpriseHookWindowsForeignCleanupState struct {

@@ -2207,7 +2207,16 @@ func removeCursorHookArtifacts(opts SetupOpts) error {
 // process caches and re-execs), an opencode plugin is re-read from the
 // plugins directory on each startup, so simply removing the file stops
 // it loading.
+//
+// Without a backup receipt (the user deleted the DefenseClaw data directory)
+// there is no edit to protect: a plugin whose first line is DefenseClaw's
+// ownership marker is DefenseClaw's and is removed; any other file stays.
 func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
+	if _, err := os.Lstat(managedFileBackupPath(opts.DataDir, c.name, "config")); os.IsNotExist(err) {
+		return c.removeOwnedPluginWithoutBackup(c.configPath(opts))
+	} else if err != nil {
+		return fmt.Errorf("%s inspect plugin backup: %w", c.name, err)
+	}
 	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", c.configPath(opts))
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", path)
 	if err != nil {
@@ -2220,6 +2229,41 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 		return nil
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
+	return nil
+}
+
+// removeOwnedPluginWithoutBackup deletes the plugin at path when it is a
+// regular file whose first line is a DefenseClaw ownership marker (any
+// version, so an older DefenseClaw's plugin is recognized too) in a trusted
+// plugin directory. Any other file is left alone.
+func (c *hookOnlyConnector) removeOwnedPluginWithoutBackup(path string) error {
+	const maxManagedPluginBytes = 4 << 20
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("%s inspect plugin %s: %w", c.name, path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	data, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("%s read plugin %s: %w", c.name, path, err)
+	}
+	firstLine, _, _ := bytes.Cut(data, []byte("\n"))
+	if !validManagedPluginOwnershipMarker(bytes.TrimSuffix(firstLine, []byte("\r"))) {
+		return nil
+	}
+	if err := validatePluginArtifactDestination(path); err != nil {
+		return fmt.Errorf("%s validate plugin %s for removal: %w", c.name, path, err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("%s remove plugin %s: %w", c.name, path, err)
+	}
 	return nil
 }
 

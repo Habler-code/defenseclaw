@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
 
 // windowsOpenCodeMachinePolicy reports OpenCode's managed config path and
@@ -328,7 +329,11 @@ func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, pol
 
 // removeWindowsRuntimeOnlyManagedRuntime revokes the SID and clears its hook
 // contract. The machine policy file stays: it serves every enrolled user.
-func removeWindowsRuntimeOnlyManagedRuntime(opts InstallOptions, connectorName string) error {
+// DefenseClaw's own user-level registration for the connector (Copilot's
+// ~/.copilot/hooks/defenseclaw.json, written by an earlier per-user setup)
+// is removed as the user; the user's own hooks stay.
+func removeWindowsRuntimeOnlyManagedRuntime(ctx context.Context, opts InstallOptions, conn connector.Connector) error {
+	connectorName := conn.Name()
 	targetSID, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
 	if err != nil {
 		return err
@@ -348,15 +353,70 @@ func removeWindowsRuntimeOnlyManagedRuntime(opts InstallOptions, connectorName s
 	if err != nil {
 		return err
 	}
-	if err := revokeWindowsPerUserManagedRegistration(connectorName, targetSID, dataDir, filepath.Clean(hookExecutable)); err != nil {
+	hookExecutable = filepath.Clean(hookExecutable)
+	if err := revokeWindowsPerUserManagedRegistration(connectorName, targetSID, dataDir, hookExecutable); err != nil {
 		return err
 	}
 	return windowsEnterpriseTargetImpersonation(targetSID, home, func() error {
+		if err := removeWindowsRuntimeOnlyUserRegistration(ctx, conn, home, dataDir, hookExecutable, targetSID); err != nil {
+			return err
+		}
 		if _, statErr := os.Lstat(dataDir); errors.Is(statErr, os.ErrNotExist) {
 			return nil
 		}
 		if err := connector.ClearHookContractLockEntryForMode(dataDir, connectorName, true); err != nil {
 			return fmt.Errorf("enterprise hooks: clear connector %s hook contract lock: %w", connectorName, err)
+		}
+		return nil
+	})
+}
+
+// removeWindowsRuntimeOnlyUserRegistration runs the connector's teardown,
+// under the caller's target impersonation, only when a DefenseClaw-owned
+// user-level hook file exists inside the user's home. Teardown removes
+// DefenseClaw's entries and keeps every other handler; a user without the
+// file gets nothing written.
+func removeWindowsRuntimeOnlyUserRegistration(
+	ctx context.Context,
+	conn connector.Connector,
+	home, dataDir, hookExecutable string,
+	targetSID *windows.SID,
+) error {
+	setup := connector.SetupOpts{
+		DataDir:           dataDir,
+		ManagedEnterprise: true,
+		HookExecutable:    hookExecutable,
+	}
+	if err := validateWindowsEnterpriseImpersonationSetup(setup); err != nil {
+		return err
+	}
+	return connector.WithUserHomeDir(home, func() error {
+		present := false
+		for _, path := range connector.HookConfigPathsForConnector(conn, setup) {
+			path = filepath.Clean(strings.TrimSpace(path))
+			if !filepath.IsAbs(path) || !pathInside(home, path) {
+				continue
+			}
+			if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return fmt.Errorf("enterprise hooks: inspect %s user hook file %s: %w", conn.Name(), path, err)
+			}
+			if err := prepareWindowsGenericPath(home, path, targetSID, false, false, false, "removal file"); err != nil {
+				return err
+			}
+			present = true
+		}
+		if !present {
+			return nil
+		}
+		if err := conn.Teardown(ctx, setup); err != nil {
+			return fmt.Errorf(
+				"enterprise hooks: connector %s user hook teardown failed under target SID %s: %w",
+				conn.Name(),
+				targetSID,
+				err,
+			)
 		}
 		return nil
 	})

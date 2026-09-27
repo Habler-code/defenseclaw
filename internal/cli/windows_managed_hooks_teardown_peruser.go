@@ -6,10 +6,12 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -19,8 +21,11 @@ import (
 // OpenCode, Amp) are part of the managed-hook teardown only in a process
 // pinned to the standalone profile. Their machine wiring is the per-user
 // enrollment and runtime selector of each hook-binary connector, plus the
-// Go-owned Copilot machine policy and public summary. Per-user runtime files
-// stay, like every other connector.
+// Go-owned Copilot machine policy and public summary. After the uninstall
+// commits, finalize also removes DefenseClaw's own registration or plugin
+// from each user's agent configuration, as that user (see
+// removeWindowsManagedHooksStandalonePerUserRegistrations). Per-user runtime
+// files stay, like every other connector.
 
 func windowsManagedHooksStandalonePerUserTarget(connectorName string) bool {
 	_, perUser := enterprisehooks.IsWindowsStandalonePerUserConnector(connectorName)
@@ -142,4 +147,81 @@ func verifyWindowsManagedHooksStandalonePerUserClean(targets []windowsManagedHoo
 		}
 	}
 	return nil
+}
+
+// windowsManagedHooksStandaloneUserCleanups lists the per-user registrations
+// an uninstall removes: the guardian's protected per-user rows, the
+// cleanups it recorded for signed-out users, and enabled manifest rows that
+// were not deferred. Deferred rows the guardian never protected have
+// nothing to remove.
+func windowsManagedHooksStandaloneUserCleanups(
+	runtimeDir string,
+	manifest enterprisehooks.Manifest,
+	now time.Time,
+) ([]enterpriseHookUserCleanup, []string) {
+	var problems []string
+	var rows []enterpriseHookReconcileRow
+	if authorization, _, err := loadEnterpriseHookGuardianAuthorization(runtimeDir); err != nil {
+		problems = append(problems, "guardian records: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+	} else {
+		rows = append(rows, authorization.ProtectedTargets...)
+	}
+	for _, target := range manifest.Targets {
+		if !target.IsEnabled() || target.IsDeferred() {
+			continue
+		}
+		rows = append(rows, enterpriseHookReconcileRow{
+			User:      target.User,
+			UserHome:  target.UserHome,
+			SID:       target.SID,
+			Connector: target.Connector,
+			Result:    &enterprisehooks.InstallResult{DataDir: target.DataDir},
+		})
+	}
+	pending, err := loadEnterpriseHookUserCleanups(runtimeDir)
+	if err != nil {
+		problems = append(problems, "pending cleanups: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+	}
+	// Every entry is attempted now, whatever its retry state.
+	for index := range pending {
+		pending[index].Attempts = 0
+		pending[index].LastAttemptAt = ""
+		pending[index].LastError = ""
+	}
+	nobody := func(string, string) bool { return false }
+	return planEnterpriseHookUserCleanups(pending, rows, nobody, windowsStandalonePerUserCleanupConnector, now), problems
+}
+
+// removeWindowsManagedHooksStandalonePerUserRegistrations runs, after a
+// committed uninstall, each per-user connector's teardown as the user for
+// every registration DefenseClaw made. It is best effort: the uninstall has
+// already revoked every enrollment, so a leftover registration can no longer
+// reach a gateway. Users without an active session, and every user when the
+// uninstall does not run as LocalSystem (an interactive administrator
+// cannot obtain another user's token), are reported as pending; there is no
+// guardian left to clean them at their next sign-in.
+func removeWindowsManagedHooksStandalonePerUserRegistrations(
+	ctx context.Context,
+	runtimeDir string,
+	manifest enterprisehooks.Manifest,
+) enterpriseHookUserCleanupResult {
+	now := time.Now()
+	entries, problems := windowsManagedHooksStandaloneUserCleanups(runtimeDir, manifest, now)
+	result := enterpriseHookUserCleanupResult{Failed: problems}
+	if len(entries) == 0 {
+		return result
+	}
+	if err := enterpriseHookWindowsUserCleanupIdentity(); err != nil {
+		for _, entry := range entries {
+			result.Pending = append(result.Pending, enterpriseHookUserCleanupLabel(entry))
+		}
+		result.Failed = append(result.Failed,
+			"per-user registrations were not removed: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+		return result
+	}
+	_, attempted := runEnterpriseHookUserCleanups(ctx, entries, enterpriseHookWindowsUserCleanupAttempt, now)
+	result.Removed = attempted.Removed
+	result.Pending = attempted.Pending
+	result.Failed = append(result.Failed, attempted.Failed...)
+	return result
 }

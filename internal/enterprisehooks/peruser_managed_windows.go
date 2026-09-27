@@ -114,6 +114,21 @@ func windowsPerUserManagedRuntimeDir(connectorName string) (string, error) {
 	return directory, nil
 }
 
+// windowsPerUserManagedRuntimeDirPresent reports whether the connector's
+// machine directory exists, without creating it.
+func windowsPerUserManagedRuntimeDirPresent(connectorName string) (bool, error) {
+	directory, err := windowsPerUserManagedRuntimeDir(connectorName)
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("enterprise hooks: inspect %s enrollment directory: %w", connectorName, err)
+	}
+	return true, nil
+}
+
 func readWindowsPerUserManagedEnrollment(
 	connectorName string,
 ) (windowsPerUserManagedEnrollment, bool, error) {
@@ -509,6 +524,14 @@ func revokeWindowsPerUserManagedRegistration(
 	if !ok || !hookBinary {
 		return nil
 	}
+	// The enrollment and the selector share the connector's machine
+	// directory. Without it there is nothing to revoke, and revocation (a
+	// user removal, or the per-user cleanup after an uninstall retired the
+	// enrollment) must not create the directory and its lock file.
+	present, err := windowsPerUserManagedRuntimeDirPresent(connectorName)
+	if err != nil || !present {
+		return err
+	}
 	sid := targetSID.String()
 	if err := updateWindowsPerUserManagedEnrollment(
 		connectorName,
@@ -577,14 +600,12 @@ func RemoveWindowsPerUserManagedEnrollments(hookExecutable string, connectors []
 		// A connector that never ran has no directory, so it has no
 		// enrollment to revoke. Removal must not create the directory and its
 		// lock file on a host that is being cleaned.
-		directory, err := windowsPerUserManagedRuntimeDir(name)
+		present, err := windowsPerUserManagedRuntimeDirPresent(name)
 		if err != nil {
 			return err
 		}
-		if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
+		if !present {
 			continue
-		} else if err != nil {
-			return fmt.Errorf("enterprise hooks: inspect %s enrollment directory: %w", name, err)
 		}
 		if err := updateWindowsPerUserManagedEnrollment(
 			name,

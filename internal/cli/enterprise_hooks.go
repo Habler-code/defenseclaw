@@ -1607,6 +1607,15 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			err,
 		)
 	}
+	// Remove DefenseClaw's own per-user registrations for revoked users (as
+	// each user), and record the cleanups of signed-out users, before this
+	// run's state publication drops the revoked rows from the ledger.
+	if err := enterpriseHookStandalonePlatformRevokeUsers(ctx, os.Stderr, manifest); err != nil {
+		return run, fmt.Errorf(
+			"enterprise hooks reconcile: record revoked per-user registrations: %w",
+			err,
+		)
+	}
 	registry := newEnterpriseHooksConnectorRegistry()
 	enterpriseHookStandalonePlatformPrepare(os.Stderr)
 
@@ -2663,27 +2672,8 @@ func writeEnterpriseHookGuardianState(
 		return err
 	}
 	authorizationData = append(authorizationData, '\n')
-	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
-	if info, statErr := os.Lstat(authorizationDir); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("hook guardian authorization path is not a trusted directory: %s", authorizationDir)
-		}
-		if err := enterpriseHookAuthorizationDirTrustCheck(authorizationDir); err != nil {
-			return err
-		}
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("inspect hook guardian authorization directory: %w", statErr)
-	}
-	if err := os.MkdirAll(authorizationDir, 0o750); err != nil {
-		return fmt.Errorf("create hook guardian authorization directory: %w", err)
-	}
-	if err := os.Chmod(authorizationDir, 0o750); err != nil {
-		return fmt.Errorf("harden hook guardian authorization directory: %w", err)
-	}
-	if err := enterpriseHookAuthorizationOwnershipSetter(authorizationDir); err != nil {
-		return fmt.Errorf("set hook guardian authorization directory ownership: %w", err)
-	}
-	if err := enterpriseHookAuthorizationDirTrustCheck(authorizationDir); err != nil {
+	authorizationDir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
+	if err != nil {
 		return err
 	}
 	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
@@ -2772,6 +2762,35 @@ func writeEnterpriseHookGuardianState(
 		return err
 	}
 	return nil
+}
+
+// prepareEnterpriseHookAuthorizationDir creates (or re-hardens) the
+// protected directory that holds the guardian's records and returns it.
+func prepareEnterpriseHookAuthorizationDir(dataDir string) (string, error) {
+	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
+	if info, statErr := os.Lstat(authorizationDir); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("hook guardian authorization path is not a trusted directory: %s", authorizationDir)
+		}
+		if err := enterpriseHookAuthorizationDirTrustCheck(authorizationDir); err != nil {
+			return "", err
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect hook guardian authorization directory: %w", statErr)
+	}
+	if err := os.MkdirAll(authorizationDir, 0o750); err != nil {
+		return "", fmt.Errorf("create hook guardian authorization directory: %w", err)
+	}
+	if err := os.Chmod(authorizationDir, 0o750); err != nil {
+		return "", fmt.Errorf("harden hook guardian authorization directory: %w", err)
+	}
+	if err := enterpriseHookAuthorizationOwnershipSetter(authorizationDir); err != nil {
+		return "", fmt.Errorf("set hook guardian authorization directory ownership: %w", err)
+	}
+	if err := enterpriseHookAuthorizationDirTrustCheck(authorizationDir); err != nil {
+		return "", err
+	}
+	return authorizationDir, nil
 }
 
 type enterpriseHookPreviousProtection struct {

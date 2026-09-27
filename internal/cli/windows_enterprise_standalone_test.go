@@ -1237,3 +1237,55 @@ func TestWindowsEnterpriseInstalledCLIKeepsAHashPinnedMarker(t *testing.T) {
 		})
 	}
 }
+
+// A committed uninstall that could not act as some users (signed out, or not
+// run as LocalSystem) says which DefenseClaw per-user registrations stay. A
+// malformed forwarded value never hides the lifecycle's report.
+func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.T) {
+	warnings := func(line string) []enterprisestatus.Message {
+		t.Helper()
+		report, err := parseWindowsEnterpriseInstallerReport([]byte(line))
+		if err != nil {
+			t.Fatalf("parse %s: %v", line, err)
+		}
+		result := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+		applyWindowsEnterpriseInstallerReport(result, nil, report, windowsEnterpriseStandaloneRun{})
+		if len(result.Errors) != 0 {
+			t.Fatalf("errors = %+v", result.Errors)
+		}
+		return result.Warnings
+	}
+	const base = `{"schema_version":1,"ok":true,"action":"Uninstall","installed":false,"transaction_pending":false`
+	sid := "S-1-5-21-1000000000-2000000000-3000000000-1017"
+
+	got := warnings(base + `,"user_registrations_removed":1,"user_registrations_pending":["devin/` + sid + `","hermes/` + sid +
+		`"],"user_registrations_failed":["per-user registrations were not removed: requires the LocalSystem guardian service"]}`)
+	if len(got) != 2 || got[0].Code != "user_registrations_pending" || got[1].Code != "user_registrations_failed" {
+		t.Fatalf("warnings = %+v", got)
+	}
+	if !strings.Contains(got[0].Message, "2 user connector registration(s)") ||
+		!strings.Contains(got[0].Message, "devin/"+sid+"; hermes/"+sid) ||
+		!strings.Contains(got[1].Message, "requires the LocalSystem guardian service") {
+		t.Fatalf("warnings = %+v", got)
+	}
+
+	if got := warnings(base + `,"user_registrations_removed":2,"user_registrations_pending":[],"user_registrations_failed":[]}`); len(got) != 0 {
+		t.Fatalf("a complete cleanup warned: %+v", got)
+	}
+	if got := warnings(base + `}`); len(got) != 0 {
+		t.Fatalf("a report without the cleanup fields warned: %+v", got)
+	}
+	if got := warnings(base + `,"user_registrations_pending":"amp/` + sid + `","user_registrations_failed":{"value":["x"],"Count":1}}`); len(got) != 1 ||
+		!strings.Contains(got[0].Message, "1 user connector registration(s)") {
+		t.Fatalf("lenient decoding: %+v", got)
+	}
+
+	many := make([]string, 25)
+	for index := range many {
+		many[index] = strconvQuote("opencode/" + sid + "-" + string(rune('a'+index)))
+	}
+	if got := warnings(base + `,"user_registrations_pending":[` + strings.Join(many, ",") + `]}`); len(got) != 1 ||
+		!strings.Contains(got[0].Message, "25 user connector") || !strings.HasSuffix(got[0].Message, "; and 5 more") {
+		t.Fatalf("bounded list: %+v", got)
+	}
+}

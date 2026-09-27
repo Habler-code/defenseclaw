@@ -93,6 +93,7 @@ given unrestricted sudo or administrator rights is an administrator.
 | Risk | Scope |
 | --- | --- |
 | A user can delete their own per-user hook registration until the next repair | Per-user connectors |
+| A Windows uninstall leaves the DefenseClaw per-user registrations of users signed out at the time, and of every user when it is not run as LocalSystem; the uninstall result lists them, and they are inert (enrollment revoked, hook runtime and binary removed; none of these agents blocks on a hook command that cannot start) | Windows per-user connectors |
 | Claude Code `--bare` / `CLAUDE_CODE_SIMPLE=1` skip managed prompt and session hooks; tool hooks still run | Claude Code |
 | Amp has no machine plugin location and no defined plugin order | Amp |
 | OpenCode's managed-plugin-last order is observed, not documented | OpenCode |

@@ -6,8 +6,13 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -84,3 +89,106 @@ func TestWindowsStandalonePerUserEnrollmentKeepFollowsManifest(t *testing.T) {
 }
 
 func boolPointerForTest(value bool) *bool { return &value }
+
+// Uninstall cleans every per-user registration the guardian made or still
+// owes, as each user; when it cannot act as users at all (an interactive
+// administrator), every registration is reported, never silently skipped.
+func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecordedUser(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	homeA, homeB := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
+	writeUserCleanupAuthorization(t, dataDir,
+		userCleanupRow("devin", userCleanupSIDA, homeA),
+		userCleanupRow("codex", userCleanupSIDA, homeA),
+	)
+	if err := saveEnterpriseHookUserCleanups(dataDir, []enterpriseHookUserCleanup{{
+		Connector: "amp", SID: userCleanupSIDB, UserHome: homeB, RecordedAt: "r",
+		Attempts: 3, LastAttemptAt: time.Now().UTC().Format(time.RFC3339Nano), LastError: "earlier",
+	}}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{Connector: "opencode", SID: userCleanupSIDB, UserHome: homeB},
+		{Connector: "hermes", SID: userCleanupSIDB, UserHome: homeB, Deferred: true},
+	}}
+	originalIdentity, originalAttempt := enterpriseHookWindowsUserCleanupIdentity, enterpriseHookWindowsUserCleanupAttempt
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, enterpriseHookWindowsUserCleanupAttempt = originalIdentity, originalAttempt
+	})
+	var attempted []string
+	enterpriseHookWindowsUserCleanupAttempt = func(_ context.Context, entry enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
+		attempted = append(attempted, enterpriseHookUserCleanupLabel(entry))
+		if entry.SID == userCleanupSIDB && entry.Connector == "opencode" {
+			return enterpriseHookUserCleanupPending, nil
+		}
+		return enterpriseHookUserCleanupDone, nil
+	}
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+
+	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB
+	if strings.Join(attempted, ",") != want {
+		t.Fatalf("attempted %v, want %s (no codex, no never-protected deferred row, backoff ignored)", attempted, want)
+	}
+	if len(result.Removed) != 2 || strings.Join(result.Pending, ",") != "opencode/"+userCleanupSIDB || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+
+	attempted = nil
+	enterpriseHookWindowsUserCleanupIdentity = func() error {
+		return errors.New("per-user Windows hook mutation requires the LocalSystem guardian service")
+	}
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	if len(attempted) != 0 || len(result.Pending) != 3 || len(result.Failed) != 1 ||
+		!strings.Contains(result.Failed[0], "LocalSystem") {
+		t.Fatalf("non-LocalSystem uninstall: attempted=%v result=%+v", attempted, result)
+	}
+}
+
+// Finalize removes users' registrations and reports the outcome only for
+// the standalone profile; Secure Client finalize never runs it.
+func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testing.T) {
+	original := windowsManagedHooksStandaloneUserRegistrationRemover
+	t.Cleanup(func() { windowsManagedHooksStandaloneUserRegistrationRemover = original })
+	calls := 0
+	windowsManagedHooksStandaloneUserRegistrationRemover = func(
+		_ context.Context,
+		runtimeDir string,
+		manifest enterprisehooks.Manifest,
+	) enterpriseHookUserCleanupResult {
+		calls++
+		if runtimeDir != `C:\ProgramData\DefenseClaw\runtime` || len(manifest.Targets) != 1 {
+			t.Fatalf("remover got %s %+v", runtimeDir, manifest)
+		}
+		return enterpriseHookUserCleanupResult{
+			Removed: []string{"devin/" + userCleanupSIDA, "amp/" + userCleanupSIDA},
+			Pending: []string{"hermes/" + userCleanupSIDB},
+		}
+	}
+	manifest := perUserTeardownManifest("devin")
+
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	var report windowsManagedHooksTeardownReport
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if calls != 0 || report.UserRegistrationsRemoved != 0 {
+		t.Fatalf("Secure Client finalize ran the per-user cleanup: calls=%d", calls)
+	}
+
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if calls != 1 || report.UserRegistrationsRemoved != 2 ||
+		strings.Join(report.UserRegistrationsPending, ",") != "hermes/"+userCleanupSIDB {
+		t.Fatalf("standalone finalize report = %+v", report)
+	}
+	body, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"user_registrations_removed":2`, `"user_registrations_pending":["hermes/`} {
+		if !strings.Contains(string(body), field) {
+			t.Fatalf("report JSON %s lacks %s", body, field)
+		}
+	}
+	if strings.Contains(string(body), "user_registrations_failed") {
+		t.Fatalf("empty failure list serialized: %s", body)
+	}
+}
