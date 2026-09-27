@@ -1670,7 +1670,7 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
 	}
-	if decoded.Content != "" {
+	if decoded.ContentProvided || decoded.Content != "" {
 		req.Content = decoded.Content
 	}
 	if decoded.Direction != "" {

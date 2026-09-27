@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,6 +60,13 @@ type windowsCopilotManagedPolicyState struct {
 	GatewayAddr        string                               `json:"gateway_addr"`
 	GatewayServiceName string                               `json:"gateway_service_name"`
 	Targets            []WindowsCopilotManagedRuntimeTarget `json:"targets"`
+}
+
+type windowsCopilotManagedArtifacts struct {
+	policy windowsManagedFileSnapshot
+	state  windowsManagedFileSnapshot
+	parsed windowsCopilotManagedPolicyState
+	active bool
 }
 
 type windowsCopilotManagedPaths struct {
@@ -120,14 +128,28 @@ func withWindowsCopilotManagedTransaction(fn func() error) error {
 	for {
 		lock, lockErr := openWindowsClaudeManagedPolicyLockFile(paths.Lock)
 		if lockErr == nil {
-			defer windows.CloseHandle(lock)
+			closed := false
+			defer func() {
+				if !closed {
+					_ = windows.CloseHandle(lock)
+				}
+			}()
 			if err := setWindowsManagedPolicyProtection(paths.Lock, false, false); err != nil {
 				return fmt.Errorf("enterprise hooks: harden Copilot policy lock: %w", err)
 			}
 			if err := windowsManagedPolicyFileTrustCheck(paths.Lock); err != nil {
 				return fmt.Errorf("enterprise hooks: verify Copilot policy lock: %w", err)
 			}
-			return fn()
+			transactionErr := fn()
+			policy, state, _, snapshotErr := readWindowsCopilotManagedState(paths)
+			retireLock := snapshotErr == nil && !policy.existed && !state.existed
+			closeErr := windows.CloseHandle(lock)
+			closed = closeErr == nil
+			var retireErr error
+			if closeErr == nil && retireLock {
+				retireErr = retireWindowsCopilotManagedLock(paths.Lock)
+			}
+			return errors.Join(transactionErr, snapshotErr, closeErr, retireErr)
 		}
 		if !errors.Is(lockErr, windows.ERROR_SHARING_VIOLATION) && !errors.Is(lockErr, windows.ERROR_LOCK_VIOLATION) {
 			return fmt.Errorf("enterprise hooks: acquire Copilot policy lock: %w", lockErr)
@@ -143,12 +165,13 @@ func canonicalWindowsCopilotTargets(targets []WindowsCopilotManagedRuntimeTarget
 	result := make([]WindowsCopilotManagedRuntimeTarget, 0, len(targets))
 	seen := make(map[string]string, len(targets))
 	for _, target := range targets {
-		sid, err := windows.StringToSid(strings.TrimSpace(target.SID))
-		if err != nil || sid == nil {
-			return nil, errors.New("enterprise hooks: Copilot managed target has an invalid SID")
+		sid, err := validateWindowsEnterpriseTargetSID(target.SID)
+		if err != nil {
+			return nil, err
 		}
-		dataDir := filepath.Clean(strings.TrimSpace(target.DataDir))
-		if !filepath.IsAbs(dataDir) || dataDir == "." {
+		dataDir := strings.TrimSpace(target.DataDir)
+		if dataDir == "" || !filepath.IsAbs(dataDir) || filepath.Clean(dataDir) != dataDir ||
+			!strings.EqualFold(filepath.Base(dataDir), ".defenseclaw") {
 			return nil, errors.New("enterprise hooks: Copilot managed target has a noncanonical data directory")
 		}
 		key := strings.ToUpper(sid.String())
@@ -178,6 +201,13 @@ func renderWindowsCopilotManagedState(state windowsCopilotManagedPolicyState) ([
 	return append(body, '\n'), nil
 }
 
+func retireWindowsCopilotManagedLock(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("enterprise hooks: retire unused Copilot transaction lock: %w", err)
+	}
+	return nil
+}
+
 func readWindowsCopilotManagedState(paths windowsCopilotManagedPaths) (windowsManagedFileSnapshot, windowsManagedFileSnapshot, windowsCopilotManagedPolicyState, error) {
 	policy, err := snapshotWindowsManagedFileWithLimit(paths.Policy, windowsCopilotManagedLimit)
 	if err != nil {
@@ -198,28 +228,57 @@ func readWindowsCopilotManagedState(paths windowsCopilotManagedPaths) (windowsMa
 			return policy, state, windowsCopilotManagedPolicyState{}, fmt.Errorf("enterprise hooks: Copilot managed artifact is untrusted: %w", err)
 		}
 	}
-	decoder := json.NewDecoder(bytes.NewReader(state.data))
+	validated, err := validateWindowsCopilotManagedArtifactData(windowsCopilotManagedArtifacts{
+		policy: policy,
+		state:  state,
+	}, false)
+	return policy, state, validated.parsed, err
+}
+
+func validateWindowsCopilotManagedArtifactData(
+	artifacts windowsCopilotManagedArtifacts,
+	requireActive bool,
+) (windowsCopilotManagedArtifacts, error) {
+	if artifacts.policy.existed != artifacts.state.existed {
+		return artifacts, errors.New("enterprise hooks: Copilot managed policy/state pair is incomplete")
+	}
+	if !artifacts.policy.existed {
+		if requireActive {
+			return artifacts, errors.New("enterprise hooks: Copilot enterprise policy is inactive")
+		}
+		artifacts.active = false
+		return artifacts, nil
+	}
+	if len(artifacts.policy.data) == 0 || len(artifacts.policy.data) > windowsCopilotManagedLimit ||
+		len(artifacts.state.data) == 0 || len(artifacts.state.data) > windowsCopilotManagedLimit {
+		return artifacts, errors.New("enterprise hooks: Copilot managed artifacts exceed bounded limits")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(artifacts.state.data))
 	decoder.DisallowUnknownFields()
 	var parsed windowsCopilotManagedPolicyState
 	if err := decoder.Decode(&parsed); err != nil {
-		return policy, state, parsed, fmt.Errorf("enterprise hooks: parse Copilot managed state: %w", err)
+		return artifacts, fmt.Errorf("enterprise hooks: parse Copilot managed state: %w", err)
 	}
-	if parsed.SchemaVersion != 1 || parsed.PolicySHA256 != windowsManagedPolicyDigest(policy.data) {
-		return policy, state, parsed, errors.New("enterprise hooks: Copilot managed state does not authenticate the policy")
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return artifacts, errors.New("enterprise hooks: Copilot managed state contains trailing JSON")
+	}
+	if parsed.SchemaVersion != 1 || parsed.PolicySHA256 != windowsManagedPolicyDigest(artifacts.policy.data) {
+		return artifacts, errors.New("enterprise hooks: Copilot managed state does not authenticate the policy")
 	}
 	if !filepath.IsAbs(parsed.HookExecutable) || filepath.Clean(parsed.HookExecutable) != parsed.HookExecutable {
-		return policy, state, parsed, errors.New("enterprise hooks: Copilot managed state has a noncanonical hook executable")
+		return artifacts, errors.New("enterprise hooks: Copilot managed state has a noncanonical hook executable")
 	}
 	addr, err := connector.NormalizeWindowsManagedGatewayAddr(parsed.GatewayAddr)
 	if err != nil || addr != parsed.GatewayAddr {
-		return policy, state, parsed, errors.New("enterprise hooks: Copilot managed state has an invalid gateway address")
+		return artifacts, errors.New("enterprise hooks: Copilot managed state has an invalid gateway address")
 	}
 	if err := connector.ValidateWindowsManagedGatewayServiceName(parsed.GatewayServiceName); err != nil {
-		return policy, state, parsed, fmt.Errorf("enterprise hooks: Copilot managed state has an invalid gateway service: %w", err)
+		return artifacts, fmt.Errorf("enterprise hooks: Copilot managed state has an invalid gateway service: %w", err)
 	}
 	canonical, err := canonicalWindowsCopilotTargets(parsed.Targets)
 	if err != nil || !equalWindowsCopilotTargets(canonical, parsed.Targets) {
-		return policy, state, parsed, errors.New("enterprise hooks: Copilot managed targets are noncanonical")
+		return artifacts, errors.New("enterprise hooks: Copilot managed targets are noncanonical")
 	}
 	provider := connector.NewCopilotEnterpriseConnector()
 	setup := connector.SetupOpts{
@@ -228,10 +287,12 @@ func readWindowsCopilotManagedState(paths windowsCopilotManagedPaths) (windowsMa
 		HookContractID:    connector.CopilotEnterpriseHookContractID,
 		HookExecutable:    parsed.HookExecutable,
 	}
-	if err := provider.VerifyManagedHookPolicy(policy.data, setup); err != nil {
-		return policy, state, parsed, fmt.Errorf("enterprise hooks: verify Copilot managed policy: %w", err)
+	if err := provider.VerifyManagedHookPolicy(artifacts.policy.data, setup); err != nil {
+		return artifacts, fmt.Errorf("enterprise hooks: verify Copilot managed policy: %w", err)
 	}
-	return policy, state, parsed, nil
+	artifacts.parsed = parsed
+	artifacts.active = true
+	return artifacts, nil
 }
 
 func equalWindowsCopilotTargets(left, right []WindowsCopilotManagedRuntimeTarget) bool {
@@ -494,6 +555,39 @@ func windowsCopilotManagedStateMatchesOptions(
 	return nil
 }
 
+// windowsCopilotSnapshotFiles returns the exact mutation order for a complete
+// Copilot machine-policy snapshot. Activation publishes the authenticated SID
+// state before the public policy; deactivation removes the public policy before
+// its state so Copilot can never observe an active, unauthenticated pairing.
+func windowsCopilotSnapshotFiles(
+	snapshot WindowsCopilotManagedPolicyTeardownSnapshot,
+) ([]windowsManagedFileSnapshot, error) {
+	paths, err := windowsCopilotManagedPathsResolve()
+	if err != nil {
+		return nil, err
+	}
+	if snapshot.PolicyExisted != snapshot.StateExisted {
+		return nil, errors.New("enterprise hooks: incomplete Copilot managed teardown snapshot")
+	}
+	if snapshot.PolicyExisted {
+		if len(snapshot.Policy) == 0 || len(snapshot.Policy) > windowsCopilotManagedLimit ||
+			len(snapshot.State) == 0 || len(snapshot.State) > windowsCopilotManagedLimit {
+			return nil, errors.New("enterprise hooks: Copilot teardown snapshot exceeds bounded limits")
+		}
+		return []windowsManagedFileSnapshot{
+			{path: paths.State, existed: true, data: snapshot.State},
+			{path: paths.Policy, existed: true, data: snapshot.Policy},
+		}, nil
+	}
+	if len(snapshot.Policy) != 0 || len(snapshot.State) != 0 {
+		return nil, errors.New("enterprise hooks: invalid empty Copilot managed teardown snapshot")
+	}
+	return []windowsManagedFileSnapshot{
+		{path: paths.Policy},
+		{path: paths.State},
+	}, nil
+}
+
 func CaptureWindowsCopilotManagedPolicySnapshot(
 	opts WindowsCopilotManagedPolicyTeardownOptions,
 ) (WindowsCopilotManagedPolicyTeardownSnapshot, error) {
@@ -588,18 +682,15 @@ func RestoreWindowsCopilotManagedPolicyTeardown(
 	if err != nil {
 		return err
 	}
-	if snapshot.PolicyExisted != snapshot.StateExisted {
-		return errors.New("enterprise hooks: incomplete Copilot managed teardown snapshot")
+	files, err := windowsCopilotSnapshotFiles(snapshot)
+	if err != nil {
+		return err
 	}
 	if !snapshot.PolicyExisted {
-		if len(expected) != 0 || len(snapshot.Policy) != 0 || len(snapshot.State) != 0 {
+		if len(expected) != 0 {
 			return errors.New("enterprise hooks: invalid empty Copilot managed teardown snapshot")
 		}
 		return VerifyWindowsCopilotManagedPolicyTeardown()
-	}
-	if len(snapshot.Policy) == 0 || len(snapshot.Policy) > windowsCopilotManagedLimit ||
-		len(snapshot.State) == 0 || len(snapshot.State) > windowsCopilotManagedLimit {
-		return errors.New("enterprise hooks: Copilot teardown snapshot exceeds bounded limits")
 	}
 	var parsed windowsCopilotManagedPolicyState
 	decoder := json.NewDecoder(bytes.NewReader(snapshot.State))
@@ -628,10 +719,10 @@ func RestoreWindowsCopilotManagedPolicyTeardown(
 			}
 			return errors.New("enterprise hooks: refusing Copilot rollback over a concurrent policy")
 		}
-		if err := windowsManagedPolicyWriter(paths.State, snapshot.State, false); err != nil {
+		if err := windowsManagedPolicyWriter(files[0].path, files[0].data, false); err != nil {
 			return err
 		}
-		if err := windowsManagedPolicyWriter(paths.Policy, snapshot.Policy, true); err != nil {
+		if err := windowsManagedPolicyWriter(files[1].path, files[1].data, true); err != nil {
 			_ = os.Remove(paths.State)
 			return err
 		}
@@ -661,9 +752,9 @@ func RestoreWindowsCopilotManagedPolicySnapshot(
 		!strings.EqualFold(priorOpts.GatewayServiceName, currentOpts.GatewayServiceName) {
 		return errors.New("enterprise hooks: Copilot lifecycle snapshot changed the protected gateway identity")
 	}
-	if snapshot.PolicyExisted != snapshot.StateExisted ||
-		(snapshot.PolicyExisted && (len(snapshot.Policy) == 0 || len(snapshot.State) == 0)) {
-		return errors.New("enterprise hooks: invalid Copilot lifecycle snapshot")
+	files, err := windowsCopilotSnapshotFiles(snapshot)
+	if err != nil {
+		return err
 	}
 	if snapshot.PolicyExisted {
 		var prior windowsCopilotManagedPolicyState
@@ -730,10 +821,10 @@ func RestoreWindowsCopilotManagedPolicySnapshot(
 		if !snapshot.PolicyExisted {
 			return nil
 		}
-		if err := windowsManagedPolicyWriter(paths.State, snapshot.State, false); err != nil {
+		if err := windowsManagedPolicyWriter(files[0].path, files[0].data, false); err != nil {
 			return rollback(err)
 		}
-		if err := windowsManagedPolicyWriter(paths.Policy, snapshot.Policy, true); err != nil {
+		if err := windowsManagedPolicyWriter(files[1].path, files[1].data, true); err != nil {
 			return rollback(err)
 		}
 		if _, _, _, err = readWindowsCopilotManagedState(paths); err != nil {

@@ -191,9 +191,12 @@ func copilotEnterpriseProfileDecode(payload map[string]interface{}) HookProfileR
 		// nested toolResult.textResultForLlm field. Inspect that exact string;
 		// never stringify the surrounding attacker-influenced result object.
 		if toolResult, ok := payload["toolResult"].(map[string]interface{}); ok {
-			req.Content = hookFirstString(toolResult, "textResultForLlm")
+			if raw, present := toolResult["textResultForLlm"]; present {
+				req.ContentProvided = true
+				req.Content, _ = raw.(string)
+			}
 		}
-		if req.Content == "" {
+		if !req.ContentProvided {
 			req.Content = hookFirstString(payload, "result", "output", "content")
 		}
 		req.Direction = "output"

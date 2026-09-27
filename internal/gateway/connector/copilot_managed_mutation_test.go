@@ -133,3 +133,19 @@ func TestCopilotManagedProfileExtractsNestedToolResultForModel(t *testing.T) {
 		t.Fatalf("decoded request = %+v", req)
 	}
 }
+
+func TestCopilotManagedProfilePreservesEmptyNestedToolResultForModel(t *testing.T) {
+	profile := NewCopilotEnterpriseConnector().HookProfile(managedCopilotTestOptions())
+	req := profile.Decode(map[string]interface{}{
+		"hookEventName": "postToolUse",
+		"toolResult": map[string]interface{}{
+			"resultType":       "success",
+			"textResultForLlm": "",
+			"metadata":         "must not be inspected as content",
+		},
+		"result": "top-level decoy must not be inspected",
+	})
+	if !req.ContentProvided || req.Content != "" || req.Direction != "output" {
+		t.Fatalf("decoded request = %+v, want authoritative empty model-facing result", req)
+	}
+}

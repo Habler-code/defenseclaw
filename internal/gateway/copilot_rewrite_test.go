@@ -239,6 +239,52 @@ func TestManagedCopilotAuthenticatedHTTPBlocksUseV2ResponseContract(t *testing.T
 	}
 }
 
+func TestManagedCopilotAuthenticatedHTTPDoesNotInspectEmptyModelResultFallbacks(t *testing.T) {
+	const gatewayToken = "managed-copilot-empty-result-test-token"
+	inspector := &stubAIDInspector{verdict: blockVerdict()}
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Gateway.Token = gatewayToken
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "copilot"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	api.SetCiscoInspector(inspector)
+
+	body := `{
+		"toolName":"shell",
+		"toolResult":{
+			"resultType":"success",
+			"textResultForLlm":"",
+			"metadata":"nested decoy must not be inspected"
+		},
+		"result":"top-level decoy must not be inspected"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+gatewayToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(connector.CopilotEnterpriseHookEventHeader, "postToolUse")
+	req.Header.Set(connector.CopilotEnterpriseHookContractHeader, connector.CopilotEnterpriseHookContractID)
+	req.Header.Set(connector.CopilotEnterpriseManagedHeader, "true")
+
+	recorder := httptest.NewRecorder()
+	api.tokenAuth(api.handleAgentHook("copilot")).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if inspector.calls != 0 || len(inspector.messages) != 0 {
+		t.Fatalf("inspector calls/messages=%d/%+v, want no inspection for authoritative empty result", inspector.calls, inspector.messages)
+	}
+	var response map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, recorder.Body.String())
+	}
+	if response["action"] != "allow" || response["raw_action"] != "allow" || response["would_block"] != false {
+		t.Fatalf("response accounting=%+v, want allow/allow/not-would-block", response)
+	}
+	if _, present := response["hook_output"]; present {
+		t.Fatalf("response=%+v, authoritative empty result must not be rewritten", response)
+	}
+}
+
 func TestManagedCopilotAuthenticatedHTTPPreToolUseReturnsNativeDeny(t *testing.T) {
 	const gatewayToken = "managed-copilot-tool-deny-test-token"
 	inspector := &stubAIDInspector{verdict: blockVerdict()}
