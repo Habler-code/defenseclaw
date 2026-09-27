@@ -74,7 +74,7 @@ The gateway is intentionally unable to write broadly into user homes. The guardi
 | Effective mode | Linux | Windows | macOS | Hook repair owner |
 | --- | --- | --- | --- | --- |
 | Empty/default or any non-managed mode, including `unmanaged_byod`, `ci_cd`, `sandboxed`, `server`, and `saas` | Existing user/process deployment behavior | Existing per-user startup/watchdog and hook auto-heal behavior | Existing user/process deployment behavior | The ordinary gateway/application-protection hook guard. No added enterprise service enforcement is activated. |
-| `managed_enterprise` | Administrator-owned systemd gateway, sensor helper, and privileged manifest guardian; event watcher and periodic timer | Five administrator-owned SCM services: gateway, credential broker, sensor helper, manifest guardian, and profile enumerator; guardian watch plus periodic reconciliation | Administrator-owned LaunchDaemons; periodic guardian reconcile | The privileged enterprise guardian repairs only the protected target manifest. The sensor helper answers only fixed acquisition requests. The gateway does not write interactive-user homes. |
+| `managed_enterprise` | Administrator-owned systemd gateway, sensor helper, and privileged manifest guardian; event watcher and periodic timer | Five administrator-owned SCM services: gateway, credential broker, sensor helper, manifest guardian, and profile enumerator; guardian watch plus periodic reconciliation | Administrator-owned LaunchDaemons; guardian watch plus periodic reconciliation | The privileged enterprise guardian repairs only the protected target manifest. The sensor helper answers only fixed acquisition requests. The gateway does not write interactive-user homes. |
 
 The matrix is an ownership switch, not an auto-heal switch. Both rows repair hook drift: normal mode uses the existing per-user repair loop, while managed mode transfers repair to an administrator-owned guardian that a standard user cannot unregister or reconfigure.
 
@@ -120,9 +120,9 @@ The durable controls live outside the agent user's authority:
 4. **Runtime mutation is denied.** Authenticated non-admin clients receive HTTP 403 for managed-enterprise config changes. Security-critical changes require an administrator edit and service restart.
 5. **Guardian authorization is root-owned.** Service-writable status is not sufficient to authorize repair or claim readiness. The gateway trusts the separate administrator-owned authorization record.
 6. **Per-user credentials are narrow.** Reading a user's `.hook-<connector>.token` grants only that connector's hook route, not status, config, policy, scan, or cross-connector API access.
-7. **Per-user drift is repaired.** The event-driven Linux and Windows watchers plus their periodic backstops restore canonical hooks, helper files, scoped tokens, permissions, and supported native config entries after an authorized target is changed. The packaged macOS guardian performs periodic reconcile.
+7. **Per-user drift is repaired.** The event-driven Linux and Windows watchers plus their periodic backstops restore canonical hooks, helper files, scoped tokens, permissions, and supported native config entries after an authorized target is changed. The packaged macOS guardian runs the same watch loop with a 60-second reconcile backstop.
 
-The important qualifier is **permanently**. A standard user—or an AI agent executing tools as that user—can delete a user-owned hook and invoke the agent before repair completes. On Linux with the event-driven watcher enabled, repairs were observed in hundreds of milliseconds during testing, but that is an observed implementation result, not a hard real-time guarantee. The Linux periodic backstop and the packaged macOS periodic reconcile have longer repair windows. If a threat model requires the hook to be impossible for the user to modify, enforce the native agent config and hook directory with MDM/EDR/application-control policy and ensure the AI agent has no path to sudo, root shells, privileged package managers, service control, or policy-exemption tools.
+The important qualifier is **permanently**. A standard user—or an AI agent executing tools as that user—can delete a user-owned hook and invoke the agent before repair completes. On Linux with the event-driven watcher enabled, repairs were observed in hundreds of milliseconds during testing, but that is an observed implementation result, not a hard real-time guarantee. The Linux periodic backstop and the macOS guardian's 60-second reconcile backstop have longer repair windows. If a threat model requires the hook to be impossible for the user to modify, enforce the native agent config and hook directory with MDM/EDR/application-control policy and ensure the AI agent has no path to sudo, root shells, privileged package managers, service control, or policy-exemption tools.
 
 ### Administrative controls required around the agent
 
@@ -171,7 +171,7 @@ Use a staged deployment rather than enabling action mode everywhere at once:
 3. **Initialize each agent profile as the user.** The native agent must create its config before the privileged guardian performs a first installation.
 4. **Establish protected guardian targets.** On Linux/macOS, add only approved users and connectors to the administrator-owned manifest. On Windows, configure the approved connector families and review the enumerator-produced SID/version rows before acceptance.
 5. **Run one manual reconcile.** Review JSON/status output and resolve every failed target before enabling the watcher.
-6. **Enable event-driven and periodic repair.** On Linux, run the watcher plus timer. On macOS, the packaged LaunchDaemon performs periodic reconcile; use MDM/EDR for stronger native-config prevention.
+6. **Enable event-driven and periodic repair.** On Linux, run the watcher plus timer. On macOS, the packaged LaunchDaemon runs the watcher with a 60-second reconcile backstop; use MDM/EDR for stronger native-config prevention.
 7. **Move selected connectors to action mode.** Confirm allow and deterministic block events, then monitor error/block counters and guardian health.
 8. **Record deployment acceptance.** On a dedicated test endpoint, confirm the evidence under [Verify](#verify), exercise one allowed and one blocked request, and record the recovery window for an authorized user-hook repair. Keep destructive tamper testing in your controlled endpoint-validation pipeline rather than on a production user workstation.
 
@@ -1575,7 +1575,7 @@ Before replacing files, the installer snapshots the existing deployment and reco
 
 Use `--no-start` when MDM or a package transaction must install and verify the files before a separate orchestration step loads the jobs. Even in that mode, an already loaded DefenseClaw job is unloaded before replacement and remains stopped until the administrator starts it.
 
-Both LaunchDaemons run as root. `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` is the authorization-record directory selected by `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`; it is distinct from `hook_guardian_state.json`, which the guardian writes under the configured `data_dir`. The hook guardian remains a separate periodic job so its lifecycle stays independent of the gateway. Both jobs pin `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`, and the installer loads both jobs in the system domain unless `--no-start` is selected.
+Both LaunchDaemons run as root. `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` is the authorization-record directory selected by `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`; it is distinct from `hook_guardian_state.json`, which the guardian writes under the configured `data_dir`. The hook guardian runs as its own long-running LaunchDaemon so its lifecycle stays independent of the gateway. Both jobs pin `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`, and the installer loads both jobs in the system domain unless `--no-start` is selected.
 
 The packaged macOS guardian is the long-running `enterprise hooks watch` job: it watches the DefenseClaw hook footprint with `fsnotify`, reconciles at least every 60 seconds as a backstop for missed events, and launchd `KeepAlive` restarts it if it exits. When launchd stops it (SIGTERM), it rewrites the readiness state to `waiting_for_targets` before exiting. For prevention rather than repair, deploy an MDM/EDR policy that monitors or locks the native agent config and DefenseClaw hook footprint.
 
@@ -1624,7 +1624,7 @@ sudo systemctl restart defenseclaw-gateway.service
 sudo systemctl start defenseclaw-hook-guardian.service
 ```
 
-On macOS, edit the root-owned config, kick-start the gateway LaunchDaemon, and run the guardian LaunchDaemon immediately instead of waiting for its next periodic reconcile:
+On macOS, edit the root-owned config, kick-start the gateway LaunchDaemon, and restart the guardian LaunchDaemon so it reconciles at startup instead of waiting for its next backstop reconcile:
 
 ```bash
 sudoedit /opt/cisco/secureclient/defenseclaw/etc/config.yaml
