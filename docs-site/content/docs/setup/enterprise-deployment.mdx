@@ -1122,6 +1122,12 @@ exact DefenseClaw leaves or values to be removed/restored. A current value that
 no longer matches the owned postimage is preserved and removal fails
 truthfully rather than overwriting a concurrent administrator edit.
 
+Before it retires the Program Files tree, uninstall checks the tree's contents.
+It accepts only the installed binaries and scripts, plus the managed IPC
+directory and its socket (`ipc\defenseclaw_ipc.sock`). Any other file or
+directory, and any other reparse point, stops uninstall before anything is
+removed.
+
 Uninstall verifies that machine policy and every DefenseClaw-owned command
 reference are absent before it retires the Program Files tree. Close or restart
 Codex and Claude sessions as part of decommissioning. A process that was
