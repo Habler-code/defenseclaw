@@ -8,6 +8,7 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -452,5 +453,43 @@ func TestCodexRequirementsPinLockWaitIsBounded(t *testing.T) {
 	}
 	if result, err := EnsureCodexRequirementsHooksPin(); err != nil || !result.Changed {
 		t.Fatalf("ensure after the lock was released = %+v, %v", result, err)
+	}
+}
+
+// The pin applies the connector's ACL check to the requirements directory and
+// file, so it never publishes or reports a pin the connector would reject.
+func TestCodexRequirementsPinAppliesTheACLCheck(t *testing.T) {
+	for _, target := range []string{"directory", "file"} {
+		t.Run(target, func(t *testing.T) {
+			dir, path := codexPinTestLayout(t)
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			original := []byte("[features]\nhooks = true\n")
+			if err := os.WriteFile(path, original, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			refused := map[string]string{"directory": dir, "file": path}[target]
+			originalACL := codexRequirementsPinACLTrust
+			t.Cleanup(func() { codexRequirementsPinACLTrust = originalACL })
+			codexRequirementsPinACLTrust = func(candidate string) error {
+				if candidate == refused {
+					return errors.New(candidate + " has write-capable macOS ACL entry")
+				}
+				return nil
+			}
+			for name, run := range map[string]func() (CodexRequirementsPinResult, error){
+				"inspect": InspectCodexRequirementsHooksPin,
+				"ensure":  EnsureCodexRequirementsHooksPin,
+				"remove":  RemoveCodexRequirementsHooksPin,
+			} {
+				if _, err := run(); err == nil || !strings.Contains(err.Error(), "ACL") {
+					t.Fatalf("%s with a write-capable %s ACL = %v", name, target, err)
+				}
+			}
+			if data, _ := os.ReadFile(path); !bytes.Equal(data, original) {
+				t.Fatalf("requirements changed: %q", data)
+			}
+		})
 	}
 }

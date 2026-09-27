@@ -47,6 +47,12 @@ var (
 	codexRequirementsPinAncestorTrust = func(dir string) error {
 		return managed.ValidateTrustedRuntimeDir(dir, "Codex requirements directory ancestor")
 	}
+	// codexRequirementsPinACLTrust rejects macOS ACL entries that grant write
+	// access to the requirements directory or file beyond their mode bits,
+	// the check the Codex connector applies when it reads the same file. A
+	// directory without such entries also cannot pass one on to the staged
+	// requirements file.
+	codexRequirementsPinACLTrust = managed.ValidateTrustedPathACL
 	// codexRequirementsPinLockPath names the lock file that serializes
 	// DefenseClaw writers (guardian reconcile, uninstall, and the hidden CLI).
 	// It lives in a root-only system directory: any user who can open the
@@ -253,6 +259,9 @@ func validateCodexRequirementsPinDir(dir string) (os.FileInfo, error) {
 	if !ok || int(st.Uid) != codexRequirementsPinOwnerUID {
 		return nil, fmt.Errorf("enterprise hooks: %s is not owned by uid %d", dir, codexRequirementsPinOwnerUID)
 	}
+	if err := codexRequirementsPinACLTrust(dir); err != nil {
+		return nil, fmt.Errorf("enterprise hooks: untrusted Codex requirements directory: %w", err)
+	}
 	if err := codexRequirementsPinAncestorTrust(filepath.Dir(dir)); err != nil {
 		return nil, fmt.Errorf("enterprise hooks: untrusted Codex requirements parent: %w", err)
 	}
@@ -387,6 +396,9 @@ func readCodexRequirementsPinFile(path string) ([]byte, os.FileInfo, bool, error
 	}
 	if err := validateCodexRequirementsPinFileInfo(path, info); err != nil {
 		return nil, nil, false, err
+	}
+	if err := codexRequirementsPinACLTrust(path); err != nil {
+		return nil, nil, false, fmt.Errorf("enterprise hooks: untrusted Codex requirements file: %w", err)
 	}
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
