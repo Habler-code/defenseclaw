@@ -8400,6 +8400,25 @@ targets:
             junction = $junctionFailure
         })
 
+        # Committed uninstall cleanup revalidates the remaining InstallRoot
+        # against the retired-tree allowlist, which must carry every binary
+        # the layout installs into bin (the ACL check itself is mocked here).
+        $retirementLayout = New-HarnessInventoryLayout `
+            -Root (Microsoft.PowerShell.Management\Join-Path $TestRoot 'inv-ret')
+        $retirementFailure = ''
+        try {
+            Assert-DefenseClawInstallTreeRetirementState -Layout $retirementLayout
+        }
+        catch {
+            $retirementFailure = [string]$_.Exception.Message
+        }
+        Assert-Harness `
+            -Condition ([string]::IsNullOrEmpty($retirementFailure)) `
+            -Message "committed install-tree retirement refused an installed payload: $retirementFailure"
+        $layoutInventoryResults.Add([pscustomobject]@{
+            name = 'retirement-state-accepts-installed-payload'
+        })
+
         return [pscustomobject]@{
             schema_version = 1
             ok = $true

@@ -17305,6 +17305,8 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
     $files = @(
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-gateway.exe'),
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-acp.exe'),
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-sensor-helper.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'agents\codex.exe'),

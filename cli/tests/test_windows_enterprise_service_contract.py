@@ -2804,6 +2804,25 @@ def test_install_tree_inventory_accepts_managed_ipc_under_install_root() -> None
         assert "-AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath" in call
 
 
+def test_retired_install_tree_allowlist_covers_every_bin_payload() -> None:
+    module = read(MODULE)
+    layout = module[
+        module.index("function Get-DefenseClawLayout {") : module.index(
+            "\nfunction ", module.index("function Get-DefenseClawLayout {") + 1
+        )
+    ]
+    payloads = re.findall(r"Join-Path \$bin '([^']+)'", layout)
+    assert "defenseclaw-acp.exe" in payloads
+    assert "defenseclaw-sensor-helper.exe" in payloads
+    allowlist = module[
+        module.index("function Get-DefenseClawRetiredInstallTreeAllowlist") : module.index(
+            "function Assert-DefenseClawRetiredInstallTree"
+        )
+    ]
+    for payload in payloads:
+        assert f"'bin\\{payload}'" in allowlist, payload
+
+
 def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -> None:
     harness = read(HARNESS)
     proof = harness[
