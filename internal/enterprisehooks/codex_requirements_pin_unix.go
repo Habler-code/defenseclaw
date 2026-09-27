@@ -135,42 +135,48 @@ func EnsureCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 		if err := ensureCodexRequirementsPinDirTraversable(dir, path, dirInfo); err != nil {
 			return err
 		}
-		raw, info, exists, err := readCodexRequirementsPinFile(path)
-		if err != nil {
-			return err
-		}
-		rendered, changed, err := renderCodexRequirementsPin(raw)
-		if err != nil {
-			return fmt.Errorf("enterprise hooks: %s: %w", path, err)
-		}
-		state, err := inspectCodexRequirementsPin(rendered)
-		if err != nil {
-			return fmt.Errorf("enterprise hooks: %s: %w", path, err)
-		}
-		result.State = state
-		mode := os.FileMode(0o644)
-		gid := -1
-		if exists {
-			// The administrator's mode and group are kept, so they must already
-			// let Codex, running as the signed-in user, read the file.
-			if err := requireCodexRequirementsPinFileReadable(path, info); err != nil {
-				return err
-			}
-			mode = info.Mode().Perm()
-			if st, ok := info.Sys().(*syscall.Stat_t); ok {
-				gid = int(st.Gid)
-			}
-		}
-		if !changed {
-			return nil
-		}
-		if err := writeCodexRequirementsPinFile(path, rendered, mode, gid); err != nil {
-			return err
-		}
-		result.Changed = true
-		return nil
+		return retryCodexRequirementsPinUpdate(func() error {
+			return ensureCodexRequirementsPinOnce(path, &result)
+		})
 	})
 	return result, err
+}
+
+func ensureCodexRequirementsPinOnce(path string, result *CodexRequirementsPinResult) error {
+	raw, info, exists, err := readCodexRequirementsPinFile(path)
+	if err != nil {
+		return err
+	}
+	rendered, changed, err := renderCodexRequirementsPin(raw)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: %s: %w", path, err)
+	}
+	state, err := inspectCodexRequirementsPin(rendered)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: %s: %w", path, err)
+	}
+	result.State = state
+	mode := os.FileMode(0o644)
+	gid := -1
+	if exists {
+		// The administrator's mode and group are kept, so they must already
+		// let Codex, running as the signed-in user, read the file.
+		if err := requireCodexRequirementsPinFileReadable(path, info); err != nil {
+			return err
+		}
+		mode = info.Mode().Perm()
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			gid = int(st.Gid)
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := writeCodexRequirementsPinFile(path, rendered, mode, gid, info); err != nil {
+		return err
+	}
+	result.Changed = true
+	return nil
 }
 
 // RemoveCodexRequirementsHooksPin removes exactly the bytes DefenseClaw added
@@ -192,40 +198,91 @@ func RemoveCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 		if dirInfo, err := validateCodexRequirementsPinDir(dir); err != nil || dirInfo == nil {
 			return err
 		}
-		raw, info, exists, err := readCodexRequirementsPinFile(path)
-		if err != nil || !exists {
-			return err
-		}
-		rendered, removeFile, changed, err := removeCodexRequirementsPin(raw)
-		if err != nil {
-			return fmt.Errorf("enterprise hooks: %s: %w", path, err)
-		}
-		if !changed {
-			state, err := inspectCodexRequirementsPin(raw)
-			if err == nil {
-				result.State = state
-			}
-			return nil
-		}
-		result.Changed = true
-		if removeFile {
-			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return fmt.Errorf("enterprise hooks: remove %s: %w", path, err)
-			}
-			result.RemovedFile = true
-			return syncCodexRequirementsPinDir(dir)
-		}
-		state, err := inspectCodexRequirementsPin(rendered)
-		if err == nil {
-			result.State = state
-		}
-		gid := -1
-		if st, ok := info.Sys().(*syscall.Stat_t); ok {
-			gid = int(st.Gid)
-		}
-		return writeCodexRequirementsPinFile(path, rendered, info.Mode().Perm(), gid)
+		return retryCodexRequirementsPinUpdate(func() error {
+			return removeCodexRequirementsPinOnce(path, &result)
+		})
 	})
 	return result, err
+}
+
+func removeCodexRequirementsPinOnce(path string, result *CodexRequirementsPinResult) error {
+	raw, info, exists, err := readCodexRequirementsPinFile(path)
+	if err != nil || !exists {
+		return err
+	}
+	rendered, removeFile, changed, err := removeCodexRequirementsPin(raw)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: %s: %w", path, err)
+	}
+	if !changed {
+		if state, err := inspectCodexRequirementsPin(raw); err == nil {
+			result.State = state
+		}
+		return nil
+	}
+	if removeFile {
+		codexRequirementsPinBeforeReplace()
+		if err := requireCodexRequirementsPinUnchanged(path, info); err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("enterprise hooks: remove %s: %w", path, err)
+		}
+		result.Changed = true
+		result.RemovedFile = true
+		return syncCodexRequirementsPinDir(filepath.Dir(path))
+	}
+	gid := -1
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		gid = int(st.Gid)
+	}
+	if err := writeCodexRequirementsPinFile(path, rendered, info.Mode().Perm(), gid, info); err != nil {
+		return err
+	}
+	result.Changed = true
+	if state, err := inspectCodexRequirementsPin(rendered); err == nil {
+		result.State = state
+	}
+	return nil
+}
+
+// errCodexRequirementsPinChanged reports that another writer changed the
+// requirements between DefenseClaw's read and its write.
+var errCodexRequirementsPinChanged = errors.New("changed while DefenseClaw was updating it; retry later")
+
+// codexRequirementsPinAttempts bounds how often one Ensure or Remove re-reads
+// requirements that another writer changed during the update.
+const codexRequirementsPinAttempts = 3
+
+// codexRequirementsPinBeforeReplace runs just before DefenseClaw confirms the
+// file is unchanged and replaces or removes it. Tests use it to change the
+// file concurrently.
+var codexRequirementsPinBeforeReplace = func() {}
+
+func retryCodexRequirementsPinUpdate(update func() error) error {
+	for attempt := 1; ; attempt++ {
+		err := update()
+		if !errors.Is(err, errCodexRequirementsPinChanged) || attempt >= codexRequirementsPinAttempts {
+			return err
+		}
+	}
+}
+
+// requireCodexRequirementsPinUnchanged fails when path is no longer the file
+// DefenseClaw read (same inode, size and modification time), or exists when
+// DefenseClaw read none. MDM and configuration-management writers do not
+// take DefenseClaw's lock, so this narrows the window in which their update
+// would be replaced by stale content; rename cannot close it entirely.
+func requireCodexRequirementsPinUnchanged(path string, previous os.FileInfo) error {
+	current, err := os.Lstat(path)
+	switch {
+	case previous == nil && errors.Is(err, fs.ErrNotExist):
+		return nil
+	case previous != nil && err == nil && os.SameFile(previous, current) &&
+		current.Size() == previous.Size() && current.ModTime().Equal(previous.ModTime()):
+		return nil
+	}
+	return fmt.Errorf("enterprise hooks: %s %w", path, errCodexRequirementsPinChanged)
 }
 
 func requireCodexRequirementsPinWriter() error {
@@ -443,8 +500,10 @@ func validateCodexRequirementsPinFileInfo(path string, info os.FileInfo) error {
 }
 
 // writeCodexRequirementsPinFile replaces path atomically with a file created
-// in the same trusted directory, keeping the previous mode and group.
-func writeCodexRequirementsPinFile(path string, data []byte, mode os.FileMode, gid int) error {
+// in the same trusted directory, keeping the previous mode and group. previous
+// is the file that was read (nil when there was none); the write is refused
+// when path no longer matches it.
+func writeCodexRequirementsPinFile(path string, data []byte, mode os.FileMode, gid int, previous os.FileInfo) error {
 	dir := filepath.Dir(path)
 	temp, err := os.CreateTemp(dir, codexRequirementsPinTempPrefix+"*")
 	if err != nil {
@@ -474,6 +533,10 @@ func writeCodexRequirementsPinFile(path string, data []byte, mode os.FileMode, g
 	}
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("enterprise hooks: close %s: %w", tempPath, err)
+	}
+	codexRequirementsPinBeforeReplace()
+	if err := requireCodexRequirementsPinUnchanged(path, previous); err != nil {
+		return err
 	}
 	if err := os.Rename(tempPath, path); err != nil {
 		return fmt.Errorf("enterprise hooks: replace %s: %w", path, err)

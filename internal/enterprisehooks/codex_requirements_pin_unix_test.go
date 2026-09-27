@@ -493,3 +493,74 @@ func TestCodexRequirementsPinAppliesTheACLCheck(t *testing.T) {
 		})
 	}
 }
+
+// MDM and configuration-management tools rewrite the requirements without
+// DefenseClaw's lock. A write that lands between DefenseClaw's read and its
+// replace must be re-read, never replaced with stale content or deleted.
+func TestCodexRequirementsPinKeepsConcurrentAdministratorUpdates(t *testing.T) {
+	dir, path := codexPinTestLayout(t)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := codexRequirementsPinBeforeReplace
+	t.Cleanup(func() { codexRequirementsPinBeforeReplace = original })
+	replace := func(content string) {
+		staged := filepath.Join(dir, "mdm.staging")
+		if err := os.WriteFile(staged, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(staged, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	replace("[features]\nweb_search = true\n")
+
+	const update = "# fleet v2\n[features]\nweb_search = false\n"
+	calls := 0
+	codexRequirementsPinBeforeReplace = func() {
+		if calls++; calls == 1 {
+			replace(update)
+		}
+	}
+	if result, err := EnsureCodexRequirementsHooksPin(); err != nil || !result.Changed {
+		t.Fatalf("ensure = %+v, %v", result, err)
+	}
+	merged, _ := os.ReadFile(path)
+	if !bytes.HasPrefix(merged, []byte("# fleet v2\n[features]\nhooks = true "+codexRequirementsPinLineMarker+"\n")) {
+		t.Fatalf("the concurrent update was replaced:\n%s", merged)
+	}
+
+	// A writer that keeps changing the file makes the pass fail unchanged.
+	replace("[features]\nweb_search = true\n")
+	codexRequirementsPinBeforeReplace = func() {
+		calls++
+		replace("# revision " + strings.Repeat("x", calls) + "\n")
+	}
+	if _, err := EnsureCodexRequirementsHooksPin(); !errors.Is(err, errCodexRequirementsPinChanged) {
+		t.Fatalf("ensure under a persistent writer = %v", err)
+	}
+	if data, _ := os.ReadFile(path); !bytes.HasPrefix(data, []byte("# revision ")) {
+		t.Fatalf("the persistent writer's content was replaced: %q", data)
+	}
+
+	// Remove must not delete a DefenseClaw-created file an administrator
+	// replaced after it was read.
+	owned, _, err := renderCodexRequirementsPin(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replace(string(owned))
+	const adminFile = "[features]\nhooks = true\n"
+	calls = 0
+	codexRequirementsPinBeforeReplace = func() {
+		if calls++; calls == 1 {
+			replace(adminFile)
+		}
+	}
+	if result, err := RemoveCodexRequirementsHooksPin(); err != nil || result.RemovedFile || result.State != CodexRequirementsPinAdministrator {
+		t.Fatalf("remove = %+v, %v", result, err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != adminFile {
+		t.Fatalf("the administrator's replacement was removed: %q", data)
+	}
+}
