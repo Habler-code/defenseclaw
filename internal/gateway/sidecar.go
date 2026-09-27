@@ -195,9 +195,17 @@ type Sidecar struct {
 	inspectionAvailable      bool
 	inspectionVerdictFailure bool // last unavailability came from an inspection without a verdict
 	inspectionDetail         string
+	// inspectionGeneration counts recorded outcomes, so a probe that
+	// waited on a token can tell that an inspection reported meanwhile;
+	// guarded by inspectionMu.
+	inspectionGeneration uint64
 	// inspectionLastProbe rate-limits probeManagedInspection; guarded by
 	// inspectionMu.
 	inspectionLastProbe time.Time
+	// managedInspectionPublishMu serializes publishManagedInspectionHealth
+	// so a slower publisher cannot overwrite a newer state with an older
+	// snapshot.
+	managedInspectionPublishMu sync.Mutex
 	// managedHookInspector records whether the API server's hook lane has
 	// a managed inspector (managedHookInspectorWired / ...Unwired); zero
 	// until the API server has picked one.
@@ -2575,14 +2583,21 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 // state is mirrored into SidecarHealth for the Secure Client availability.
 func (s *Sidecar) setInspectionAvailability(err error) {
 	s.inspectionMu.Lock()
+	s.recordInspectionAvailabilityLocked(err)
+	s.inspectionMu.Unlock()
+	s.publishManagedInspectionHealth()
+}
+
+// recordInspectionAvailabilityLocked stores an outcome and advances the
+// generation. Caller holds inspectionMu.
+func (s *Sidecar) recordInspectionAvailabilityLocked(err error) {
+	s.inspectionGeneration++
 	s.inspectionAvailable = err == nil
 	s.inspectionVerdictFailure = errors.Is(err, errManagedAIDNoVerdict)
 	s.inspectionDetail = ""
 	if err != nil {
 		s.inspectionDetail = err.Error()
 	}
-	s.inspectionMu.Unlock()
-	s.publishManagedInspectionHealth()
 }
 
 // inspectionAvailability reports the last managed-inspection outcome.
