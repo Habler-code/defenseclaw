@@ -322,9 +322,26 @@ $moduleCapture = & $module {
         )
         $script:GoldenAclPlan.Add([ordered]@{ path = $Path; kind = 'StateAncestorTraverse'; sid = $GatewayServiceSID })
     }
+    # The NT SERVICE SID is computed here, not through
+    # Get-DefenseClawDeterministicServiceSID: that function calls back into
+    # Get-DefenseClawServiceSID whenever a service with the same name exists on
+    # the host, so on a machine with a real DefenseClawGateway service the two
+    # would recurse until the call depth overflows. The value is the one
+    # `sc.exe showsid` prints: S-1-5-80 followed by the five little-endian
+    # DWORDs of SHA-1 over the upper-cased service name in UTF-16LE.
     function script:Get-DefenseClawServiceSID {
         param([Parameter(Mandatory)][string]$ServiceName)
-        return (Get-DefenseClawDeterministicServiceSID -ServiceName $ServiceName)
+        $sha1 = [Security.Cryptography.SHA1]::Create()
+        try {
+            $hash = $sha1.ComputeHash([Text.Encoding]::Unicode.GetBytes($ServiceName.ToUpperInvariant()))
+        }
+        finally {
+            $sha1.Dispose()
+        }
+        $parts = foreach ($offset in 0, 4, 8, 12, 16) {
+            [BitConverter]::ToUInt32($hash, $offset)
+        }
+        return ('S-1-5-80-' + ($parts -join '-'))
     }
     Set-DefenseClawManagedAcls -Layout $layout.Clone() -GatewayServiceName $GatewayService
     $capture.acl_plan = @($script:GoldenAclPlan.ToArray())
