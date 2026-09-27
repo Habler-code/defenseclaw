@@ -21145,6 +21145,27 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     $reconcileInstall = $false
     if ($Action -eq 'Install') {
         if ($null -ne $metadata -and (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+            # -DeferredConfig against an active deployment is unsafe under the
+            # reconcile-Install lane. The deferred flow stages placeholder
+            # config.yaml + targets.yaml, sets deferred_config_pending=$true,
+            # and skips service restart (see line ~22850 where -NoStart is OR'd
+            # with -DeferredConfig). Applied on top of an active deployment
+            # that reconcile-Install already stopped for atomic swap, the run
+            # completes with services stopped and placeholder policy — the
+            # endpoint is left broken with no automatic recovery. Refuse the
+            # combination and direct callers to Repair, which is the supported
+            # in-place policy-update surface. This is a uniform contract on
+            # every managed endpoint (not per-device handling): the same
+            # -Action Install -DeferredConfig invocation is refused everywhere
+            # a prior active deployment exists.
+            if ($DeferredConfig) {
+                throw (
+                    'refusing -DeferredConfig against an active DefenseClaw ' +
+                    'enterprise deployment; use -Action Repair to update ' +
+                    'policy in place, or -Action Uninstall -Purge before a ' +
+                    'deferred-config Install'
+                )
+            }
             Microsoft.PowerShell.Utility\Write-Warning -Message (
                 'DefenseClaw enterprise install: reconciling existing installation ' +
                 'in place (idempotent Install)'

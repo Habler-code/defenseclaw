@@ -28,7 +28,7 @@ $modulePath = [IO.Path]::GetFullPath(
 
 $parseErrors = $null
 $parseTokens = $null
-[void][Management.Automation.Language.Parser]::ParseFile(
+$moduleAst = [Management.Automation.Language.Parser]::ParseFile(
     $modulePath,
     [ref]$parseTokens,
     [ref]$parseErrors
@@ -75,6 +75,10 @@ $required = @(
     @{
         needle = '-not $reconcileInstall'
         why    = 'inactive-metadata tombstone adoption is gated on reconcile-Install'
+    },
+    @{
+        needle = 'refusing -DeferredConfig against an active DefenseClaw'
+        why    = '-DeferredConfig must be refused inside reconcile-Install to avoid stopping services with a placeholder policy in place'
     }
 )
 foreach ($entry in $required) {
@@ -83,26 +87,85 @@ foreach ($entry in $required) {
     }
 }
 
-# ---- structural: the reconcile-Install branch and the tombstone-lane
-# branch must NOT both fire in the same run. In practice this is the
-# `if/elseif` split around the `Test-DefenseClawMetadataInstalled` check
-# — grep for both members of the pair in close proximity so an
-# accidental flatten to two independent `if` blocks is caught.
+# ---- structural: verify branch ownership via the parsed IfStatementAst
+# rather than a substring near-miss. The psm1 must contain an IfStatementAst
+# whose clauses look like:
+#   if     ($null -ne $metadata -and (Test-DefenseClawMetadataInstalled ...))
+#          { ... $reconcileInstall = $true; reconcile warning; DeferredConfig refusal }
+#   elseif ($null -ne $metadata)
+#          { ... Remove-DefenseClawCommittedManagedHooksTeardownJournal ... }
+#
+# Substring proximity would accept an unrelated elseif elsewhere in the
+# 22 000-line module. `IfStatementAst.Clauses` binds the assertion to the
+# actual clause structure.
 
-$reconcileFirst = $body.IndexOf('reconciling existing installation')
-$tombstoneLater = $body.IndexOf(
-    'Remove-DefenseClawCommittedManagedHooksTeardownJournal',
-    $reconcileFirst
-)
-if ($reconcileFirst -lt 0 -or $tombstoneLater -lt 0 -or $reconcileFirst -ge $tombstoneLater) {
-    throw 'enterprise-install-reconcile-smoke: reconcile warning must precede the tombstone-teardown branch'
+function Test-BranchClause {
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][string[]]$MustContain,
+        [Parameter(Mandatory)][string]$Label
+    )
+    foreach ($needle in $MustContain) {
+        if (-not $Text.Contains($needle)) {
+            throw "enterprise-install-reconcile-smoke: ${Label} clause missing required text: ``$needle``"
+        }
+    }
 }
-$elseifBetween = $body.Substring(
-    $reconcileFirst,
-    [Math]::Min(2000, $tombstoneLater - $reconcileFirst)
+
+$ifCandidates = $moduleAst.FindAll(
+    {
+        param($node)
+        if ($node -isnot [Management.Automation.Language.IfStatementAst]) { return $false }
+        if ($node.Clauses.Count -lt 2) { return $false }
+        $firstCond = $node.Clauses[0].Item1.Extent.Text
+        return ($firstCond -match 'Test-DefenseClawMetadataInstalled' -and
+                $firstCond -match '\$metadata')
+    },
+    $true
 )
-if (-not $elseifBetween.Contains('elseif ($null -ne $metadata)')) {
-    throw 'enterprise-install-reconcile-smoke: tombstone-teardown must be the elseif of the reconcile branch, not a separate if'
+
+$reconcileIf = $null
+foreach ($candidate in $ifCandidates) {
+    $firstBody = $candidate.Clauses[0].Item2.Extent.Text
+    if ($firstBody -notmatch [regex]::Escape('$reconcileInstall = $true')) {
+        continue
+    }
+    if ($firstBody -notmatch [regex]::Escape('reconciling existing installation')) {
+        continue
+    }
+    $reconcileIf = $candidate
+    break
+}
+if ($null -eq $reconcileIf) {
+    throw 'enterprise-install-reconcile-smoke: could not locate an if/elseif rooted at (Test-DefenseClawMetadataInstalled) whose reconcile clause sets $reconcileInstall = $true and emits the reconcile warning'
+}
+
+$reconcileClauseCond = $reconcileIf.Clauses[0].Item1.Extent.Text
+$reconcileClauseBody = $reconcileIf.Clauses[0].Item2.Extent.Text
+$tombstoneClauseCond = $reconcileIf.Clauses[1].Item1.Extent.Text
+$tombstoneClauseBody = $reconcileIf.Clauses[1].Item2.Extent.Text
+
+if ($reconcileClauseCond -notmatch '\$null\s+-ne\s+\$metadata\s+-and' -or
+    $reconcileClauseCond -notmatch 'Test-DefenseClawMetadataInstalled') {
+    throw "enterprise-install-reconcile-smoke: reconcile clause condition must gate on active metadata; got: $reconcileClauseCond"
+}
+if ($tombstoneClauseCond -notmatch '^\s*\$null\s+-ne\s+\$metadata\s*$') {
+    throw "enterprise-install-reconcile-smoke: tombstone clause condition must be exactly `$null -ne `$metadata (elseif for the inactive-metadata tombstone lane); got: $tombstoneClauseCond"
+}
+
+Test-BranchClause -Text $reconcileClauseBody -Label 'reconcile' -MustContain @(
+    '$reconcileInstall = $true',
+    'reconciling existing installation',
+    'refusing -DeferredConfig against an active DefenseClaw'
+)
+Test-BranchClause -Text $tombstoneClauseBody -Label 'tombstone' -MustContain @(
+    'Remove-DefenseClawCommittedManagedHooksTeardownJournal'
+)
+if ($tombstoneClauseBody.Contains('$reconcileInstall = $true')) {
+    throw 'enterprise-install-reconcile-smoke: tombstone clause must not flip $reconcileInstall (that flag is reconcile-only)'
+}
+if ($tombstoneClauseBody.Contains('reconciling existing installation')) {
+    throw 'enterprise-install-reconcile-smoke: reconcile warning must not appear in the tombstone clause'
 }
 
 'enterprise-install-reconcile-smoke OK'

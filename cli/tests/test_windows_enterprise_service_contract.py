@@ -408,19 +408,57 @@ def test_enterprise_module_install_is_idempotent_over_active_metadata() -> None:
         "it never fires under reconcile-Install"
     )
 
-    # Structural: the reconcile warning must precede the tombstone-teardown
-    # call, and the tombstone branch must be the elseif of the reconcile
-    # branch (not a separate if that fires alongside it).
-    reconcile_at = body.find("reconciling existing installation")
-    tombstone_at = body.find(
-        "Remove-DefenseClawCommittedManagedHooksTeardownJournal", reconcile_at
+    # -DeferredConfig against an active deployment leaves services stopped
+    # and placeholder policy on disk (see reconcile-Install throw in the psm1).
+    # The refusal must live INSIDE the reconcile branch so a fresh install can
+    # still legitimately use -DeferredConfig.
+    assert "refusing -DeferredConfig against an active DefenseClaw" in body, (
+        "reconcile-Install must refuse -DeferredConfig combined with active metadata"
     )
-    assert reconcile_at >= 0 and tombstone_at > reconcile_at, (
-        "reconcile warning must precede the tombstone-teardown branch"
+
+    # Structural: verify branch ownership directly — the reconcile clause must
+    # hold the $reconcileInstall = $true assignment AND the DeferredConfig
+    # refusal, and its elseif clause must hold the tombstone-teardown call. A
+    # regex over the parsed structure keeps the assertion from passing on an
+    # unrelated `elseif ($null -ne $metadata)` elsewhere in the module.
+    branch = re.search(
+        r"""if\s*\(
+            \s*\$null\s+-ne\s+\$metadata\s+-and\s+
+            \(\s*Test-DefenseClawMetadataInstalled\s+-Metadata\s+\$metadata\s*\)\s*
+        \)\s*\{
+            (?P<reconcile>(?:[^{}]|\{[^{}]*\})*)
+        \}\s*
+        elseif\s*\(\s*\$null\s+-ne\s+\$metadata\s*\)\s*\{
+            (?P<tombstone>(?:[^{}]|\{[^{}]*\})*)
+        \}""",
+        body,
+        re.S | re.X,
     )
-    between = body[reconcile_at:tombstone_at]
-    assert "elseif ($null -ne $metadata)" in between, (
-        "tombstone-teardown must be the elseif of the reconcile branch"
+    assert branch is not None, (
+        "psm1 must have an if/elseif pair rooted at "
+        "`if ($null -ne $metadata -and (Test-DefenseClawMetadataInstalled ...))` "
+        "followed by `elseif ($null -ne $metadata)` — reconcile-Install and "
+        "tombstone-teardown must be sibling clauses of that same construct"
+    )
+    reconcile_clause = branch.group("reconcile")
+    tombstone_clause = branch.group("tombstone")
+    assert "$reconcileInstall = $true" in reconcile_clause, (
+        "reconcile clause must flip $reconcileInstall to $true"
+    )
+    assert (
+        "refusing -DeferredConfig against an active DefenseClaw" in reconcile_clause
+    ), "reconcile clause must contain the -DeferredConfig refusal"
+    assert "reconciling existing installation" in reconcile_clause, (
+        "reconcile clause must emit the reconcile-in-place warning"
+    )
+    assert (
+        "Remove-DefenseClawCommittedManagedHooksTeardownJournal" in tombstone_clause
+    ), (
+        "tombstone-teardown call must live in the elseif ($null -ne $metadata) "
+        "clause (fires only for a tombstone, never for active metadata)"
+    )
+    assert "$reconcileInstall = $true" not in tombstone_clause, (
+        "reconcile-Install selector must never be flipped in the tombstone clause"
     )
 
 
