@@ -107,6 +107,9 @@ func installWindowsRuntimeOnlyManagedResult(
 	var lockEntry connector.HookContractLockEntry
 	var lockUpdatedAt, entryUpdatedAt string
 	var generation WindowsManagedRuntimeGenerationPublication
+	if err := ensureWindowsStandaloneHookRuntimeAncestorReadable(); err != nil {
+		return InstallResult{}, err
+	}
 	err = connector.WithUserHomeDir(target.home, func() error {
 		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
 			verifiedHome, verifiedSID, verifyErr := validateWindowsEnterpriseHome(target.home, target.sid.String())

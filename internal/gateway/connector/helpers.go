@@ -45,6 +45,14 @@ var userHomeOverride string
 // userHomeDir returns the current user's home directory in a cross-platform
 // way. It prefers os.UserHomeDir() (which uses USERPROFILE on Windows,
 // HOME on Unix) and falls back to os.Getenv("HOME") for legacy compatibility.
+// activeUserHomeOverride returns the home installed by WithUserHomeDir, or
+// "" when connector paths resolve for the process user.
+func activeUserHomeOverride() string {
+	userHomeOverrideMu.RLock()
+	defer userHomeOverrideMu.RUnlock()
+	return strings.TrimSpace(userHomeOverride)
+}
+
 func userHomeDir() string {
 	userHomeOverrideMu.RLock()
 	override := strings.TrimSpace(userHomeOverride)

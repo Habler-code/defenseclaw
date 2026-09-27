@@ -73,6 +73,27 @@ func ManagedExecutablePath() string {
 	return filepath.Join(home, "hermes-agent", "venv", "Scripts", "hermes.exe")
 }
 
+// ConfigPathForUserHome resolves the Hermes config path inside another
+// user's profile home. Privileged services acting for that user must use it
+// instead of ConfigPath, which reads the calling token's known folders. On
+// Windows the default AppData\Local layout under the profile is assumed; a
+// redirected Local AppData is not followed.
+func ConfigPathForUserHome(userHome string) string {
+	userHome = strings.TrimSpace(userHome)
+	if userHome == "" {
+		return ""
+	}
+	localAppData := ""
+	if runtime.GOOS == "windows" {
+		localAppData = filepath.Join(userHome, "AppData", "Local")
+	}
+	home := ResolveHomeDir(runtime.GOOS, "", localAppData, userHome)
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "config.yaml")
+}
+
 // ResolveHomeDir is the pure, OS-parameterized core used by HomeDir and tests.
 // Explicit HERMES_HOME always wins. Native Windows then uses
 // %LOCALAPPDATA%\hermes. Unix-like hosts retain the historical ~/.hermes

@@ -2813,6 +2813,11 @@ func hermesConfigPath(SetupOpts) string {
 	if HermesConfigPathOverride != "" {
 		return HermesConfigPathOverride
 	}
+	// A privileged service acting for another user (the managed guardian)
+	// must resolve that user's profile, not its own token's known folders.
+	if home := activeUserHomeOverride(); home != "" && runtime.GOOS == "windows" {
+		return hermespath.ConfigPathForUserHome(home)
+	}
 	return hermesConfigPathResolver()
 }
 

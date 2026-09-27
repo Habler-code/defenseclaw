@@ -59,7 +59,11 @@ func applyStandaloneRowState(row *ManifestTarget, previous map[string]ManifestTa
 	if row == nil {
 		return false
 	}
-	if _, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
+	if prev, known := previous[previousManifestKey(row.SID, row.Connector)]; known {
+		if ok, reason := windowsStandalonePerUserAdmission(row.UserHome, row.Connector, prev.AgentVersion); !ok {
+			logfSafely(logf, row.SID, fmt.Sprintf("(SID, %s) row dropped: %s", row.Connector, reason))
+			return false
+		}
 		return applyPreviousRowState(row, previous, logf)
 	}
 	version, reason := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
@@ -75,6 +79,10 @@ func applyStandaloneRowState(row *ManifestTarget, previous map[string]ManifestTa
 			logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: version %s is below the lowest hook contract %s", row.Connector, version, minimum))
 			return false
 		}
+	}
+	if ok, reason := windowsStandalonePerUserAdmission(row.UserHome, row.Connector, version); !ok {
+		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
+		return false
 	}
 	enabled := true
 	row.AgentVersion = version

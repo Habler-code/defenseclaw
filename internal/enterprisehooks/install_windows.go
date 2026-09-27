@@ -452,6 +452,13 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
+	if _, perUser := windowsStandalonePerUserConnector(name); perUser && connector.ProtectedSetupSelectionConnector(name) {
+		executable, reason := windowsStandalonePerUserManagedExecutable(home, name)
+		if executable == "" {
+			return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %s cannot be managed for this user: %s", name, reason)
+		}
+		setup.AgentExecutable = executable
+	}
 	return windowsGenericManagedTarget{
 		home:           home,
 		dataDir:        dataDir,
@@ -479,6 +486,11 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 	var result InstallResult
 	var generation WindowsManagedRuntimeGenerationPublication
 	generationUsed := false
+	if _, perUser := windowsStandalonePerUserConnector(target.conn.Name()); perUser {
+		if err := ensureWindowsStandaloneHookRuntimeAncestorReadable(); err != nil {
+			return InstallResult{}, err
+		}
+	}
 	err = connector.WithUserHomeDir(target.home, func() error {
 		configPaths := connector.HookConfigPathsForConnector(target.conn, target.setup)
 		footprint := connector.AgentPaths{}
@@ -504,6 +516,21 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			allowMissingConfig := opts.AllowMissingHookConfigRepair || perUserStandalone
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
+			}
+			if err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, footprint); err != nil {
+				return err
+			}
+			// Hash the guardian-selected image as the target user and record
+			// it where the connector's executable admission reads it.
+			if target.setup.AgentExecutable != "" {
+				if err := connector.WriteManagedSetupAgentSelection(
+					target.dataDir,
+					target.conn.Name(),
+					target.setup.AgentExecutable,
+					target.setup.AgentVersion,
+				); err != nil {
+					return fmt.Errorf("enterprise hooks: record managed %s executable selection: %w", target.conn.Name(), err)
+				}
 			}
 			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
 			if err := target.conn.Setup(ctx, target.setup); err != nil {
@@ -974,20 +1001,25 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	if err := connector.ValidateManagedHookRuntimeState(target.dataDir, target.conn.Name(), target.setup.HookFailMode); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s runtime sidecars are invalid: %w", target.conn.Name(), err)
 	}
-	tokenPath, err := connector.HookTokenFilePath(filepath.Join(target.dataDir, "hooks"), target.conn.Name())
-	if err != nil {
-		return err
-	}
-	tokenData, err := connector.ReadManagedHookRuntimeFile(
-		tokenPath,
-		"managed connector-scoped token",
-		windowsEnterpriseTokenMaxBytes,
-	)
-	if err != nil {
-		return fmt.Errorf("enterprise hooks: read per-user connector-scoped token: %w", err)
-	}
-	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(string(tokenData))), []byte(target.setup.HookAPIToken)) != 1 {
-		return fmt.Errorf("enterprise hooks: per-user connector-scoped token does not match the protected service token")
+	// In-agent plugin connectors (Amp, OpenCode) do not run the hook binary
+	// and publish no per-user hook token file; their plugin and runtime
+	// artifacts are verified above.
+	if hookBinary, perUser := windowsStandalonePerUserConnector(target.conn.Name()); !perUser || hookBinary {
+		tokenPath, err := connector.HookTokenFilePath(filepath.Join(target.dataDir, "hooks"), target.conn.Name())
+		if err != nil {
+			return err
+		}
+		tokenData, err := connector.ReadManagedHookRuntimeFile(
+			tokenPath,
+			"managed connector-scoped token",
+			windowsEnterpriseTokenMaxBytes,
+		)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: read per-user connector-scoped token: %w", err)
+		}
+		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(string(tokenData))), []byte(target.setup.HookAPIToken)) != 1 {
+			return fmt.Errorf("enterprise hooks: per-user connector-scoped token does not match the protected service token")
+		}
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(
 		target.dataDir,

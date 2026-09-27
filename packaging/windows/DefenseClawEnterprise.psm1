@@ -9346,7 +9346,6 @@ function Restore-DefenseClawTransaction {
                 -Name $standaloneSensorHelper `
                 -Layout $Layout
             Set-DefenseClawServiceStartMode -Name $standaloneSensorHelper -StartMode 4
-            Stop-DefenseClawService -Name $standaloneSensorHelper
         }
     }
     # A retained snapshot may be recovered after a reboot or after the final
@@ -9376,6 +9375,12 @@ function Restore-DefenseClawTransaction {
         if (-not [string]::IsNullOrWhiteSpace($name)) {
             Stop-DefenseClawService -Name $name
         }
+    }
+    # The gateway depends on the sensor helper, so the helper can only stop
+    # after the gateway has.
+    if (-not [string]::IsNullOrWhiteSpace($standaloneSensorHelper) -and
+        (Test-DefenseClawServiceExists -Name $standaloneSensorHelper)) {
+        Stop-DefenseClawService -Name $standaloneSensorHelper
     }
     $restoreQuiescedAt = [DateTime]::UtcNow.ToString('o')
     # Recovery starts a fresh durable drain window. Never reuse a timestamp
