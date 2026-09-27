@@ -124,6 +124,7 @@ def _render_bridge_publication(
     *,
     connector: str,
     foreign_guard: str = "",
+    install_marker: str = "",
 ) -> bytes:
     template_name = {
         "amp": "amp-plugin.ts",
@@ -143,6 +144,7 @@ def _render_bridge_publication(
         .replace("{{.HookSocketJS}}", "")
         .replace("{{.ServiceUID}}", "0")
         .replace("{{.ForeignHookGuardJS}}", json.dumps(foreign_guard)[1:-1])
+        .replace("{{.InstallMarkerJS}}", json.dumps(install_marker)[1:-1])
     )
     assert "{{." not in rendered
     return rendered.encode()
@@ -479,6 +481,43 @@ def test_bridge_naming_a_user_writable_guard_binary_is_not_first_party(
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
 
     assert first_party_self_reason(target) is None
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_path"),
+    [
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
+def test_bridge_rendered_with_an_install_marker_stays_first_party(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+) -> None:
+    """The Windows standalone guardian renders the bridge with its install
+    marker directory; that bridge is still the published connector bridge,
+    while a marker that is not an absolute path is not."""
+
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    for marker, expected in (
+        (str(tmp_path / "DefenseClaw-HookRuntime"), "installed DefenseClaw connector bridge"),
+        ("DefenseClaw-HookRuntime", None),
+    ):
+        published = _render_bridge_publication(
+            repository_root,
+            data_dir,
+            connector=connector,
+            install_marker=marker,
+        )
+        _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+        assert first_party_self_reason(target) == expected, marker
 
 
 @pytest.mark.parametrize(

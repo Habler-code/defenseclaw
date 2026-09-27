@@ -1833,6 +1833,42 @@
       "security_note": "Hook PATH lockdown — stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
     },
     {
+      "name": "DEFENSECLAW_HOOK_SOCKET",
+      "category": "hook_internal",
+      "purpose": "Path of the standalone gateway's peer-authorized unix hook socket, assigned inside a rendered standalone Unix hook (connector shell hooks and the Codex notify bridge) before the socket and its directory owners are checked and the request is sent with curl --unix-socket. The script sets it itself, so an inherited value is overwritten.",
+      "default": "(rendered by setup for standalone Unix installs that name a hook socket; absent everywhere else)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hook_socket_transport.go",
+          "description": "Shell transport block that assigns and verifies the socket path"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_SOCKET_UID",
+      "category": "hook_internal",
+      "purpose": "Gateway service account uid that a rendered standalone Unix hook accepts, besides root, as the owner of the hook socket and its directory. The script sets it itself, so an inherited value is overwritten.",
+      "default": "(rendered by setup next to DEFENSECLAW_HOOK_SOCKET)",
+      "accepted_values": [
+        "uid"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hook_socket_transport.go",
+          "description": "Shell transport block owner check"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the connector hook-token cross-process lock fixture.",
@@ -2557,6 +2593,44 @@
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_LEAK",
+      "category": "test_fixture",
+      "purpose": "Marker a test sets in its own environment to prove that Unix agent discovery does not run the agent executable, or pass the caller's environment to it, without allowExec.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/enumerator_unix_test.go",
+          "description": "Test-only environment leak marker for agent discovery"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_LEAK_CHECK",
+      "category": "test_fixture",
+      "purpose": "Marker a test sets in its own environment to prove that the trusted directory-tool runner starts its command with a clean environment.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/unixidentity/identity_test.go",
+          "description": "Test-only environment leak marker for the directory tool runner"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_LEDGER_ROOT",
@@ -4295,6 +4369,25 @@
       "since": "0.3.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_APPLY_TARGET_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the test helper process that stands in for the per-user apply-target worker.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_standalone_unix_test.go",
+          "description": "Test-only apply-target worker helper selector"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_CODEX_MANAGED_DATA",
       "category": "test_fixture",
       "purpose": "Passes the isolated Codex managed data root from the Windows connector-reconcile Go test to its re-execed subprocess so the child resolves managed-Codex artifacts under t.TempDir().",
@@ -4484,6 +4577,25 @@
         }
       ],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LEAK",
+      "category": "test_fixture",
+      "purpose": "Marker a test sets in the parent environment to prove the per-user apply-target worker does not inherit it.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_standalone_unix_test.go",
+          "description": "Test-only environment leak marker for the apply-target worker"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_TEST_LLM_KEY",

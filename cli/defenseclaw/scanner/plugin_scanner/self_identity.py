@@ -65,8 +65,8 @@ _BRIDGE_PUBLICATION_SCHEMA = {
     },
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
-    "amp": "d3d3b92dc65d0892a8a9c5d517e0a63379344b85761273869c12998a43b98e6c",
-    "opencode": "dca6ebf506a886c2c9b48017f87d99ab0b2b155a4ab565c126d719f893d84528",
+    "amp": "65b8f3ac75236edada4ddab08e39362f1e7c9e4dce138abc49e7bc8baf651732",
+    "opencode": "8ce0544604ed275f3095b34111d5fd9279ff6ebc59dc5d0be90b06c4934c8e61",
 }
 _BRIDGE_DYNAMIC_LINES = {
     "amp": (
@@ -106,6 +106,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"\n',
             "guard",
         ),
+        (
+            b'const DC_INSTALL_MARKER: string = "',
+            b'"\n',
+            b'const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"\n',
+            "marker",
+        ),
     ),
     "opencode": (
         (
@@ -143,6 +149,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";\n',
             "guard",
+        ),
+        (
+            b'const DC_INSTALL_MARKER = "',
+            b'";\n',
+            b'const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";\n',
+            "marker",
         ),
     ),
 }
@@ -353,7 +365,10 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
 
     The foreign-hook guard binary is executed by the plugin on every tool
     call, so a bridge naming one is first-party only when that binary is an
-    administrator-owned file no other account can replace.
+    administrator-owned file no other account can replace. The hook socket
+    and the Windows standalone install marker (the directory whose absence
+    tells the plugin the deployment was uninstalled) only need to be
+    absolute paths.
     """
 
     if value == b"":
@@ -393,7 +408,7 @@ def _valid_bridge_dynamic_value(
         return value in {b"open", b"closed"}
     if kind == "uid":
         return value.isdigit() and len(value) <= 10
-    if kind in {"socket", "guard"}:
+    if kind in {"socket", "guard", "marker"}:
         return _valid_bridge_managed_path(kind, value)
     if kind != "token":
         return False
