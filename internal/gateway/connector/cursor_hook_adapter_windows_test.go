@@ -91,6 +91,9 @@ func TestMain(m *testing.M) {
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	default:
+		if os.Getenv(codexMachineHookHelperMode) == "block" {
+			runCodexMachineHookHelper()
+		}
 		if os.Getenv(windsurfAdapterHelperMode) == "result" {
 			payload, err := io.ReadAll(os.Stdin)
 			if err != nil || string(payload) != `{"source":"windsurf-adapter-probe"}` {

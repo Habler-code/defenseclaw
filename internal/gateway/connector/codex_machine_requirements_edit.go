@@ -415,7 +415,7 @@ func codexTOMLString(value string) string {
 }
 
 func renderWindowsCodexRequirementsGroup(group codexHookGroup, hookBinary, newline string) string {
-	command := codexTOMLString(windowsCodexManagedHookCommand(hookBinary))
+	command := codexTOMLString(windowsCodexManagedHookCommand(hookBinary, group.eventType))
 	event := codexTOMLKey(group.eventType)
 	lines := []string{"[[hooks." + event + "]]"}
 	if group.matcher != "" {
@@ -432,13 +432,18 @@ func renderWindowsCodexRequirementsGroup(group codexHookGroup, hookBinary, newli
 }
 
 // windowsCodexRequirementsMergePlan lists the DefenseClaw-owned entries the
-// map-based merge added or normalized.
+// map-based merge added, normalized, or replaced. legacyGroups holds, per
+// event, the indices of an earlier release's unbound groups among the
+// legacyGroupCounts groups the document defines; they are deleted before the
+// additions are inserted.
 type windowsCodexRequirementsMergePlan struct {
 	addManagedHooksOnly bool
 	addFeatureHooks     bool
 	addManagedDir       bool
 	replaceManagedDir   bool
 	missingGroups       []codexHookGroup
+	legacyGroups        map[string][]int
+	legacyGroupCounts   map[string]int
 }
 
 func (p windowsCodexRequirementsMergePlan) empty() bool {
@@ -456,12 +461,20 @@ func windowsCodexRequirementsUneditableError(what string) error {
 
 // renderWindowsCodexRequirementsMerge inserts the plan's additions into raw
 // without touching any existing byte (apart from a canonical managed
-// directory value the merge normalizes).
+// directory value the merge normalizes and an earlier release's unbound
+// groups, which it deletes).
 func renderWindowsCodexRequirementsMerge(
 	raw []byte,
 	plan windowsCodexRequirementsMergePlan,
 	opts WindowsCodexMachineRequirementsOptions,
 ) ([]byte, error) {
+	if len(plan.legacyGroups) > 0 {
+		stripped, err := removeWindowsCodexRequirementsLegacyGroups(raw, plan)
+		if err != nil {
+			return nil, err
+		}
+		raw = stripped
+	}
 	if plan.empty() {
 		return append([]byte(nil), raw...), nil
 	}
@@ -540,6 +553,57 @@ func renderWindowsCodexRequirementsMerge(
 		return rendered, nil
 	}
 	return appendWindowsCodexRequirementsRegion(rendered, strings.Join(tailBlocks, newline+newline), newline)
+}
+
+// removeWindowsCodexRequirementsLegacyGroups deletes the unbound groups the
+// plan names so their bound replacements can be appended. The surgical
+// removal renderer deletes exactly those [[hooks.<event>]] elements, tidies
+// the DefenseClaw regions they leave, and proves the result is raw's policy
+// without them.
+func removeWindowsCodexRequirementsLegacyGroups(
+	raw []byte,
+	plan windowsCodexRequirementsMergePlan,
+) ([]byte, error) {
+	want, err := parseWindowsCodexRequirements(raw)
+	if err != nil {
+		return nil, err
+	}
+	hooks, _ := want["hooks"].(map[string]interface{})
+	for event, indices := range plan.legacyGroups {
+		groups, _ := hooks[event].([]interface{})
+		if len(groups) != plan.legacyGroupCounts[event] {
+			return nil, windowsCodexRequirementsUneditableError("hooks." + event)
+		}
+		drop := make(map[int]bool, len(indices))
+		for _, index := range indices {
+			drop[index] = true
+		}
+		kept := make([]interface{}, 0, len(groups)-len(indices))
+		for index, group := range groups {
+			if !drop[index] {
+				kept = append(kept, group)
+			}
+		}
+		if len(kept) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = kept
+		}
+	}
+	if len(hooks) == 0 {
+		doc, err := parseCodexTOMLDocument(raw)
+		if err != nil {
+			return nil, err
+		}
+		// Only a [hooks] header keeps an emptied table in the document.
+		if doc.tableForm("hooks") != codexTOMLTableHeader {
+			delete(want, "hooks")
+		}
+	}
+	return renderWindowsCodexRequirementsRemoval(raw, windowsCodexRequirementsRemovalPlan{
+		removedGroups: plan.legacyGroups,
+		groupCounts:   plan.legacyGroupCounts,
+	}, want)
 }
 
 // appendWindowsCodexRequirementsRegion adds content to the final DefenseClaw

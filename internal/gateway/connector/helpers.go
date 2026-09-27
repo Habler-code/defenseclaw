@@ -634,22 +634,23 @@ func windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBina
 }
 
 func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractID, hookBinary string) string {
-	arguments := []string{
-		powershellQuoteLiteral("hook"),
-		powershellQuoteLiteral("--connector"),
-		powershellQuoteLiteral(connector),
-	}
+	arguments := []string{"hook", "--connector", connector}
 	if strings.TrimSpace(event) != "" {
-		arguments = append(arguments,
-			powershellQuoteLiteral("--event"),
-			powershellQuoteLiteral(event),
-		)
+		arguments = append(arguments, "--event", event)
 	}
 	if strings.TrimSpace(contractID) != "" {
-		arguments = append(arguments,
-			powershellQuoteLiteral("--hook-contract"),
-			powershellQuoteLiteral(contractID),
-		)
+		arguments = append(arguments, "--hook-contract", contractID)
+	}
+	return windowsNativePowerShellHookCommandForArguments(hookBinary, arguments)
+}
+
+// windowsNativePowerShellHookCommandForArguments runs hookBinary with the
+// literal arguments through the fixed system PowerShell and returns the hook's
+// own exit code.
+func windowsNativePowerShellHookCommandForArguments(hookBinary string, rawArguments []string) string {
+	arguments := make([]string, 0, len(rawArguments))
+	for _, argument := range rawArguments {
+		arguments = append(arguments, powershellQuoteLiteral(argument))
 	}
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
