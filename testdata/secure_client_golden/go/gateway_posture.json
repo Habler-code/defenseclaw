@@ -1,5 +1,9 @@
 [
   {
+    "detail": "id=\"\" kind=\"\" name=\"\" ai_defense_only=true inventory_home=\"\"",
+    "scenario": "event_user_fallback/managed"
+  },
+  {
     "detail": "status=403 reason=managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian",
     "scenario": "guardrail_config_patch/managed_with_token"
   },

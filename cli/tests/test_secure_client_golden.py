@@ -28,6 +28,7 @@ EXPECTED_FIXTURES = (
     "go/config_posture.json",
     "go/config_mode_pin.json",
     "go/gateway_posture.json",
+    "go/cli_posture.json",
     "go/ipc_socket.json",
     "go/sensor_socket.json",
     "windows/lifecycle.json",

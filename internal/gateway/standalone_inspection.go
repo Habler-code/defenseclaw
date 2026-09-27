@@ -33,6 +33,10 @@ var errStandaloneAIDefenseDisabled = errors.New("ai defense is not enabled for t
 // api_key_env and the data-dir .env are never consulted, so neither a
 // user nor a compromised service-writable file can substitute a key. A
 // missing or untrusted credential leaves the local engine deciding alone.
+//
+// A built client reports every request's outcome to /health: a rejected key
+// (HTTP 401/403) or an unreachable endpoint or proxy marks AI Defense
+// unavailable, and the next successful inspection clears it.
 func (s *Sidecar) newStandaloneInspector(ctx context.Context, cfg *config.Config) Inspector {
 	c, err := newStandaloneCiscoInspectClient(cfg)
 	if err != nil {
@@ -45,9 +49,17 @@ func (s *Sidecar) newStandaloneInspector(ctx context.Context, cfg *config.Config
 			"standalone managed_enterprise: Cisco AI Defense disabled, local policy engine continues: "+err.Error())
 		return nil
 	}
+	return s.adoptStandaloneInspector(c)
+}
+
+// adoptStandaloneInspector wires a built standalone AI Defense client into
+// the sidecar: metrics, a fresh available state, and the observer through
+// which its requests keep /health current.
+func (s *Sidecar) adoptStandaloneInspector(c *CiscoInspectClient) Inspector {
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	c.bindObservabilityV8(metricRuntime)
 	s.setInspectionAvailability(nil)
+	c.bindAvailabilityObserver(s.inspectionAvailabilityObserver())
 	return c
 }
 

@@ -39,6 +39,8 @@ func TestStandaloneGuardianCoverageIsolatesPerUserFailures(t *testing.T) {
 		}
 	}
 	fresh := time.Now().UTC().Format(time.RFC3339)
+	// Rows carry a SID as well as a POSIX identity: Windows keys guardian
+	// targets strictly by SID, so rows without one are incomplete there.
 	write(fmt.Sprintf(`{
 		"version":1,
 		"updated_at":%q,
@@ -47,7 +49,7 @@ func TestStandaloneGuardianCoverageIsolatesPerUserFailures(t *testing.T) {
 		"success_count":1,
 		"failure_count":1,
 		"pending_count":1,
-		"protected_targets":[{"user":"bob","user_home":"/home/bob","connector":"claudecode","ok":true,"uid":1002}]
+		"protected_targets":[{"user":"bob","sid":"S-1-5-21-1-2-3-1002","user_home":"/home/bob","connector":"claudecode","ok":true,"uid":1002}]
 	}`, fresh))
 
 	if ok, _ := managedGuardianCoversConnectors("unused", []string{"claudecode"}); ok {
@@ -71,8 +73,8 @@ func TestStandaloneGuardianCoverageIsolatesPerUserFailures(t *testing.T) {
 		"success_count":1,
 		"failure_count":1,
 		"protected_targets":[
-			{"user":"alice","user_home":"/home/alice","connector":"amp","ok":true,"uid":1001},
-			{"user":"bob","user_home":"/home/bob","connector":"amp","ok":true,"uid":1002}
+			{"user":"alice","sid":"S-1-5-21-1-2-3-1001","user_home":"/home/alice","connector":"amp","ok":true,"uid":1001},
+			{"user":"bob","sid":"S-1-5-21-1-2-3-1002","user_home":"/home/bob","connector":"amp","ok":true,"uid":1002}
 		]
 	}`, fresh))
 	if ok, status := managedGuardianStandaloneCoverage("unused"); !ok {
@@ -90,8 +92,8 @@ func TestStandaloneGuardianCoverageIsolatesPerUserFailures(t *testing.T) {
 		"success_count":1,
 		"failure_count":1,
 		"protected_targets":[
-			{"user":"alice","user_home":"/home/alice","connector":"claudecode","ok":true,"uid":1001},
-			{"user":"bob","user_home":"/home/bob","connector":"claudecode","ok":true,"uid":1002}
+			{"user":"alice","sid":"S-1-5-21-1-2-3-1001","user_home":"/home/alice","connector":"claudecode","ok":true,"uid":1001},
+			{"user":"bob","sid":"S-1-5-21-1-2-3-1002","user_home":"/home/bob","connector":"claudecode","ok":true,"uid":1002}
 		]
 	}`, fresh))
 	if ok, status := managedGuardianStandaloneCoverage("unused"); !ok || !strings.Contains(status, "1 of 2 guardian targets need attention") {
@@ -107,9 +109,9 @@ func TestStandaloneGuardianCoverageIsolatesPerUserFailures(t *testing.T) {
 	// Structural problems still fail closed.
 	for name, body := range map[string]string{
 		"stale":               `{"version":1,"updated_at":"2020-01-01T00:00:00Z","ok":true,"target_count":0,"success_count":0,"failure_count":0,"protected_targets":[]}`,
-		"inconsistent counts": fmt.Sprintf(`{"version":1,"updated_at":%q,"ok":true,"target_count":5,"success_count":1,"failure_count":1,"protected_targets":[{"user":"bob","user_home":"/home/bob","connector":"codex","ok":true}]}`, fresh),
-		"more protected rows than successes and failures": fmt.Sprintf(`{"version":1,"updated_at":%q,"ok":true,"target_count":1,"success_count":1,"failure_count":0,"protected_targets":[{"user":"bob","user_home":"/home/bob","connector":"codex","ok":true},{"user":"eve","user_home":"/home/eve","connector":"codex","ok":true}]}`, fresh),
-		"failed protected row":                            fmt.Sprintf(`{"version":1,"updated_at":%q,"ok":true,"target_count":1,"success_count":1,"failure_count":0,"protected_targets":[{"user":"bob","user_home":"/home/bob","connector":"codex","ok":false}]}`, fresh),
+		"inconsistent counts": fmt.Sprintf(`{"version":1,"updated_at":%q,"ok":true,"target_count":5,"success_count":1,"failure_count":1,"protected_targets":[{"user":"bob","sid":"S-1-5-21-1-2-3-1002","user_home":"/home/bob","connector":"codex","ok":true}]}`, fresh),
+		"more protected rows than successes and failures": fmt.Sprintf(`{"version":1,"updated_at":%q,"ok":true,"target_count":1,"success_count":1,"failure_count":0,"protected_targets":[{"user":"bob","sid":"S-1-5-21-1-2-3-1002","user_home":"/home/bob","connector":"codex","ok":true},{"user":"eve","sid":"S-1-5-21-1-2-3-1003","user_home":"/home/eve","connector":"codex","ok":true}]}`, fresh),
+		"failed protected row":                            fmt.Sprintf(`{"version":1,"updated_at":%q,"ok":true,"target_count":1,"success_count":1,"failure_count":0,"protected_targets":[{"user":"bob","sid":"S-1-5-21-1-2-3-1002","user_home":"/home/bob","connector":"codex","ok":false}]}`, fresh),
 	} {
 		write(body)
 		if ok, _ := managedGuardianStandaloneCoverage("unused"); ok {

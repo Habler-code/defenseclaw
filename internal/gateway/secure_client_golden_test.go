@@ -232,6 +232,22 @@ func TestSecureClientGoldenGatewayPosture(t *testing.T) {
 		})
 	}
 
+	// Events that carry no identity of their own are never attributed to the
+	// managed gateway's service account. Booted last because NewSidecar
+	// publishes the process-wide posture that the rows above do not assume.
+	withRestoredManagedPosture(t)
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	restoreRetainJudgeBodies(t)
+	t.Setenv("DEFENSECLAW_RUN_ID", "secure-client-golden")
+	bootProfileSidecar(t, profilePostures[1])
+	fallback := newLLMEventUser("", "", false)
+	rows = append(rows, secureClientGatewayScenario{
+		Scenario: "event_user_fallback/managed",
+		Detail: fmt.Sprintf("id=%q kind=%q name=%q ai_defense_only=%t inventory_home=%q",
+			fallback.ID, fallback.IDKind, fallback.Name, ManagedEnterpriseActive(), daemonHomeForInventoryAttribution()),
+	})
+
 	sortSecureClientGatewayRows(rows)
 	testenv.CompareSecureClientGoldenJSON(t, "go/gateway_posture.json", rows)
 }

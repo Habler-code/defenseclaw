@@ -15,3 +15,7 @@ package cli
 // managedHostWindowsStandalone is Windows-only; unix hosts use the runtime
 // descriptor.
 var managedHostWindowsStandalone = func() (string, bool) { return "", false }
+
+// managedHostRecordTrusted accepts every record outside Windows: the unix
+// descriptor lives in a root-owned directory no standard user can write.
+var managedHostRecordTrusted = func(string) error { return nil }

@@ -1,0 +1,50 @@
+[
+  {
+    "detail": "refused=false",
+    "scenario": "per_user_gateway_guard/secure_client_host_no_standalone_record"
+  },
+  {
+    "detail": "refused=false",
+    "scenario": "per_user_gateway_guard/untrusted_standalone_record"
+  },
+  {
+    "detail": "refused=true",
+    "scenario": "per_user_gateway_guard/trusted_standalone_record"
+  },
+  {
+    "detail": "refused=false",
+    "scenario": "per_user_gateway_guard/managed_service_pin"
+  },
+  {
+    "detail": "refused=true",
+    "scenario": "per_user_gateway_guard/standard_user_user_writable_vendor_standalone_gateway_service"
+  },
+  {
+    "detail": "refused=false",
+    "scenario": "per_user_gateway_guard/standard_user_user_writable_vendor_no_gateway_service"
+  },
+  {
+    "detail": "refused=false",
+    "scenario": "per_user_gateway_guard/standard_user_user_writable_vendor_secure_client_gateway_service"
+  },
+  {
+    "detail": "trusted=true",
+    "scenario": "managed_record_trust/administrator_record"
+  },
+  {
+    "detail": "trusted=false",
+    "scenario": "managed_record_trust/user_owned_record"
+  },
+  {
+    "detail": "trusted=true",
+    "scenario": "managed_record_trust/standard_user_below_administrator_only_directory"
+  },
+  {
+    "detail": "trusted=false",
+    "scenario": "managed_record_trust/locked_record_in_user_created_directory"
+  },
+  {
+    "detail": "trusted=false",
+    "scenario": "managed_record_trust/nothing_inspectable"
+  }
+]

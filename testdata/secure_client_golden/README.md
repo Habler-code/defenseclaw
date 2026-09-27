@@ -18,7 +18,8 @@ per-OS default).
 | --- | --- | --- |
 | `go/config_posture.json` (darwin, windows) | `internal/config` | managed-mode constants and env names; IPC enablement and peer-auth kind per deployment mode; the Secure Client GUI codesign allowlist; managed AI Defense log-sink predicate; loopback listener rules; Windows IPC allowlist rejection; `env_config.json` path and endpoint validation; guardrail runtime-migration gate |
 | `go/config_mode_pin.json` (darwin, windows) | `internal/config` | `DEFENSECLAW_DEPLOYMENT_MODE` service pin: fills, matches, conflicts, invalid |
-| `go/gateway_posture.json` | `internal/gateway` | AI Defense-only decisions (local detectors, CodeGuard, and regex bypassed), fail-open when AI Defense has no verdict or is unwired, managed inspector requires a registered cloud provider and an endpoint, multi-connector refusal without a provider, no OS toasts, runtime config PATCH denied |
+| `go/gateway_posture.json` | `internal/gateway` | AI Defense-only decisions (local detectors, CodeGuard, and regex bypassed), fail-open when AI Defense has no verdict or is unwired, managed inspector requires a registered cloud provider and an endpoint, multi-connector refusal without a provider, no OS toasts, runtime config PATCH denied, events without an identity never attributed to the gateway's service account |
+| `go/cli_posture.json` | `internal/cli` | the per-user gateway guard never refuses on a host without a trusted standalone deployment record, and a record a standard user could have planted does not count; a standard user whose vendor directory keeps the ProgramData Users grant is refused only when the administrator-registered gateway service runs the standalone gateway executable, never for the Secure Client gateway |
 | `go/ipc_socket.json` (darwin, windows) | `internal/ipc` | Secure Client GUI IPC socket path, env-override immunity, socket-mode ceilings |
 | `go/cli_dotenv_profile_pin.json` | `internal/cli` | a data-directory `.env` cannot supply `DEFENSECLAW_ENTERPRISE_PROFILE`, so the Secure Client shape still resolves `secure_client` on darwin and windows |
 | `go/sensor_socket.json` (darwin, windows) | `internal/sensor/acquire` | managed sensor-helper socket path and env-override immunity |
@@ -29,7 +30,7 @@ per-OS default).
 | `source_tripwire.json` | `scripts/secure_client_golden.py` | SHA-256 of Secure Client-only sources (macOS and launchd packaging, the AVC build kit, CMID/cloudreg/broker code, the Secure Client IPC contract) and of the Secure Client-defining functions and constants in `packaging/windows/DefenseClawEnterprise.psm1` and `install-enterprise.ps1` |
 
 Linux has no Secure Client distribution. Platform-keyed goldens skip there;
-the platform-independent ones (gateway posture, Codex requirements) and the
+the platform-independent ones (gateway and CLI posture, Codex requirements) and the
 source tripwire run on every platform.
 
 ## Running

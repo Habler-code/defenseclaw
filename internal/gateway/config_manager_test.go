@@ -744,15 +744,21 @@ func standaloneDiffTestConfig() *config.Config {
 	return cfg
 }
 
-func TestDiffConfigsMarksEnterpriseChangesRestartRequired(t *testing.T) {
+// TestDiffConfigsSplitsStandaloneEnterpriseChanges: an edit that only
+// touches enterprise.* must never reload as "no change". AI Defense settings
+// rebuild the client in place (hot); the egress proxy and enrollment are
+// captured at startup and need a restart.
+func TestDiffConfigsSplitsStandaloneEnterpriseChanges(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		mutate func(*config.Config)
+		name        string
+		mutate      func(*config.Config)
+		wantChanged string
+		wantRestart bool
 	}{
-		{name: "disable AI Defense", mutate: func(c *config.Config) { c.Enterprise.Inspection.AIDefense.Enabled = false }},
-		{name: "change the credential", mutate: func(c *config.Config) { c.Enterprise.Inspection.AIDefense.Credential = "other-key" }},
-		{name: "change the proxy", mutate: func(c *config.Config) { c.Enterprise.Network.HTTPSProxy = "http://proxy2.corp:3128" }},
-		{name: "change enrollment", mutate: func(c *config.Config) { c.Enterprise.Enrollment.ExemptUsers = nil }},
+		{name: "disable AI Defense", mutate: func(c *config.Config) { c.Enterprise.Inspection.AIDefense.Enabled = false }, wantChanged: "enterprise.inspection"},
+		{name: "change the credential", mutate: func(c *config.Config) { c.Enterprise.Inspection.AIDefense.Credential = "other-key" }, wantChanged: "enterprise.inspection"},
+		{name: "change the proxy", mutate: func(c *config.Config) { c.Enterprise.Network.HTTPSProxy = "http://proxy2.corp:3128" }, wantChanged: "enterprise.network", wantRestart: true},
+		{name: "change enrollment", mutate: func(c *config.Config) { c.Enterprise.Enrollment.ExemptUsers = nil }, wantChanged: "enterprise", wantRestart: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			oldCfg := standaloneDiffTestConfig()
@@ -760,11 +766,11 @@ func TestDiffConfigsMarksEnterpriseChangesRestartRequired(t *testing.T) {
 			tc.mutate(newCfg)
 
 			diff := diffConfigs(oldCfg, newCfg)
-			if !slices.Contains(diff.Changed, "enterprise") {
-				t.Fatalf("changed = %v, missing enterprise", diff.Changed)
+			if !slices.Equal(diff.Changed, []string{tc.wantChanged}) {
+				t.Fatalf("changed = %v, want [%s]", diff.Changed, tc.wantChanged)
 			}
-			if !slices.Contains(diff.RestartRequired, "enterprise") {
-				t.Fatalf("restart_required = %v, missing enterprise: the gateway would keep its startup AI Defense client", diff.RestartRequired)
+			if got := slices.Contains(diff.RestartRequired, tc.wantChanged); got != tc.wantRestart {
+				t.Fatalf("restart_required = %v, want %s restart=%t", diff.RestartRequired, tc.wantChanged, tc.wantRestart)
 			}
 		})
 	}
@@ -772,7 +778,7 @@ func TestDiffConfigsMarksEnterpriseChangesRestartRequired(t *testing.T) {
 
 func TestDiffConfigsSeesNoEnterpriseChangeAcrossAClone(t *testing.T) {
 	oldCfg := standaloneDiffTestConfig()
-	if diff := diffConfigs(oldCfg, cloneConfig(oldCfg)); slices.Contains(diff.Changed, "enterprise") {
+	if diff := diffConfigs(oldCfg, cloneConfig(oldCfg)); len(diff.Changed) != 0 {
 		t.Fatalf("an unchanged enterprise block diffed as changed: %v", diff.Changed)
 	}
 	secureClient := config.DefaultConfig()

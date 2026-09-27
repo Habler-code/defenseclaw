@@ -194,6 +194,10 @@ type Sidecar struct {
 	inspectionMu        sync.RWMutex
 	inspectionAvailable bool
 	inspectionDetail    string
+	// inspectionEpoch advances on every setInspectionAvailability, so an
+	// observer bound to a replaced inspector stops publishing (see
+	// inspectionAvailabilityObserver).
+	inspectionEpoch uint64
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -498,6 +502,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// AI Defense failure diagnostics remain sink-redacted in every posture; this
 	// flag must never authorize raw upstream response bytes in gateway logs.
 	setManagedEnterpriseRedactionPosture(cfg.ManagedAIDOnly())
+	setManagedServiceHosted(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
 	return sidecar, nil
 }
@@ -1801,6 +1806,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// managed-enterprise local-agent carve-out and cloud-controlled
 	// per-inspection redaction gate in sync with the committed deployment mode.
 	setManagedEnterpriseRedactionPosture(nextManagedAIDOnly)
+	setManagedServiceHosted(nextManagedEnterprise)
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
 
 	appliedCfg := current
@@ -2017,7 +2023,17 @@ func inspectorNeedsRebuild(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	return !reflect.DeepEqual(oldCfg.CiscoAIDefense, newCfg.CiscoAIDefense)
+	if !reflect.DeepEqual(oldCfg.CiscoAIDefense, newCfg.CiscoAIDefense) {
+		return true
+	}
+	// A standalone deployment's AI Defense client also depends on the
+	// enterprise block: whether it is enabled, which protected credential
+	// holds its key, and the egress proxy it dials through.
+	if !oldCfg.StandaloneEnterprise() && !newCfg.StandaloneEnterprise() {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.Enterprise.Inspection, newCfg.Enterprise.Inspection) ||
+		!reflect.DeepEqual(oldCfg.Enterprise.Network, newCfg.Enterprise.Network)
 }
 
 func judgeNeedsReload(oldCfg, newCfg *config.Config) bool {
@@ -2556,12 +2572,35 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 func (s *Sidecar) setInspectionAvailability(err error) {
 	s.inspectionMu.Lock()
 	defer s.inspectionMu.Unlock()
+	s.inspectionEpoch++
+	s.recordInspectionAvailabilityLocked(err)
+}
+
+func (s *Sidecar) recordInspectionAvailabilityLocked(err error) {
 	s.inspectionAvailable = err == nil
 	if err != nil {
 		s.inspectionDetail = err.Error()
 		return
 	}
 	s.inspectionDetail = ""
+}
+
+// inspectionAvailabilityObserver returns a callback for an inspector's
+// per-request outcomes. It publishes them until the next
+// setInspectionAvailability, which every inspector rebuild makes, so a late
+// reply from a replaced client cannot overwrite its successor's state.
+func (s *Sidecar) inspectionAvailabilityObserver() func(error) {
+	s.inspectionMu.RLock()
+	epoch := s.inspectionEpoch
+	s.inspectionMu.RUnlock()
+	return func(err error) {
+		s.inspectionMu.Lock()
+		defer s.inspectionMu.Unlock()
+		if s.inspectionEpoch != epoch {
+			return
+		}
+		s.recordInspectionAvailabilityLocked(err)
+	}
 }
 
 // inspectionAvailability reports the last managed-inspection outcome.
@@ -2571,6 +2610,30 @@ func (s *Sidecar) inspectionAvailability() (bool, string) {
 	s.inspectionMu.RLock()
 	defer s.inspectionMu.RUnlock()
 	return s.inspectionAvailable, s.inspectionDetail
+}
+
+// addStandaloneAIDefenseHealth publishes the optional Cisco AI Defense
+// client of a standalone deployment on a guardrail health detail. The local
+// engine keeps deciding when that client cannot be built (missing, untrusted
+// or empty credential, rejected egress proxy) or when its requests fail
+// (rejected key, unreachable endpoint or proxy), so inspection_available
+// stays true there; these keys are what show the administrator that the
+// cloud augmentation they enabled is not running. Other profiles are
+// untouched.
+func (s *Sidecar) addStandaloneAIDefenseHealth(detail map[string]interface{}) {
+	cfg := s.currentConfig()
+	if detail == nil || !cfg.StandaloneEnterprise() || !cfg.Enterprise.Inspection.AIDefense.Enabled {
+		return
+	}
+	available, reason := s.inspectionAvailability()
+	detail["ai_defense_available"] = available
+	if available {
+		return
+	}
+	if reason == "" {
+		reason = "client not initialized"
+	}
+	detail["ai_defense_error"] = "ai_defense: " + reason
 }
 
 func (s *Sidecar) apiSnapshot() *APIServer {
@@ -3730,7 +3793,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					verifiedEnforcement = enforcementEnabled
 					hint = "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path"
 				}
-				s.health.SetGuardrail(state, status, map[string]interface{}{
+				detail := map[string]interface{}{
 					"summary":             summary,
 					"connector":           conn.Name(),
 					"mode":                "observability",
@@ -3741,7 +3804,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					"hint":                hint,
 					"lifecycle_manager":   "enterprise_hook_guardian",
 					"guardian_verified":   covered,
-				})
+				}
+				s.addStandaloneAIDefenseHealth(detail)
+				s.health.SetGuardrail(state, status, detail)
 			}
 			publishHealth()
 			fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — awaiting enterprise hook guardian verification\n", conn.Name(), policyMode, enforcementEnabled)
@@ -4297,13 +4362,10 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
 		}
 		inspectionAvailable, inspectionDetail := s.inspectionAvailability()
-		standalone := s.currentConfig().StandaloneEnterprise()
-		if standalone {
+		if s.currentConfig().StandaloneEnterprise() {
 			// The local policy engine always inspects; AI Defense only
 			// augments it, so its outage degrades rather than disables.
-			if !inspectionAvailable && inspectionDetail != "" {
-				inspectionDetail = "ai_defense: " + inspectionDetail
-			}
+			// addStandaloneAIDefenseHealth publishes the AI Defense state.
 			inspectionAvailable = true
 		}
 		detail := map[string]interface{}{
@@ -4322,6 +4384,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			// say plainly that nothing is inspecting behind it.
 			detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected"
 		}
+		s.addStandaloneAIDefenseHealth(detail)
 		s.health.SetGuardrail(state, status, detail)
 	}
 	publishHealth()
