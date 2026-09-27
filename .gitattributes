@@ -16,6 +16,9 @@ extensions/defenseclaw/openclaw.plugin.json text eol=lf
 internal/configs/providers.json text eol=lf
 internal/gateway/connector/hooks/amp-plugin.ts text eol=lf
 internal/gateway/connector/hooks/opencode-plugin.js text eol=lf
+# The gateway renders the listener check block of this helper into the plugin
+# bridges by its LF marker lines, and the CLI pins the rendered block's digest.
+internal/gateway/connector/hooks/_hardening.sh text eol=lf
 
 # These pinned upstream snapshots are authenticated by SHA256 over their exact
 # bytes. Disable checkout-time newline conversion so Windows materializes the
