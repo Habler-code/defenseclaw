@@ -1404,8 +1404,8 @@ a local folder. So does a workspace whose folders cannot all be checked: a
 hook call that does not report `workspace_roots`, more than 32 distinct
 folders, or a folder that Cursor reports as a remote or relative path rather
 than a local one. Under the plugin folder, links, junctions and other reparse
-points, folders nested more than 8 levels deep, and more than 4096 folders in
-total also deny. The guard does not scan the enterprise hooks file or team
+points, and more than 4096 folders in total, also deny; folders are checked at
+any depth. The guard does not scan the enterprise hooks file or team
 hooks from the Cursor dashboard, which administrators control, and it cannot
 see plugins that Cursor keeps outside `%USERPROFILE%\.cursor\plugins` or
 Claude Code plugins imported through Cursor's third-party settings. On Cursor
