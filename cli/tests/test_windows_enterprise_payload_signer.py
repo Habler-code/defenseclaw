@@ -156,8 +156,13 @@ def test_endpoint_signer_pin_matches_the_assembly_publisher_contract() -> None:
     # every Authenticode payload file before it is embedded.
     assert "Get-CiscoSignatureCommonName -Certificate $sig.SignerCertificate" in assembly_ps
     assert "SimpleName" not in function_body(assembly_ps, "Assert-CiscoSignature")
-    assert "subjectCommonName(certificateSubject(context))" in read(
+    # The broker and the IPC Secure Client peer check read the signer's name
+    # with the same one-common-name parser.
+    assert "authenticode.SubjectCommonName(certificateSubject(context))" in read(
         ROOT / "internal" / "managed" / "cmidbroker" / "library_trust_windows.go"
+    )
+    assert "authenticode.SubjectCommonName(certificate.RawSubject)" in read(
+        ROOT / "internal" / "ipc" / "winpeer_auth.go"
     )
     assert "Assert-CiscoSignature -Path (Join-Path $PayloadDir $name)" in read(
         ROOT / "packaging" / "scripts" / "lib" / "assemble.ps1"
