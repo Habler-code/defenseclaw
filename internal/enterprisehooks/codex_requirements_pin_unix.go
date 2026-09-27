@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -46,7 +47,18 @@ var (
 	codexRequirementsPinAncestorTrust = func(dir string) error {
 		return managed.ValidateTrustedRuntimeDir(dir, "Codex requirements directory ancestor")
 	}
+	// codexRequirementsPinLockPath names the lock file that serializes
+	// DefenseClaw writers (guardian reconcile, uninstall, and the hidden CLI).
+	// It lives in a root-only system directory: any user who can open the
+	// requirements directory could take, and hold, a lock on the directory
+	// itself.
+	codexRequirementsPinLockPath = defaultCodexRequirementsPinLockPath
+	// codexRequirementsPinLockWait bounds how long a writer waits for another
+	// DefenseClaw writer; the pass then fails and the next pass retries.
+	codexRequirementsPinLockWait = 10 * time.Second
 )
+
+const codexRequirementsPinLockPoll = 50 * time.Millisecond
 
 // codexRequirementsPinTempPrefix names DefenseClaw's staging files in the
 // requirements directory.
@@ -57,6 +69,17 @@ func defaultCodexRequirementsPinPath() string {
 		return "/private/etc/codex/requirements.toml"
 	}
 	return "/etc/codex/requirements.toml"
+}
+
+func defaultCodexRequirementsPinLockPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "/private/var/db/com.cisco.secureclient.defenseclaw.codex-requirements.lock"
+	case "linux":
+		return "/run/defenseclaw-codex-requirements.lock"
+	default:
+		return "/var/run/defenseclaw-codex-requirements.lock"
+	}
 }
 
 // InspectCodexRequirementsHooksPin reports whether the machine Codex
@@ -98,11 +121,11 @@ func EnsureCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 		return result, err
 	}
 	dir := filepath.Dir(path)
-	dirInfo, err := prepareCodexRequirementsPinDir(dir)
-	if err != nil {
-		return result, err
-	}
-	err = withCodexRequirementsPinDirLock(dir, func() error {
+	err := withCodexRequirementsPinLock(func() error {
+		dirInfo, err := prepareCodexRequirementsPinDir(dir)
+		if err != nil {
+			return err
+		}
 		if err := ensureCodexRequirementsPinDirTraversable(dir, path, dirInfo); err != nil {
 			return err
 		}
@@ -155,11 +178,14 @@ func RemoveCodexRequirementsHooksPin() (CodexRequirementsPinResult, error) {
 		return result, err
 	}
 	dir := filepath.Dir(path)
-	dirInfo, err := validateCodexRequirementsPinDir(dir)
-	if err != nil || dirInfo == nil {
+	// Without the directory there is nothing to remove and no lock to take.
+	if dirInfo, err := validateCodexRequirementsPinDir(dir); err != nil || dirInfo == nil {
 		return result, err
 	}
-	err = withCodexRequirementsPinDirLock(dir, func() error {
+	err := withCodexRequirementsPinLock(func() error {
+		if dirInfo, err := validateCodexRequirementsPinDir(dir); err != nil || dirInfo == nil {
+			return err
+		}
 		raw, info, exists, err := readCodexRequirementsPinFile(path)
 		if err != nil || !exists {
 			return err
@@ -456,18 +482,83 @@ func syncCodexRequirementsPinDir(dir string) error {
 	return nil
 }
 
-// withCodexRequirementsPinDirLock serializes DefenseClaw writers (guardian
-// reconcile and uninstall) with an advisory lock on the directory itself, so
-// no lock file is added to the administrator's directory.
-func withCodexRequirementsPinDirLock(dir string, fn func() error) error {
-	handle, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+// withCodexRequirementsPinLock runs fn while holding the DefenseClaw
+// requirements lock. The lock file is created 0600 by root in a root-only
+// directory, so no standard user can open it to take or hold the lock, and
+// the wait is bounded so a stuck writer fails the pass instead of stalling
+// the guardian or the uninstaller. The file is removed on release, so no
+// lock file is left behind.
+func withCodexRequirementsPinLock(fn func() error) error {
+	path := codexRequirementsPinLockPath()
+	if err := codexRequirementsPinAncestorTrust(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("enterprise hooks: untrusted Codex requirements lock directory: %w", err)
+	}
+	deadline := time.Now().Add(codexRequirementsPinLockWait)
+	for {
+		handle, acquired, err := tryCodexRequirementsPinLock(path)
+		if err != nil {
+			return err
+		}
+		if acquired {
+			defer func() {
+				// Unlink before unlocking: a writer that opened this file while
+				// waiting then sees that the path no longer names it and retries.
+				_ = os.Remove(path)
+				_ = syscall.Flock(int(handle.Fd()), syscall.LOCK_UN)
+				_ = handle.Close()
+			}()
+			return fn()
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("enterprise hooks: another DefenseClaw process held %s for more than %s", path, codexRequirementsPinLockWait)
+		}
+		time.Sleep(codexRequirementsPinLockPoll)
+	}
+}
+
+// tryCodexRequirementsPinLock opens or creates the lock file and takes a
+// non-blocking exclusive lock on it. acquired is false while another writer
+// holds the lock or when the path no longer names the opened file.
+func tryCodexRequirementsPinLock(path string) (*os.File, bool, error) {
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: open %s: %w", dir, err)
+		return nil, false, fmt.Errorf("enterprise hooks: open %s: %w", path, err)
 	}
-	defer handle.Close()
-	if err := syscall.Flock(int(handle.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("enterprise hooks: lock %s: %w", dir, err)
+	acquired, err := lockCodexRequirementsPinFile(file, path)
+	if err != nil || !acquired {
+		_ = file.Close()
+		return nil, false, err
 	}
-	defer func() { _ = syscall.Flock(int(handle.Fd()), syscall.LOCK_UN) }()
-	return fn()
+	return file, true, nil
+}
+
+func lockCodexRequirementsPinFile(file *os.File, path string) (bool, error) {
+	opened, err := file.Stat()
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: inspect %s: %w", path, err)
+	}
+	st, ok := opened.Sys().(*syscall.Stat_t)
+	if !ok || !opened.Mode().IsRegular() || int(st.Uid) != codexRequirementsPinOwnerUID || st.Nlink > 1 {
+		return false, fmt.Errorf("enterprise hooks: %s is not a lock file owned by uid %d", path, codexRequirementsPinOwnerUID)
+	}
+	if st.Nlink == 0 {
+		// Another writer released and removed it after it was opened.
+		return false, nil
+	}
+	if opened.Mode().Perm() != 0o600 {
+		if err := file.Chmod(0o600); err != nil {
+			return false, fmt.Errorf("enterprise hooks: set mode on %s: %w", path, err)
+		}
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR) {
+			return false, nil
+		}
+		return false, fmt.Errorf("enterprise hooks: lock %s: %w", path, err)
+	}
+	if current, err := os.Lstat(path); err != nil || !os.SameFile(opened, current) {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		return false, nil
+	}
+	return true, nil
 }

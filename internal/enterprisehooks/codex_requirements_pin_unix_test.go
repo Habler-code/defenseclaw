@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -29,16 +30,25 @@ func codexPinTestLayout(t *testing.T) (dir, path string) {
 		t.Fatal(err)
 	}
 	path = filepath.Join(dir, "requirements.toml")
+	lockDir := filepath.Join(root, "run")
+	if err := os.Mkdir(lockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	originalPath := codexRequirementsPinPath
 	originalUID := codexRequirementsPinOwnerUID
 	originalTrust := codexRequirementsPinAncestorTrust
+	originalLockPath := codexRequirementsPinLockPath
+	originalLockWait := codexRequirementsPinLockWait
 	codexRequirementsPinPath = func() string { return path }
 	codexRequirementsPinOwnerUID = os.Geteuid()
 	codexRequirementsPinAncestorTrust = func(string) error { return nil }
+	codexRequirementsPinLockPath = func() string { return filepath.Join(lockDir, "codex-requirements.lock") }
 	t.Cleanup(func() {
 		codexRequirementsPinPath = originalPath
 		codexRequirementsPinOwnerUID = originalUID
 		codexRequirementsPinAncestorTrust = originalTrust
+		codexRequirementsPinLockPath = originalLockPath
+		codexRequirementsPinLockWait = originalLockWait
 	})
 	return dir, path
 }
@@ -239,6 +249,12 @@ func TestCodexRequirementsPinDefaultPathHasTrustedAncestors(t *testing.T) {
 		if err := managed.ValidateTrustedRuntimeDir("/etc", "test"); err == nil {
 			t.Fatal("/etc unexpectedly passed the no-symlink trust walk")
 		}
+		if lock := defaultCodexRequirementsPinLockPath(); filepath.Dir(lock) != "/private/var/db" {
+			t.Fatalf("darwin lock path = %q", lock)
+		}
+		if err := managed.ValidateTrustedRuntimeDir("/private/var/db", "test"); err != nil {
+			t.Fatalf("/private/var/db is not a trusted lock directory: %v", err)
+		}
 		return
 	}
 	if path != "/etc/codex/requirements.toml" {
@@ -364,5 +380,77 @@ func TestCodexRequirementsPinReportsRequirementsUsersCannotRead(t *testing.T) {
 				t.Fatalf("administrator requirements changed: %q, %v", data, err)
 			}
 		})
+	}
+}
+
+// Any user who can open the requirements directory can flock it. Such a lock
+// must not stall the guardian or the uninstaller, and DefenseClaw's own lock
+// must not add a file to the administrator's directory.
+func TestCodexRequirementsPinIgnoresLocksOnTheRequirementsDirectory(t *testing.T) {
+	dir, _ := codexPinTestLayout(t)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		if _, err := EnsureCodexRequirementsHooksPin(); err != nil {
+			done <- err
+			return
+		}
+		_, err := RemoveCodexRequirementsHooksPin()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a lock another process holds on the requirements directory blocked the pin")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("files left in the requirements directory: %v", entries)
+	}
+	if _, err := os.Lstat(codexRequirementsPinLockPath()); !os.IsNotExist(err) {
+		t.Fatalf("lock file left behind: %v", err)
+	}
+}
+
+// A writer that cannot get DefenseClaw's lock fails after a bounded wait and
+// changes nothing.
+func TestCodexRequirementsPinLockWaitIsBounded(t *testing.T) {
+	dir, _ := codexPinTestLayout(t)
+	codexRequirementsPinLockWait = 200 * time.Millisecond
+	holder, err := os.OpenFile(codexRequirementsPinLockPath(), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := EnsureCodexRequirementsHooksPin(); err == nil || !strings.Contains(err.Error(), "held") {
+		t.Fatalf("ensure while the lock is held = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("lock wait took %s", elapsed)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("ensure changed the requirements without the lock: %v", err)
+	}
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := EnsureCodexRequirementsHooksPin(); err != nil || !result.Changed {
+		t.Fatalf("ensure after the lock was released = %+v, %v", result, err)
 	}
 }
