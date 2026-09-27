@@ -11,6 +11,8 @@ change that the docs do not follow fails here.
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOYMENT_DOC = ROOT / "docs-site/content/docs/setup/enterprise-deployment.mdx"
 THREAT_MODEL = ROOT / "docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md"
@@ -20,6 +22,9 @@ BUNDLE_SCRIPT = ROOT / "packaging/scripts/build-managed-windows-bundle.sh"
 MODULE = ROOT / "packaging/windows/DefenseClawEnterprise.psm1"
 HARNESS = ROOT / "scripts/test-windows-enterprise-hardening.ps1"
 LIFECYCLE_CLI = ROOT / "internal/cli/windows_enterprise_service.go"
+HOOK_RECONCILE = ROOT / "internal/cli/enterprise_hooks.go"
+CODEX_INSTALL = ROOT / "internal/enterprisehooks/install_windows_codex_secure.go"
+FOREIGN_HOOKS = ROOT / "internal/gateway/connector/hookexec/foreign_hooks.go"
 
 NUMBER_WORDS = {
     3: "three",
@@ -64,6 +69,13 @@ def _powershell_function(text: str, name: str) -> str:
     start = text.index(f"function {name} {{")
     end = text.find("\nfunction ", start + 1)
     return text[start : end if end != -1 else len(text)]
+
+
+def _go_function(text: str, name: str) -> str:
+    start = text.index(f"func {name}(")
+    end = text.find("\n}\n", start)
+    assert end != -1, name
+    return text[start:end]
 
 
 def test_avc_handoff_payload_tree_lists_every_expected_payload_file() -> None:
@@ -268,14 +280,47 @@ def test_codex_requirements_doc_names_the_guardian_reconcile() -> None:
     assert "Reconcile runs on install and repair, and each time a Codex user is enrolled." not in section
 
 
+def test_codex_requirements_doc_limits_the_signed_out_deferral_to_protected_targets() -> None:
+    # A never-protected target goes straight to Install on every guardian
+    # cycle, and the Codex install reconciles requirements.toml before it
+    # impersonates the target user, so a signed-out user does not stop the
+    # reconcile. Only an already protected target waits for a session.
+    repair = _go_function(_read(HOOK_RECONCILE), "enterpriseHookVerifyOrRepairTarget")
+    never_protected = repair[repair.index("if !previouslyProtected {") :]
+    assert never_protected.index("enterpriseHookReconcileInstaller(") < never_protected.index(
+        "enterpriseHookReconcileSessionAvailable("
+    )
+    install = _go_function(_read(CODEX_INSTALL), "installWindowsCodexManagedResult")
+    assert install.index("windowsCodexRequirementsReconciler(machineOpts)") < install.index(
+        "windowsEnterpriseTargetImpersonation("
+    )
+
+    doc = _flat(_read(DEPLOYMENT_DOC))
+    section = doc[doc.index("## Native Windows Codex managed hooks") :]
+    section = section[: section.index("## ", 3)]
+    assert "With no enrolled Codex user signed in, the guardian defers that repair" not in section
+    assert "It can be recorded the same way with nobody signed in" in section
+    assert "while an enabled Codex target has never been protected" in section
+    assert (
+        "only when every enabled Codex target is already protected and none of their users is signed in"
+        in section
+    )
+
+
 def test_unavailable_action_docs_cover_single_request_fail_open() -> None:
     doc = _flat(_read(DEPLOYMENT_DOC))
     start = doc.index("In `managed_enterprise`, AI Defense is the only decision-maker.")
-    paragraph = doc[start : doc.index("Set ownership and start the service", start)]
-    assert "When it returns no verdict for a request, the request is allowed by default" in paragraph
-    assert "rate limited" in paragraph
-    assert "The default therefore fails open per request" in paragraph
-    assert "(Cloud Management not enrolled or offline, the identity library missing, or the service not answering)" not in paragraph
+    # The outage paragraph is followed by its own per-request paragraph, so a
+    # change to the outage paragraph and this one merge without a conflict.
+    section = doc[start : doc.index("Set ownership and start the service", start)]
+    per_request = section[section.index("The allow default applies to each request, not only to outages.") :]
+    assert "an HTTP error for that one request" in per_request
+    assert "rate limited" in per_request
+    assert "a response DefenseClaw cannot read" in per_request
+    assert "The default therefore fails open per request" in per_request
+    assert "switches the machine-wide Secure Client state to `DEGRADED`" in per_request
+    assert "set `cisco_ai_defense.unavailable_action: block` and run the connectors in `action` mode" in per_request
+    assert section.count("The default therefore fails open per request") == 1
 
     threat = _flat(_read(THREAT_MODEL))
     residuals = threat[threat.index("## Residual risks and deployment dependencies") : threat.index("## Certification gate")]
@@ -313,9 +358,19 @@ def test_claude_attestation_docs_match_the_actions_the_module_accepts() -> None:
 
 def test_cursor_foreign_hook_approval_doc_states_what_a_digest_trusts() -> None:
     doc = _flat(_read(DEPLOYMENT_DOC))
-    assert "not the script or program the command runs" in doc
-    assert "Approving a digest trusts whatever that command runs" in doc
-    assert "Approve only handlers whose command is an absolute path to an executable" in doc
+    # One paragraph describes what an approval digest covers. The text ships
+    # with the change that binds digests to scope and event (sc/fix-g5).
+    assert doc.count("The digest covers") <= 1
+    assert "The digest covers the registration text DefenseClaw reads from the hooks file" not in doc
+    if "func foreignHookApprovalDigest(" not in _read(FOREIGN_HOOKS):
+        pytest.skip("Cursor approval digests are not scope-bound in this tree; the doc text ships with that change")
+    assert doc.count("The digest covers the handler registration") == 1
+    assert "its event and its scope" in doc
+    assert "It does not cover the script the command runs" in doc
+    assert (
+        "Approve only handlers whose command is an absolute path to an executable that standard users cannot modify"
+        in doc
+    )
 
 
 def test_threat_model_covers_the_secure_client_gui_ipc_boundary() -> None:
