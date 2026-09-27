@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +32,17 @@ var enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEn
 var enterpriseHookWindowsTargetUnselectedCheck = enterprisehooks.RequireWindowsEnterpriseTargetUnselected
 var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
 var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
+
+// enterpriseHookWatchStopContext returns parent unchanged: the native
+// Windows service host cancels the command context on SERVICE_CONTROL_STOP
+// and SERVICE_CONTROL_SHUTDOWN, which already runs the watch loop's
+// deferred readiness retraction.
+func enterpriseHookWatchStopContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return parent, func() {}
+}
 
 func enterpriseHookTargetSessionAvailable(
 	target enterprisehooks.ManifestTarget,

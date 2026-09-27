@@ -6,11 +6,30 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/spf13/cobra"
 )
+
+// enterpriseHookWatchStopSignals are the signals launchd, systemd and an
+// interactive terminal use to stop `enterprise hooks watch`.
+var enterpriseHookWatchStopSignals = []os.Signal{syscall.SIGTERM, os.Interrupt}
+
+// enterpriseHookWatchStopContext cancels the watch context on a stop signal
+// so the watch loop returns and its deferred readiness retraction runs.
+// Calling the returned function restores default signal handling, so a
+// second signal after the loop has returned stops the process as before.
+func enterpriseHookWatchStopContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return signal.NotifyContext(parent, enterpriseHookWatchStopSignals...)
+}
 
 var enterpriseHookSIDProfilePath = func(string) (string, error) {
 	return "", fmt.Errorf("SID-only targets are supported only on native Windows")

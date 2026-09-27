@@ -26,6 +26,11 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 			target.Connector,
 		)
 	}
+	if connectorName == "claudecode" {
+		if err := requireWindowsEnterpriseDeferredClaudePolicyStageable(target); err != nil {
+			return err
+		}
+	}
 	home, targetSID, err := validateWindowsEnterpriseHome(target.UserHome, target.SID)
 	if err != nil {
 		return err
@@ -58,6 +63,51 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 			DataDir:        dataDir,
 			HookExecutable: hookExecutable,
 		},
+	)
+}
+
+// windowsDeferredClaudePolicyTargetsReader reads the SIDs the Claude Code
+// machine policy already covers (the set deferred staging skips). Tests
+// replace it.
+var windowsDeferredClaudePolicyTargetsReader = ReadWindowsClaudeManagedPolicyTargets
+
+// requireWindowsEnterpriseDeferredClaudePolicyStageable proves that deferred
+// staging can cover a Claude Code target. Staging renders the machine policy
+// from the row's recorded agent_version, and a version below the enrollment
+// floor has no hook contract to render. Such a row still loads (an earlier
+// release often recorded it as the placeholder for a user with no detected
+// client), so without this check it was reported pending and then failed
+// staging, which rolled back staging for every other pending SID and withheld
+// the exact enrollment publication (#894). The row stays pending only when an
+// earlier release already staged its SID, because staging then skips it and
+// has nothing to render. Otherwise it is not pending: it fails as its own
+// target, and while its user is signed out it is one of the targets awaiting
+// first sign-in that do not withhold staging or publication for other SIDs.
+func requireWindowsEnterpriseDeferredClaudePolicyStageable(target ManifestTarget) error {
+	versionErr := requireWindowsEnterpriseManagedAgentVersion("claudecode", target.AgentVersion)
+	if versionErr == nil {
+		return nil
+	}
+	sid, err := validateWindowsEnterpriseTargetSID(target.SID)
+	if err != nil {
+		return err
+	}
+	staged, _, err := windowsDeferredClaudePolicyTargetsReader()
+	if err != nil {
+		return fmt.Errorf(
+			"enterprise hooks: deferred Claude Code machine policy cannot be staged for this target: %w (read the staged Claude Code targets: %v)",
+			versionErr,
+			err,
+		)
+	}
+	for _, stagedSID := range staged {
+		if strings.EqualFold(strings.TrimSpace(stagedSID), sid.String()) {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"enterprise hooks: deferred Claude Code machine policy cannot be staged for this target: %w",
+		versionErr,
 	)
 }
 

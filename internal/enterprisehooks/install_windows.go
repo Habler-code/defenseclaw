@@ -145,8 +145,12 @@ func windowsEnterpriseManagedAgentMinimum(name string) string {
 // enumerator keeps a known row's recorded version. Such a row must not make
 // the whole manifest unreadable, or lifecycle capture, restore, teardown and
 // the enumerator's previous-row state fail for every target and connector.
-// Enrollment (platformInstall/platformVerify) still requires the current
-// floor, so the row fails as a single target.
+// Enrollment (platformInstall/platformVerify) and the deferred pending proof
+// still require the current floor, so the row is reported as a failed
+// target. Only while it is never protected, unselected and its user is
+// signed out does it leave staging and the exact enrollment publication to
+// the other targets; otherwise it withholds them for every target, like any
+// other failure, until targets.yaml is re-rendered or the row is disabled.
 var windowsEnterpriseLegacyManifestAgentMinimums = map[string]string{
 	"claudecode": "2.1.152",
 }

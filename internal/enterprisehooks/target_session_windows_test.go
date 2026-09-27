@@ -96,3 +96,93 @@ func TestWindowsTargetUnselectedProofAcceptsAbsentRootAndRejectsSelection(t *tes
 		t.Fatal("unselected proof accepted a selected SID because its home had no root")
 	}
 }
+
+// TestWindowsDeferredPendingProofRequiresStageableClaudePolicy is the #894
+// review regression for loadable legacy Claude Code rows. A deferred row at
+// 2.1.152 or 2.1.153 (often an earlier installer's placeholder for a user with
+// no detected client) has no hook contract, so deferred staging cannot render
+// its machine policy. Reporting it pending made staging fail and roll back
+// every other pending SID. It stays pending only when an earlier release
+// already staged its SID, which staging skips.
+func TestWindowsDeferredPendingProofRequiresStageableClaudePolicy(t *testing.T) {
+	previous := windowsDeferredClaudePolicyTargetsReader
+	t.Cleanup(func() { windowsDeferredClaudePolicyTargetsReader = previous })
+	const (
+		sid      = "S-1-5-21-1000-2000-3000-1105"
+		otherSID = "S-1-5-21-1000-2000-3000-1101"
+		refusal  = "deferred Claude Code machine policy cannot be staged"
+	)
+	enabled := true
+	base := ManifestTarget{
+		// A refused row never reaches the home checks; an accepted one fails
+		// them on this absent home, which is not the staging refusal.
+		UserHome:  filepath.Join(t.TempDir(), "absent"),
+		SID:       sid,
+		Connector: "claudecode",
+		Enabled:   &enabled,
+		Deferred:  true,
+	}
+	var staged []string
+	var readErr error
+	reads := 0
+	windowsDeferredClaudePolicyTargetsReader = func() ([]string, bool, error) {
+		reads++
+		return staged, len(staged) > 0, readErr
+	}
+	for _, version := range []string{"2.1.152", "2.1.153"} {
+		target := base
+		target.AgentVersion = version
+
+		staged, readErr = nil, nil
+		err := RequireWindowsEnterpriseDeferredTargetPending(target)
+		if err == nil || !strings.Contains(err.Error(), refusal) || !strings.Contains(err.Error(), version) {
+			t.Fatalf("%s row with no staged policy: pending proof = %v, want the staging refusal", version, err)
+		}
+
+		staged = []string{otherSID}
+		err = RequireWindowsEnterpriseDeferredTargetPending(target)
+		if err == nil || !strings.Contains(err.Error(), refusal) {
+			t.Fatalf("%s row when only another SID is staged: pending proof = %v, want the staging refusal", version, err)
+		}
+
+		// Staging compares SIDs case-insensitively; so does the proof.
+		staged = []string{otherSID, strings.ToLower(sid)}
+		err = RequireWindowsEnterpriseDeferredTargetPending(target)
+		if err == nil || strings.Contains(err.Error(), refusal) {
+			t.Fatalf("%s row already staged: pending proof = %v, want it to pass the staging check and fail later on the absent home", version, err)
+		}
+
+		staged, readErr = nil, errors.New("managed policy state unreadable")
+		err = RequireWindowsEnterpriseDeferredTargetPending(target)
+		if err == nil || !strings.Contains(err.Error(), refusal) || !strings.Contains(err.Error(), "managed policy state unreadable") {
+			t.Fatalf("%s row with an unreadable policy: pending proof = %v, want the staging refusal and the read error", version, err)
+		}
+	}
+
+	// A renderable version, and connectors whose staging does not render from
+	// the recorded version, never consult the Claude Code policy.
+	staged, readErr, reads = nil, nil, 0
+	for _, target := range []ManifestTarget{
+		func() ManifestTarget { target := base; target.AgentVersion = "2.1.154"; return target }(),
+		func() ManifestTarget {
+			target := base
+			target.Connector = "cursor"
+			target.AgentVersion = "1.7.0"
+			return target
+		}(),
+		func() ManifestTarget {
+			target := base
+			target.Connector = "codex"
+			target.AgentVersion = "0.144.3"
+			return target
+		}(),
+	} {
+		err := RequireWindowsEnterpriseDeferredTargetPending(target)
+		if err == nil || strings.Contains(err.Error(), refusal) {
+			t.Fatalf("%s %s: pending proof = %v, want the absent-home refusal only", target.Connector, target.AgentVersion, err)
+		}
+	}
+	if reads != 0 {
+		t.Fatalf("renderable rows read the Claude Code policy %d times, want 0", reads)
+	}
+}

@@ -236,6 +236,150 @@ func TestReconcileSignedOutEnumeratorRowWithoutRootDoesNotBlockOthers(t *testing
 	}
 }
 
+// TestReconcileUnstageableLegacyClaudeRowDoesNotRollBackStaging is the #894
+// review scenario for a loadable legacy Claude Code row: a deferred,
+// never-protected row at 2.1.152 (an earlier installer's placeholder for a
+// signed-out user with no detected client) whose SID was never staged. It
+// used to be reported pending, and deferred staging then failed on it and
+// rolled back staging for every other pending SID. The pending proof now
+// refuses it (TestWindowsDeferredPendingProofRequiresStageableClaudePolicy
+// covers the proof; it reads the machine Claude Code policy, so it is
+// stubbed here; the next test runs the real proof), which makes it a
+// failure awaiting first sign-in: staging runs for the other pending target
+// only, and the exact publication leaves the row out.
+func TestReconcileUnstageableLegacyClaudeRowDoesNotRollBackStaging(t *testing.T) {
+	stubSignInIsolationReconcile(t)
+	previousSession := enterpriseHookWindowsTargetSessionCheck
+	previousPending := enterpriseHookWindowsDeferredPendingCheck
+	previousUnselected := enterpriseHookWindowsTargetUnselectedCheck
+	t.Cleanup(func() {
+		enterpriseHookWindowsTargetSessionCheck = previousSession
+		enterpriseHookWindowsDeferredPendingCheck = previousPending
+		enterpriseHookWindowsTargetUnselectedCheck = previousUnselected
+	})
+	const (
+		pendingSID     = "S-1-5-21-1000-2000-3000-1102"
+		placeholderSID = "S-1-5-21-1000-2000-3000-1106"
+		refusal        = "enterprise hooks: deferred Claude Code machine policy cannot be staged for this target: " +
+			"enterprise hooks: connector claudecode agent_version 2.1.152 is below the Windows enterprise minimum 2.1.154"
+	)
+	enterpriseHookWindowsTargetSessionCheck = func(sid, _ string) error {
+		if strings.EqualFold(sid, pendingSID) || strings.EqualFold(sid, placeholderSID) {
+			return &enterprisehooks.WindowsTargetSessionUnavailableError{SID: sid}
+		}
+		return nil
+	}
+	var proved []string
+	enterpriseHookWindowsDeferredPendingCheck = func(target enterprisehooks.ManifestTarget) error {
+		proved = append(proved, target.SID)
+		if strings.EqualFold(target.SID, placeholderSID) {
+			return errors.New(refusal)
+		}
+		return nil
+	}
+	enterpriseHookWindowsTargetUnselectedCheck = func(enterprisehooks.ManifestTarget) error { return nil }
+
+	fixture, run := runSignInIsolationReconcileWithOptions(t, []signInIsolationTarget{
+		{name: "alice", sid: "S-1-5-21-1000-2000-3000-1101", connector: "claudecode"},
+		{name: "carol", sid: pendingSID, connector: "codex", deferred: true},
+		{name: "placeholder", sid: placeholderSID, connector: "claudecode", deferred: true, agentVersion: "2.1.152"},
+	}, signInIsolationOptions{realClassifier: true})
+	if run.Failures != 1 || run.Pending != 1 {
+		t.Fatalf("run failures=%d pending=%d, want the placeholder as the only failure and carol pending", run.Failures, run.Pending)
+	}
+	if strings.Join(proved, ",") != pendingSID+","+placeholderSID {
+		t.Fatalf("pending proof consulted for %v, want carol and the placeholder", proved)
+	}
+	for _, row := range run.Rows {
+		if row.UserHome != fixture.homes["placeholder"] {
+			continue
+		}
+		if row.OK || row.Pending || row.Error != refusal {
+			t.Fatalf("placeholder row = %+v, want the pending proof's staging refusal", row)
+		}
+	}
+	if strings.Join(fixture.classified, ",") != "placeholder" {
+		t.Fatalf("sign-in classifier consulted for %v, want only the placeholder", fixture.classified)
+	}
+	if got := fixture.stagedPending; len(got) != 1 || strings.Join(got[0], ",") != "carol" {
+		t.Fatalf("deferred staging pending sets = %v, want one call staging only carol", got)
+	}
+	if got := fixture.staged; len(got) != 1 || strings.Join(got[0], ",") != "alice,carol" {
+		t.Fatalf("deferred staging manifests = %v, want one call authorizing alice and carol", got)
+	}
+	if got := exactPublications(fixture); len(got) != 1 || strings.Join(got[0], ",") != "alice,carol" {
+		t.Fatalf("exact enrollment publications = %v, want one publication of alice and carol", got)
+	}
+}
+
+// TestReconcileUnstageableLegacyClaudeRowFailsOnTheRealPendingProof runs the
+// scenario above through the production deferred pending proof, so the
+// reconcile-level result depends on the proof's Claude Code version check: a
+// deferred, signed-out claudecode row at 2.1.152 whose SID was never staged
+// must be refused with the staging error. Without that check the proof goes
+// on to the home and data-root checks, and for a row that passes them it
+// reports the row pending. The refused row is a failure awaiting first
+// sign-in, so staging and the exact publication still run for alice. The
+// proof reads this host's machine Claude Code policy only to learn which SIDs
+// are already staged; the placeholder SID is synthetic, so no host lists it.
+func TestReconcileUnstageableLegacyClaudeRowFailsOnTheRealPendingProof(t *testing.T) {
+	stubSignInIsolationReconcile(t)
+	previousSession := enterpriseHookWindowsTargetSessionCheck
+	previousPending := enterpriseHookWindowsDeferredPendingCheck
+	previousUnselected := enterpriseHookWindowsTargetUnselectedCheck
+	t.Cleanup(func() {
+		enterpriseHookWindowsTargetSessionCheck = previousSession
+		enterpriseHookWindowsDeferredPendingCheck = previousPending
+		enterpriseHookWindowsTargetUnselectedCheck = previousUnselected
+	})
+	const placeholderSID = "S-1-5-21-1000-2000-3000-1106"
+	enterpriseHookWindowsTargetSessionCheck = func(sid, _ string) error {
+		if strings.EqualFold(sid, placeholderSID) {
+			return &enterprisehooks.WindowsTargetSessionUnavailableError{SID: sid}
+		}
+		return nil
+	}
+	enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
+	// Only the machine selector read is isolated from this host
+	// (enterprisehooks tests cover it directly).
+	enterpriseHookWindowsTargetUnselectedCheck = func(enterprisehooks.ManifestTarget) error { return nil }
+
+	fixture, run := runSignInIsolationReconcileWithOptions(t, []signInIsolationTarget{
+		{name: "alice", sid: "S-1-5-21-1000-2000-3000-1101", connector: "claudecode"},
+		{name: "placeholder", sid: placeholderSID, connector: "claudecode", deferred: true, agentVersion: "2.1.152"},
+	}, signInIsolationOptions{realClassifier: true})
+	if run.Failures != 1 || run.Pending != 0 {
+		t.Fatalf("run failures=%d pending=%d, want the placeholder as the only failure", run.Failures, run.Pending)
+	}
+	found := false
+	for _, row := range run.Rows {
+		if row.UserHome != fixture.homes["placeholder"] {
+			continue
+		}
+		found = true
+		if row.OK || row.Pending ||
+			!strings.HasPrefix(row.Error, "enterprise hooks: deferred Claude Code machine policy cannot be staged for this target: ") ||
+			!strings.Contains(row.Error, "agent_version 2.1.152 is below the Windows enterprise minimum 2.1.154") {
+			t.Fatalf("placeholder row = %+v, want the pending proof's staging refusal", row)
+		}
+	}
+	if !found {
+		t.Fatalf("reconcile rows %+v have no placeholder row", run.Rows)
+	}
+	if strings.Join(fixture.classified, ",") != "placeholder" {
+		t.Fatalf("sign-in classifier consulted for %v, want only the placeholder", fixture.classified)
+	}
+	if got := fixture.stagedPending; len(got) != 1 || len(got[0]) != 0 {
+		t.Fatalf("deferred staging pending sets = %v, want one call with no pending target", got)
+	}
+	if got := fixture.staged; len(got) != 1 || strings.Join(got[0], ",") != "alice" {
+		t.Fatalf("deferred staging manifests = %v, want one call authorizing alice", got)
+	}
+	if got := exactPublications(fixture); len(got) != 1 || strings.Join(got[0], ",") != "alice" {
+		t.Fatalf("exact enrollment publications = %v, want one publication of alice", got)
+	}
+}
+
 func TestExpandEnterpriseHookProfileImagePathUsesTrustedSystemDrive(t *testing.T) {
 	previous := enterpriseHookWindowsSystemDirectory
 	t.Cleanup(func() { enterpriseHookWindowsSystemDirectory = previous })

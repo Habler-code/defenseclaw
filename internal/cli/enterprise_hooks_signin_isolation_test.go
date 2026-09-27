@@ -30,6 +30,8 @@ type signInIsolationTarget struct {
 	awaitingSignIn bool
 	// deferred writes the row as `deferred: true` (Windows-only schema).
 	deferred bool
+	// agentVersion is the row's recorded agent_version; empty means 99.0.0.
+	agentVersion string
 }
 
 type signInIsolationOptions struct {
@@ -47,18 +49,25 @@ type signInIsolationPublication struct {
 }
 
 type signInIsolationFixture struct {
-	homes        map[string]string
-	staged       [][]string
-	publications []signInIsolationPublication
-	classified   []string
+	homes  map[string]string
+	staged [][]string
+	// stagedPending is the pending target set each deferred staging call
+	// received.
+	stagedPending [][]string
+	publications  []signInIsolationPublication
+	classified    []string
 	// stagedClaudeAllowUnmanagedHooks is the claude_code.allow_unmanaged_hooks
 	// value each deferred staging call received.
 	stagedClaudeAllowUnmanagedHooks []bool
 }
 
 func publicationTargetNames(f *signInIsolationFixture, manifest enterprisehooks.Manifest) []string {
-	names := make([]string, 0, len(manifest.Targets))
-	for _, target := range manifest.Targets {
+	return signInIsolationTargetNames(f, manifest.Targets)
+}
+
+func signInIsolationTargetNames(f *signInIsolationFixture, targets []enterprisehooks.ManifestTarget) []string {
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
 		for name, home := range f.homes {
 			if home == target.UserHome {
 				names = append(names, name)
@@ -104,10 +113,14 @@ func runSignInIsolationReconcileWithOptions(
 		}
 		fixture.homes[target.name] = home
 		byHome[home] = target
+		agentVersion := target.agentVersion
+		if agentVersion == "" {
+			agentVersion = "99.0.0"
+		}
 		fmt.Fprintf(
 			&manifest,
-			"  - user_home: %q\n    sid: %s\n    connector: %s\n    agent_version: 99.0.0\n",
-			home, target.sid, target.connector,
+			"  - user_home: %q\n    sid: %s\n    connector: %s\n    agent_version: %s\n",
+			home, target.sid, target.connector, agentVersion,
 		)
 		if target.deferred {
 			manifest.WriteString("    deferred: true\n")
@@ -152,11 +165,12 @@ func runSignInIsolationReconcileWithOptions(
 	}
 	enterpriseHookReconcileStageDeferred = func(
 		manifest enterprisehooks.Manifest,
-		_ []enterprisehooks.ManifestTarget,
+		pending []enterprisehooks.ManifestTarget,
 		_ string,
 		claudeCodeAllowUnmanagedHooks bool,
 	) error {
 		fixture.staged = append(fixture.staged, publicationTargetNames(fixture, manifest))
+		fixture.stagedPending = append(fixture.stagedPending, signInIsolationTargetNames(fixture, pending))
 		fixture.stagedClaudeAllowUnmanagedHooks = append(
 			fixture.stagedClaudeAllowUnmanagedHooks,
 			claudeCodeAllowUnmanagedHooks,
