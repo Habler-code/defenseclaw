@@ -94,3 +94,35 @@ func TestManagedHookPolicyDefaultsAreSecure(t *testing.T) {
 		t.Fatal("legacy claude_code block opt-out was not honored")
 	}
 }
+
+// The documented claude_code.allow_unmanaged_hooks key must keep working when
+// the config also carries a connector_hooks.claudecode block for another
+// setting, and the connector_hooks spelling is honored on its own.
+func TestClaudeCodeAllowUnmanagedHooksReadsBothConfigBlocks(t *testing.T) {
+	var mixed Config
+	if err := yaml.Unmarshal([]byte(`claude_code:
+  allow_unmanaged_hooks: true
+connector_hooks:
+  claudecode:
+    enabled: true
+    scan_on_stop: true
+`), &mixed); err != nil {
+		t.Fatal(err)
+	}
+	if !mixed.ClaudeCodeAllowUnmanagedHooks() {
+		t.Fatal("claude_code.allow_unmanaged_hooks ignored because connector_hooks.claudecode exists")
+	}
+	canonical := &Config{ConnectorHooks: map[string]AgentHookConfig{
+		"claudecode": {AllowUnmanagedHooks: true},
+	}}
+	if !canonical.ClaudeCodeAllowUnmanagedHooks() {
+		t.Fatal("connector_hooks.claudecode.allow_unmanaged_hooks was not honored")
+	}
+	neither := &Config{
+		ClaudeCode:     AgentHookConfig{Enabled: true},
+		ConnectorHooks: map[string]AgentHookConfig{"claudecode": {Enabled: true}},
+	}
+	if neither.ClaudeCodeAllowUnmanagedHooks() {
+		t.Fatal("opt-out reported although neither block sets it")
+	}
+}
