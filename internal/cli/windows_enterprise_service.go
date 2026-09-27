@@ -360,7 +360,7 @@ func runWindowsEnterpriseLifecycle(
 	if action == "ensure" {
 		return runWindowsEnterpriseStandaloneEnsure(ctx, cmd, opts, script)
 	}
-	args := windowsEnterprisePowerShellArgs(action, opts)
+	args := windowsEnterprisePowerShellArgs(action, windowsEnterpriseRepairRecordingOptions(action, opts))
 	executable, executableErr := windowsEnterpriseExecutableResolver()
 	if executableErr != nil {
 		normalizedAction := strings.ToLower(strings.TrimSpace(action))

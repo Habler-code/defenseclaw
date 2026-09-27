@@ -202,3 +202,15 @@ func hookAPIServiceAccounts(goos string) []string {
 	}
 	return []string{managed.StandaloneLinuxServiceUser}
 }
+
+// hookAPIValidateOwnerFor matches the Windows signature; Unix guardians act
+// with the target user's own credentials, so no extra owner is trusted.
+func hookAPIValidateOwnerFor(path string, info os.FileInfo, _ string) error {
+	return hookAPIValidateOwner(path, info)
+}
+
+// hookAPIValidateDirectoryFor matches the Windows signature (see
+// hookAPIValidateOwnerFor).
+func hookAPIValidateDirectoryFor(path, _ string) error {
+	return hookAPIValidateDirectory(path)
+}

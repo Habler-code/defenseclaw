@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -32,13 +33,17 @@ import (
 // LocalSystem guardian can hash as the target user. These are the only images
 // the guardian selects; anything else stays unmanaged and is reported, rather
 // than failing the reconcile for every other user.
-var windowsStandaloneManagedExecutableRelative = map[string][]string{
+var windowsStandaloneManagedExecutableRelative = map[string][][]string{
 	// npm's amp.cmd launches this native image.
-	"amp": {"AppData", "Roaming", "npm", "node_modules", "@ampcode", "cli", "bin", "amp.exe"},
-	// The connector's executable admission accepts only the official SST
-	// WinGet image.
-	"opencode": {"AppData", "Local", "Microsoft", "WinGet", "Packages",
-		"SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe", "opencode.exe"},
+	"amp": {{"AppData", "Roaming", "npm", "node_modules", "@ampcode", "cli", "bin", "amp.exe"}},
+	// The connector's executable admission accepts the official SST WinGet
+	// image and the native image npm's opencode.cmd launches from the
+	// opencode-ai package. WinGet wins when both exist.
+	"opencode": {
+		{"AppData", "Local", "Microsoft", "WinGet", "Packages",
+			"SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe", "opencode.exe"},
+		{"AppData", "Roaming", "npm", "node_modules", "opencode-ai", "bin", "opencode.exe"},
+	},
 }
 
 // windowsStandalonePerUserManagedExecutable returns the native image the
@@ -50,28 +55,47 @@ func windowsStandalonePerUserManagedExecutable(profileHome, connectorName string
 		return "", ""
 	}
 	switch connectorName {
-	case "amp":
-		// The guardian can now select and admit the native image, but the
-		// Amp plugin's per-user custody (user-owned plugin directory holding
-		// the hook API token) does not pass the managed token-path trust
-		// check, so a live reconcile cannot verify coverage.
-		return "", "managed Amp is not supported on Windows yet: its per-user plugin token custody does not pass the managed verification"
 	case "hermes":
-		return "", "managed Hermes is not supported on Windows yet: its executable admission runs the Hermes version probe, which the LocalSystem guardian does not launch as the user"
-	case "opencode":
-		relative := windowsStandaloneManagedExecutableRelative[connectorName]
-		candidate := filepath.Join(append([]string{profileHome}, relative...)...)
-		if err := winpath.RejectReparseChain(filepath.Dir(candidate)); err != nil {
-			return "", fmt.Sprintf("the %s install path is not a plain directory chain: %v", connectorName, err)
+		candidate := hermespath.ManagedExecutablePathForUserHome(profileHome)
+		if candidate == "" {
+			return "", "no updater-managed Hermes executable path could be derived for this profile"
 		}
-		info, err := os.Lstat(candidate)
-		if err != nil || !info.Mode().IsRegular() {
-			return "", "managed OpenCode requires the official SST WinGet package (winget install SST.opencode); other installs are not admitted"
+		return windowsStandalonePlainExecutable(connectorName, candidate)
+	case "amp", "opencode":
+		var last string
+		for _, relative := range windowsStandaloneManagedExecutableRelative[connectorName] {
+			candidate := filepath.Join(append([]string{profileHome}, relative...)...)
+			path, reason := windowsStandalonePlainExecutable(connectorName, candidate)
+			if path == "" {
+				last = reason
+				continue
+			}
+			if connectorName == "opencode" && !connector.OpenCodeWindowsPackageIdentityVerified(path) {
+				last = "the npm opencode-ai package identity could not be verified"
+				continue
+			}
+			return path, ""
 		}
-		return candidate, ""
+		if connectorName == "opencode" {
+			return "", "managed OpenCode requires the SST WinGet package or the npm opencode-ai package with its native opencode.exe; " + last
+		}
+		return "", "no native amp.exe was found under the user's npm global prefix; " + last
 	default:
 		return "", fmt.Sprintf("connector %s has no managed executable selection on Windows", connectorName)
 	}
+}
+
+// windowsStandalonePlainExecutable returns candidate when it is a regular
+// file reached through a plain (reparse-free) directory chain.
+func windowsStandalonePlainExecutable(connectorName, candidate string) (string, string) {
+	if err := winpath.RejectReparseChain(filepath.Dir(candidate)); err != nil {
+		return "", fmt.Sprintf("the %s install path is not a plain directory chain: %v", connectorName, err)
+	}
+	info, err := os.Lstat(candidate)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Sprintf("%s is not present", candidate)
+	}
+	return candidate, ""
 }
 
 // windowsStandalonePerUserAdmission reports whether the guardian can manage a

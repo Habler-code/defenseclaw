@@ -677,8 +677,10 @@ func runWindowsEnterpriseStandaloneEnsure(
 	actionOpts.jsonOutput = true
 	if plan.Action == "repair" {
 		// Repair reapplies ACL, service, and environment invariants from the
-		// installed payload; it takes no sources.
+		// installed payload; it takes no sources and records the installed
+		// binaries' version.
 		clearWindowsEnterpriseSources(&actionOpts)
+		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
 	}
 	var cleanupManifest func()
 	if plan.Action == "install" && strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
@@ -724,6 +726,36 @@ func runWindowsEnterpriseStandaloneEnsure(
 		if err != nil {
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+	if plan.Action == "repair" && plan.Reason == "transaction_pending" &&
+		report.OK && report.Installed && !report.TransactionPending {
+		// Repair finished an interrupted transaction on the payload already in
+		// place, typically an upgrade whose failed rollback had to be retained.
+		// That is not convergence: re-plan from a fresh status exactly as
+		// ensure does on a host without a pending transaction, so the upgrade
+		// the MDM asked for still runs in this invocation.
+		followOpts := *opts
+		followOpts.jsonOutput = true
+		followStatus, _, statusErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", &followOpts))
+		if statusErr == nil {
+			followPlan, planErr := planWindowsEnterpriseEnsure(followStatus, opts, script)
+			if planErr != nil {
+				applyWindowsEnterpriseInstallerReport(result, report, run)
+				result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
+				return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			}
+			if followPlan.Action == "upgrade" {
+				result.AddWarning("recovered_pending_transaction", "ensure finished a pending transaction with repair before it ran "+followPlan.Action+": "+followPlan.Reason)
+				plan = followPlan
+				actionOpts = *opts
+				actionOpts.jsonOutput = true
+				report, run, err = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
+				if err != nil {
+					result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
+					return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+				}
+			}
 		}
 	}
 	applyWindowsEnterpriseInstallerReport(result, report, run)

@@ -325,7 +325,7 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	if err != nil {
 		return false, fmt.Errorf("validate opencode managed plugin receipt: %w", err)
 	}
-	if err := safefile.ValidatePrivateFile(boundPath); err != nil {
+	if err := validateOpenCodeManagedPluginProtection(boundPath, opts); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
@@ -354,6 +354,21 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 		}
 	}
 	return true, nil
+}
+
+// validateOpenCodeManagedPluginProtection checks the plugin's custody. A
+// setup for the current user requires the safefile owner-private shape for
+// that user. A Windows enterprise guardian verifying a per-user target
+// (ManagedTargetSID) runs as LocalSystem or an administrator without that
+// user's token, so the current-user shape cannot apply; the guardian pins the
+// exact managed plugin DACL itself, and here the plugin needs the same custody
+// Amp's plugin does: an owner trusted for the target account and no untrusted
+// write authority on the file or its directory.
+func validateOpenCodeManagedPluginProtection(path string, opts SetupOpts) error {
+	if strings.TrimSpace(opts.ManagedTargetSID) != "" {
+		return validatePluginArtifactDestinationFor(path, opts.ManagedTargetSID)
+	}
+	return safefile.ValidatePrivateFile(path)
 }
 
 // configFileReferencesHook reports whether the file at path contains any of

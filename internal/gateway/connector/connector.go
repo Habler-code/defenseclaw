@@ -184,6 +184,14 @@ type SetupOpts struct {
 
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
+
+	// ManagedTargetSID is set only by the Windows enterprise guardian when it
+	// sets up or verifies one per-user target: the target account's SID.
+	// Custody checks then trust that account the way they trust the current
+	// user under its own token (the guardian verifies signed-out users
+	// without one), and setup never launches the user's agent executable
+	// from the guardian process. Empty everywhere else.
+	ManagedTargetSID string
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

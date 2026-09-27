@@ -459,6 +459,9 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		}
 		setup.AgentExecutable = executable
 	}
+	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
+		setup.ManagedTargetSID = targetSID.String()
+	}
 	return windowsGenericManagedTarget{
 		home:           home,
 		dataDir:        dataDir,
@@ -517,7 +520,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
 			}
-			if err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, footprint); err != nil {
+			if err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint); err != nil {
 				return err
 			}
 			// Hash the guardian-selected image as the target user and record
@@ -563,6 +566,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			}
 			if err := connector.SaveHookContractLockEntryForMode(target.dataDir, lockEntry, true); err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
+			}
+			if err := publishWindowsPluginScopedHookToken(target); err != nil {
+				return rollback(err)
 			}
 			if err := hardenWindowsGenericFootprint(target, configPaths, footprint); err != nil {
 				return rollback(err)
@@ -666,7 +672,21 @@ func prepareWindowsGenericFootprint(target windowsGenericManagedTarget, configPa
 	if err := prepareWindowsGenericPath(target.home, target.dataDir, target.sid, true, false, allowRepair, "data dir"); err != nil {
 		return err
 	}
+	privatePlugins := windowsStandalonePrivatePluginPaths(target, configPaths)
 	for _, path := range configPaths {
+		if !allowRepair && windowsPrivatePluginPathSelected(privatePlugins, path) {
+			// Verification checks the whole-file plugin's directory chain and
+			// the managed plugin DACL. Repair mode keeps the generic
+			// obstruction handling; the relax step that follows returns the
+			// file to the managed plugin DACL.
+			if err := prepareWindowsGenericPath(target.home, filepath.Dir(filepath.Clean(path)), target.sid, true, true, false, "managed plugin directory"); err != nil {
+				return err
+			}
+			if err := verifyWindowsPrivatePluginFile(path, target.sid, true); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := prepareWindowsGenericPath(target.home, path, target.sid, false, !allowRepair, allowRepair, "hook config"); err != nil {
 			return err
 		}
@@ -681,6 +701,9 @@ func prepareWindowsGenericFootprint(target windowsGenericManagedTarget, configPa
 		return err
 	}
 	for _, path := range sortedUnique(files) {
+		if !allowRepair && windowsPrivatePluginPathSelected(privatePlugins, path) {
+			continue
+		}
 		if err := prepareWindowsGenericPath(target.home, path, target.sid, false, false, allowRepair, "footprint file"); err != nil {
 			return err
 		}
@@ -974,7 +997,17 @@ func hardenWindowsGenericFootprint(target windowsGenericManagedTarget, configPat
 	if err != nil {
 		return err
 	}
+	privatePlugins := windowsStandalonePrivatePluginPaths(target, configPaths)
 	for _, path := range sortedUnique(files) {
+		if windowsPrivatePluginPathSelected(privatePlugins, path) {
+			// The whole-file plugin gets the managed plugin DACL, not the
+			// generic footprint DACL: the latter grants Administrators write
+			// authority the connector's custody checks refuse.
+			if err := hardenWindowsPrivatePluginFile(target.home, path, target.sid); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
@@ -983,6 +1016,22 @@ func hardenWindowsGenericFootprint(target windowsGenericManagedTarget, configPat
 		if err := prepareWindowsGenericPath(target.home, path, target.sid, false, true, true, "installed file"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// publishWindowsPluginScopedHookToken publishes the connector-scoped token
+// sidecar an in-agent plugin connector (Amp, OpenCode) reads at event time.
+// Their setup renders only the plugin, which names this sidecar; without it
+// every tool call fails closed with "hook credential is unavailable". It runs
+// under the target user's token before hardening, so the sidecar gets the
+// managed footprint DACL like every other per-user token file.
+func publishWindowsPluginScopedHookToken(target windowsGenericManagedTarget) error {
+	if !connector.RequiresScopedHookToken(target.conn) {
+		return nil
+	}
+	if err := publishEnterpriseHookAPIToken(target.dataDir, target.conn.Name(), target.setup.HookAPIToken); err != nil {
+		return fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err)
 	}
 	return nil
 }
@@ -1001,10 +1050,10 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	if err := connector.ValidateManagedHookRuntimeState(target.dataDir, target.conn.Name(), target.setup.HookFailMode); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s runtime sidecars are invalid: %w", target.conn.Name(), err)
 	}
-	// In-agent plugin connectors (Amp, OpenCode) do not run the hook binary
-	// and publish no per-user hook token file; their plugin and runtime
-	// artifacts are verified above.
-	if hookBinary, perUser := windowsStandalonePerUserConnector(target.conn.Name()); !perUser || hookBinary {
+	// Every target reads its connector-scoped bearer from the per-user token
+	// sidecar: the hook binary for hook connectors, the in-agent plugin at
+	// event time for Amp and OpenCode.
+	{
 		tokenPath, err := connector.HookTokenFilePath(filepath.Join(target.dataDir, "hooks"), target.conn.Name())
 		if err != nil {
 			return err

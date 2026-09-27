@@ -1935,10 +1935,16 @@ func javaScriptStringContent(value string) string {
 // Unlike ordinary agent config writes, plugin installation never follows a
 // symlink: an existing target must be the trusted regular file we inspected.
 func validatePluginArtifactDestination(path string) error {
+	return validatePluginArtifactDestinationFor(path, "")
+}
+
+// validatePluginArtifactDestinationFor also trusts trustedOwnerSID, the
+// per-user target a Windows guardian verifies without that user's token.
+func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("plugin path must be absolute: %q", path)
 	}
-	if err := hookAPIValidateDirectory(filepath.Dir(filepath.Clean(path))); err != nil {
+	if err := hookAPIValidateDirectoryFor(filepath.Dir(filepath.Clean(path)), trustedOwnerSID); err != nil {
 		return err
 	}
 	info, err := os.Lstat(path)
@@ -1954,7 +1960,7 @@ func validatePluginArtifactDestination(path string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("plugin target must be a regular file: %s", path)
 	}
-	if err := hookAPIValidateOwner(path, info); err != nil {
+	if err := hookAPIValidateOwnerFor(path, info, trustedOwnerSID); err != nil {
 		return err
 	}
 	return nil

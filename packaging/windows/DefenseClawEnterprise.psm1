@@ -16927,12 +16927,108 @@ function Wait-DefenseClawFreshGuardianReconcile {
     throw "LocalSystem guardian restarted but did not publish fresh required coverage within $TimeoutSeconds seconds; last_status=$lastStatus"
 }
 
+function Get-DefenseClawStandaloneIPCSocketLeaves {
+    <#
+        The exact AF_UNIX socket files a standalone deployment may leave in
+        its managed IPC directory under InstallRoot: the sensor helper's
+        acquisition socket and, if a GUI build ever bound it, the UI IPC
+        socket. Windows backs AF_UNIX socket files with a reparse point, so
+        these are the only reparse points a standalone install tree may
+        contain. Secure Client returns nothing here and keeps its own
+        allow-list.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return @()
+    }
+    $directory = [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
+    return @(
+        [IO.Path]::GetFullPath((Microsoft.PowerShell.Management\Join-Path $directory 'sensor-helper.sock')),
+        [IO.Path]::GetFullPath((Microsoft.PowerShell.Management\Join-Path $directory 'defenseclaw_ipc.sock'))
+    )
+}
+
+function Test-DefenseClawStandaloneIPCSocketLeaf {
+    <#
+        True only for an allowed standalone socket leaf that is a plain
+        AF_UNIX reparse file: never a directory, never a symbolic link,
+        junction or mount point (those resolve a LinkTarget).
+    #>
+    param(
+        [Parameter(Mandatory)][object]$Item,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Leaves
+    )
+    if ($Item.PSIsContainer) {
+        return $false
+    }
+    $full = [IO.Path]::GetFullPath([string]$Item.FullName)
+    $allowed = $false
+    foreach ($leaf in $Leaves) {
+        if ([string]::Equals($full, $leaf, [StringComparison]::OrdinalIgnoreCase)) {
+            $allowed = $true
+        }
+    }
+    if (-not $allowed) {
+        return $false
+    }
+    if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+        return $true
+    }
+    try {
+        $target = $Item.LinkTarget
+    }
+    catch {
+        return $false
+    }
+    return [string]::IsNullOrEmpty([string]$target)
+}
+
+function Remove-DefenseClawStandaloneManagedIPCDirectory {
+    <#
+        Standalone uninstall: after every DefenseClaw service is removed,
+        delete the managed IPC directory under InstallRoot and the stale
+        socket files the gateway and sensor helper left in it, so the
+        install-tree removal below sees only bin and libexec. Anything else
+        in the directory aborts the uninstall. Secure Client is unchanged.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $directory = [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory)) {
+        return
+    }
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "refusing to remove managed IPC path that is not a plain directory: $directory"
+    }
+    $leaves = @(Get-DefenseClawStandaloneIPCSocketLeaves -Layout $Layout)
+    foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force)) {
+        if (-not (Test-DefenseClawStandaloneIPCSocketLeaf -Item $child -Leaves $leaves)) {
+            throw "refusing to remove unexpected managed IPC content: $($child.FullName)"
+        }
+    }
+    foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force)) {
+        [IO.File]::Delete([string]$child.FullName)
+    }
+    [IO.Directory]::Delete($directory, $false)
+}
+
 function Assert-DefenseClawManagedInstallTree {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory
     )
+    # Standalone keeps its managed IPC directory (sensor helper socket)
+    # under InstallRoot; only that directory and its exact socket leaves are
+    # added. The Secure Client allow-list is unchanged.
+    $standaloneIPCLeaves = @(Get-DefenseClawStandaloneIPCSocketLeaves -Layout $Layout)
+    if ($standaloneIPCLeaves.Count -gt 0) {
+        $allowedDirectories += [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
+    }
     $allowedFiles = @(
         $Layout.BrokerPath,
         $Layout.GatewayPath,
@@ -16944,6 +17040,10 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.ModulePath
     )
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Layout.InstallRoot -Recurse -Force) {
+        if ($standaloneIPCLeaves.Count -gt 0 -and
+            (Test-DefenseClawStandaloneIPCSocketLeaf -Item $item -Leaves $standaloneIPCLeaves)) {
+            continue
+        }
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "refusing to remove managed install tree containing a reparse point: $($item.FullName)"
         }
@@ -21281,6 +21381,7 @@ function Invoke-DefenseClawUninstallLifecycle {
                     -GatewayServiceName $GatewayServiceName)
             Remove-DefenseClawService -Name $Layout.BrokerServiceName
         }
+        Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout
         $tombstone = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `

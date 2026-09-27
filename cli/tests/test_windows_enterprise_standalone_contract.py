@@ -265,3 +265,33 @@ def test_standalone_guardian_state_identity_reads_the_runtime_directory() -> Non
     runtime = body.index("$Layout.RuntimeDirectory", gate)
     join = body.index("hook_guardian_state.json", runtime)
     assert gate < runtime < join
+
+
+def test_standalone_uninstall_accepts_and_removes_only_its_ipc_directory() -> None:
+    # Standalone keeps <InstallRoot>\ipc\ (the sensor helper's AF_UNIX socket)
+    # under InstallRoot. Uninstall refused "unexpected directory ... \ipc"
+    # before this. The walk may accept only that directory and its exact
+    # socket leaves in the standalone profile; removal happens after every
+    # service is gone and before the install tree is retired.
+    module = _text(MODULE)
+    leaves_start = module.index("function Get-DefenseClawStandaloneIPCSocketLeaves")
+    leaves = module[leaves_start : module.index("\nfunction ", leaves_start + 10)]
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in leaves
+    assert "'sensor-helper.sock'" in leaves
+    leaf_start = module.index("function Test-DefenseClawStandaloneIPCSocketLeaf")
+    leaf = module[leaf_start : module.index("\nfunction ", leaf_start + 10)]
+    assert "$Item.PSIsContainer" in leaf
+    assert "$Item.LinkTarget" in leaf
+    walk_start = module.index("function Assert-DefenseClawManagedInstallTree")
+    walk = module[walk_start : module.index("\nfunction ", walk_start + 10)]
+    assert "Get-DefenseClawStandaloneIPCSocketLeaves -Layout $Layout" in walk
+    assert "$Layout.BinDirectory," in walk and "$Layout.LibexecDirectory" in walk
+    uninstall_start = module.index("function Invoke-DefenseClawUninstallLifecycle")
+    uninstall = module[uninstall_start : module.index("\nfunction ", uninstall_start + 10)]
+    helper = uninstall.index("Remove-DefenseClawService -Name $Layout.SensorHelperServiceName")
+    removal = uninstall.index("Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout", helper)
+    retire = uninstall.index("Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout", removal)
+    assert helper < removal < retire
+    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-ipc-uninstall-smoke.ps1")
+    assert "Secure Client allow-list" in smoke
+    assert "symbolic link named like the socket (removal)" in smoke

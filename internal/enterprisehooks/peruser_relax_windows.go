@@ -44,7 +44,7 @@ import (
 // owner's WRITE_DAC.
 const windowsGuardianHardenedOwnerRightsACE = "(A;;RC;;;OW)"
 
-func relaxWindowsStandalonePerUserFootprintForSetup(target windowsGenericManagedTarget, footprint connector.AgentPaths) error {
+func relaxWindowsStandalonePerUserFootprintForSetup(target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths) error {
 	if _, perUser := windowsStandalonePerUserConnector(target.conn.Name()); !perUser {
 		return nil
 	}
@@ -63,6 +63,17 @@ func relaxWindowsStandalonePerUserFootprintForSetup(target windowsGenericManaged
 			return err
 		}
 	}
+	// A whole-file plugin the guardian hardened on an older release, or whose
+	// DACL the user rewrote, gets the managed plugin DACL back so the
+	// connector can republish it.
+	for path := range windowsStandalonePrivatePluginPaths(target, configPaths) {
+		if !windowsPathWithin(target.home, path) {
+			return fmt.Errorf("enterprise hooks: managed plugin is outside the user home: %s", path)
+		}
+		if err := restoreWindowsPrivatePluginFile(target.home, path, target.sid); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -71,9 +82,9 @@ func relaxWindowsStandalonePerUserFootprintForSetup(target windowsGenericManaged
 // impersonation: a new goroutine runs on another OS thread, which carries
 // only the LocalSystem process token (the hardened DACL denies the target
 // user WRITE_DAC).
-func relaxWindowsStandalonePerUserFootprintForSetupAsService(target windowsGenericManagedTarget, footprint connector.AgentPaths) error {
+func relaxWindowsStandalonePerUserFootprintForSetupAsService(target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths) error {
 	done := make(chan error, 1)
-	go func() { done <- relaxWindowsStandalonePerUserFootprintForSetup(target, footprint) }()
+	go func() { done <- relaxWindowsStandalonePerUserFootprintForSetup(target, configPaths, footprint) }()
 	return <-done
 }
 

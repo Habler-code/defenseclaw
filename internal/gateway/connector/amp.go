@@ -103,7 +103,7 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 		}
 		return false, err
 	}
-	if err := validatePluginArtifactDestination(path); err != nil {
+	if err := validatePluginArtifactDestinationFor(path, opts.ManagedTargetSID); err != nil {
 		return false, err
 	}
 	data, err := os.ReadFile(path)

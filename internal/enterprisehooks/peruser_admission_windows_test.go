@@ -41,25 +41,53 @@ func TestWindowsStandalonePerUserAdmissionSelectsOnlyAdmissibleImages(t *testing
 	home := t.TempDir()
 	const ampVersion = "0.0.1785875347-gbc402f"
 
-	writePerUserAdmissionFixture(t, home, windowsStandaloneManagedExecutableRelative["amp"]...)
 	if ok, reason := windowsStandalonePerUserAdmission(home, "amp", ampVersion); ok ||
-		!strings.Contains(reason, "not supported") {
-		t.Fatalf("amp must stay unmanaged until its plugin custody verifies: ok=%v reason=%q", ok, reason)
+		!strings.Contains(reason, "amp.exe") {
+		t.Fatalf("amp without a native image: ok=%v reason=%q", ok, reason)
 	}
-
+	amp := writePerUserAdmissionFixture(t, home, windowsStandaloneManagedExecutableRelative["amp"][0]...)
+	if ok, reason := windowsStandalonePerUserAdmission(home, "amp", ampVersion); !ok {
+		t.Fatalf("amp with its native npm image refused: %s", reason)
+	}
+	if got, _ := windowsStandalonePerUserManagedExecutable(home, "amp"); got != amp {
+		t.Fatalf("amp executable = %q, want %q", got, amp)
+	}
 	if ok, reason := windowsStandalonePerUserAdmission(home, "amp", "not-a-version"); ok ||
 		!strings.Contains(reason, "known hook contract") {
 		t.Fatalf("amp with unknown version: ok=%v reason=%q", ok, reason)
 	}
 
-	// npm OpenCode is not the admitted WinGet image.
-	writePerUserAdmissionFixture(t, home, "AppData", "Roaming", "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
-	if _, reason := windowsStandalonePerUserManagedExecutable(home, "opencode"); !strings.Contains(reason, "WinGet") {
-		t.Fatalf("npm OpenCode reason = %q, want WinGet guidance", reason)
+	// npm OpenCode is admitted only when the opencode-ai package identity
+	// checks out; the SST WinGet image wins when both exist.
+	npmOpenCode := writePerUserAdmissionFixture(t, home, "AppData", "Roaming", "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
+	if _, reason := windowsStandalonePerUserManagedExecutable(home, "opencode"); !strings.Contains(reason, "opencode-ai") {
+		t.Fatalf("npm OpenCode without its package.json: reason = %q", reason)
+	}
+	manifest := filepath.Join(filepath.Dir(filepath.Dir(npmOpenCode)), "package.json")
+	if err := os.WriteFile(manifest, []byte(`{"name":"not-opencode"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := windowsStandalonePerUserManagedExecutable(home, "opencode"); got != "" {
+		t.Fatalf("npm OpenCode with a foreign package name was admitted: %q", got)
+	}
+	if err := os.WriteFile(manifest, []byte(`{"name":"opencode-ai","version":"1.18.32"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, reason := windowsStandalonePerUserManagedExecutable(home, "opencode"); got != npmOpenCode {
+		t.Fatalf("npm OpenCode = %q (%s), want %q", got, reason, npmOpenCode)
+	}
+	winget := writePerUserAdmissionFixture(t, home, windowsStandaloneManagedExecutableRelative["opencode"][0]...)
+	if got, _ := windowsStandalonePerUserManagedExecutable(home, "opencode"); got != winget {
+		t.Fatalf("OpenCode with both installs = %q, want the WinGet image %q", got, winget)
 	}
 
-	if _, reason := windowsStandalonePerUserManagedExecutable(home, "hermes"); !strings.Contains(reason, "not supported") {
-		t.Fatalf("hermes reason = %q, want an explicit unsupported reason", reason)
+	// Hermes binds to the updater-managed image inside the target profile.
+	if _, reason := windowsStandalonePerUserManagedExecutable(home, "hermes"); !strings.Contains(reason, "not present") {
+		t.Fatalf("hermes without its image: reason = %q", reason)
+	}
+	hermes := writePerUserAdmissionFixture(t, home, "AppData", "Local", "hermes", "hermes-agent", "venv", "Scripts", "hermes.exe")
+	if got, reason := windowsStandalonePerUserManagedExecutable(home, "hermes"); got != hermes {
+		t.Fatalf("hermes = %q (%s), want %q", got, reason, hermes)
 	}
 
 	// Connectors without protected executable admission need no image.

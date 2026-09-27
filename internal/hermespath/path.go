@@ -21,6 +21,9 @@
 package hermespath
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -71,6 +74,63 @@ func ManagedExecutablePath() string {
 		return ""
 	}
 	return filepath.Join(home, "hermes-agent", "venv", "Scripts", "hermes.exe")
+}
+
+// ManagedExecutablePathForUserHome is ManagedExecutablePath for another
+// user's profile home, for privileged services acting for that user (the
+// calling token's known folders belong to the service). The default
+// AppData\Local layout under the profile is assumed.
+func ManagedExecutablePathForUserHome(userHome string) string {
+	userHome = strings.TrimSpace(userHome)
+	if runtime.GOOS != "windows" || userHome == "" {
+		return ""
+	}
+	home := ResolveHomeDir(runtime.GOOS, "", filepath.Join(userHome, "AppData", "Local"), userHome)
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "hermes-agent", "venv", "Scripts", "hermes.exe")
+}
+
+// InstalledVersionForManagedExecutable reads the release Hermes' updater
+// recorded for an updater-managed executable (hermes-agent\install-stamp.json,
+// baseVersion) without launching it. It refuses anything but a plain,
+// bounded regular file beside the managed virtual environment.
+func InstalledVersionForManagedExecutable(executable string) (string, error) {
+	executable = strings.TrimSpace(executable)
+	if executable == "" || !filepath.IsAbs(executable) {
+		return "", errors.New("managed Hermes executable path is not absolute")
+	}
+	scripts := filepath.Dir(executable)
+	venv := filepath.Dir(scripts)
+	agent := filepath.Dir(venv)
+	if !strings.EqualFold(filepath.Base(scripts), "Scripts") || !strings.EqualFold(filepath.Base(venv), "venv") ||
+		!strings.EqualFold(filepath.Base(agent), "hermes-agent") {
+		return "", errors.New("executable is not the updater-managed Hermes virtual environment image")
+	}
+	stamp := filepath.Join(agent, "install-stamp.json")
+	info, err := os.Lstat(stamp)
+	if err != nil {
+		return "", fmt.Errorf("inspect Hermes install stamp: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return "", errors.New("Hermes install stamp is not a bounded regular file")
+	}
+	data, err := os.ReadFile(stamp)
+	if err != nil {
+		return "", fmt.Errorf("read Hermes install stamp: %w", err)
+	}
+	var parsed struct {
+		BaseVersion string `json:"baseVersion"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return "", fmt.Errorf("parse Hermes install stamp: %w", err)
+	}
+	version := strings.TrimSpace(parsed.BaseVersion)
+	if version == "" || strings.ContainsAny(version, "\x00\r\n") {
+		return "", errors.New("Hermes install stamp has no base version")
+	}
+	return version, nil
 }
 
 // ConfigPathForUserHome resolves the Hermes config path inside another
