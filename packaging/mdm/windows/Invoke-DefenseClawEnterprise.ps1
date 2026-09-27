@@ -613,7 +613,9 @@ try {
         Copy-WrapperInput -Source $SetupPath -Destination $stagedSetup -Limit 1GB -Label 'Setup'
         Assert-WrapperSetup -Staged $stagedSetup
         Write-WrapperLog -Message "verified Setup (trust=$($script:Mode) sha256=$(if ($script:PinnedSha256) { $script:PinnedSha256 } else { 'unpinned' }))"
-        $arguments = @('/' + $normalizedAction, 'JSON=1')
+        # Parenthesize the switch: the comma operator binds tighter than +, so
+        # '/' + $normalizedAction, 'JSON=1' is one string "/ensure JSON=1".
+        $arguments = @(('/' + $normalizedAction), 'JSON=1')
         if ($config) { $arguments += "CONFIG=$config" }
         if ($script:Signers.Count -gt 0) { $arguments += ('ALLOWEDSIGNERS=' + ($script:Signers -join ',')) }
         $run = Invoke-DefenseClawNative -FilePath $stagedSetup -ArgumentList $arguments

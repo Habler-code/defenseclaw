@@ -451,6 +451,19 @@ def test_generic_windows_wrapper_refuses_a_product_version_pin_for_a_staged_setu
     assert "-ProductVersion applies only to the installed CLI" in document["errors"][0]["message"], document
 
 
+def test_windows_scripts_never_concatenate_into_an_argument_list() -> None:
+    # PowerShell's comma operator binds tighter than +, so
+    # @('/' + $action, 'JSON=1') is the single argument "/ensure JSON=1". The
+    # generic wrapper built its Setup command line that way, and Setup refused
+    # every -SetupPath run with "unexpected positional argument" (exit 1639).
+    pattern = re.compile(r"@\(\s*'[^']*'\s*\+\s*\$\w+\s*,")
+    for path in sorted((MDM / "windows").glob("*.ps1")) + sorted((MDM / "intune" / "windows").glob("*.ps1")):
+        assert not pattern.search(_text(path)), path.name
+    assert "$arguments = @(('/' + $normalizedAction), 'JSON=1')" in _text(
+        MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1"
+    )
+
+
 def test_windows_scripts_use_the_standalone_setup_and_marker() -> None:
     marker = r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
     assert marker in _text(MDM / "windows" / "detect.ps1")
