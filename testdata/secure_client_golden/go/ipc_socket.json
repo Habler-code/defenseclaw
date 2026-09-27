@@ -2,6 +2,8 @@
   "darwin": {
     "managed_path": "/opt/cisco/secureclient/defenseclaw/ipc/defenseclaw_ipc.sock",
     "managed_path_with_env_override": "/opt/cisco/secureclient/defenseclaw/ipc/defenseclaw_ipc.sock",
+    "managed_path_with_profile_env/bogus": "/opt/cisco/secureclient/defenseclaw/ipc/defenseclaw_ipc.sock",
+    "managed_path_with_profile_env/secure_client": "/opt/cisco/secureclient/defenseclaw/ipc/defenseclaw_ipc.sock",
     "peer_auth_kind/managed": "UnixPeer",
     "socket_env_var": "DEFENSECLAW_IPC_SOCKET",
     "socket_file_name": "defenseclaw_ipc.sock",
@@ -18,6 +20,8 @@
   "windows": {
     "managed_path": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock",
     "managed_path_with_env_override": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock",
+    "managed_path_with_profile_env/bogus": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock",
+    "managed_path_with_profile_env/secure_client": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock",
     "peer_auth_kind/managed": "UnixPeerUnauthenticated",
     "socket_env_var": "DEFENSECLAW_IPC_SOCKET",
     "socket_file_name": "defenseclaw_ipc.sock",

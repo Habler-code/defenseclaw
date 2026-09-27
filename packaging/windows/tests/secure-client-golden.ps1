@@ -23,8 +23,18 @@
       * the canonical ACL for every managed path kind and the path-to-kind
         plan Set-DefenseClawManagedAcls applies;
       * the required-rights matrix Verify checks;
+      * the Secure Client values of the profile helpers (roots, broker gate,
+        gateway dependencies, Claude floor, attestation schema);
+      * the sc.exe argument lists Set-DefenseClawManagedServices issues at
+        install (recorded through stubs, never run);
       * the -Mode/-Connector config.yaml and targets.yaml renderers in
         install-enterprise.ps1;
+      * which other-profile deployment records block a Secure Client
+        mutation (a planted file or folder does not; an administrator's
+        record does);
+      * the deployment.json document New-DefenseClawDeploymentMetadata
+        writes for an installed deployment and a tombstone, and how
+        Get-DefenseClawDeploymentMetadata reads Secure Client records back;
       * the read-only Status result keys.
 
     Usage (Windows PowerShell 5.1 is the production Secure Client engine):
@@ -346,6 +356,131 @@ $moduleCapture = & $module {
     Set-DefenseClawManagedAcls -Layout $layout.Clone() -GatewayServiceName $GatewayService
     $capture.acl_plan = @($script:GoldenAclPlan.ToArray())
 
+    # Profile helpers the pinned functions call for their Secure Client
+    # branch: roots, broker gate, gateway dependencies and version floors.
+    $profileRoots = Get-DefenseClawProfileRoots -EnterpriseProfile SecureClient
+    $brokerService = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayService
+    $sensorHelperService = Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayService
+    $defaultRoots = Get-DefenseClawProfileRoots
+    $defaultRootsAreSecureClient = $defaultRoots.Count -eq $profileRoots.Count
+    foreach ($rootKey in @($profileRoots.Keys)) {
+        if ([string]$defaultRoots[$rootKey] -cne [string]$profileRoots[$rootKey]) {
+            $defaultRootsAreSecureClient = $false
+        }
+    }
+    $capture.profile_helpers = [ordered]@{
+        default_profile = Get-DefenseClawEnterpriseProfile
+        standalone_profile = [bool](Test-DefenseClawStandaloneProfile)
+        broker_enabled = [bool](Test-DefenseClawBrokerEnabled)
+        layout_broker_enabled = [bool](Test-DefenseClawLayoutBrokerEnabled -Layout $layout)
+        roots = $profileRoots
+        default_roots_are_secure_client = [bool]$defaultRootsAreSecureClient
+        profile_from_lifecycle_directory = Resolve-DefenseClawProfileFromLifecycleDirectory -Directory $profileRoots.LifecycleDirectory
+        gateway_dependencies = [ordered]@{
+            without_sensor_helper = Get-DefenseClawGatewayServiceDependencies `
+                -BrokerServiceName $brokerService `
+                -SensorHelperServiceName $sensorHelperService
+            with_sensor_helper = Get-DefenseClawGatewayServiceDependencies `
+                -BrokerServiceName $brokerService `
+                -SensorHelperServiceName $sensorHelperService `
+                -SensorHelperRegistered
+        }
+        claude_minimum_client_version = Get-DefenseClawClaudeMinimumClientVersion
+        agent_application_control_attestation_schema_version = [int](Get-DefenseClawAgentApplicationControlAttestationSchemaVersion)
+    }
+
+    # Service install plan: the exact sc.exe argument lists
+    # Set-DefenseClawManagedServices issues for the broker, sensor helper,
+    # gateway, guardian and enumerator, recorded instead of run. Every SCM
+    # query and write goes through the stubs below; the plan stops at the
+    # first failure-actions write, before any service registry change.
+    $stubNames = @(
+        'Invoke-DefenseClawNative', 'Test-DefenseClawServiceExists',
+        'Assert-DefenseClawServiceImagePath',
+        'Assert-DefenseClawOwnedServiceOrAbsent', 'Assert-DefenseClawCMIDBrokerServiceOrAbsent',
+        'Set-DefenseClawSensorHelperServiceEnvironment', 'Set-DefenseClawExactFailureActions',
+        'Set-DefenseClawServiceRegistryAcl', 'Set-DefenseClawCMIDBrokerAuthKey',
+        'Set-DefenseClawServiceEnvironment'
+    )
+    $savedFunctions = @{}
+    foreach ($stubName in $stubNames) {
+        $savedFunctions[$stubName] = (Microsoft.PowerShell.Core\Get-Command -Name $stubName -CommandType Function).ScriptBlock
+    }
+    $script:GoldenServicePlan = [Collections.Generic.List[object]]::new()
+    $script:GoldenServicesExist = $false
+    function script:Invoke-DefenseClawNative {
+        param($File, $Arguments)
+        $script:GoldenServicePlan.Add([ordered]@{ command = [IO.Path]::GetFileName([string]$File); arguments = @($Arguments) })
+    }
+    function script:Test-DefenseClawServiceExists { return $script:GoldenServicesExist }
+    function script:Assert-DefenseClawServiceImagePath { }
+    function script:Assert-DefenseClawOwnedServiceOrAbsent { }
+    function script:Assert-DefenseClawCMIDBrokerServiceOrAbsent { }
+    function script:Set-DefenseClawSensorHelperServiceEnvironment {
+        param($Name, $GatewayServiceName)
+        $script:GoldenServicePlan.Add([ordered]@{ command = 'Set-DefenseClawSensorHelperServiceEnvironment'; arguments = @($Name, $GatewayServiceName) })
+    }
+    function script:Set-DefenseClawExactFailureActions { throw 'golden-service-plan-complete' }
+    function script:Set-DefenseClawServiceRegistryAcl { throw 'golden-service-plan-unexpected-write' }
+    function script:Set-DefenseClawCMIDBrokerAuthKey { throw 'golden-service-plan-unexpected-write' }
+    function script:Set-DefenseClawServiceEnvironment { throw 'golden-service-plan-unexpected-write' }
+    $plans = [ordered]@{}
+    try {
+        foreach ($variant in @('create_deferred', 'create_automatic', 'reconfigure_deferred', 'create_deferred_with_sensor_helper')) {
+            $script:GoldenServicePlan.Clear()
+            $script:GoldenServicesExist = $variant -ceq 'reconfigure_deferred'
+            # Set-DefenseClawManagedServices reads $Layout from its caller.
+            $Layout = $serviceLayout.Clone()
+            if ($variant -ceq 'create_deferred_with_sensor_helper') {
+                # Any file that exists stands in for the helper binary.
+                $Layout.SensorHelperPath = Join-Path $script:System32 'sc.exe'
+            }
+            else {
+                $Layout.SensorHelperPath = ''
+            }
+            $serviceArguments = @{
+                GatewayServiceName = $GatewayService
+                GuardianServiceName = $GuardianService
+                BrokerServiceName = $Layout.BrokerServiceName
+                BrokerPath = $Layout.BrokerPath
+                BrokerPipeName = $Layout.BrokerPipeName
+                BrokerAuthKeyPath = $Layout.BrokerAuthKeyPath
+                ProviderLibraryPath = $Layout.ProviderLibraryPath
+                BrokerLogPath = $Layout.BrokerLogPath
+                GatewayPath = $Layout.GatewayPath
+                ManifestPath = $Layout.ManifestPath
+                RuntimeDirectory = $Layout.RuntimeDirectory
+                ConfigPath = $Layout.ConfigPath
+                AuthorizationDirectory = $Layout.AuthorizationDirectory
+                GatewayLogPath = $Layout.GatewayLogPath
+                GuardianLogPath = $Layout.GuardianLogPath
+            }
+            if ($variant -cne 'create_automatic') {
+                $serviceArguments.DeferAutomaticStart = $true
+            }
+            $completed = $false
+            try {
+                Set-DefenseClawManagedServices @serviceArguments
+            }
+            catch {
+                if ([string]$_.Exception.Message -cne 'golden-service-plan-complete') {
+                    throw
+                }
+                $completed = $true
+            }
+            if (-not $completed) {
+                throw "service plan $variant did not reach the failure-actions write"
+            }
+            $plans[$variant] = @($script:GoldenServicePlan.ToArray())
+        }
+    }
+    finally {
+        foreach ($stubName in $stubNames) {
+            Microsoft.PowerShell.Management\Set-Item -LiteralPath "function:script:$stubName" -Value $savedFunctions[$stubName]
+        }
+    }
+    $capture.service_install_plan = $plans
+
     return $capture
 } $installRoot $stateRoot $gatewayService $guardianService $providerLibrary
 
@@ -463,6 +598,28 @@ $recordCapture = & $module {
             installed = [bool]$probe.installed
             untrusted = [bool]($null -ne $probe.PSObject.Properties['untrusted'] -and $probe.untrusted)
         }
+        $record = [IO.Path]::Combine($install, 'deployment.json')
+        # The conflict check itself is unchanged: a standalone record an
+        # administrator wrote still refuses the Secure Client mutation. The
+        # scratch tree cannot carry the lifecycle's administrator-only ACL, so
+        # the record-trust test stands in for it here.
+        $originalRecordTrusted = ${function:Test-DefenseClawProfileDeploymentRecordTrusted}
+        try {
+            Microsoft.PowerShell.Management\Set-Item -Path 'function:script:Test-DefenseClawProfileDeploymentRecordTrusted' -Value { return $true }
+            $capture.administrator_standalone_record = & $decide
+        }
+        finally {
+            Microsoft.PowerShell.Management\Set-Item -Path 'function:script:Test-DefenseClawProfileDeploymentRecordTrusted' -Value $originalRecordTrusted
+        }
+        # A folder a standard user created at the record path is no record.
+        [IO.File]::Delete($record)
+        [void][IO.Directory]::CreateDirectory($record)
+        $capture.planted_standalone_folder = & $decide
+        $probe = Test-DefenseClawProfileDeploymentInstalled -EnterpriseProfile Standalone
+        $capture.planted_standalone_folder_probe = [ordered]@{
+            installed = [bool]$probe.installed
+            untrusted = [bool]($null -ne $probe.PSObject.Properties['untrusted'] -and $probe.untrusted)
+        }
     }
     finally {
         Microsoft.PowerShell.Management\Set-Item -Path 'function:script:Test-DefenseClawAdministrator' -Value $originalAdministrator
@@ -473,6 +630,150 @@ $recordCapture = & $module {
     return $capture
 } ([IO.Path]::GetTempPath())
 $golden.cross_profile_records = $recordCapture
+
+# ---- Deployment metadata -------------------------------------------------
+# The deployment.json document the Secure Client lifecycle writes
+# (New-DefenseClawDeploymentMetadata) for an installed deployment and for an
+# uninstall tombstone, and how Get-DefenseClawDeploymentMetadata reads a
+# Secure Client record back: a record without a profile field (every Secure
+# Client record) is Secure Client, and a record that names the standalone
+# profile is refused. Evaluated in a disposable directory: the eight hashed
+# binaries, the Codex policy and managed-hooks state, and the
+# application-control attestation are fixed stand-in files there (their
+# paths appear as %GoldenScratch%), the activation record is a fixed valid
+# record, the attestation reader and the record's canonical-ACL check are
+# stubbed and restored, and timestamps are reduced to their format.
+$metadataCapture = & $module {
+    param($InstallRoot, $StateRoot, $GatewayService, $GuardianService, $ProviderLibrary, [string]$ScratchParent)
+    $capture = [ordered]@{}
+    $scratch = [IO.Path]::Combine($ScratchParent, ('dc-scgolden-metadata-' + [Guid]::NewGuid().ToString('N')))
+    [void][IO.Directory]::CreateDirectory($scratch)
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $stubNames = @('Get-DefenseClawAgentApplicationControlAttestation', 'Assert-DefenseClawCanonicalPathAcl')
+    $savedFunctions = @{}
+    foreach ($stubName in $stubNames) {
+        $savedFunctions[$stubName] = (Microsoft.PowerShell.Core\Get-Command -Name $stubName -CommandType Function).ScriptBlock
+    }
+    $originalProfile = Get-DefenseClawEnterpriseProfile
+    $normalize = {
+        param($Value)
+        if ($Value -is [string]) {
+            return $Value.Replace($scratch, '%GoldenScratch%')
+        }
+        if ($Value -is [Collections.IDictionary]) {
+            $copy = [ordered]@{}
+            foreach ($key in @($Value.Keys)) {
+                $item = $Value[$key]
+                if ($key -in @('updated_at', 'uninstalled_at') -and $null -ne $item) {
+                    $item = if ([string]$item -cmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$') {
+                        '<utc-round-trip-timestamp>'
+                    }
+                    else {
+                        'unexpected: ' + [string]$item
+                    }
+                }
+                $copy[$key] = & $normalize $item
+            }
+            return $copy
+        }
+        return $Value
+    }
+    try {
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+        function script:Get-DefenseClawAgentApplicationControlAttestation { param($Layout) }
+        function script:Assert-DefenseClawCanonicalPathAcl { param($Path, $Expected) }
+        $layout = Get-DefenseClawLayout `
+            -InstallRoot $InstallRoot `
+            -StateRoot $StateRoot `
+            -GatewayServiceName $GatewayService `
+            -GuardianServiceName $GuardianService
+        $layout.ProviderLibraryPath = $ProviderLibrary
+        foreach ($key in @(
+                'BrokerPath', 'GatewayPath', 'ACPPath', 'HookPath', 'SensorHelperPath',
+                'CLIPath', 'InstallerPath', 'ModulePath',
+                'CodexMachinePolicyPath', 'CodexManagedHooksStatePath',
+                'AgentApplicationControlAttestationPath'
+            )) {
+            $standIn = [IO.Path]::Combine($scratch, $key)
+            [IO.File]::WriteAllText($standIn, $key, $utf8)
+            $layout[$key] = $standIn
+        }
+        $layout.CodexTargetEnabled = $true
+        $layout.ClaudeTargetEnabled = $true
+        $layout.CursorTargetEnabled = $false
+        $layout.AgentApplicationControlAttested = $true
+        $layout.ClaudeEffectivePolicyVerified = $true
+        $metadataArguments = @{
+            Layout = $layout
+            GatewayServiceName = $GatewayService
+            GuardianServiceName = $GuardianService
+            ManagedHooksActivation = [pscustomobject][ordered]@{
+                schema_version = 1
+                deployment_generation_id = '0123456789abcdef0123456789abcdef'
+                state = 'activated'
+                manifest_sha256 = ('ab' * 32)
+                target_count = 2
+            }
+        }
+        $installed = New-DefenseClawDeploymentMetadata @metadataArguments
+        $tombstone = New-DefenseClawDeploymentMetadata @metadataArguments -Installed $false
+        $capture.new_installed = & $normalize $installed
+        $capture.new_tombstone = & $normalize $tombstone
+
+        # Read-back: the record is written the way the lifecycle serializes
+        # it, into a layout that starts without the recorded provider
+        # library and targets, so the capture shows what the reader adopts.
+        $readBack = {
+            param([Collections.IDictionary]$Document)
+            $readLayout = $layout.Clone()
+            $readLayout.MetadataPath = [IO.Path]::Combine($scratch, 'deployment.json')
+            $readLayout.ProviderLibraryPath = ''
+            $readLayout.ClaudeTargetEnabled = $false
+            $readLayout.CodexTargetEnabled = $false
+            $readLayout.CursorTargetEnabled = $false
+            [IO.File]::WriteAllText(
+                $readLayout.MetadataPath,
+                ($Document | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12),
+                $utf8
+            )
+            try {
+                $metadata = Get-DefenseClawDeploymentMetadata -Layout $readLayout -Required
+                return [ordered]@{
+                    result = 'read'
+                    installed = [bool]$metadata.installed
+                    layout_provider_library_path = [string]$readLayout.ProviderLibraryPath
+                    layout_certification_codex_home = [string]$readLayout.CertificationCodexHome
+                    layout_core_hardening_certification = [bool]$readLayout.CoreHardeningCertification
+                    layout_claude_target_enabled = [bool]$readLayout.ClaudeTargetEnabled
+                    layout_codex_target_enabled = [bool]$readLayout.CodexTargetEnabled
+                    layout_cursor_target_enabled = [bool]$readLayout.CursorTargetEnabled
+                }
+            }
+            catch {
+                return [ordered]@{ result = 'refused: ' + (& $normalize ([string]$_.Exception.Message)) }
+            }
+        }
+        $capture.read_secure_client_record = & $readBack $installed
+        $capture.read_secure_client_tombstone = & $readBack $tombstone
+        $named = [ordered]@{}
+        foreach ($key in @($installed.Keys)) {
+            $named[$key] = $installed[$key]
+        }
+        $named['profile'] = 'secure_client'
+        $capture.read_record_naming_secure_client = & $readBack $named
+        $named['profile'] = 'standalone'
+        $capture.read_record_naming_standalone = & $readBack $named
+    }
+    finally {
+        foreach ($stubName in $stubNames) {
+            Microsoft.PowerShell.Management\Set-Item -LiteralPath "function:script:$stubName" -Value $savedFunctions[$stubName]
+        }
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $capture
+} $installRoot $stateRoot $gatewayService $guardianService $providerLibrary ([IO.Path]::GetTempPath())
+$golden.deployment_metadata = $metadataCapture
 
 # ---- Read-only Status on this (uninstalled) host -------------------------
 $status = Invoke-DefenseClawEnterpriseLifecycle `

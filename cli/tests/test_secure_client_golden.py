@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -31,7 +32,10 @@ EXPECTED_FIXTURES = (
     "go/cli_posture.json",
     "go/ipc_socket.json",
     "go/sensor_socket.json",
+    "go/setup_command_line.json",
     "windows/lifecycle.json",
+    "windows/lifecycle_profile_resolution.json",
+    "windows/setup_lifecycle_arguments.json",
     "windows/codex_requirements_empty.toml",
     "windows/codex_requirements_admin.toml",
     "windows/codex_requirements_contract.json",
@@ -93,6 +97,105 @@ def test_secure_client_tripwire_extracts_whole_functions() -> None:
     assert "60000" in text
     with pytest.raises(ValueError):
         module.powershell_function_text(source, "Get-DefenseClawThisFunctionDoesNotExist")
+
+
+def test_secure_client_tripwire_extracts_the_installer_param_block() -> None:
+    module = _load_tripwire_module()
+    source = (ROOT / "packaging" / "windows" / "install-enterprise.ps1").read_text(encoding="utf-8-sig")
+    text = module.powershell_script_param_text(source)
+    assert text.startswith("param(\n")
+    assert text.endswith("\n)\n")
+    assert "[string]$EnterpriseProfile = 'SecureClient'" in text
+    with pytest.raises(ValueError):
+        module.powershell_script_param_text("function X {\n}\n")
+
+
+def test_secure_client_tripwire_reports_an_unextractable_definition_as_drift(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A reformatted installer param() block (or a renamed pinned function)
+    # must fail with the drift message, not a traceback, and must not update.
+    module = _load_tripwire_module()
+    monkeypatch.setattr(
+        module, "PINNED_POWERSHELL_SCRIPT_PARAMS", ("packaging/windows/DefenseClawEnterprise.psm1",)
+    )
+    assert module.main([]) == 1
+    err = capsys.readouterr().err
+    assert "Secure Client source tripwire drift:" in err
+    assert "expected exactly one top-level param( block" in err
+    assert "Traceback" not in err
+    assert module.main(["--update"]) == 1
+    assert "cannot update" in capsys.readouterr().err
+
+
+def test_secure_client_tripwire_pins_the_secure_client_profile_helpers() -> None:
+    expected = json.loads((GOLDEN_DIR / "source_tripwire.json").read_text(encoding="utf-8"))
+    module_key = "packaging/windows/DefenseClawEnterprise.psm1#"
+    installer_key = "packaging/windows/install-enterprise.ps1#"
+    for name in (
+        "Get-DefenseClawProfileRoots",
+        "Test-DefenseClawStandaloneProfile",
+        "Test-DefenseClawBrokerEnabled",
+        "Test-DefenseClawLayoutBrokerEnabled",
+        "Get-DefenseClawGatewayServiceDependencies",
+        "Get-DefenseClawClaudeMinimumClientVersion",
+        "Get-DefenseClawAgentApplicationControlAttestationSchemaVersion",
+        "Assert-DefenseClawNoOtherProfileDeployment",
+        "Test-DefenseClawProfileDeploymentInstalled",
+        "Test-DefenseClawProfileDeploymentRecordTrusted",
+        "$script:DefenseClawEnterpriseProfile",
+    ):
+        assert module_key + name in expected["powershell"], name
+    for name in (
+        "Get-DefenseClawBootstrapProfileRoots",
+        "Test-DefenseClawBootstrapInteractiveUserSID",
+        "Initialize-DefenseClawBootstrapNativePath",
+        "param",
+    ):
+        assert installer_key + name in expected["powershell"], name
+    for path in (
+        "internal/ipc/server_windows.go",
+        "internal/ipc/acl_windows.go",
+        "internal/ipc/listen_windows.go",
+        "internal/cli/hook_foreign_guard_host.go",
+        "internal/cli/hook_foreign_guard_host_windows.go",
+    ):
+        assert path in expected["files"], path
+
+
+def test_secure_client_tripwire_pins_only_tracked_files(tmp_path: Path) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    module = _load_tripwire_module()
+    repo = tmp_path / "repo"
+    (repo / "lib").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "lib" / "tracked.sh").write_text("echo tracked\n", encoding="utf-8")
+    (repo / "lib" / ".DS_Store").write_bytes(b"\0\1")
+    (repo / "lib" / "scratch.sh").write_text("echo local\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "lib/tracked.sh"], check=True)
+    tracked = module.tracked_files(repo)
+    assert tracked == {"lib/tracked.sh"}
+    assert [path.name for path in module.pinned_file_matches(repo, "lib/*", tracked)] == ["tracked.sh"]
+    # An exported tree without git still skips dot-files.
+    assert module.tracked_files(repo / "lib") is None
+    assert [path.name for path in module.pinned_file_matches(repo, "lib/*", None)] == ["scratch.sh", "tracked.sh"]
+
+
+def test_secure_client_tripwire_ignores_a_finder_file_in_a_pinned_directory() -> None:
+    module = _load_tripwire_module()
+    stray = ROOT / "packaging" / "scripts" / "lib" / ".DS_Store"
+    if stray.exists():
+        pytest.skip("this checkout already has packaging/scripts/lib/.DS_Store")
+    stray.write_bytes(b"\0")
+    try:
+        problems = module.drift(
+            json.loads((GOLDEN_DIR / "source_tripwire.json").read_text(encoding="utf-8")),
+            module.compute_tripwire(ROOT),
+        )
+    finally:
+        stray.unlink()
+    assert not any(".DS_Store" in problem for problem in problems), problems
 
 
 def _windows_powershell_engines() -> list[str]:

@@ -65,6 +65,11 @@ _OPENCODE_REGISTRATION_SOURCES = frozenset({"manual", "automatic"})
 _RUNTIME_HEALTHY_STATES = frozenset({"running", "active", "ready", "up", "healthy", "ok"})
 
 
+# Only the standalone profile reports its profile in `status`. The Secure
+# Client and unmanaged output (text rows and JSON keys) stays exactly as it
+# was before enterprise profiles existed.
+_STANDALONE_ENTERPRISE_PROFILE = "standalone"
+
 
 def _enterprise_profile(cfg) -> str:
     """Return the managed_enterprise profile, or "" for unmanaged installs.
@@ -93,9 +98,15 @@ def _enterprise_profile(cfg) -> str:
         configured = ""
     if configured:
         return configured
+    return _default_enterprise_profile()
+
+
+def _default_enterprise_profile() -> str:
+    """Return the per-OS default profile: standalone on Linux, secure_client elsewhere."""
     import sys
 
     return "standalone" if sys.platform.startswith("linux") else "secure_client"
+
 
 def _opencode_registration_source_valid(value: object) -> bool:
     """Accept only an exact source emitted by gateway registration."""
@@ -280,7 +291,7 @@ def status(app: AppContext, as_json: bool) -> None:
     if getattr(cfg, "deployment_mode", ""):
         _status_row("Deployment", cfg.deployment_mode)
     profile = _enterprise_profile(cfg)
-    if profile:
+    if profile == _STANDALONE_ENTERPRISE_PROFILE:
         _status_row("Enterprise", f"{profile} (managed by your organization)")
     _status_row("Data dir", cfg.data_dir)
     _status_row("Config", str(config_path()))
@@ -1232,14 +1243,20 @@ def _status_payload(app) -> dict:
     payload: dict = {
         "environment": cfg.environment,
         "deployment_mode": getattr(cfg, "deployment_mode", ""),
-        "enterprise_profile": _enterprise_profile(cfg),
-        "data_dir": cfg.data_dir,
-        "config": str(config_path()),
-        "audit_db": cfg.audit_db,
-        "scope": _connector_scope_text(cfg),
-        "sandbox": {"available": _openshell_available(cfg)},
-        "scanners": _scanner_status_map(cfg),
     }
+    profile = _enterprise_profile(cfg)
+    if profile == _STANDALONE_ENTERPRISE_PROFILE:
+        payload["enterprise_profile"] = profile
+    payload.update(
+        {
+            "data_dir": cfg.data_dir,
+            "config": str(config_path()),
+            "audit_db": cfg.audit_db,
+            "scope": _connector_scope_text(cfg),
+            "sandbox": {"available": _openshell_available(cfg)},
+            "scanners": _scanner_status_map(cfg),
+        }
+    )
 
     if app.store:
         try:

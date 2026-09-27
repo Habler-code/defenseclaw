@@ -50,8 +50,14 @@ func InspectEnterpriseDeployment(profile string) (EnterpriseDeployment, error) {
 	return InspectEnterpriseDeploymentAt(roots.Profile, roots.MetadataPath)
 }
 
-// InspectEnterpriseDeploymentAt reads the deployment metadata at an exact
-// path, such as a certification scope's <state-root>\install\deployment.json.
+// InspectEnterpriseDeploymentAt classifies the deployment record at an exact
+// metadataPath (such as a certification scope's
+// <state-root>\install\deployment.json, or a scratch path in goldens and
+// tests) the way InspectEnterpriseDeployment classifies a profile's record
+// at its trusted path: absent, installed, tombstone, or unknown (an
+// unreadable, oversized, or unparseable record). A path that exists but is
+// not a regular file (a directory, a link) is an error. Like
+// InspectEnterpriseDeployment it does not check who wrote the record.
 func InspectEnterpriseDeploymentAt(profile, metadataPath string) (EnterpriseDeployment, error) {
 	deployment := EnterpriseDeployment{Profile: profile, MetadataPath: metadataPath}
 	info, err := os.Lstat(metadataPath)

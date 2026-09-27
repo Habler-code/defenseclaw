@@ -1,6 +1,8 @@
 {
   "darwin": {
     "managed_default": "/var/run/defenseclaw/sensor-helper.sock",
+    "managed_default_with_profile_env/bogus": "/var/run/defenseclaw/sensor-helper.sock",
+    "managed_default_with_profile_env/secure_client": "/var/run/defenseclaw/sensor-helper.sock",
     "managed_with_env_override": "/var/run/defenseclaw/sensor-helper.sock",
     "socket_env_var": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
     "socket_file_name": "sensor-helper.sock",
@@ -9,6 +11,8 @@
   },
   "windows": {
     "managed_default": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock",
+    "managed_default_with_profile_env/bogus": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock",
+    "managed_default_with_profile_env/secure_client": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock",
     "managed_with_env_override": "C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock",
     "socket_env_var": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
     "socket_file_name": "sensor-helper.sock",

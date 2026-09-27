@@ -1,0 +1,161 @@
+{
+  "administrator_standalone_record_install": {
+    "action": "install",
+    "error": "invalid arguments: the standalone profile has no CMID credential broker; omit --broker-binary",
+    "ignored_records": "0"
+  },
+  "administrator_standalone_record_status": {
+    "action": "status",
+    "error": "profile_conflict: both Secure Client and standalone enterprise deployments are recorded on this host",
+    "ignored_records": "0"
+  },
+  "certification_scope": {
+    "action": "install",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "config_pins_secure_client": {
+    "action": "upgrade",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "explicit_secure_client": {
+    "action": "install",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "fresh_install": {
+    "action": "install",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "fresh_install_deferred_config": {
+    "action": "install",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "fresh_status": {
+    "action": "status",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "installed_reconcile": {
+    "action": "reconcile",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "installed_refuses_standalone_request": {
+    "action": "install",
+    "error": "profile_conflict: this host carries a secure_client enterprise deployment; install of the standalone profile is refused because the profiles share service names"
+  },
+  "installed_repair": {
+    "action": "repair",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "installed_status": {
+    "action": "status",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "installed_uninstall": {
+    "action": "uninstall",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "installed_upgrade": {
+    "action": "upgrade",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "installed_verify": {
+    "action": "verify",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "planted_standalone_file_install": {
+    "action": "install",
+    "ignored_records": "1",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "planted_standalone_file_status_standard_user": {
+    "action": "status",
+    "ignored_records": "1",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "planted_standalone_file_upgrade": {
+    "action": "upgrade",
+    "ignored_records": "1",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "planted_standalone_folder_install": {
+    "action": "install",
+    "ignored_records": "1",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "planted_standalone_folder_status_standard_user": {
+    "action": "status",
+    "ignored_records": "1",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "planted_standalone_folder_uninstall": {
+    "action": "uninstall",
+    "ignored_records": "1",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "refuses_ensure": {
+    "action": "ensure",
+    "error": "invalid arguments: ensure is available only for the standalone profile"
+  },
+  "refuses_standalone_trust_flags": {
+    "action": "install",
+    "error": "invalid arguments: --trust-mode, --payload-manifest, --allowed-signer, and --product-version apply only to the standalone profile"
+  },
+  "refuses_unknown_profile": {
+    "action": "install",
+    "error": "invalid arguments: --profile must be secure_client or standalone"
+  },
+  "secure_client_record_verify": {
+    "action": "verify",
+    "ignored_records": "0",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "tombstone_reinstall": {
+    "action": "install",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  },
+  "unreadable_record_status": {
+    "action": "status",
+    "product_version": "",
+    "profile": "secure_client",
+    "trust_mode": ""
+  }
+}

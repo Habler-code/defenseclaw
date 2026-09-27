@@ -150,11 +150,172 @@
     "users_sid": "S-1-5-32-545"
   },
   "cross_profile_records": {
+    "administrator_standalone_record": "refused: profile_conflict: a standalone DefenseClaw enterprise deployment exists (%ProgramData%\\Cisco\\DefenseClaw\\install\\deployment.json); uninstall it before installing the Secure Client profile",
     "no_standalone_record": "allowed",
+    "planted_standalone_folder": "allowed",
+    "planted_standalone_folder_probe": {
+      "installed": false,
+      "untrusted": false
+    },
     "planted_standalone_record": "allowed",
     "planted_standalone_record_probe": {
       "installed": false,
       "untrusted": true
+    }
+  },
+  "deployment_metadata": {
+    "new_installed": {
+      "agent_application_control_attestation_path": "%GoldenScratch%\\AgentApplicationControlAttestationPath",
+      "agent_application_control_attestation_sha256": "6648fddc14ad52d5c754df5c9f7151897eb5176d90658dc5064a23f6facc6995",
+      "agent_application_control_enforced": true,
+      "agent_application_control_prerequisite": "wdac_or_applocker_approved_agent_client_rules",
+      "approved_agent_clients_enforced": true,
+      "broker_account": "LocalSystem",
+      "broker_auth_key_path": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\cmid-broker\\broker-auth.key",
+      "broker_pipe": "\\\\.\\pipe\\DefenseClawCMIDBroker",
+      "broker_service": "DefenseClawCMIDBroker",
+      "claude_approved_client_enforced": true,
+      "claude_effective_policy_verified": true,
+      "claude_minimum_client_version": "2.1.152",
+      "claude_target_enabled": true,
+      "codex_approved_client_enforced": true,
+      "codex_machine_policy_managed": true,
+      "codex_machine_policy_parent": "%ProgramData%\\OpenAI\\Codex",
+      "codex_machine_policy_parent_preserved_on_uninstall": true,
+      "codex_machine_policy_path": "%GoldenScratch%\\CodexMachinePolicyPath",
+      "codex_machine_policy_sha256": "e27d63c034f2545bd1d2059f16e4f39e82c52cbd4f64443b47f59dce6f3eb6bc",
+      "codex_managed_hooks_directory": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin",
+      "codex_managed_hooks_state_path": "%GoldenScratch%\\CodexManagedHooksStatePath",
+      "codex_requirements_acl_backup_path": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\install\\codex-requirements-acl-backup.json",
+      "codex_requirements_ownership_path": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\install\\codex-requirements-ownership.json",
+      "codex_target_enabled": true,
+      "core_hardening_certification": false,
+      "cursor_target_enabled": false,
+      "deployment_mode": "managed_enterprise",
+      "external_security_prerequisites_satisfied": true,
+      "gateway_account": "NT SERVICE\\DefenseClawGateway",
+      "gateway_service": "DefenseClawGateway",
+      "guardian_account": "LocalSystem",
+      "guardian_service": "DefenseClawHookGuardian",
+      "hashes": {
+        "acp": "9e67e3d421c37f83fdd636a5bb52f4ad118695590354e6a451e0d819485a3077",
+        "broker": "cff8181f4a42373627986262220c257858772b43772aeccc2323b79703658838",
+        "cli": "7d2e3864acd1eaa63912201fdf3d2fa2adc9caddba86a15d323d959ac9fae2f9",
+        "gateway": "cc3d39cd9418e287b120dcce2d1755e73992f728d8bce9de1153118e8a1c65a3",
+        "hook": "00ef619bd6ee0aed748eb06c0364a5a134e5f02098fa5c0601da4b227c9c6c5f",
+        "installer": "81b0efabaec5d6d4f596cbebdb4436f201e5a045f3d5691597370c2f399c90fd",
+        "module": "a8fc20e8c826a66a826347738df42e0590def0315beb69d9d676f79b8660cc4c",
+        "sensor_helper": "de5e029b72dff2e18254f83eda86fa09f9075e762fa72f94579d5a40f5642d98"
+      },
+      "install_root": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw",
+      "installed": true,
+      "managed_hooks_activation": {
+        "deployment_generation_id": "0123456789abcdef0123456789abcdef",
+        "manifest_sha256": "abababababababababababababababababababababababababababababababab",
+        "schema_version": 1,
+        "state": "activated",
+        "target_count": 2
+      },
+      "managed_hooks_teardown_journal_path": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\install\\managed-hooks-teardown-journal.json",
+      "provider_library_path": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll",
+      "schema_version": 1,
+      "security_complete": true,
+      "state_root": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw",
+      "uninstalled_at": null,
+      "updated_at": "<utc-round-trip-timestamp>"
+    },
+    "new_tombstone": {
+      "agent_application_control_attestation_path": "%GoldenScratch%\\AgentApplicationControlAttestationPath",
+      "agent_application_control_attestation_sha256": "",
+      "agent_application_control_enforced": false,
+      "agent_application_control_prerequisite": "wdac_or_applocker_approved_agent_client_rules",
+      "approved_agent_clients_enforced": false,
+      "broker_account": "LocalSystem",
+      "broker_auth_key_path": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\cmid-broker\\broker-auth.key",
+      "broker_pipe": "\\\\.\\pipe\\DefenseClawCMIDBroker",
+      "broker_service": "DefenseClawCMIDBroker",
+      "claude_approved_client_enforced": false,
+      "claude_effective_policy_verified": false,
+      "claude_minimum_client_version": "2.1.152",
+      "claude_target_enabled": false,
+      "codex_approved_client_enforced": false,
+      "codex_machine_policy_managed": false,
+      "codex_machine_policy_parent": "%ProgramData%\\OpenAI\\Codex",
+      "codex_machine_policy_parent_preserved_on_uninstall": true,
+      "codex_machine_policy_path": "%GoldenScratch%\\CodexMachinePolicyPath",
+      "codex_machine_policy_sha256": "",
+      "codex_managed_hooks_directory": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin",
+      "codex_managed_hooks_state_path": "%GoldenScratch%\\CodexManagedHooksStatePath",
+      "codex_requirements_acl_backup_path": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\install\\codex-requirements-acl-backup.json",
+      "codex_requirements_ownership_path": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\install\\codex-requirements-ownership.json",
+      "codex_target_enabled": false,
+      "core_hardening_certification": false,
+      "cursor_target_enabled": false,
+      "deployment_mode": "managed_enterprise",
+      "external_security_prerequisites_satisfied": false,
+      "gateway_account": "NT SERVICE\\DefenseClawGateway",
+      "gateway_service": "DefenseClawGateway",
+      "guardian_account": "LocalSystem",
+      "guardian_service": "DefenseClawHookGuardian",
+      "hashes": {
+        "acp": "9e67e3d421c37f83fdd636a5bb52f4ad118695590354e6a451e0d819485a3077",
+        "broker": "cff8181f4a42373627986262220c257858772b43772aeccc2323b79703658838",
+        "cli": "7d2e3864acd1eaa63912201fdf3d2fa2adc9caddba86a15d323d959ac9fae2f9",
+        "gateway": "cc3d39cd9418e287b120dcce2d1755e73992f728d8bce9de1153118e8a1c65a3",
+        "hook": "00ef619bd6ee0aed748eb06c0364a5a134e5f02098fa5c0601da4b227c9c6c5f",
+        "installer": "81b0efabaec5d6d4f596cbebdb4436f201e5a045f3d5691597370c2f399c90fd",
+        "module": "a8fc20e8c826a66a826347738df42e0590def0315beb69d9d676f79b8660cc4c",
+        "sensor_helper": "de5e029b72dff2e18254f83eda86fa09f9075e762fa72f94579d5a40f5642d98"
+      },
+      "install_root": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw",
+      "installed": false,
+      "managed_hooks_activation": {
+        "deployment_generation_id": "0123456789abcdef0123456789abcdef",
+        "manifest_sha256": "abababababababababababababababababababababababababababababababab",
+        "schema_version": 1,
+        "state": "activated",
+        "target_count": 2
+      },
+      "managed_hooks_teardown_journal_path": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\install\\managed-hooks-teardown-journal.json",
+      "provider_library_path": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll",
+      "schema_version": 1,
+      "security_complete": false,
+      "state_root": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw",
+      "uninstalled_at": "<utc-round-trip-timestamp>",
+      "updated_at": "<utc-round-trip-timestamp>"
+    },
+    "read_record_naming_secure_client": {
+      "installed": true,
+      "layout_certification_codex_home": "",
+      "layout_claude_target_enabled": true,
+      "layout_codex_target_enabled": true,
+      "layout_core_hardening_certification": false,
+      "layout_cursor_target_enabled": false,
+      "layout_provider_library_path": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll",
+      "result": "read"
+    },
+    "read_record_naming_standalone": {
+      "result": "refused: profile_conflict: deployment metadata records the standalone profile but this lifecycle runs the secure_client profile"
+    },
+    "read_secure_client_record": {
+      "installed": true,
+      "layout_certification_codex_home": "",
+      "layout_claude_target_enabled": true,
+      "layout_codex_target_enabled": true,
+      "layout_core_hardening_certification": false,
+      "layout_cursor_target_enabled": false,
+      "layout_provider_library_path": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll",
+      "result": "read"
+    },
+    "read_secure_client_tombstone": {
+      "installed": false,
+      "layout_certification_codex_home": "",
+      "layout_claude_target_enabled": false,
+      "layout_codex_target_enabled": false,
+      "layout_core_hardening_certification": false,
+      "layout_cursor_target_enabled": false,
+      "layout_provider_library_path": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll",
+      "result": "read"
     }
   },
   "gateway_service_sid": "S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274",
@@ -230,6 +391,30 @@
       "%ProgramData%\\Cisco\\Cisco Secure Client"
     ],
     "TransactionsDirectory": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\install\\transactions"
+  },
+  "profile_helpers": {
+    "agent_application_control_attestation_schema_version": 2,
+    "broker_enabled": true,
+    "claude_minimum_client_version": "2.1.152",
+    "default_profile": "SecureClient",
+    "default_roots_are_secure_client": true,
+    "gateway_dependencies": {
+      "with_sensor_helper": "DefenseClawCMIDBroker/DefenseClawSensorHelper",
+      "without_sensor_helper": "DefenseClawCMIDBroker"
+    },
+    "layout_broker_enabled": true,
+    "profile_from_lifecycle_directory": "SecureClient",
+    "roots": {
+      "BrokerEnabled": true,
+      "CertificationInstallBase": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw-Cert",
+      "CertificationStateBase": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw-Cert",
+      "InstallRoot": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw",
+      "LifecycleDirectory": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw-Lifecycle",
+      "ManagedIPCDirectory": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc",
+      "Profile": "SecureClient",
+      "StateRoot": "%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw"
+    },
+    "standalone_profile": false
   },
   "rendered_config": {
     "action_codex_claudecode_cursor": "config_version: 8\ndeployment_mode: managed_enterprise\n\nobservability:\n  defaults:\n    redaction_profile: sensitive\n\ngateway:\n  api_bind: 127.0.0.1\n  api_port: 18970\n  watcher:\n    enabled: false\n\nguardrail:\n  enabled: true\n  rule_pack_dir: \"\"\n  mode: action\n  scanner_mode: both\n  detection_strategy: regex_only\n  judge:\n    enabled: false\n  connector: codex\n  connectors:\n    codex:\n      enabled: true\n      mode: action\n    claudecode:\n      enabled: true\n      mode: action\n    cursor:\n      enabled: true\n      mode: action\n\nai_discovery:\n  enabled: true\n\nasset_policy:\n  enabled: false\n\napplication_protection:\n  enabled: false\n",
@@ -307,6 +492,728 @@
     "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME=DefenseClawGateway",
     "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\\DefenseClawGateway"
   ],
+  "service_install_plan": {
+    "create_automatic": [
+      {
+        "arguments": [
+          "create",
+          "DefenseClawCMIDBroker",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-cmid-broker.exe\" service --service-name DefenseClawCMIDBroker --gateway-service-name DefenseClawGateway --pipe-name \\\\.\\pipe\\DefenseClawCMIDBroker --auth-key \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\cmid-broker\\broker-auth.key\" --cmid-library \"%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll\" --log \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\logs\\cmid-broker\\cmid-broker.log\"",
+          "type=",
+          "own",
+          "start=",
+          "auto",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Credential Broker"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawGateway",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\"",
+          "type=",
+          "own",
+          "start=",
+          "auto",
+          "error=",
+          "normal",
+          "depend=",
+          "DefenseClawCMIDBroker",
+          "obj=",
+          "NT SERVICE\\DefenseClawGateway",
+          "DisplayName=",
+          "DefenseClaw Enterprise Gateway"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawHookGuardian",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\" enterprise hooks watch --manifest \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\hook-guardian\\targets.yaml\" --interval 1m",
+          "type=",
+          "own",
+          "start=",
+          "auto",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Enterprise Hook Guardian"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawHookEnumerator",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\" enterprise windows enumerate --manifest \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\hook-guardian\\targets.yaml\" --interval 5m",
+          "type=",
+          "own",
+          "start=",
+          "auto",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Enterprise Hook Enumerator"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawGateway",
+          "restricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawCMIDBroker",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawHookGuardian",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawHookEnumerator",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawGateway",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawCMIDBroker",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawHookGuardian",
+          "SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawHookEnumerator",
+          "SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "failure",
+          "DefenseClawCMIDBroker",
+          "reset=",
+          "86400",
+          "actions=",
+          "restart/5000/restart/15000/restart/60000"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "failureflag",
+          "DefenseClawCMIDBroker",
+          "1"
+        ],
+        "command": "sc.exe"
+      }
+    ],
+    "create_deferred": [
+      {
+        "arguments": [
+          "create",
+          "DefenseClawCMIDBroker",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-cmid-broker.exe\" service --service-name DefenseClawCMIDBroker --gateway-service-name DefenseClawGateway --pipe-name \\\\.\\pipe\\DefenseClawCMIDBroker --auth-key \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\cmid-broker\\broker-auth.key\" --cmid-library \"%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll\" --log \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\logs\\cmid-broker\\cmid-broker.log\"",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Credential Broker"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawGateway",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\"",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "DefenseClawCMIDBroker",
+          "obj=",
+          "NT SERVICE\\DefenseClawGateway",
+          "DisplayName=",
+          "DefenseClaw Enterprise Gateway"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawHookGuardian",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\" enterprise hooks watch --manifest \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\hook-guardian\\targets.yaml\" --interval 1m",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Enterprise Hook Guardian"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawHookEnumerator",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\" enterprise windows enumerate --manifest \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\hook-guardian\\targets.yaml\" --interval 5m",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Enterprise Hook Enumerator"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawGateway",
+          "restricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawCMIDBroker",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawHookGuardian",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawHookEnumerator",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawGateway",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawCMIDBroker",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawHookGuardian",
+          "SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawHookEnumerator",
+          "SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "failure",
+          "DefenseClawCMIDBroker",
+          "reset=",
+          "86400",
+          "actions=",
+          "restart/5000/restart/15000/restart/60000"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "failureflag",
+          "DefenseClawCMIDBroker",
+          "1"
+        ],
+        "command": "sc.exe"
+      }
+    ],
+    "create_deferred_with_sensor_helper": [
+      {
+        "arguments": [
+          "create",
+          "DefenseClawCMIDBroker",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-cmid-broker.exe\" service --service-name DefenseClawCMIDBroker --gateway-service-name DefenseClawGateway --pipe-name \\\\.\\pipe\\DefenseClawCMIDBroker --auth-key \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\cmid-broker\\broker-auth.key\" --cmid-library \"%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll\" --log \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\logs\\cmid-broker\\cmid-broker.log\"",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Credential Broker"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawSensorHelper",
+          "binPath=",
+          "\"%WINDIR%\\System32\\sc.exe\" --managed-enterprise",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Sensor Helper"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "DefenseClawSensorHelper",
+          "DefenseClawGateway"
+        ],
+        "command": "Set-DefenseClawSensorHelperServiceEnvironment"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawGateway",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\"",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "DefenseClawCMIDBroker/DefenseClawSensorHelper",
+          "obj=",
+          "NT SERVICE\\DefenseClawGateway",
+          "DisplayName=",
+          "DefenseClaw Enterprise Gateway"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawHookGuardian",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\" enterprise hooks watch --manifest \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\hook-guardian\\targets.yaml\" --interval 1m",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Enterprise Hook Guardian"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "create",
+          "DefenseClawHookEnumerator",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\" enterprise windows enumerate --manifest \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\hook-guardian\\targets.yaml\" --interval 5m",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Enterprise Hook Enumerator"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawGateway",
+          "restricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawCMIDBroker",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawHookGuardian",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawHookEnumerator",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawSensorHelper",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawGateway",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawCMIDBroker",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawSensorHelper",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawHookGuardian",
+          "SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawHookEnumerator",
+          "SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "failure",
+          "DefenseClawCMIDBroker",
+          "reset=",
+          "86400",
+          "actions=",
+          "restart/5000/restart/15000/restart/60000"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "failureflag",
+          "DefenseClawCMIDBroker",
+          "1"
+        ],
+        "command": "sc.exe"
+      }
+    ],
+    "reconfigure_deferred": [
+      {
+        "arguments": [
+          "config",
+          "DefenseClawCMIDBroker",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-cmid-broker.exe\" service --service-name DefenseClawCMIDBroker --gateway-service-name DefenseClawGateway --pipe-name \\\\.\\pipe\\DefenseClawCMIDBroker --auth-key \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\cmid-broker\\broker-auth.key\" --cmid-library \"%ProgramFiles%\\Cisco\\Cisco Secure Client\\CM\\5.1.0.0\\CMID\\1.0.0.0\\x64\\cmidapi.dll\" --log \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\logs\\cmid-broker\\cmid-broker.log\"",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Credential Broker"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "config",
+          "DefenseClawGateway",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\"",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "DefenseClawCMIDBroker",
+          "obj=",
+          "NT SERVICE\\DefenseClawGateway",
+          "DisplayName=",
+          "DefenseClaw Enterprise Gateway"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "config",
+          "DefenseClawHookGuardian",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\" enterprise hooks watch --manifest \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\hook-guardian\\targets.yaml\" --interval 1m",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Enterprise Hook Guardian"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "config",
+          "DefenseClawHookEnumerator",
+          "binPath=",
+          "\"%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-gateway.exe\" enterprise windows enumerate --manifest \"%ProgramData%\\Cisco\\Cisco Secure Client\\DefenseClaw\\hook-guardian\\targets.yaml\" --interval 5m",
+          "type=",
+          "own",
+          "start=",
+          "disabled",
+          "error=",
+          "normal",
+          "depend=",
+          "/",
+          "obj=",
+          "LocalSystem",
+          "DisplayName=",
+          "DefenseClaw Enterprise Hook Enumerator"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawGateway",
+          "restricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawCMIDBroker",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawHookGuardian",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "sidtype",
+          "DefenseClawHookEnumerator",
+          "unrestricted"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawGateway",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawCMIDBroker",
+          "SeChangeNotifyPrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawHookGuardian",
+          "SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "privs",
+          "DefenseClawHookEnumerator",
+          "SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "failure",
+          "DefenseClawCMIDBroker",
+          "reset=",
+          "86400",
+          "actions=",
+          "restart/5000/restart/15000/restart/60000"
+        ],
+        "command": "sc.exe"
+      },
+      {
+        "arguments": [
+          "failureflag",
+          "DefenseClawCMIDBroker",
+          "1"
+        ],
+        "command": "sc.exe"
+      }
+    ]
+  },
   "service_names": [
     "DefenseClawGateway",
     "DefenseClawCMIDBroker",

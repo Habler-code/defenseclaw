@@ -37,7 +37,15 @@ func TestSecureClientGoldenIPCSocket(t *testing.T) {
 		"socket_file_name": SocketFileName,
 		"socket_env_var":   SocketEnvVar,
 	}
+	// Secure Client services carry no enterprise profile pin; a value other
+	// than standalone must not move the socket either.
+	t.Setenv(managed.EnterpriseProfileEnv, "")
 	record["managed_path"] = ResolveSocketPath(managedCfg)
+	for _, pin := range []string{managed.ProfileSecureClient, "bogus"} {
+		t.Setenv(managed.EnterpriseProfileEnv, pin)
+		record["managed_path_with_profile_env/"+pin] = ResolveSocketPath(managedCfg)
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, "")
 	t.Setenv(SocketEnvVar, "/tmp/redirected.sock")
 	record["managed_path_with_env_override"] = ResolveSocketPath(managedCfg)
 	record["unmanaged_path_with_env_override"] = ResolveSocketPath(unmanagedCfg)

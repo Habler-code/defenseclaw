@@ -13,6 +13,7 @@ package acquire
 import (
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -21,12 +22,19 @@ import (
 // See testdata/secure_client_golden/README.md.
 func TestSecureClientGoldenSensorSocket(t *testing.T) {
 	testenv.SkipUnlessSecureClientPlatform(t)
+	// Secure Client services carry no enterprise profile pin.
+	t.Setenv(managed.EnterpriseProfileEnv, "")
 	record := map[string]string{
 		"socket_file_name":                 SocketFileName,
 		"socket_env_var":                   SocketEnvVar,
 		"managed_default":                  DefaultSocketPath("/opt/cisco/secureclient/defenseclaw/runtime", true),
 		"unmanaged_default_under_data_dir": DefaultSocketPath("/data", false),
 	}
+	for _, pin := range []string{managed.ProfileSecureClient, "bogus"} {
+		t.Setenv(managed.EnterpriseProfileEnv, pin)
+		record["managed_default_with_profile_env/"+pin] = DefaultSocketPath("/opt/cisco/secureclient/defenseclaw/runtime", true)
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, "")
 	t.Setenv(SocketEnvVar, "/tmp/redirected-sensor.sock")
 	record["managed_with_env_override"] = DefaultSocketPath("/opt/cisco/secureclient/defenseclaw/runtime", true)
 	record["unmanaged_with_env_override"] = DefaultSocketPath("/data", false)

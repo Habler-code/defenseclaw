@@ -262,15 +262,74 @@ func TestLoadEnterprisePayloadAcceptsStandaloneFlavors(t *testing.T) {
 }
 
 func TestParseEnterpriseSetupEnsureAndSigners(t *testing.T) {
-	opts, _, err := parseEnterpriseSetupOptions([]string{"/ensure", "config=C:\\c.yaml", "allowedsigners=" + strings.Repeat("AB", 32)})
+	signer := "allowedsigners=" + strings.Repeat("AB", 32)
+	opts, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", "config=C:\\c.yaml", signer})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.Action != "ensure" || opts.Config != `C:\c.yaml` {
+	if opts.Action != "ensure" || opts.Config != `C:\c.yaml` || opts.AllowedSigners != strings.Repeat("AB", 32) {
 		t.Fatalf("opts %+v", opts)
 	}
-	if _, _, err := parseEnterpriseSetupOptions([]string{"/ensure", "--allowed-signers=nope"}); err == nil {
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", "--allowed-signers=nope"}); err == nil {
 		t.Fatal("invalid signer accepted")
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/status", "--no-start"}); err == nil ||
+		err.Error() != "--no-start is valid only with install, upgrade, repair, or ensure" {
+		t.Fatalf("standalone --no-start refusal = %v", err)
+	}
+}
+
+// The Secure Client Setup keeps its own action set and flags: ensure and
+// --allowed-signers are argument errors there, worded as before the
+// standalone flavor existed.
+func TestSecureClientSetupRejectsStandaloneArguments(t *testing.T) {
+	for arguments, want := range map[string]string{
+		"/ensure":         `unexpected positional argument "/ensure"`,
+		"--action=ensure": "--action must be install, upgrade, repair, reconcile, status, verify, or uninstall",
+		"--allowed-signers=" + strings.Repeat("ab", 32): "flag provided but not defined: -allowed-signers",
+	} {
+		_, _, err := parseEnterpriseSetupOptions([]string{arguments})
+		if err == nil || err.Error() != want {
+			t.Errorf("parseEnterpriseSetupOptions(%q) error = %v, want %q", arguments, err, want)
+		}
+	}
+	_, _, err := parseEnterpriseSetupOptions([]string{"/install", "--config=a", "--manifest=b", "ALLOWEDSIGNERS=" + strings.Repeat("ab", 32)})
+	if err == nil || !strings.HasPrefix(err.Error(), "unexpected positional argument") {
+		t.Fatalf("Secure Client ALLOWEDSIGNERS= must stay an unknown argument: %v", err)
+	}
+}
+
+func TestRunEnterpriseSetupHelpMatchesEmbeddedFlavor(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	for _, standalone := range []bool{false, true} {
+		enterpriseSetupStandaloneFlavor = func() bool { return standalone }
+		var stdout, stderr, want bytes.Buffer
+		if code := runEnterpriseSetup([]string{"/?"}, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+			t.Fatalf("standalone=%v: help exit=%d stderr=%q", standalone, code, stderr.String())
+		}
+		writeEnterpriseSetupUsageForFlavor(&want, standalone)
+		if stdout.String() != want.String() {
+			t.Fatalf("standalone=%v: usage = %q, want %q", standalone, stdout.String(), want.String())
+		}
+		if got := strings.Contains(stdout.String(), "ensure"); got != standalone {
+			t.Fatalf("standalone=%v: usage lists ensure = %v", standalone, got)
+		}
+	}
+	var secureClient bytes.Buffer
+	writeEnterpriseSetupUsage(&secureClient)
+	if want := enterpriseSetupArtifactName + " --action <install|reconcile|repair|status|uninstall|upgrade|verify> [options]\n" +
+		"Install requires --config <config.yaml> and --manifest <targets.yaml>.\n" +
+		"Production paths and service names are fixed by the enterprise lifecycle.\n"; secureClient.String() != want {
+		t.Fatalf("Secure Client usage = %q", secureClient.String())
+	}
+}
+
+func TestEmbeddedSetupFlavorDefaultsToSecureClient(t *testing.T) {
+	// The source tree embeds only the placeholder, which is not a
+	// standalone manifest.
+	if embeddedEnterpriseSetupStandalone() {
+		t.Fatal("a Setup without a standalone manifest must parse as the Secure Client Setup")
 	}
 }
 
