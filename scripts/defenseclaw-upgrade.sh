@@ -80,7 +80,8 @@ dc_handoff() {
                 return 1
             fi
         fi
-        set --
+        # The installer installs its own stamped version; say so explicitly.
+        set -- --version "${tag}"
     fi
     expected="$(awk '$2=="install.sh"||$2=="*install.sh"{print $1}' "${tmp}/checksums.txt")"
     if [ -z "${expected}" ] || [ "${expected}" != "$( (sha256sum "${tmp}/install.sh" 2>/dev/null || shasum -a 256 "${tmp}/install.sh") | awk '{print $1}')" ]; then
