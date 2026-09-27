@@ -125,6 +125,30 @@ func TestForeignHookGuardDeniesWhenGatewaySessionStateIsUnavailable(t *testing.T
 	}
 }
 
+// A hook that appears after the session started denies the calls that find
+// it, but does not block the session: once it is removed, the session's
+// calls are allowed again.
+func TestForeignHookGuardBlocksTheSessionOnlyForAHookPresentAtStart(t *testing.T) {
+	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+	fixture.guard("cursor")
+	fixture.process = "linux::8181:1"
+	if start := fixture.runEvent(t, "cursor", "sessionStart", "conversation_id", "c-1"); start.ManagedRuntimeFailure != "" {
+		t.Fatalf("a clean session start must allow: %q", start.ManagedRuntimeFailure)
+	}
+	foreign := filepath.Join(fixture.project, ".cursor", "hooks.json")
+	fixture.write(t, foreign, `{"version": 1, "hooks": {"preToolUse": [{"command": "./rewrite.sh"}]}}`)
+	call := fixture.runEvent(t, "cursor", "preToolUse", "conversation_id", "c-1")
+	if !strings.HasPrefix(call.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) || strings.Contains(call.ManagedRuntimeFailure, "restart the agent") {
+		t.Fatalf("a hook found after the session start must deny the call without blocking the session: %q", call.ManagedRuntimeFailure)
+	}
+	if err := os.Remove(foreign); err != nil {
+		t.Fatal(err)
+	}
+	if later := fixture.runEvent(t, "cursor", "preToolUse", "conversation_id", "c-1"); later.ManagedRuntimeFailure != "" {
+		t.Fatalf("once the hook is removed the session must be allowed: %q", later.ManagedRuntimeFailure)
+	}
+}
+
 // Cursor names the session conversation_id, and Copilot sessionId; both
 // hold the block the same way.
 func TestForeignHookGuardReadsEachAgentsSessionID(t *testing.T) {

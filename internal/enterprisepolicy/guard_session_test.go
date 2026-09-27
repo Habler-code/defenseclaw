@@ -33,6 +33,8 @@ type sessionHarness struct {
 	home    string
 	now     time.Time
 	process string
+	// stateDir, when set, is the gateway store (SessionUpdate.StateDir).
+	stateDir string
 }
 
 func newSessionHarness(t *testing.T) *sessionHarness {
@@ -44,6 +46,7 @@ func (h *sessionHarness) apply(session string, start bool, decision GuardDecisio
 	h.now = h.now.Add(time.Second)
 	return ApplyForeignHookSession(SessionUpdate{
 		AccountHome:  h.home,
+		StateDir:     h.stateDir,
 		Key:          SessionKey{Connector: "claudecode", Session: session, Process: h.process},
 		SessionStart: start,
 		Decision:     decision,
@@ -51,9 +54,16 @@ func (h *sessionHarness) apply(session string, start bool, decision GuardDecisio
 	})
 }
 
+func (h *sessionHarness) path(kind, id string) string {
+	if h.stateDir != "" {
+		return sessionPathInDir(h.stateDir, "claudecode", kind, id)
+	}
+	return SessionPath(h.home, "claudecode", kind, id)
+}
+
 func (h *sessionHarness) record(kind, id string) SessionRecord {
 	h.t.Helper()
-	data, err := os.ReadFile(SessionPath(h.home, "claudecode", kind, id))
+	data, err := os.ReadFile(h.path(kind, id))
 	if err != nil {
 		h.t.Fatalf("read %s record %q: %v", kind, id, err)
 	}
@@ -154,7 +164,7 @@ func TestSessionStateFollowsTheAgentProcess(t *testing.T) {
 func TestSessionStateUsesTheProcessWithoutASessionID(t *testing.T) {
 	h := newSessionHarness(t)
 	h.process = runtime.GOOS + "::99:1"
-	h.apply("", false, sessionDeny("/r/.github/hooks/x.json", "cc33"))
+	h.apply("", true, sessionDeny("/r/.github/hooks/x.json", "cc33"))
 	if later := h.apply("", false, GuardDecision{}); !later.Deny {
 		t.Fatalf("the agent process keeps the block: %+v", later)
 	}
@@ -220,6 +230,18 @@ func TestSessionStateDeniesOnAnUnreadableRecord(t *testing.T) {
 	if decision := h.apply("s-1", false, GuardDecision{}); !decision.Deny || !strings.Contains(decision.Reason, "could not verify") {
 		t.Fatalf("a corrupt record must deny: %+v", decision)
 	}
+	// It is not a foreign hook: the agent process is not blocked for it.
+	h.process = runtime.GOOS + "::31:1"
+	if decision := h.apply("s-1", false, GuardDecision{}); !decision.Deny {
+		t.Fatalf("a corrupt record must deny: %+v", decision)
+	}
+	if _, err := os.Stat(h.path(sessionKindProcess, h.process)); !os.IsNotExist(err) {
+		t.Fatalf("an unreadable record must not be carried to the agent process: %v", err)
+	}
+	if call := h.apply("s-2", false, GuardDecision{}); call.Deny {
+		t.Fatalf("another session of the process is not blocked by the unreadable record: %+v", call)
+	}
+	h.process = ""
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
@@ -247,29 +269,36 @@ func TestSessionStateDeniesOnAnUnreadableRecord(t *testing.T) {
 	}
 }
 
-// Records untouched for the retention period are pruned at a session start;
-// a blocked record that keeps denying is refreshed and survives.
+// Records written more than the retention period ago are pruned at a
+// session start. A denial does not refresh a blocked record.
 func TestSessionStatePrunesOldRecords(t *testing.T) {
 	h := newSessionHarness(t)
 	h.apply("old", true, GuardDecision{})
 	h.apply("blocked", true, sessionDeny("/r/x.json", "ee55"))
+	h.apply("recent", true, GuardDecision{})
 	old := SessionPath(h.home, "claudecode", sessionKindSession, "old")
 	blocked := SessionPath(h.home, "claudecode", sessionKindSession, "blocked")
+	recent := SessionPath(h.home, "claudecode", sessionKindSession, "recent")
 	stale := h.now.Add(-sessionRecordTTL - time.Hour)
-	for _, path := range []string{old, blocked} {
-		if err := os.Chtimes(path, stale, stale); err != nil {
+	for path, when := range map[string]time.Time{old: stale, blocked: stale, recent: h.now} {
+		if err := os.Chtimes(path, when, when); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if decision := h.apply("blocked", false, GuardDecision{}); !decision.Deny {
-		t.Fatalf("the blocked session still denies: %+v", decision)
+		t.Fatalf("the block lasts from BlockedAt, not from the file time: %+v", decision)
+	}
+	if info, err := os.Stat(blocked); err != nil || !info.ModTime().Equal(stale) {
+		t.Fatalf("a denial must not refresh the blocked record: %v", err)
 	}
 	h.apply("new", true, GuardDecision{})
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Fatalf("an untouched old record must be pruned: %v", err)
+	for _, path := range []string{old, blocked} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s: a record past the retention period must be pruned: %v", filepath.Base(path), err)
+		}
 	}
-	if _, err := os.Stat(blocked); err != nil {
-		t.Fatalf("a blocked record that denied recently must survive: %v", err)
+	if _, err := os.Stat(recent); err != nil {
+		t.Fatalf("a recent record must survive: %v", err)
 	}
 }
 
@@ -399,4 +428,86 @@ func TestSessionStateBlockedAtDoesNotChangeOnRepeatedDenials(t *testing.T) {
 	if later := h.record(sessionKindSession, "s-1").BlockedAt; later != blockedAt {
 		t.Fatalf("repeated denials must keep the block time: was %s, now %s", blockedAt, later)
 	}
+}
+
+// sessionStores runs a test against the account-home store and the gateway
+// store (SessionUpdate.StateDir).
+func sessionStores(t *testing.T, run func(t *testing.T, h *sessionHarness)) {
+	for _, store := range []string{"account-home", "gateway"} {
+		t.Run(store, func(t *testing.T) {
+			h := newSessionHarness(t)
+			if store == "gateway" {
+				h.stateDir = filepath.Join(t.TempDir(), "records")
+			}
+			run(t, h)
+		})
+	}
+}
+
+// Only a session start that finds an unapproved hook blocks the session. A
+// hook found later denies the calls that find it, until it is removed.
+func TestSessionStateBlocksOnlyForAHookPresentAtSessionStart(t *testing.T) {
+	sessionStores(t, func(t *testing.T, h *sessionHarness) {
+		h.process = runtime.GOOS + "::666:6"
+		if start := h.apply("s-1", true, GuardDecision{}); start.Deny {
+			t.Fatalf("a clean session start allows: %+v", start)
+		}
+		later := sessionDeny("/r/.cursor/hooks.json", "ff66")
+		if call := h.apply("s-1", false, later); !call.Deny || strings.Contains(call.Reason, "restart the agent") {
+			t.Fatalf("a hook found after the session start denies the call without blocking the session: %+v", call)
+		}
+		for kind, id := range map[string]string{sessionKindSession: "s-1", sessionKindProcess: h.process} {
+			if record := h.record(kind, id); record.Blocked {
+				t.Fatalf("%s record: a hook found after the session start must not block: %+v", kind, record)
+			}
+		}
+		if call := h.apply("s-1", false, GuardDecision{}); call.Deny {
+			t.Fatalf("once the hook is removed the session is allowed: %+v", call)
+		}
+		// A session start with the hook present blocks the session.
+		if start := h.apply("s-2", true, later); !start.Deny || !strings.Contains(start.Reason, "restart the agent") {
+			t.Fatalf("a hook present at the session start blocks the session: %+v", start)
+		}
+		if call := h.apply("s-2", false, GuardDecision{}); !call.Deny {
+			t.Fatalf("the session that started with the hook stays blocked: %+v", call)
+		}
+	})
+}
+
+// A block lasts sessionRecordTTL from when it was recorded. Denials in
+// between neither rewrite the record nor extend the block.
+func TestSessionStateBlockExpiresAfterTheRetentionPeriod(t *testing.T) {
+	sessionStores(t, func(t *testing.T, h *sessionHarness) {
+		h.process = runtime.GOOS + "::555:5"
+		h.apply("s-1", true, sessionDeny("/r/.claude/hooks.json", "ee55"))
+		blockedAt := h.now
+		written := map[string]time.Time{}
+		for _, path := range []string{h.path(sessionKindSession, "s-1"), h.path(sessionKindProcess, h.process)} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			written[path] = info.ModTime()
+		}
+		for h.now.Sub(blockedAt) < sessionRecordTTL-12*time.Hour {
+			h.now = h.now.Add(12 * time.Hour)
+			if call := h.apply("s-1", false, GuardDecision{}); !call.Deny {
+				t.Fatalf("%v after the block the session must still be denied: %+v", h.now.Sub(blockedAt), call)
+			}
+		}
+		for path, mod := range written {
+			if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(mod) {
+				t.Fatalf("%s: a denial must not rewrite the blocked record: %v", filepath.Base(path), err)
+			}
+		}
+		h.now = blockedAt.Add(sessionRecordTTL + time.Hour)
+		if call := h.apply("s-1", false, GuardDecision{}); call.Deny {
+			t.Fatalf("the block ends %v after it was recorded: %+v", sessionRecordTTL, call)
+		}
+		for kind, id := range map[string]string{sessionKindSession: "s-1", sessionKindProcess: h.process} {
+			if record := h.record(kind, id); record.Blocked {
+				t.Fatalf("%s record: an expired block must be replaced by a clean snapshot: %+v", kind, record)
+			}
+		}
+	})
 }

@@ -66,8 +66,8 @@ var hookForeignGuardExchange = exchangeForeignHookSession
 // applyEnterpriseForeignHookGuard denies a hook invocation on a standalone
 // managed host while an unapproved hook that could rewrite the tool call
 // after DefenseClaw checks it is present in the agent's user or project
-// config, and for the rest of an agent session in which a call was denied
-// for one (the agent keeps running hooks it loaded when the session
+// config, and for the rest of an agent session that started while one was
+// present (the agent keeps running hooks it loaded when the session
 // started). It covers machine-policy (--enterprise-managed) and per-user
 // registrations alike. The denial reuses hookexec's managed fail-closed
 // path, so each connector gets its native block response carrying the
@@ -258,8 +258,8 @@ func hookForeignGuardScanBudget(connector, event string) time.Duration {
 // recognized only under the account's home: the hook's data directory and
 // $HOME come from the agent's environment (DEFENSECLAW_HOME, HOME), which
 // the user controls. With foreign_hooks remove, the result is combined
-// with the session's recorded state (a session denied once stays denied
-// until the agent restarts), and the agent's config-location environment is
+// with the session's state in the gateway (a session that started with an
+// unapproved hook stays denied until the agent restarts), and the agent's config-location environment is
 // recorded for the guardian's cleanup.
 func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, deadline time.Time) (enterprisepolicy.GuardDecision, string) {
 	accountHome := hookForeignGuardAccountHome()

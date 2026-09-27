@@ -30,9 +30,10 @@ import (
 // once per process. Checking the files on every call therefore misses a
 // foreign hook that was present when the session started and was deleted
 // afterwards. So the hook records a snapshot at SessionStart (the hash of
-// the foreign-hook state it found) and, once a call of a session was denied
-// for a foreign hook, keeps denying that session's tool calls until the
-// agent restarts.
+// the foreign-hook state it found) and, when an unapproved hook or plugin
+// was present then, keeps denying that session's tool calls until the agent
+// restarts, for at most sessionRecordTTL. A hook found later in a session,
+// or a file the scan cannot verify, denies only the call that found it.
 //
 // A snapshot is keyed twice: by the agent's session ID from the hook
 // payload, and by the agent process that runs the hook
@@ -50,13 +51,10 @@ const (
 	sessionDirName = "foreign-hook-sessions"
 	// sessionRecordLimit bounds one record.
 	sessionRecordLimit = 16 << 10
-	// sessionRecordTTL is how long an untouched record is kept. A blocked
-	// record is touched whenever it denies a call, so a long-running
-	// blocked agent keeps its record.
+	// sessionRecordTTL is how long a record is kept after it was written,
+	// and how long a block lasts after BlockedAt. A blocked record is never
+	// rewritten, so repeated denials extend neither.
 	sessionRecordTTL = 7 * 24 * time.Hour
-	// sessionTouchAfter is how old a blocked record gets before a denial
-	// refreshes it.
-	sessionTouchAfter = 24 * time.Hour
 	// sessionDirLimit bounds the records kept per user.
 	sessionDirLimit = 512
 	// sessionIDLimit bounds a session ID or process identity.
@@ -89,9 +87,9 @@ type SessionRecord struct {
 	// foreign-hook state then (ForeignHookStateHash).
 	Started string `json:"started"`
 	State   string `json:"state"`
-	// Blocked is set once a call of the session was denied for a foreign
-	// hook; Scope, Path, Digest and Reason describe the first unapproved
-	// finding of that denial.
+	// Blocked is set when the session started with an unapproved hook or
+	// plugin present; Scope, Path, Digest and Reason describe the first
+	// one, and BlockedAt is when the block was recorded.
 	Blocked   bool   `json:"blocked"`
 	BlockedAt string `json:"blocked_at,omitempty"`
 	Scope     string `json:"scope,omitempty"`
@@ -143,7 +141,7 @@ type SessionUpdate struct {
 	StateDir string
 	Key      SessionKey
 	// SessionStart marks the agent's session-start event, where the
-	// snapshot is taken.
+	// snapshot is taken and the only event that records a block.
 	SessionStart bool
 	// Decision is this invocation's scan result.
 	Decision GuardDecision
@@ -167,16 +165,20 @@ const (
 
 // ApplyForeignHookSession combines this invocation's scan with the
 // session's recorded state and returns the decision to enforce:
-//   - a denial is recorded for the session and its agent process, and its
-//     message says the block lasts until the agent restarts;
-//   - a call of a session or process that was denied earlier is denied, even
-//     when the files are clean now (the agent may still run the hook);
+//   - a session start that finds an unapproved hook or plugin is recorded
+//     as a block for the session and its agent process, and its message
+//     says the block lasts until the agent restarts;
+//   - a call of a session or process blocked earlier is denied, even when
+//     the files are clean now (the agent may still run the hook), until
+//     sessionRecordTTL after the block;
 //   - otherwise the snapshot is recorded (replaced at a session start) and
-//     the scan's own decision stands.
+//     the scan's own decision stands: a hook found after the session start,
+//     or a file the scan cannot verify, denies this call only.
 //
-// A record that exists but cannot be read counts as a denial. With StateDir
-// (the standalone gateway path), a failed read or write always denies the
-// call. The older account-home path retains its best-effort write behavior.
+// A record that exists but cannot be read denies the call without
+// recording a block. With StateDir (the standalone gateway path), a failed
+// read or write always denies the call. The account-home path writes best
+// effort.
 func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	decision := update.Decision
 	home := strings.TrimSpace(update.AccountHome)
@@ -210,12 +212,28 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		if strict && err == nil && exists && !validGatewaySessionRecord(record, key, kind) {
 			err = fmt.Errorf("invalid session record")
 		}
+		if err == nil && exists && sessionBlockExpired(record, now) {
+			// The block ended sessionRecordTTL after it was recorded,
+			// however often it denied since.
+			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) && strict {
+				return loaded{path: path}, removeErr
+			}
+			return loaded{path: path}, nil
+		}
 		return loaded{path: path, record: record, exists: exists}, err
 	}
 	process, processErr := load(sessionKindProcess, key.Process)
 	session, sessionErr := load(sessionKindSession, key.Session)
 	if strict && (processErr != nil || sessionErr != nil) {
 		return sessionUnavailableDecision(decision)
+	}
+	// An unreadable account-home record denies this call. It is not a
+	// foreign hook, so it is not carried to the other key as a block.
+	switch {
+	case processErr != nil:
+		return stickySessionDecision(decision, key.Connector, *unverifiableSessionRecord(key, process.path, processErr))
+	case sessionErr != nil:
+		return stickySessionDecision(decision, key.Connector, *unverifiableSessionRecord(key, session.path, sessionErr))
 	}
 	if strict {
 		newRecords := 0
@@ -236,13 +254,7 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	}
 
 	var sticky *SessionRecord
-	switch {
-	case processErr != nil:
-		sticky = unverifiableSessionRecord(key, process.path, processErr)
-	case sessionErr != nil:
-		sticky = unverifiableSessionRecord(key, session.path, sessionErr)
-	}
-	if sticky == nil && process.exists && process.record.Blocked {
+	if process.exists && process.record.Blocked {
 		sticky = &process.record
 	}
 	if sticky == nil && session.exists && session.record.Blocked {
@@ -272,32 +284,25 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		return record
 	}
 
-	if decision.Deny && hasBlockableFindings(decision) {
+	if decision.Deny && update.SessionStart && hasBlockableFindings(decision) {
 		blocked := func(existing loaded) SessionRecord {
 			record := fresh(existing)
 			record.Blocked, record.BlockedAt = true, stamp
 			for _, finding := range decision.Findings {
-				if !finding.Allowed {
+				if isBlockableFinding(finding) {
 					record.Scope, record.Path, record.Digest, record.Reason = finding.Scope, finding.Path, finding.Digest, finding.Reason
 					break
 				}
 			}
-			if record.Path == "" && record.Reason == "" {
-				record.Reason = "cannot verify hook file: " + truncate(strings.TrimSpace(decision.Reason), 200)
-			}
 			return record
 		}
 		for _, entry := range []loaded{process, session} {
-			switch {
-			case entry.path == "":
-			case entry.exists && entry.record.Blocked:
-				if !touchSessionRecord(entry.path, now) && strict {
-					return sessionUnavailableDecision(decision)
-				}
-			default:
-				if !write(entry.path, blocked(entry)) {
-					return sessionUnavailableDecision(decision)
-				}
+			if entry.path == "" || (entry.exists && entry.record.Blocked) {
+				// A block keeps its BlockedAt.
+				continue
+			}
+			if !write(entry.path, blocked(entry)) {
+				return sessionUnavailableDecision(decision)
 			}
 		}
 		decision.Reason = strings.TrimSpace(decision.Reason) + " " + sessionBlockNote
@@ -324,13 +329,6 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 			}
 			if !write(entry.path, carried) {
 				return sessionUnavailableDecision(decision)
-			}
-		}
-		for _, entry := range []loaded{process, session} {
-			if entry.exists && entry.record.Blocked {
-				if !touchSessionRecord(entry.path, now) && strict {
-					return sessionUnavailableDecision(decision)
-				}
 			}
 		}
 		return stickySessionDecision(decision, key.Connector, *sticky)
@@ -493,18 +491,18 @@ func writePrivateUserFile(path string, data []byte) error {
 	return nil
 }
 
-func touchSessionRecord(path string, now time.Time) bool {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
+// sessionBlockExpired reports a blocked record whose block was recorded
+// more than sessionRecordTTL ago. A record without a readable BlockedAt
+// (from an older release) keeps its block until it is pruned.
+func sessionBlockExpired(record SessionRecord, now time.Time) bool {
+	if !record.Blocked {
 		return false
 	}
-	if now.Sub(info.ModTime()) < sessionTouchAfter {
-		return true
-	}
-	return os.Chtimes(path, now, now) == nil
+	blockedAt, err := time.Parse(time.RFC3339, record.BlockedAt)
+	return err == nil && now.Sub(blockedAt) > sessionRecordTTL
 }
 
-// pruneSessionRecords removes records untouched for sessionRecordTTL and,
+// pruneSessionRecords removes records written more than sessionRecordTTL ago and,
 // past sessionDirLimit records, the oldest ones.
 func pruneSessionRecords(dir string, now time.Time) {
 	info, err := os.Lstat(dir)
@@ -539,23 +537,9 @@ func pruneSessionRecords(dir string, now time.Time) {
 		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		// For blocked records, use the original block time for TTL calculation.
-		// This prevents repeated denials from extending expiry beyond the 7-day window.
-		var expired bool
-		record, recordExists, readErr := readSessionRecord(path)
-		if readErr == nil && recordExists && record.Blocked && record.BlockedAt != "" {
-			// Use BlockedAt for blocked records.
-			if blockedAt, parseErr := time.Parse(time.RFC3339, record.BlockedAt); parseErr == nil {
-				expired = now.Sub(blockedAt) > sessionRecordTTL
-			} else {
-				// BlockedAt is malformed, fall back to mtime.
-				expired = now.Sub(info.ModTime()) > sessionRecordTTL
-			}
-		} else {
-			// Use mtime for non-blocked records or read errors.
-			expired = now.Sub(info.ModTime()) > sessionRecordTTL
-		}
-		if expired {
+		// A blocked record is never rewritten, so its modification time is
+		// no earlier than its BlockedAt.
+		if now.Sub(info.ModTime()) > sessionRecordTTL {
 			_ = os.Remove(path)
 			continue
 		}
