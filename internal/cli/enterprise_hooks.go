@@ -65,10 +65,17 @@ var enterpriseHookTargetsWaitPoll = 30 * time.Second
 var enterpriseHookWatchReconcileOnce = runEnterpriseHookReconcileOnce
 
 // enterpriseHookGuardianReadinessRefresh is how often the watch loop
-// re-publishes a ready state when no reconcile has published one, so the
-// gateway's guardianstate.ReadyMaxAge check never expires a healthy guardian
-// whatever its --interval.
+// re-publishes a ready state when no reconcile has published one, between
+// reconciles and while one runs, so the gateway's guardianstate.ReadyMaxAge
+// check never expires a healthy guardian whatever its --interval or the
+// length of a reconcile pass.
 var enterpriseHookGuardianReadinessRefresh = guardianstate.RefreshInterval
+
+// enterpriseHookGuardianReadinessPassStall is how long a running reconcile
+// pass may go without finishing a target before the watch loop stops
+// re-publishing ready during it, so a stuck pass still ages out of the
+// gateway's guardianstate.ReadyMaxAge check.
+var enterpriseHookGuardianReadinessPassStall = guardianstate.ReadyMaxAge
 
 var (
 	enterpriseHookConnector     string
@@ -1585,6 +1592,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
 	for _, target := range manifest.Targets {
+		// Reaching a target means the previous one finished: the watch loop
+		// keeps a published ready fresh while the pass keeps progressing.
+		noteEnterpriseHookReconcileProgress(ctx)
 		if !target.IsEnabled() {
 			continue
 		}
@@ -1716,6 +1726,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		rows = append(rows, row)
 	}
+	noteEnterpriseHookReconcileProgress(ctx)
 
 	var enrollmentErr error
 	if failures == 0 {
@@ -1839,7 +1850,24 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	repairRetryNeeded := false
 	repairRetryDelay := time.Duration(0)
 	reconcile := func(reason string) (bool, error) {
-		run, err := enterpriseHookWatchReconcileOnce(cmd.Context())
+		// The select below cannot refresh ready while this pass runs, and a
+		// pass can outlast guardianstate.ReadyMaxAge (a root guardian gives
+		// each target user a worker budget per pass). Keep a ready the loop
+		// already published fresh until the pass returns, for as long as the
+		// pass keeps finishing targets; the outcome is published after the
+		// refresher has stopped.
+		progress := newEnterpriseHookReconcileProgress(time.Now())
+		stopReadyRefresh := func() {}
+		if publishedReadiness == guardianstate.StateReady {
+			stopReadyRefresh = keepGuardianReadyDuringPass(
+				cmd.ErrOrStderr(),
+				progress,
+				enterpriseHookGuardianReadinessRefresh,
+				enterpriseHookGuardianReadinessPassStall,
+			)
+		}
+		run, err := enterpriseHookWatchReconcileOnce(withEnterpriseHookReconcileProgress(cmd.Context(), progress))
+		stopReadyRefresh()
 		if err != nil {
 			repairRetryNeeded = true
 			publishReadiness(guardianReadinessAfterReconcile(run, err))
