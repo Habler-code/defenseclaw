@@ -26,8 +26,10 @@ type WatchPathSet struct {
 // Resolving them reads files in the target's home (the agent discovery cache
 // and connector config locations), so on Unix a root caller resolves both in
 // the per-target worker, running as the target user, exactly like Install
-// and Verify; a worker failure is reported in both errors. Other callers get
-// the in-process results.
+// and Verify; a worker failure is reported in both errors. In a reconcile
+// pass (WithTargetWorkerPass) the Install or Verify worker that already ran
+// for the same options reports them, so no further worker starts. Other
+// callers get the in-process results.
 func ResolveWatchPaths(ctx context.Context, opts InstallOptions) WatchPathSet {
 	if set, handled := platformResolveWatchPaths(ctx, opts); handled {
 		return set

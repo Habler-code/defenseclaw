@@ -1574,10 +1574,11 @@ func enterpriseHookVerifyDispositionIssues(
 }
 
 func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcileRun, error) {
-	// Targets are reconciled one after another; a user whose per-target
-	// worker misses its deadline gets no further workers in this pass, so
-	// they cannot hold up the other users' repairs.
-	ctx = enterprisehooks.WithTargetWorkerStallGuard(ctx)
+	// Targets are reconciled one after another. A user's per-target workers
+	// share one time budget per pass, and once it is used up that user gets
+	// no further workers in this pass, so they cannot hold up the other
+	// users' repairs.
+	ctx = enterprisehooks.WithTargetWorkerPass(ctx)
 	run := enterpriseHookReconcileRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
@@ -1712,20 +1713,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 			}
 			err = applyEnterpriseHookMachinePolicyPreferences(&opts)
-			watch := enterpriseHookReconcileWatchPaths(ctx, opts)
-			if err == nil && watch.DirsErr == nil {
-				for _, dir := range watch.Dirs {
-					watchDirs[dir] = struct{}{}
-				}
-			}
-			if watch.OwnershipErr == nil {
-				for _, f := range watch.Ownership.ExclusiveWriter {
-					exclusiveFiles[f] = struct{}{}
-				}
-				for _, f := range watch.Ownership.SharedWriter {
-					sharedFiles[f] = struct{}{}
-				}
-			}
+			policyErr := err
 			if err == nil {
 				var result enterprisehooks.InstallResult
 				var repaired bool
@@ -1743,6 +1731,23 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
 					row.Result = &result
+				}
+			}
+			// Resolved after the verification or repair, so the paths reflect
+			// what it left behind and a root guardian on Unix takes them from
+			// the worker that just ran instead of starting another one.
+			watch := enterpriseHookReconcileWatchPaths(ctx, opts)
+			if policyErr == nil && watch.DirsErr == nil {
+				for _, dir := range watch.Dirs {
+					watchDirs[dir] = struct{}{}
+				}
+			}
+			if watch.OwnershipErr == nil {
+				for _, f := range watch.Ownership.ExclusiveWriter {
+					exclusiveFiles[f] = struct{}{}
+				}
+				for _, f := range watch.Ownership.SharedWriter {
+					sharedFiles[f] = struct{}{}
 				}
 			}
 		}

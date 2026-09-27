@@ -53,30 +53,37 @@ func TestReconcileTakesWatchPathsFromResolveWatchPaths(t *testing.T) {
 	}
 }
 
-// Every reconcile pass runs under a target worker stall guard, so a target
-// user who stops or blocks their own worker costs the pass one worker
-// deadline instead of one per worker.
-func TestReconcileRunsEachPassUnderATargetWorkerStallGuard(t *testing.T) {
+// Every reconcile pass runs in one target worker pass, so a target user's
+// workers share one time budget, and each target's watch paths are resolved
+// after its verification or repair, which lets a root guardian take them
+// from that worker instead of starting another.
+func TestReconcileRunsEachPassInATargetWorkerPass(t *testing.T) {
 	stubSignInIsolationReconcile(t)
 	previous := enterpriseHookReconcileWatchPaths
 	t.Cleanup(func() { enterpriseHookReconcileWatchPaths = previous })
-	var unguarded []string
+	var unguarded, calls []string
 	enterpriseHookReconcileWatchPaths = func(ctx context.Context, _ enterprisehooks.InstallOptions) enterprisehooks.WatchPathSet {
-		if !enterprisehooks.TargetWorkerStallGuardActive(ctx) {
+		calls = append(calls, "watch paths")
+		if !enterprisehooks.TargetWorkerPassActive(ctx) {
 			unguarded = append(unguarded, "watch paths")
 		}
 		return enterprisehooks.WatchPathSet{}
 	}
 	runSignInIsolationReconcileWithOptions(t, []signInIsolationTarget{
 		{name: "alice", sid: "S-1-5-21-1000-2000-3000-1101", connector: "codex"},
+		{name: "bob", sid: "S-1-5-21-1000-2000-3000-1102", connector: "codex"},
 	}, signInIsolationOptions{
 		observeInstallContext: func(ctx context.Context) {
-			if !enterprisehooks.TargetWorkerStallGuardActive(ctx) {
+			calls = append(calls, "install")
+			if !enterprisehooks.TargetWorkerPassActive(ctx) {
 				unguarded = append(unguarded, "install")
 			}
 		},
 	})
 	if len(unguarded) != 0 {
-		t.Fatalf("reconcile ran %v without a target worker stall guard", unguarded)
+		t.Fatalf("reconcile ran %v outside a target worker pass", unguarded)
+	}
+	if want := []string{"install", "watch paths", "install", "watch paths"}; !slices.Equal(calls, want) {
+		t.Fatalf("reconcile calls = %v, want %v", calls, want)
 	}
 }

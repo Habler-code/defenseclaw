@@ -53,6 +53,11 @@ const (
 	targetOperationInstall    = "enterprise-hooks.install"
 	targetOperationVerify     = "enterprise-hooks.verify"
 	targetOperationWatchPaths = "enterprise-hooks.watch-paths"
+	// Install and Verify that also report the target's watch paths, for a
+	// reconcile pass (see WithTargetWorkerPass). A guardian that predates
+	// them sends only the plain operations, whose answers are unchanged.
+	targetOperationInstallWithWatchPaths = "enterprise-hooks.install-with-watch-paths"
+	targetOperationVerifyWithWatchPaths  = "enterprise-hooks.verify-with-watch-paths"
 
 	targetWorkerExitProtocol = 2
 	targetWorkerExitIdentity = 3
@@ -219,6 +224,38 @@ func init() {
 		}
 		return resolveTargetWatchPaths(opts), nil
 	})
+	registerTargetInstallWithWatchPaths(targetOperationInstallWithWatchPaths, Install)
+	registerTargetInstallWithWatchPaths(targetOperationVerifyWithWatchPaths, Verify)
+}
+
+// targetInstallWithWatchPathsResult answers an Install or Verify that also
+// resolves the target's watch paths after the operation, whether or not it
+// succeeded. Error is the operation's own failure.
+type targetInstallWithWatchPathsResult struct {
+	Result *InstallResult         `json:"result,omitempty"`
+	Error  string                 `json:"error,omitempty"`
+	Watch  targetWatchPathsResult `json:"watch"`
+}
+
+func registerTargetInstallWithWatchPaths(name string, run func(context.Context, InstallOptions) (InstallResult, error)) {
+	RegisterTargetOperation(name, func(ctx context.Context, target TargetCredentials, payload json.RawMessage) (any, error) {
+		opts, err := decodeTargetInstallRequest(target, payload)
+		if err != nil {
+			return nil, err
+		}
+		var answer targetInstallWithWatchPathsResult
+		result, err := run(ctx, opts)
+		if err != nil {
+			answer.Error = err.Error()
+			if answer.Error == "" {
+				answer.Error = "enterprise hooks: target operation failed without a reason"
+			}
+		} else {
+			answer.Result = &result
+		}
+		answer.Watch = resolveTargetWatchPaths(opts)
+		return answer, nil
+	})
 }
 
 // targetWatchPathsResult carries WatchDirs and WatchOwnedFiles back from
@@ -321,22 +358,52 @@ func prepareTargetWorkerInstallCall(opts InstallOptions) (targetWorkerInstallCal
 // installThroughTargetWorker is the root path of Install and Verify on Unix.
 // The guardian only resolves the target's identity (read-only) and then
 // hands the whole operation, including every validation and repair, to a
-// worker running as that user.
+// worker running as that user. In a reconcile pass the same worker also
+// reports the target's watch paths, which the pass keeps for
+// ResolveWatchPaths.
 func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operation string) (InstallResult, error) {
 	call, err := prepareTargetWorkerInstallCall(opts)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	raw, err := runTargetWorker(ctx, call.target, operation, call.payload)
+	pass := targetWorkerPassFrom(ctx)
+	withWatchPaths := map[string]string{
+		targetOperationInstall: targetOperationInstallWithWatchPaths,
+		targetOperationVerify:  targetOperationVerifyWithWatchPaths,
+	}[operation]
+	if pass == nil || withWatchPaths == "" {
+		raw, err := runTargetWorker(ctx, call.target, operation, call.payload)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		var result InstallResult
+		if err := decodeTargetOperationJSON(raw, &result); err != nil {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: decode target worker result: %w", err)
+		}
+		return call.bindResult(result)
+	}
+	raw, err := runTargetWorker(ctx, call.target, withWatchPaths, call.payload)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	var result InstallResult
-	if err := decodeTargetOperationJSON(raw, &result); err != nil {
+	var answer targetInstallWithWatchPathsResult
+	if err := decodeTargetOperationJSON(raw, &answer); err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: decode target worker result: %w", err)
 	}
-	// The worker runs as the target user, so bind its answer to the target
-	// the guardian asked about.
+	pass.storeWatchPaths(call.payload, call.watchPathSet(answer.Watch))
+	if answer.Error != "" {
+		// Keep the operation's own message, as spawnTargetWorker does.
+		return InstallResult{}, errors.New(answer.Error)
+	}
+	if answer.Result == nil {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: target worker returned no result")
+	}
+	return call.bindResult(*answer.Result)
+}
+
+// bindResult accepts a worker's result only for the target the guardian
+// asked about: the worker runs as the target user.
+func (call targetWorkerInstallCall) bindResult(result InstallResult) (InstallResult, error) {
 	if result.Connector != call.connector || filepath.Clean(result.UserHome) != call.target.UserHome ||
 		filepath.Clean(result.DataDir) != call.dataDir {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: target worker returned a result for a different target")
@@ -344,28 +411,15 @@ func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operat
 	return result, nil
 }
 
-// resolveWatchPathsThroughTargetWorker is the root path of ResolveWatchPaths
-// on Unix: the worker, running as the target user, computes WatchDirs and
-// WatchOwnedFiles.
-func resolveWatchPathsThroughTargetWorker(ctx context.Context, opts InstallOptions) (WatchPathSet, error) {
-	call, err := prepareTargetWorkerInstallCall(opts)
-	if err != nil {
-		return WatchPathSet{}, err
-	}
-	raw, err := runTargetWorker(ctx, call.target, targetOperationWatchPaths, call.payload)
-	if err != nil {
-		return WatchPathSet{}, err
-	}
-	var result targetWatchPathsResult
-	if err := decodeTargetOperationJSON(raw, &result); err != nil {
-		return WatchPathSet{}, fmt.Errorf("enterprise hooks: decode target worker watch paths: %w", err)
-	}
-	// The guardian watches these directories with its own credentials, so it
-	// accepts only what WatchDirs can return: clean absolute paths inside the
-	// target home. Owned files are only compared with event paths.
+// watchPathSet converts a worker's watch paths. The guardian watches these
+// directories with its own credentials, so it accepts only what WatchDirs
+// can return: clean absolute paths inside the target home; otherwise both
+// halves fail. Owned files are watched only inside those directories.
+func (call targetWorkerInstallCall) watchPathSet(result targetWatchPathsResult) WatchPathSet {
 	for _, dir := range result.Dirs {
 		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || !pathInside(call.target.UserHome, dir) {
-			return WatchPathSet{}, fmt.Errorf("enterprise hooks: target worker returned watch directory %q outside the target home", dir)
+			err := fmt.Errorf("enterprise hooks: target worker returned watch directory %q outside the target home", dir)
+			return WatchPathSet{DirsErr: err, OwnershipErr: err}
 		}
 	}
 	set := WatchPathSet{
@@ -378,24 +432,54 @@ func resolveWatchPathsThroughTargetWorker(ctx context.Context, opts InstallOptio
 	if result.OwnershipError != "" {
 		set.OwnershipErr = errors.New(result.OwnershipError)
 	}
-	return set, nil
+	return set
 }
 
-// runTargetWorker runs one operation in a worker unless an earlier worker
-// for the same user did not finish in this reconcile pass (see
-// WithTargetWorkerStallGuard).
+// resolveWatchPathsThroughTargetWorker is the root path of ResolveWatchPaths
+// on Unix: the worker, running as the target user, computes WatchDirs and
+// WatchOwnedFiles. In a reconcile pass it takes them from the Install or
+// Verify worker that already ran for the same request.
+func resolveWatchPathsThroughTargetWorker(ctx context.Context, opts InstallOptions) (WatchPathSet, error) {
+	call, err := prepareTargetWorkerInstallCall(opts)
+	if err != nil {
+		return WatchPathSet{}, err
+	}
+	if pass := targetWorkerPassFrom(ctx); pass != nil {
+		if set, ok := pass.watchPaths(call.payload); ok {
+			return set, nil
+		}
+	}
+	raw, err := runTargetWorker(ctx, call.target, targetOperationWatchPaths, call.payload)
+	if err != nil {
+		return WatchPathSet{}, err
+	}
+	var result targetWatchPathsResult
+	if err := decodeTargetOperationJSON(raw, &result); err != nil {
+		return WatchPathSet{}, fmt.Errorf("enterprise hooks: decode target worker watch paths: %w", err)
+	}
+	return call.watchPathSet(result), nil
+}
+
+// runTargetWorker runs one operation in a worker. In a reconcile pass (see
+// WithTargetWorkerPass) the worker runs only for what is left of its user's
+// budget, and does not start once that is used up.
 func runTargetWorker(ctx context.Context, target TargetCredentials, operation string, payload json.RawMessage) (json.RawMessage, error) {
-	guard := targetWorkerStallGuardFrom(ctx)
-	if guard != nil && guard.isStalled(target.UID) {
+	pass := targetWorkerPassFrom(ctx)
+	if pass == nil {
+		return targetWorkerRunner(ctx, target, operation, payload)
+	}
+	left, ok := pass.remaining(target.UID)
+	if !ok {
 		return nil, fmt.Errorf(
-			"enterprise hooks: skipping the target worker for uid %d: an earlier worker for this user did not finish in this reconcile pass",
+			"enterprise hooks: skipping the target worker for uid %d: this user's workers used up their time in this reconcile pass",
 			target.UID,
 		)
 	}
-	raw, err := targetWorkerRunner(ctx, target, operation, payload)
-	if err != nil && guard != nil && errors.Is(err, context.DeadlineExceeded) {
-		guard.markStalled(target.UID)
-	}
+	workerCtx, cancel := context.WithTimeout(ctx, left)
+	defer cancel()
+	started := time.Now()
+	raw, err := targetWorkerRunner(workerCtx, target, operation, payload)
+	pass.charge(target.UID, time.Since(started), err != nil && errors.Is(err, context.DeadlineExceeded))
 	return raw, err
 }
 
