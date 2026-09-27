@@ -14,6 +14,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -164,7 +165,11 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 		if name == "" {
 			continue
 		}
-		result, err := enterprisepolicy.CleanUserForeignHooks(enterprisepolicy.GuardRequest{
+		// The worker's environment is not the user's session: the user's
+		// hooks recorded the config locations their agents' environment
+		// redirects to (XDG_CONFIG_HOME, COPILOT_HOME, CODEX_HOME, ...).
+		redirects, redirectErr := enterprisepolicy.LoadEnvRedirects(home, name)
+		result, err := enterprisepolicy.CleanUserForeignHooksWithRedirects(enterprisepolicy.GuardRequest{
 			Connector:     name,
 			GOOS:          runtime.GOOS,
 			Home:          home,
@@ -173,7 +178,8 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 			Policy:        cleanup.Policy,
 			Getenv:        os.Getenv,
 			OwnedCommands: cleanup.OwnedCommands,
-		}, now)
+		}, redirects, now)
+		err = errors.Join(err, redirectErr)
 		report := enterpriseHookWorkerCleanupReport{BackupDir: result.BackupDir}
 		for _, finding := range result.Removed {
 			report.Removed = append(report.Removed, finding.Path)

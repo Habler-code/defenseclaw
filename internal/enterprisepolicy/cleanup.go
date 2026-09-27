@@ -41,6 +41,18 @@ type CleanupResult struct {
 // reported. Codex TOML config is reported rather than rewritten so a user's
 // comments and layout are never re-marshalled.
 func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, error) {
+	return CleanUserForeignHooksWithRedirects(req, nil, now)
+}
+
+// CleanUserForeignHooksWithRedirects is CleanUserForeignHooks for the
+// default locations and then for each environment redirect the user's
+// hooks recorded (LoadEnvRedirects): the user config an agent reads from
+// CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_HOME, XDG_CONFIG_HOME,
+// OPENCODE_CONFIG, OPENCODE_CONFIG_DIR, APPDATA or another HOME. A file
+// reached through more than one of them is cleaned once. It runs with the
+// user's credentials, so a recorded location reaches only what the user
+// can write.
+func CleanUserForeignHooksWithRedirects(req GuardRequest, redirects []EnvRedirect, now time.Time) (CleanupResult, error) {
 	result := CleanupResult{}
 	if !req.Policy.Guard || req.Policy.ForeignHooks != config.ForeignHooksRemove {
 		return result, nil
@@ -50,9 +62,33 @@ func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, erro
 	}
 	backupDir := filepath.Join(req.Home, ".defenseclaw", "foreign-hooks-backup", req.Connector, now.UTC().Format("20060102T150405Z"))
 	var errs []error
+	passes := []GuardRequest{req}
+	for _, redirect := range redirects {
+		passes = append(passes, redirect.request(req))
+	}
+	type sourceKey struct{ path, format string }
+	var visited []sourceKey
+	for _, pass := range passes {
+		errs = append(errs, cleanUserSources(pass, backupDir, func(source hookSource) bool {
+			key := sourceKey{filepath.Clean(source.path), source.format}
+			for _, existing := range visited {
+				if existing.format == key.format && samePath(existing.path, key.path) {
+					return false
+				}
+			}
+			visited = append(visited, key)
+			return true
+		}, &result)...)
+	}
+	return result, errors.Join(errs...)
+}
+
+// cleanUserSources cleans req's user sources that first accepts.
+func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource) bool, result *CleanupResult) []error {
+	var errs []error
 	scan := newGuardScan(req)
 	for _, source := range guardSources(req) {
-		if source.scope != ScopeUser {
+		if source.scope != ScopeUser || !first(source) {
 			continue
 		}
 		if scan.exceeded != nil {
@@ -115,17 +151,17 @@ func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, erro
 					continue
 				}
 				child := source.child(filepath.Join(source.path, entry.Name()), formatFlat)
-				if err := cleanJSONSource(scan, child, backupDir, &result); err != nil {
+				if err := cleanJSONSource(scan, child, backupDir, result); err != nil {
 					errs = append(errs, err)
 				}
 			}
 		default:
-			if err := cleanJSONSource(scan, source, backupDir, &result); err != nil {
+			if err := cleanJSONSource(scan, source, backupDir, result); err != nil {
 				errs = append(errs, err)
 			}
 		}
 	}
-	return result, errors.Join(errs...)
+	return errs
 }
 
 // cleanJSONSource rewrites one user JSON file without its foreign entries.

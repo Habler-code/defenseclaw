@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -58,9 +59,12 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 	}
 	var result enterprisepolicy.CleanupResult
 	err = enterprisehooks.RunAsTarget(target, func() error {
+		// The guardian has no user environment: the user's hooks recorded
+		// the config locations their agents' environment redirects to.
+		redirects, redirectErr := enterprisepolicy.LoadEnvRedirects(target.UserHome, name)
 		var cleanErr error
-		result, cleanErr = enterprisepolicy.CleanUserForeignHooks(request, time.Now())
-		return cleanErr
+		result, cleanErr = enterprisepolicy.CleanUserForeignHooksWithRedirects(request, redirects, time.Now())
+		return errors.Join(cleanErr, redirectErr)
 	})
 	return result, err
 }

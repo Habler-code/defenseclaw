@@ -36,6 +36,8 @@ type foreignGuardFixture struct {
 	project string
 	summary *enterprisepolicy.PublicPolicy
 	loadErr error
+	// process is the agent process identity the guard sees ("" unknown).
+	process string
 }
 
 func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
@@ -43,6 +45,13 @@ func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 	if runtime.GOOS == "windows" {
 		t.Skip("fixture uses unix hook command forms")
 	}
+	return newPortableForeignGuardFixture(t, mode)
+}
+
+// newPortableForeignGuardFixture is the fixture for tests that use only
+// foreign hook entries, which read the same on every OS.
+func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
+	t.Helper()
 	fixture := &foreignGuardFixture{home: t.TempDir()}
 	fixture.project = filepath.Join(fixture.home, "work", "repo")
 	if err := os.MkdirAll(filepath.Join(fixture.project, ".git"), 0o755); err != nil {
@@ -57,6 +66,7 @@ func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 	}
 	previousPath, previousLoad := hookForeignGuardSummaryPath, hookForeignGuardLoad
 	previousAccountHome, previousEnvHomes := hookForeignGuardAccountHome, hookForeignGuardEnvHomes
+	previousProcess := hookForeignGuardAgentProcess
 	hookForeignGuardSummaryPath = func() (string, bool) { return "/etc/defenseclaw/machine-policy.json", true }
 	hookForeignGuardLoad = func(string) (*enterprisepolicy.PublicPolicy, error) {
 		if fixture.loadErr != nil {
@@ -69,9 +79,11 @@ func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 	}
 	hookForeignGuardAccountHome = func() string { return fixture.home }
 	hookForeignGuardEnvHomes = func() []string { return nil }
+	hookForeignGuardAgentProcess = func() string { return fixture.process }
 	t.Cleanup(func() {
 		hookForeignGuardSummaryPath, hookForeignGuardLoad = previousPath, previousLoad
 		hookForeignGuardAccountHome, hookForeignGuardEnvHomes = previousAccountHome, previousEnvHomes
+		hookForeignGuardAgentProcess = previousProcess
 	})
 	return fixture
 }

@@ -34,6 +34,12 @@ foreign-hook guard closes that gap for agents without a vendor lock.
    `~/.config/devin/config.json`, `~/.config/opencode/plugins/` and
    `~/.config/amp/plugins/`. Each removed entry is backed up to
    `~/.defenseclaw/foreign-hooks-backup/<connector>/<timestamp>/` and logged.
+   An agent whose environment moves its user configuration
+   (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `XDG_CONFIG_HOME`,
+   `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`, or a `HOME` that is not
+   the account's) is covered too: the hook records the locations it sees in
+   `~/.defenseclaw/foreign-hook-env.json`, and the guardian cleans them on its
+   next pass.
 2. **Blocks while a project hook is present.** Repository files are never
    rewritten. Before each call the hook checks the working directory and its
    parents up to the repository root (on Windows, up to and including the
@@ -44,6 +50,16 @@ foreign-hook guard closes that gap for agents without a vendor lock.
 3. **Reads Claude-format files too.** Cursor, Copilot and Devin also load
    `.claude/settings.json` and `.claude/settings.local.json`, so the guard
    scans those for them.
+4. **Keeps a session blocked until the agent restarts.** Agents read their
+   hooks when a session starts and keep running them after the file changes;
+   OpenCode and Amp load plugins once per process. So the hook records a
+   snapshot of the foreign-hook state at session start, and once a call of a
+   session is denied for a foreign hook, the rest of that session's tool
+   calls stay denied, even after the hook is removed. The block also covers
+   sessions the same agent process clears, compacts or resumes into, because
+   they keep the hooks the process loaded. Remove the hook, then restart the
+   agent: a new agent process starts clean, including one that resumes the
+   old session. The snapshots live in `~/.defenseclaw/foreign-hook-sessions/`.
 
 The guard reads files without following links and bounds their size. A file
 it cannot read or parse counts as unapproved, so a malformed hook file blocks
@@ -56,8 +72,26 @@ enterprise_foreign_hook_blocked: your organization blocks cursor hooks it has
 not approved, because they can change a tool call after DefenseClaw checks it.
 The project file /home/alice/repo/.cursor/hooks.json defines a hook
 (digest sha256:3f5c…). Remove it, or ask your administrator to add the digest
-to enterprise.machine_policy.connectors.cursor.allowed_hooks.
+to enterprise.machine_policy.connectors.cursor.allowed_hooks. The agent can
+keep running a hook it loaded when the session started, even after the file
+changes, so DefenseClaw blocks tool calls for the rest of this session: after
+removing the hook, restart the agent.
 ```
+
+Later in a session that was blocked, the message says so:
+
+```text
+enterprise_foreign_hook_blocked: your organization blocks claudecode hooks it
+has not approved, because they can change a tool call after DefenseClaw checks
+it. Earlier in this agent session the project file
+/home/alice/repo/.claude/settings.local.json defined a hook (digest
+sha256:9b1e…). The agent can keep running a hook it loaded when the session
+started, even after the file changes, so DefenseClaw blocks tool calls for the
+rest of this session: after removing the hook, restart the agent.
+```
+
+An approval an administrator adds while a session is blocked applies to the
+next agent session; the running one stays blocked.
 
 ## Approving hooks
 
@@ -108,6 +142,20 @@ approved digests; it contains no secrets.
 
 - The guard knows the locations each vendor documents. A new location in a
   future agent release is outside the guard until DefenseClaw adds it.
+- The session snapshots and the recorded environment locations are files in
+  the user's own data directory. A user who deletes a snapshot, or a hook
+  that removes itself before DefenseClaw's session-start check reads the
+  files, is not held by the session block; the per-call check still denies
+  while a foreign hook is present. For Claude Code and Codex, the vendor lock
+  (`managed_hooks_only: enforce`, the default) is the complete control.
+- The session block follows the agent process when DefenseClaw can name it
+  (the nearest parent of the hook that is not a shell or launcher). When it
+  cannot, only the session ID carries the block, so a session the same
+  process clears into starts without it.
+- The guardian cleans an environment-moved location only after a DefenseClaw
+  hook has run with that environment. A relative `OPENCODE_CONFIG` and
+  `OPENCODE_CONFIG_CONTENT` are never cleaned; the hook still blocks while
+  they name a foreign plugin.
 - Plugins are code. The guard stops them from loading unapproved, but an
   approved plugin can still do anything the user can.
 - Deploying hooks your developers need through machine policy avoids the

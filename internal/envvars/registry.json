@@ -4369,6 +4369,25 @@
       "since": "0.3.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_AGENT_PROCESS_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the test helper process that prints the agent process identity it sees, so the agentprocess tests can run it through the platform's shells.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/agentprocess/agentprocess_test.go",
+          "description": "Test-only agent process identity helper selector"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_APPLY_TARGET_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the test helper process that stands in for the per-user apply-target worker.",
