@@ -3852,6 +3852,11 @@
               "minimum": 0,
               "maximum": 4294967294
             },
+            "uid_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967294
+            },
             "home_roots": {
               "type": "array",
               "maxItems": 64,

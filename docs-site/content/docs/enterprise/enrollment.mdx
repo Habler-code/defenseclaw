@@ -40,6 +40,7 @@ enterprise:
     unenrolled_users: inspect  # inspect | deny
     root: inspect              # inspect | deny | exempt
     uid_min: 1000              # Linux and macOS; 0 reads UID_MIN from login.defs
+    uid_max: 0                 # 0 bounds only local accounts by login.defs UID_MAX
     home_roots: [/srv/home]    # extra home parents beyond the defaults
     agent_prefixes: [/opt/tools]    # extra administrator install prefixes for agent CLIs
 ```
@@ -49,6 +50,14 @@ enterprise:
   `inspect` (the default) inspects an unenrolled user rather than blocking
   them. `deny` refuses users without a protected enrollment. Per-user
   connectors always require enrollment.
+- **`exclude_users`** and **`exempt_users`** entries match an account name or,
+  on Linux and macOS, its numeric uid (for example `"1234401103"`), which is
+  the spelling the gateway uses for directory accounts it cannot name.
+- **`uid_max`** caps enrolled uids for local and directory accounts alike.
+  With the default `0`, login.defs `UID_MAX` bounds only accounts in
+  `/etc/passwd`: directory accounts (SSSD id-mapping, FreeIPA ranges) and
+  systemd-homed users usually have uids above it and are still enrolled. On
+  Linux, systemd's dynamic service uids (61184-65519) are never enrolled.
 - **`home_roots`** adds home parents beyond the defaults (`/home` and
   `/var/home` on Linux, `/Users` on macOS). The lifecycle widens the guardian
   unit to exactly these paths. System directories such as `/`, `/etc`, `/opt`

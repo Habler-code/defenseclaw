@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,7 +54,18 @@ var unixNologinShells = map[string]struct{}{
 type UnixEnumeratorState struct {
 	Version int            `json:"version"`
 	Misses  map[string]int `json:"misses,omitempty"`
+	// Sources records, per enrolled user, whether the account was last
+	// seen in the local account database ("files") or only through a
+	// directory ("directory"). A later "no such user" is definitive for a
+	// local account; for a directory account it counts only when the
+	// directory is shown to be answering.
+	Sources map[string]string `json:"sources,omitempty"`
 }
+
+const (
+	unixSourceFiles     = "files"
+	unixSourceDirectory = "directory"
+)
 
 // UnixDiscoverFunc returns connector → version for one account, discovered
 // with that account's credentials (the apply-target worker). reasons
@@ -70,6 +82,13 @@ type UnixEnumerateOptions struct {
 	HomeRoots []string
 	// UIDMin/UIDMax bound interactive accounts (default login.defs).
 	UIDMin, UIDMax int
+	// LocalAccounts returns the local account database (name → uid);
+	// nil or an error leaves every account's source unknown, which keeps
+	// login.defs UID_MAX for all of them and never corroborates a miss.
+	LocalAccounts func() (map[string]int, error)
+	// DirectoryConfigured reports whether lookups may reach a remote
+	// directory; nil means they may.
+	DirectoryConfigured func() bool
 	// MachinePolicyConnectors come from the runtime descriptor; they get
 	// per-user rows only when enrollment.unenrolled_users is "deny".
 	MachinePolicyConnectors []string
@@ -80,6 +99,8 @@ type UnixEnumerateOptions struct {
 	MachineVersion func(connector string) string
 	State          *UnixEnumeratorState
 	Logger         EnumerationLogger
+	// CheckHome classifies a candidate's home; nil uses CheckUnixTargetHome.
+	CheckHome func(home string, uid int) HomeCheck
 }
 
 // UnixEnumerationReport summarizes a cycle for logs and JSON output.
@@ -181,6 +202,9 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	if opts.State.Misses == nil {
 		opts.State.Misses = map[string]int{}
 	}
+	if opts.State.Sources == nil {
+		opts.State.Sources = map[string]string{}
+	}
 	enrollment := cfg.Enterprise.Enrollment
 	connectors := EffectiveUnixHookConnectors(cfg, registry)
 	machinePolicy := map[string]struct{}{}
@@ -197,12 +221,61 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	}
 	report.Connectors = perUser
 
-	previous := loadPreviousUnixRows(opts.ExistingManifestPath, opts.Logger)
+	previous, err := loadPreviousUnixRows(opts.ExistingManifestPath)
+	if err != nil {
+		// Publishing from scratch would re-enable administrator-disabled
+		// rows and drop known users without the miss count. Keep the file
+		// as it is until an administrator repairs it.
+		return Manifest{}, report, err
+	}
 	uidMin, uidMax := opts.UIDMin, opts.UIDMax
 	if enrollment.UIDMin > 0 {
 		uidMin = enrollment.UIDMin
 	}
+	var local map[string]int
+	localKnown := false
+	if opts.LocalAccounts != nil {
+		if accounts, err := opts.LocalAccounts(); err == nil {
+			local, localKnown = accounts, true
+		} else {
+			logfSafely(opts.Logger, "directory", fmt.Sprintf("local account database unreadable; account sources are unknown this cycle: %v", err))
+		}
+	}
+	directoryConfigured := opts.DirectoryConfigured == nil || opts.DirectoryConfigured()
+	// sourceOf classifies a resolved account; "" when it cannot tell.
+	sourceOf := func(account unixidentity.Account) string {
+		if !localKnown {
+			return ""
+		}
+		if uid, ok := local[account.Name]; ok && uid == account.UID {
+			return unixSourceFiles
+		}
+		return unixSourceDirectory
+	}
+	// upperBound is the highest uid enrolled for account. login.defs
+	// UID_MAX describes the local useradd range: directory accounts (SSSD
+	// id-mapping from 200000, FreeIPA ranges, systemd-homed 60001-60513)
+	// routinely sit above it, so it bounds only local accounts unless the
+	// administrator sets enterprise.enrollment.uid_max.
+	upperBound := func(account unixidentity.Account) int {
+		if enrollment.UIDMax > 0 {
+			return enrollment.UIDMax
+		}
+		if sourceOf(account) == unixSourceDirectory {
+			return 0
+		}
+		return uidMax
+	}
 	homeRoots := normalizeHomeRoots(opts.HomeRoots)
+	checkHome := opts.CheckHome
+	if checkHome == nil {
+		// A hung network home must not stall the whole cycle: no new user
+		// would be enrolled and no deleted one revoked while the process
+		// stays alive, so the service manager never restarts it.
+		checkHome = func(home string, uid int) HomeCheck {
+			return BoundedCheckUnixTargetHome(home, uid, unixHomeProbeTimeout)
+		}
+	}
 
 	candidates, _ := collectUnixCandidates(ctx, opts, enrollment, homeRoots)
 	// Re-evaluate every previously enrolled user even when enumeration did
@@ -238,6 +311,28 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].account.Name < candidates[j].account.Name })
 	report.Candidates = len(candidates)
+	// A directory account that resolved this cycle shows the directory is
+	// answering, which is what makes another directory account's "no such
+	// user" (getent exit 2, also its answer while a backend is down)
+	// definitive.
+	resolvedSource := map[string]string{}
+	directoryAnswered := false
+	for _, candidate := range candidates {
+		source := sourceOf(candidate.account)
+		resolvedSource[candidate.account.Name] = source
+		if source == unixSourceDirectory && !systemdLocalUID(candidate.account.UID) {
+			directoryAnswered = true
+		}
+	}
+	definitiveMiss := func(user string) bool {
+		if localKnown {
+			if _, stillLocal := local[user]; stillLocal {
+				return false // the local database still has it: lookups are failing
+			}
+		}
+		return !directoryConfigured || opts.State.Sources[user] == unixSourceFiles || directoryAnswered
+	}
+	filtered := map[string]struct{}{}
 	include := stringSet(enrollment.IncludeUsers)
 	exclude := stringSet(enrollment.ExcludeUsers)
 	exempt := stringSet(enrollment.ExemptUsers)
@@ -254,11 +349,16 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			report.Skipped = append(report.Skipped, name+": "+reason)
 			logfSafely(opts.Logger, name, reason)
 		}
-		if _, ok := exclude[name]; ok {
+		// exclude_users and exempt_users match an account name or its
+		// decimal uid. The gateway authorizes exempt callers by
+		// kernel-verified uid, and directory names it cannot resolve are
+		// easiest to list by uid, so both spellings must mean the same.
+		uidText := strconv.Itoa(account.UID)
+		if _, byName := exclude[name]; byName || hasKey(exclude, uidText) {
 			skip("excluded by enterprise.enrollment.exclude_users")
 			continue
 		}
-		if _, ok := exempt[name]; ok {
+		if _, byName := exempt[name]; byName || hasKey(exempt, uidText) {
 			skip("exempt by enterprise.enrollment.exempt_users")
 			continue
 		}
@@ -271,17 +371,32 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			skip("nobody is never a guardian target")
 			continue
 		}
-		if !explicitlyIncluded && (account.UID < uidMin || (uidMax > 0 && account.UID > uidMax)) {
-			skip(fmt.Sprintf("uid %d outside the interactive range %d-%d", account.UID, uidMin, uidMax))
-			continue
+		if !explicitlyIncluded {
+			if reason := unixReservedUID(account.UID); reason != "" {
+				skip(reason)
+				continue
+			}
+			if account.UID < uidMin {
+				skip(fmt.Sprintf("uid %d outside the interactive range (below %d)", account.UID, uidMin))
+				continue
+			}
+			if bound := upperBound(account); bound > 0 && account.UID > bound {
+				skip(fmt.Sprintf("uid %d outside the interactive range %d-%d", account.UID, uidMin, bound))
+				continue
+			}
 		}
 		if _, nologin := unixNologinShells[filepath.Clean(account.Shell)]; nologin && !explicitlyIncluded {
 			skip("non-interactive login shell " + account.Shell)
 			continue
 		}
-		if ok, transientErr, reason := groupFilterAllows(opts.Resolver, account, enrollment); !ok {
+		if ok, transientErr, counted, reason := groupFilterAllows(opts.Resolver, account, enrollment); !ok {
 			if transientErr {
 				keep[name] = struct{}{}
+			} else if _, enrolled := previousUsers[name]; enrolled && counted {
+				// A missing include-group membership can be a partial
+				// answer from a degraded directory: revoke only after
+				// repeated answers, like a missing account.
+				filtered[name] = struct{}{}
 			}
 			skip(reason)
 			continue
@@ -291,7 +406,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			skip(fmt.Sprintf("home %s is outside the guardian-writable home roots %v", home, homeRoots))
 			continue
 		}
-		check := CheckUnixTargetHome(home, account.UID)
+		check := checkHome(home, account.UID)
 		if check.State == HomeUntrusted {
 			if _, enrolled := previousUsers[name]; enrolled {
 				// A user must not unenroll themselves by loosening their
@@ -318,6 +433,16 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
 		}
+		// Only an available home's inode identifies it. A pending home's
+		// inode belongs to whatever is visible while it is unavailable (a
+		// locked ecryptfs home shows its lower mountpoint directory, whose
+		// inode differs from the mounted root's), so it is neither compared
+		// nor bound: comparing it re-enrolled or revoked the user on every
+		// logout.
+		currentInode := uint64(0)
+		if check.State == HomeAvailable {
+			currentInode = check.Inode
+		}
 		for _, conn := range perUser {
 			key := unixRowKey(name, conn)
 			row := ManifestTarget{
@@ -327,7 +452,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				GID:       intPointer(account.GID),
 				Connector: conn,
 				DataDir:   filepath.Join(home, ".defenseclaw"),
-				HomeInode: check.Inode,
+				HomeInode: currentInode,
 			}
 			if prev, known := previous[key]; known && sameUnixIdentity(prev, row) {
 				row.AgentVersion = prev.AgentVersion
@@ -395,14 +520,28 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			targets = append(targets, prev)
 			continue
 		}
-		if _, gone := missing[userName]; gone {
+		_, gone := missing[userName]
+		_, filteredOut := filtered[userName]
+		if gone && !definitiveMiss(userName) {
+			// getent reports "no such user" both for a deleted account and
+			// for any account while sssd, nslcd or ypbind cannot reach the
+			// directory; nothing shows the directory answering this cycle.
+			logfSafely(opts.Logger, userName, fmt.Sprintf("account not found, but the directory could not be confirmed reachable; keeping (%s, %s) unchanged", userName, prev.Connector))
+			targets = append(targets, prev)
+			continue
+		}
+		if gone || filteredOut {
+			what := "account not found"
+			if filteredOut {
+				what = "no longer passes the enrollment group filter"
+			}
 			opts.State.Misses[key]++
 			if opts.State.Misses[key] < UnixRevokeAfterMisses {
-				logfSafely(opts.Logger, userName, fmt.Sprintf("account not found (%d/%d); keeping (%s, %s) for now", opts.State.Misses[key], UnixRevokeAfterMisses, userName, prev.Connector))
+				logfSafely(opts.Logger, userName, fmt.Sprintf("%s (%d/%d); keeping (%s, %s) for now", what, opts.State.Misses[key], UnixRevokeAfterMisses, userName, prev.Connector))
 				targets = append(targets, prev)
 				continue
 			}
-			logfSafely(opts.Logger, userName, fmt.Sprintf("account not found %d times; revoking (%s, %s)", UnixRevokeAfterMisses, userName, prev.Connector))
+			logfSafely(opts.Logger, userName, fmt.Sprintf("%s %d times; revoking (%s, %s)", what, UnixRevokeAfterMisses, userName, prev.Connector))
 		}
 		delete(opts.State.Misses, key)
 		report.Revoked++
@@ -410,6 +549,20 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	for key := range opts.State.Misses {
 		if _, known := previous[key]; !known {
 			delete(opts.State.Misses, key)
+		}
+	}
+	withRows := map[string]struct{}{}
+	for _, target := range targets {
+		withRows[strings.TrimSpace(target.User)] = struct{}{}
+	}
+	for user := range opts.State.Sources {
+		if _, ok := withRows[user]; !ok {
+			delete(opts.State.Sources, user)
+		}
+	}
+	for user := range withRows {
+		if source := resolvedSource[user]; source != "" {
+			opts.State.Sources[user] = source
 		}
 	}
 
@@ -469,8 +622,15 @@ func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrol
 			if ctx.Err() != nil {
 				break
 			}
-			info, err := os.Lstat(filepath.Join(root, entry.Name()))
-			if err != nil || !info.IsDir() {
+			path := filepath.Join(root, entry.Name())
+			info, err := BoundedLstat(path, unixHomeProbeTimeout)
+			if err != nil {
+				if PendingTargetError(err) && !errors.Is(err, os.ErrNotExist) {
+					logfSafely(opts.Logger, path, fmt.Sprintf("home owner scan skipped this entry: %v", err))
+				}
+				continue
+			}
+			if !info.IsDir() {
 				continue
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
@@ -501,13 +661,17 @@ func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrol
 
 // groupFilterAllows applies include/exclude groups (exclude wins). A
 // transient membership failure reports transient=true so known rows stay.
-func groupFilterAllows(resolver unixidentity.Resolver, account unixidentity.Account, enrollment config.EnterpriseEnrollmentConfig) (allowed bool, transient bool, reason string) {
+// counted marks a denial that rests only on a membership being absent,
+// which a degraded directory can also produce; membership of an excluded
+// group is positive evidence and applies at once.
+func groupFilterAllows(resolver unixidentity.Resolver, account unixidentity.Account, enrollment config.EnterpriseEnrollmentConfig) (allowed, transient, counted bool, reason string) {
 	if len(enrollment.IncludeGroups) == 0 && len(enrollment.ExcludeGroups) == 0 {
-		return true, false, ""
+		return true, false, false, ""
 	}
 	ids, err := resolver.GroupIDs(account)
 	if err != nil {
-		return false, !unixidentity.IsNotFound(err), fmt.Sprintf("group membership unavailable: %v", err)
+		notFound := unixidentity.IsNotFound(err)
+		return false, !notFound, notFound, fmt.Sprintf("group membership unavailable: %v", err)
 	}
 	names := map[string]struct{}{}
 	for _, gid := range ids {
@@ -518,31 +682,55 @@ func groupFilterAllows(resolver unixidentity.Resolver, account unixidentity.Acco
 	}
 	for _, excluded := range enrollment.ExcludeGroups {
 		if _, ok := names[strings.TrimSpace(excluded)]; ok {
-			return false, false, "member of excluded group " + excluded
+			return false, false, false, "member of excluded group " + excluded
 		}
 	}
 	if len(enrollment.IncludeGroups) == 0 {
-		return true, false, ""
+		return true, false, false, ""
 	}
 	for _, included := range enrollment.IncludeGroups {
 		if _, ok := names[strings.TrimSpace(included)]; ok {
-			return true, false, ""
+			return true, false, false, ""
 		}
 	}
-	return false, false, "not a member of any enterprise.enrollment.include_groups group"
+	return false, false, true, "not a member of any enterprise.enrollment.include_groups group"
 }
 
-func loadPreviousUnixRows(path string, logf EnumerationLogger) map[string]ManifestTarget {
+// unixReservedUID explains why uid can never be an interactive user:
+// the overflow and "-1"/"-2" uids, and on Linux systemd's DynamicUser
+// range.
+func unixReservedUID(uid int) string {
+	switch {
+	case uid == 65535 || int64(uid) >= 4294967294:
+		return fmt.Sprintf("uid %d is reserved", uid)
+	case runtime.GOOS == "linux" && uid >= 61184 && uid <= 65519:
+		return fmt.Sprintf("uid %d is a systemd dynamic service uid", uid)
+	}
+	return ""
+}
+
+// systemdLocalUID reports uids systemd allocates on the host itself
+// (systemd-homed 60001-60513, DynamicUser 61184-65519). They come from
+// nss-systemd, not a remote directory, so resolving one says nothing about
+// whether the directory is reachable.
+func systemdLocalUID(uid int) bool {
+	return (uid >= 60001 && uid <= 60513) || (uid >= 61184 && uid <= 65519)
+}
+
+// loadPreviousUnixRows reads the published manifest's rows. A missing file
+// is a first run; any other failure is returned so the cycle publishes
+// nothing rather than rebuilding the manifest from scratch.
+func loadPreviousUnixRows(path string) (map[string]ManifestTarget, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return nil
+		return nil, nil
 	}
 	manifest, err := LoadManifest(path)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			logfSafely(logf, path, fmt.Sprintf("existing manifest failed to load; treating every row as new: %v", err))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
 		}
-		return nil
+		return nil, fmt.Errorf("enterprise hooks: enumerate: the existing manifest %s does not load, so it is kept unchanged until it is repaired: %w", path, err)
 	}
 	previous := make(map[string]ManifestTarget, len(manifest.Targets))
 	for _, target := range manifest.Targets {
@@ -550,7 +738,7 @@ func loadPreviousUnixRows(path string, logf EnumerationLogger) map[string]Manife
 			previous[key] = target
 		}
 	}
-	return previous
+	return previous, nil
 }
 
 func unixRowKey(user, conn string) string {
@@ -627,6 +815,11 @@ func stringSet(values []string) map[string]struct{} {
 }
 
 func intPointer(value int) *int { return &value }
+
+func hasKey(set map[string]struct{}, key string) bool {
+	_, ok := set[key]
+	return ok
+}
 
 // MarshalUnixTargetsManifest renders the deterministic manifest bytes.
 func MarshalUnixTargetsManifest(m Manifest) ([]byte, error) {
@@ -768,6 +961,14 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 	for key, count := range parsed.Misses {
 		if count > 0 && count < 1000 {
 			state.Misses[key] = count
+		}
+	}
+	for user, source := range parsed.Sources {
+		if user != "" && (source == unixSourceFiles || source == unixSourceDirectory) {
+			if state.Sources == nil {
+				state.Sources = map[string]string{}
+			}
+			state.Sources[user] = source
 		}
 	}
 	return state

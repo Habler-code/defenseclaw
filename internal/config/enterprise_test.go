@@ -293,3 +293,34 @@ func TestEnterpriseAgentPrefixes(t *testing.T) {
 		t.Fatal("secure_client accepted enrollment.agent_prefixes")
 	}
 }
+
+func TestEnterpriseEnrollmentUIDMax(t *testing.T) {
+	for _, tc := range []struct {
+		min, max int
+		wantErr  string
+	}{
+		{0, 0, ""}, {1000, 2000000000, ""}, {0, 70000, ""},
+		{0, -1, "uid_max must not be negative"},
+		{5000, 4000, "must not be below uid_min"},
+	} {
+		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Enrollment: EnterpriseEnrollmentConfig{UIDMin: tc.min, UIDMax: tc.max}}}
+		err := resolveEnterpriseConfig(&cfg, "linux", "")
+		if tc.wantErr == "" && err != nil {
+			t.Fatalf("uid range %d-%d rejected: %v", tc.min, tc.max, err)
+		}
+		if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Fatalf("uid range %d-%d error = %v, want %q", tc.min, tc.max, err, tc.wantErr)
+		}
+	}
+	document, err := ParseV8YAML("uid-max.yaml", []byte("config_version: 8\nenterprise:\n  enrollment:\n    uid_max: 2000000000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateV8Schema("uid-max.yaml", document); err != nil {
+		t.Fatalf("v8 schema rejected enrollment.uid_max: %v", err)
+	}
+	cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client", Enrollment: EnterpriseEnrollmentConfig{UIDMax: 70000}}}
+	if err := resolveEnterpriseConfig(&cfg, "windows", ""); err == nil {
+		t.Fatal("secure_client accepted enrollment.uid_max")
+	}
+}

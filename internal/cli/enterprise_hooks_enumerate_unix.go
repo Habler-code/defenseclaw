@@ -174,11 +174,15 @@ func runEnterpriseHooksEnumerateCycle(
 	uidMin, uidMax := unixidentity.DefaultUIDRange()
 	homeRoots := append(enterprisehooks.DefaultUnixHomeRoots(runtime.GOOS), current.Enterprise.Enrollment.HomeRoots...)
 	manifest, cycle, err := enterprisehooks.EnumerateUnix(ctx, current, newEnterpriseHooksConnectorRegistry(), enterprisehooks.UnixEnumerateOptions{
-		ExistingManifestPath:    manifestPath,
-		Resolver:                resolver,
-		HomeRoots:               homeRoots,
-		UIDMin:                  uidMin,
-		UIDMax:                  uidMax,
+		ExistingManifestPath: manifestPath,
+		Resolver:             resolver,
+		HomeRoots:            homeRoots,
+		UIDMin:               uidMin,
+		UIDMax:               uidMax,
+		LocalAccounts: func() (map[string]int, error) {
+			return enterpriseHooksEnumerateLocalAccounts(ctx)
+		},
+		DirectoryConfigured:     enterpriseHooksEnumerateDirectoryConfigured,
 		MachinePolicyConnectors: machinePolicy,
 		SessionUIDs:             enterpriseHookSessionUIDs,
 		Discover:                enterpriseHooksEnumerateDiscover,
@@ -221,6 +225,14 @@ var enterpriseHooksEnumerateResolver = func(ctx context.Context) unixidentity.Re
 	return unixidentity.Default(ctx)
 }
 
+// The local account database and the directory configuration tell a
+// deleted local account from a directory account during an outage; both
+// are replaceable in tests.
+var (
+	enterpriseHooksEnumerateLocalAccounts       = unixidentity.LocalAccounts
+	enterpriseHooksEnumerateDirectoryConfigured = unixidentity.DirectoryConfigured
+)
+
 func enterpriseHooksEnumerateMachinePolicyConnectors(descriptorPath string) ([]string, error) {
 	descriptorPath = strings.TrimSpace(descriptorPath)
 	if descriptorPath == "" {
@@ -259,7 +271,7 @@ func enterpriseHooksEnumerateDiscover(ctx context.Context, account unixidentity.
 	}
 	versions := map[string]string{}
 	for name, version := range response.Versions {
-		if wanted[name] && enterprisehooks.ExtractUnixAgentVersion(version) == version {
+		if wanted[name] && enterprisehooks.ValidUnixAgentVersion(version) {
 			versions[name] = version
 		}
 	}

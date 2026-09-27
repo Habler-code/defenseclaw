@@ -496,6 +496,12 @@ type enterpriseHookReconcileRow struct {
 	// deployments never set them, so their records are unchanged.
 	UID       int    `json:"uid,omitempty"`
 	HomeInode uint64 `json:"home_inode,omitempty"`
+	// RevokeProtection marks a failed standalone Unix target whose account
+	// identity changed (its name now maps to another uid, or its old uid
+	// now belongs to another account): the prior protected row, which
+	// still carries the old uid, must not be carried forward. It is never
+	// serialized and only the standalone Unix reconcile sets it.
+	RevokeProtection bool `json:"-"`
 }
 
 type enterpriseHookReconcileRun struct {
@@ -3021,6 +3027,11 @@ func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookRecon
 		// right now; its identity binding, not the ledger, keeps its
 		// repair rights.
 		if row.Pending && enterpriseHooksStandaloneUnixActive() {
+			continue
+		}
+		// A reused or reassigned uid must not inherit the previous
+		// account's authorization through the carried-forward row.
+		if row.RevokeProtection && enterpriseHooksStandaloneUnixActive() {
 			continue
 		}
 		if prior, ok := previousByKey[key]; ok {

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -41,13 +42,67 @@ type HomeCheck struct {
 	State  HomeState
 	Reason string
 	Inode  uint64
+	// AccessDenied marks a pending home whose root the caller was refused
+	// (EACCES/EPERM). That can be infrastructure (an NFS parent the
+	// squashed root cannot search), so it stays pending for a home that
+	// was never available; callers that know the home was available
+	// before treat it as untrusted.
+	AccessDenied bool
+	// LooseMode marks an untrusted home whose only problem is group or
+	// other write permission: a real directory the target uid owns under
+	// trusted ancestors. Its owner can tighten it (the per-user worker
+	// does, for an enrolled target) without any root write in the home.
+	LooseMode bool
 }
 
 // ecryptfsLockedMarkers are the files ecryptfs-utils leaves in a locked
 // (unmounted) private home.
 var ecryptfsLockedMarkers = []string{"Access-Your-Private-Data.desktop", ".ecryptfs"}
 
+var (
+	// ecryptfsPrivateRoot is where ecryptfs-setup-private keeps every
+	// user's encrypted tree; a user cannot create entries in it.
+	ecryptfsPrivateRoot = "/home/.ecryptfs"
+	// ecryptfsRootOwnerOK accepts the owner of ecryptfsPrivateRoot;
+	// unprivileged tests replace it.
+	ecryptfsRootOwnerOK = func(uid uint32) bool { return uid == 0 }
+	// unixMountAt returns the mount whose mount point is exactly path, if
+	// any; replaced in tests.
+	unixMountAt = platformMountAt
+	// unixLiveSession reports whether uid has a live login session (or a
+	// lingering user manager); replaced in tests.
+	unixLiveSession = platformLiveSession
+)
+
+// unixMount is one mount-table entry.
+type unixMount struct {
+	FSType string
+	// Owner is the uid that mounted a user-mountable filesystem (FUSE's
+	// user_id, macOS f_owner); -1 when the table does not say.
+	Owner int
+}
+
+// userMounted reports a filesystem a non-root user mounted. Its server
+// answers the guardian's own stat calls, so it can refuse, fail or hang
+// them at will.
+func (m unixMount) userMounted() bool {
+	if m.Owner > 0 {
+		return true
+	}
+	fstype := strings.ToLower(m.FSType)
+	isFUSE := fstype == "fuse" || fstype == "fuseblk" || strings.HasPrefix(fstype, "fuse.")
+	return isFUSE && m.Owner != 0
+}
+
 // CheckUnixTargetHome classifies home for uid without writing anything.
+//
+// Nothing the user controls can make a home pending: a user-mounted
+// filesystem over the home is untrusted before the home is even stat'ed,
+// and a locked ecryptfs home is recognized only from the root-owned
+// ecryptfs layout with no filesystem mounted over the home, and only while
+// the user has no live session (a user who is logged in has an unlocked
+// home, or runs agents from the lower directory, which must then be
+// protected).
 func CheckUnixTargetHome(home string, uid int) HomeCheck {
 	clean := filepath.Clean(home)
 	if home == "" || !filepath.IsAbs(clean) || clean == string(filepath.Separator) {
@@ -56,8 +111,15 @@ func CheckUnixTargetHome(home string, uid int) HomeCheck {
 	if reason := worldWritableAncestor(clean); reason != "" {
 		return HomeCheck{State: HomeUntrusted, Reason: reason}
 	}
+	mount, mounted, mountErr := unixMountAt(clean)
+	if mountErr == nil && mounted && mount.userMounted() {
+		return HomeCheck{State: HomeUntrusted, Reason: fmt.Sprintf("user home %s is covered by a %s filesystem mounted by a user", clean, mount.FSType)}
+	}
 	info, err := os.Lstat(clean)
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return HomeCheck{State: HomePending, AccessDenied: true, Reason: fmt.Sprintf("user home %s refused inspection: %v", clean, err)}
+		}
 		if pendingErrno(err) {
 			return HomeCheck{State: HomePending, Reason: fmt.Sprintf("user home %s is not available yet: %v", clean, err)}
 		}
@@ -77,9 +139,14 @@ func CheckUnixTargetHome(home string, uid int) HomeCheck {
 		return HomeCheck{State: HomeUntrusted, Reason: fmt.Sprintf("user home %s owner uid=%d does not match target uid=%d", clean, st.Uid, uid)}
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return HomeCheck{State: HomeUntrusted, Reason: fmt.Sprintf("user home %s is group/other writable", clean)}
+		return HomeCheck{State: HomeUntrusted, LooseMode: true, Inode: uint64(st.Ino), Reason: fmt.Sprintf("user home %s is group/other writable", clean)}
 	}
-	if lockedEcryptfsHome(clean) {
+	// A mounted home shows the mounted filesystem (an unlocked ecryptfs
+	// home, NFS, systemd-homed); lock markers inside it are user files.
+	if ecryptfsSupported && mountErr == nil && !mounted && lockedEcryptfsHome(clean, uid) {
+		if unixLiveSession(uid) {
+			return HomeCheck{State: HomeUntrusted, Inode: uint64(st.Ino), Reason: fmt.Sprintf("user home %s is a locked ecryptfs home while the user has a live session", clean)}
+		}
 		return HomeCheck{State: HomePending, Reason: fmt.Sprintf("user home %s is a locked ecryptfs home", clean), Inode: uint64(st.Ino)}
 	}
 	return HomeCheck{State: HomeAvailable, Inode: uint64(st.Ino)}
@@ -132,9 +199,36 @@ func worldWritableAncestor(home string) string {
 	}
 }
 
-func lockedEcryptfsHome(home string) bool {
-	private, err := os.Lstat(filepath.Join(home, ".Private"))
-	if err != nil || private.Mode()&os.ModeSymlink == 0 {
+// lockedEcryptfsHome recognizes the lower directory of a locked
+// ecryptfs-utils private home. The markers alone are files the user can
+// create, so the home's .Private link must lead to this uid's own
+// directory inside the root-owned ecryptfs root, which only an
+// administrator's ecryptfs-setup-private creates.
+func lockedEcryptfsHome(home string, uid int) bool {
+	target, err := os.Readlink(filepath.Join(home, ".Private"))
+	if err != nil || !filepath.IsAbs(target) {
+		return false
+	}
+	target = filepath.Clean(target)
+	userDir := filepath.Dir(target)
+	if filepath.Base(target) != ".Private" || filepath.Dir(userDir) != filepath.Clean(ecryptfsPrivateRoot) {
+		return false
+	}
+	root, err := os.Lstat(ecryptfsPrivateRoot)
+	if err != nil || !root.IsDir() || root.Mode()&os.ModeSymlink != 0 || root.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	if st, ok := root.Sys().(*syscall.Stat_t); !ok || !ecryptfsRootOwnerOK(st.Uid) {
+		return false
+	}
+	owned, err := os.Lstat(userDir)
+	if err != nil || !owned.IsDir() || owned.Mode()&os.ModeSymlink != 0 || owned.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	if st, ok := owned.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != uid {
+		return false
+	}
+	if private, err := os.Lstat(target); err != nil || !private.IsDir() || private.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
 	for _, marker := range ecryptfsLockedMarkers {

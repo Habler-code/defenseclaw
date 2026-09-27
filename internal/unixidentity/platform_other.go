@@ -12,7 +12,10 @@
 
 package unixidentity
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // DefaultUIDRange is a conservative default for other Unix systems.
 func DefaultUIDRange() (int, int) { return 1000, 60000 }
@@ -25,3 +28,9 @@ func Default(ctx context.Context) Resolver {
 func platformLocalUserLister(context.Context, commandRunner) ([]Account, error) {
 	return nil, nil
 }
+
+func platformLocalAccounts(context.Context) (map[string]int, error) {
+	return nil, errors.New("unixidentity: no local account reader on this platform")
+}
+
+func platformDirectoryConfigured() bool { return true }

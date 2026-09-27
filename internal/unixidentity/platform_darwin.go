@@ -30,6 +30,25 @@ func Default(ctx context.Context) Resolver {
 	return NewCachingResolver(NewOSUserResolver(ctx))
 }
 
+// platformLocalAccounts lists the local directory node's accounts.
+func platformLocalAccounts(ctx context.Context) (map[string]int, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", "UniqueID"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	return parseDSCLLocalAccounts(string(result.stdout)), nil
+}
+
+// platformDirectoryConfigured cannot cheaply tell whether this Mac is
+// bound to a directory, so it assumes it may be.
+func platformDirectoryConfigured() bool { return true }
+
 // platformLocalUserLister lists local accounts with `dscl . -list /Users
 // UniqueID`, then resolves each through os/user for home and group data.
 func platformLocalUserLister(ctx context.Context, runner commandRunner) ([]Account, error) {

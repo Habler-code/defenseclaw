@@ -75,6 +75,11 @@ type EnterpriseEnrollmentConfig struct {
 	Root            string   `mapstructure:"root"             yaml:"root,omitempty"`
 	// UIDMin overrides the unix login.defs UID_MIN; 0 means "read it".
 	UIDMin int `mapstructure:"uid_min" yaml:"uid_min,omitempty"`
+	// UIDMax, when set, is the highest uid enrolled on Linux and macOS,
+	// for local and directory accounts alike. 0 bounds only local
+	// (/etc/passwd) accounts by login.defs UID_MAX: directory, SSSD
+	// id-mapped, FreeIPA and systemd-homed uids routinely sit above it.
+	UIDMax int `mapstructure:"uid_max" yaml:"uid_max,omitempty"`
 	// HomeRoots lists extra home parents (e.g. /srv/home) the guardian may
 	// write under. The lifecycle widens the guardian unit to exactly these.
 	HomeRoots []string `mapstructure:"home_roots" yaml:"home_roots,omitempty"`
@@ -344,7 +349,7 @@ func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
 	return strings.TrimSpace(e.Mode) == "" && len(e.IncludeUsers) == 0 && len(e.ExcludeUsers) == 0 &&
 		len(e.IncludeGroups) == 0 && len(e.ExcludeGroups) == 0 && len(e.ExemptUsers) == 0 &&
 		strings.TrimSpace(e.UnenrolledUsers) == "" && strings.TrimSpace(e.Root) == "" &&
-		e.UIDMin == 0 && len(e.HomeRoots) == 0 && len(e.AgentPrefixes) == 0
+		e.UIDMin == 0 && e.UIDMax == 0 && len(e.HomeRoots) == 0 && len(e.AgentPrefixes) == 0
 }
 
 func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
@@ -396,6 +401,12 @@ func validateEnterpriseConfig(cfg *Config) error {
 	}
 	if en.UIDMin < 0 {
 		return fmt.Errorf("config: enterprise.enrollment.uid_min must not be negative")
+	}
+	if en.UIDMax < 0 {
+		return fmt.Errorf("config: enterprise.enrollment.uid_max must not be negative")
+	}
+	if en.UIDMax > 0 && en.UIDMax < en.UIDMin {
+		return fmt.Errorf("config: enterprise.enrollment.uid_max must not be below uid_min")
 	}
 	for _, root := range en.HomeRoots {
 		if err := validateEnterpriseHomeRoot(root); err != nil {

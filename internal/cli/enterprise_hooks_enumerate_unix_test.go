@@ -92,3 +92,26 @@ func TestEnumerateCommandDryRunDiscoversThroughTheWorker(t *testing.T) {
 		t.Fatalf("dry-run must not publish: %v", err)
 	}
 }
+
+// The parent re-validated worker versions by re-extracting them, which
+// stripped the trailing "v" of "1.2.0-dev" and dropped the version.
+func TestEnumerateDiscoverKeepsPrereleaseVersionsEndingInV(t *testing.T) {
+	origRunner := enterpriseHookWorkerRunner
+	t.Cleanup(func() { enterpriseHookWorkerRunner = origRunner })
+	enterpriseHookWorkerRunner = func(context.Context, enterpriseHookWorkerAccount, enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		return enterpriseHookWorkerResponse{Versions: map[string]string{"opencode": "1.2.0-dev", "amp": "v0.9.1", "codex": "$(id)"}}, nil
+	}
+	versions, _, err := enterpriseHooksEnumerateDiscover(context.Background(), unixidentity.Account{Name: "alice", UID: 1000, GID: 1000, Home: "/home/alice"}, []string{"opencode", "amp", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if versions["opencode"] != "1.2.0-dev" {
+		t.Fatalf("a valid prerelease version was dropped: %v", versions)
+	}
+	if _, ok := versions["amp"]; ok {
+		t.Fatalf("a non-canonical worker version must not be accepted: %v", versions)
+	}
+	if _, ok := versions["codex"]; ok {
+		t.Fatalf("a forged worker version must be dropped: %v", versions)
+	}
+}

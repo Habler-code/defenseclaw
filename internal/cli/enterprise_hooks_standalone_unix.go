@@ -301,7 +301,7 @@ func resolveEnterpriseHookStandaloneAccount(
 	label := firstNonEmpty(name, home)
 	if lookupErr != nil {
 		if unixidentity.IsNotFound(lookupErr) {
-			return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: target account %q does not exist", label)
+			return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: target account %q does not exist: %w", label, errEnterpriseHookTargetNotFound)
 		}
 		if explicit {
 			// Honor the administrator-published identity while the
@@ -312,7 +312,7 @@ func resolveEnterpriseHookStandaloneAccount(
 		return enterpriseHookWorkerAccount{}, fmt.Sprintf("directory lookup for %q is unavailable: %v", label, lookupErr), nil
 	}
 	if target.UID != nil && *target.UID != account.UID {
-		return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: target %q uid %d no longer matches the directory uid %d", account.Name, *target.UID, account.UID)
+		return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: target %q uid %d no longer matches the directory uid %d: %w", account.Name, *target.UID, account.UID, errEnterpriseHookTargetUIDChanged)
 	}
 	if target.GID != nil && *target.GID != account.GID {
 		return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: target %q gid %d no longer matches the directory primary gid %d", account.Name, *target.GID, account.GID)
@@ -332,8 +332,45 @@ func resolveEnterpriseHookStandaloneAccount(
 	return enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.Name, Home: filepath.Clean(home)}, "", nil
 }
 
+var (
+	errEnterpriseHookTargetNotFound   = errors.New("no such account")
+	errEnterpriseHookTargetUIDChanged = errors.New("the account's uid changed")
+)
+
+// enterpriseHookStandaloneIdentityReassigned reports a failed resolution
+// after which the uid the target was last protected under may belong to
+// someone else: its name now maps to another uid, or its name is gone and
+// that uid now resolves to another account. A name that is gone while its
+// uid resolves to nobody keeps its protection: that is also what a
+// directory outage looks like, and no other account can hold the uid.
+func enterpriseHookStandaloneIdentityReassigned(err error, target enterprisehooks.ManifestTarget, binding *enterpriseHookUnixBinding, resolver unixidentity.Resolver) bool {
+	if errors.Is(err, errEnterpriseHookTargetUIDChanged) {
+		return true
+	}
+	if !errors.Is(err, errEnterpriseHookTargetNotFound) {
+		return false
+	}
+	name := strings.TrimSpace(target.User)
+	var uids []int
+	if target.UID != nil {
+		uids = append(uids, *target.UID)
+	}
+	if binding != nil {
+		uids = append(uids, binding.UID)
+	}
+	for _, uid := range uids {
+		if uid <= 0 {
+			continue
+		}
+		if holder, lookupErr := resolver.LookupUID(uid); lookupErr == nil && holder.Name != name {
+			return true
+		}
+	}
+	return false
+}
+
 func enterpriseHookHomeOwner(home string) (int, error) {
-	info, err := os.Lstat(home)
+	info, err := enterprisehooks.BoundedLstat(home, enterpriseHookHomeCheckTimeout)
 	if err != nil {
 		return 0, fmt.Errorf("enterprise hooks: inspect user home %s: %w", home, err)
 	}
@@ -355,16 +392,11 @@ func firstNonEmpty(values ...string) string {
 
 // enterpriseHookCheckHome classifies a home without letting a hung network
 // filesystem stall the guardian: a check that does not answer in time is
-// pending, and its blocked goroutine is abandoned.
+// pending, and while it is still blocked no further blocking check of that
+// home is started, so rows, passes and reconciles cannot pile up blocked
+// threads.
 var enterpriseHookCheckHome = func(home string, uid int) enterprisehooks.HomeCheck {
-	done := make(chan enterprisehooks.HomeCheck, 1)
-	go func() { done <- enterprisehooks.CheckUnixTargetHome(home, uid) }()
-	select {
-	case check := <-done:
-		return check
-	case <-time.After(enterpriseHookHomeCheckTimeout):
-		return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending, Reason: fmt.Sprintf("user home %s did not respond within %s", home, enterpriseHookHomeCheckTimeout)}
-	}
+	return enterprisehooks.BoundedCheckUnixTargetHome(home, uid, enterpriseHookHomeCheckTimeout)
 }
 
 // validateEnterpriseHookWorkerResult treats the worker's answer as
@@ -530,10 +562,20 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		failRow := func(err error) {
 			row.Error = err.Error()
 			rows = append(rows, row)
-			carryBinding(enterpriseHookProtectedTargetKey(row))
+			if !row.RevokeProtection {
+				carryBinding(enterpriseHookProtectedTargetKey(row))
+			}
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
 		if err != nil {
+			var binding *enterpriseHookUnixBinding
+			if previous, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok {
+				binding = &previous
+			}
+			if enterpriseHookStandaloneIdentityReassigned(err, target, binding, resolver) {
+				row.RevokeProtection = true
+				fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s: the account's uid was reassigned; revoking its previous protection\n", enterpriseHookTargetLabel(row))
+			}
 			failRow(err)
 			continue
 		}
@@ -541,17 +583,40 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			pendingRow(pendingReason)
 			continue
 		}
+		if protected, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok && protected.UID != account.UID {
+			// The name was protected under another uid, which the prior
+			// ledger row still carries: if this pass fails, that uid must
+			// not stay authorized.
+			row.RevokeProtection = true
+		}
+		tightenHome := false
 		row.UserHome = account.Home
 		row.UID = account.UID
 		check := enterpriseHookCheckHome(account.Home, account.UID)
 		row.HomeInode = check.Inode
 		switch check.State {
 		case enterprisehooks.HomePending:
+			if _, protectedBefore := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; check.AccessDenied && protectedBefore {
+				// A home the guardian could inspect when it protected the
+				// target now refuses it: that is a change on the host (for
+				// example a filesystem the user mounted over it), not a
+				// home that is still being created.
+				failRow(fmt.Errorf("enterprise hooks: %s; it was available when this target was protected", check.Reason))
+				continue
+			}
 			pendingRow(check.Reason)
 			continue
 		case enterprisehooks.HomeUntrusted:
-			failRow(errors.New("enterprise hooks: " + check.Reason))
-			continue
+			if _, published := machinePolicy[strings.ToLower(row.Connector)]; !check.LooseMode || published {
+				failRow(errors.New("enterprise hooks: " + check.Reason))
+				continue
+			}
+			// An enrolled user loosened their own home's mode. Failing the
+			// row stopped every repair of their hooks; the user's own
+			// worker removes group/other write (as the owner may) and then
+			// repairs as usual.
+			tightenHome = true
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: %s: %s; the user's worker removes group/other write before repair\n", enterpriseHookTargetLabel(row), check.Reason)
 		}
 		if target.HomeInode != 0 && check.Inode != target.HomeInode {
 			pendingRow(fmt.Sprintf("home %s was recreated after enumeration; waiting for the enumerator to re-enroll it", account.Home))
@@ -654,6 +719,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
 			jobs[account.UID] = job
 		}
+		job.Request.TightenHome = job.Request.TightenHome || tightenHome
 		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
 			Index:               index,
 			Mode:                enterpriseHookWorkerModeVerifyOrRepair,

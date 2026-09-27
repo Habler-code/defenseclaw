@@ -91,13 +91,137 @@ func UnixAgentProbeKnown(connector string) bool {
 	return ok
 }
 
+// userNodePrefixes lists the per-user npm-style install prefixes. In the
+// standalone per-user worker it adds npm's common custom prefixes and the
+// one ~/.npmrc names, yarn classic, pnpm, each installed Node of nvm, fnm,
+// asdf and mise (newest first) and Linuxbrew. Those need reads inside the
+// home, so they are searched only by a process running as the target user
+// (the worker), where these user-owned trees grant nothing the user does
+// not already have; other callers keep the original fixed list.
 func userNodePrefixes(home string) []string {
-	return []string{
+	prefixes := []string{
 		filepath.Join(home, ".npm-global"),
 		filepath.Join(home, ".local"),
 		filepath.Join(home, ".bun", "install", "global"),
 		filepath.Join(home, ".volta", "tools", "image"),
 	}
+	if !unixUserDiscoveryExtended() {
+		return prefixes
+	}
+	if prefix := userNPMRCPrefix(home); prefix != "" {
+		prefixes = append(prefixes, prefix)
+	}
+	prefixes = append(prefixes,
+		filepath.Join(home, ".npm-packages"),
+		filepath.Join(home, ".config", "yarn", "global"),
+	)
+	for _, pattern := range userVersionedNodePrefixPatterns(home) {
+		prefixes = append(prefixes, newestVersionedDirs(pattern, unixVersionedPrefixLimit)...)
+	}
+	return append(prefixes,
+		filepath.Join(home, ".linuxbrew"),
+		"/home/linuxbrew/.linuxbrew",
+	)
+}
+
+// unixUserDiscoveryExtended reports whether discovery may look through the
+// home for version-manager installs: only the standalone profile's per-user
+// worker, which runs as the target user, never a root process.
+var unixUserDiscoveryExtended = func() bool {
+	return StandaloneUnix() && os.Geteuid() != 0
+}
+
+// unixVersionedPrefixLimit bounds the installed Node versions searched per
+// version manager.
+const unixVersionedPrefixLimit = 16
+
+// userVersionedNodePrefixPatterns are globs whose matches are Node install
+// prefixes (bin/ and lib/node_modules/ below them) or pnpm global
+// directories (node_modules/ below them).
+func userVersionedNodePrefixPatterns(home string) []string {
+	return []string{
+		filepath.Join(home, ".nvm", "versions", "node", "*"),
+		filepath.Join(home, ".local", "share", "fnm", "node-versions", "*", "installation"),
+		filepath.Join(home, "Library", "Application Support", "fnm", "node-versions", "*", "installation"),
+		filepath.Join(home, ".fnm", "node-versions", "*", "installation"),
+		filepath.Join(home, ".asdf", "installs", "nodejs", "*"),
+		filepath.Join(home, ".local", "share", "mise", "installs", "node", "*"),
+		filepath.Join(home, ".local", "share", "pnpm", "global", "*"),
+		filepath.Join(home, "Library", "pnpm", "global", "*"),
+	}
+}
+
+// newestVersionedDirs expands pattern to real directories, newest version
+// first (the version is the first path element the wildcard matched,
+// "v22.11.0" or "22.11.0"), at most limit of them.
+func newestVersionedDirs(pattern string, limit int) []string {
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+	star := strings.Index(pattern, "*")
+	versionOf := func(match string) string {
+		rest := match[star:]
+		if i := strings.IndexRune(rest, filepath.Separator); i >= 0 {
+			rest = rest[:i]
+		}
+		return strings.TrimPrefix(rest, "v")
+	}
+	var dirs []string
+	for _, match := range matches {
+		if info, err := os.Lstat(match); err == nil && info.IsDir() {
+			dirs = append(dirs, match)
+		}
+	}
+	sort.SliceStable(dirs, func(i, j int) bool { return compareUnixVersions(versionOf(dirs[i]), versionOf(dirs[j])) > 0 })
+	if len(dirs) > limit {
+		dirs = dirs[:limit]
+	}
+	return dirs
+}
+
+// userNPMRCPrefix returns the npm global prefix set in ~/.npmrc
+// ("prefix=~/.npm-packages", "prefix=${HOME}/tools"), or "".
+func userNPMRCPrefix(home string) string {
+	path := filepath.Join(home, ".npmrc")
+	// A regular file only, opened without following a link or blocking on
+	// a FIFO, so the file cannot stall discovery.
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(file, unixAgentVersionMaxBytes+1))
+	if err != nil || len(data) > unixAgentVersionMaxBytes {
+		return ""
+	}
+	prefix := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || strings.TrimSpace(key) != "prefix" {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		switch {
+		case strings.HasPrefix(value, "~/"):
+			value = filepath.Join(home, value[2:])
+		case strings.HasPrefix(value, "${HOME}/"):
+			value = filepath.Join(home, strings.TrimPrefix(value, "${HOME}/"))
+		case strings.HasPrefix(value, "$HOME/"):
+			value = filepath.Join(home, strings.TrimPrefix(value, "$HOME/"))
+		}
+		prefix = value // the last assignment wins, as in npm
+	}
+	if prefix == "" || !filepath.IsAbs(prefix) || strings.ContainsAny(prefix, "\x00:") || filepath.Clean(prefix) == "/" {
+		return ""
+	}
+	return filepath.Clean(prefix)
 }
 
 // machinePrefixes lists machine-wide install prefixes; tests replace it so
@@ -134,8 +258,14 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 		return "", fmt.Sprintf("no version probe for connector %s", connector)
 	}
 	home = filepath.Clean(home)
+	userPrefixes := userNodePrefixes(home)
 	for _, pkg := range probe.npmPackages {
-		for _, prefix := range append(userNodePrefixes(home), machinePrefixes()...) {
+		prefixes := userPrefixes
+		if unixUserDiscoveryExtended() {
+			// Volta keeps each global package in its own image.
+			prefixes = append([]string{filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg))}, userPrefixes...)
+		}
+		for _, prefix := range append(append([]string{}, prefixes...), machinePrefixes()...) {
 			for _, candidate := range nodeModulesPackage(prefix, pkg) {
 				if version, ok := readUnixPackageVersion(candidate, pkg, false); ok {
 					return version, ""
@@ -186,7 +316,7 @@ func DiscoverUnixMachineAgentVersion(connector string) string {
 }
 
 func unixAgentBinaryCandidates(home, binary string) []string {
-	dirs := UnixAgentSearchDirs(home)
+	dirs := unixAgentDiscoveryDirs(home)
 	candidates := make([]string, 0, len(dirs))
 	for _, dir := range dirs {
 		candidates = append(candidates, filepath.Join(dir, binary))
@@ -194,9 +324,23 @@ func unixAgentBinaryCandidates(home, binary string) []string {
 	return candidates
 }
 
-// UnixAgentSearchDirs lists the directories agent discovery looks in for
-// home: per-user install locations first, then the machine prefixes.
+// UnixAgentSearchDirs lists fixed directories agent discovery looks in for
+// home, per-user install locations first, then the machine prefixes. It
+// never touches the filesystem, so a root parent can use it to build the
+// worker's PATH. The standalone profile adds the fixed bin and shim
+// directories of Volta, pnpm, yarn, fnm, asdf, mise and Linuxbrew.
 func UnixAgentSearchDirs(home string) []string {
+	return append(unixUserAgentBinDirs(home, false), unixMachineAgentBinDirs()...)
+}
+
+// unixAgentDiscoveryDirs adds, for the per-user worker, the bin directories
+// found by reading the home: the npm prefix in ~/.npmrc and each installed
+// Node of nvm, fnm, asdf and mise.
+func unixAgentDiscoveryDirs(home string) []string {
+	return append(unixUserAgentBinDirs(home, unixUserDiscoveryExtended()), unixMachineAgentBinDirs()...)
+}
+
+func unixUserAgentBinDirs(home string, readHome bool) []string {
 	dirs := []string{
 		filepath.Join(home, ".local", "bin"),
 		filepath.Join(home, ".npm-global", "bin"),
@@ -204,6 +348,43 @@ func UnixAgentSearchDirs(home string) []string {
 		filepath.Join(home, ".opencode", "bin"),
 		filepath.Join(home, "bin"),
 	}
+	if !StandaloneUnix() {
+		return dirs
+	}
+	if readHome {
+		if prefix := userNPMRCPrefix(home); prefix != "" {
+			dirs = append(dirs, filepath.Join(prefix, "bin"))
+		}
+	}
+	dirs = append(dirs,
+		filepath.Join(home, ".npm-packages", "bin"),
+		filepath.Join(home, ".volta", "bin"),
+		filepath.Join(home, ".local", "share", "pnpm"),
+		filepath.Join(home, "Library", "pnpm"),
+		filepath.Join(home, ".yarn", "bin"),
+		filepath.Join(home, ".config", "yarn", "global", "node_modules", ".bin"),
+		filepath.Join(home, ".local", "share", "fnm", "aliases", "default", "bin"),
+		filepath.Join(home, ".asdf", "shims"),
+		filepath.Join(home, ".local", "share", "mise", "shims"),
+	)
+	if readHome {
+		for _, pattern := range userVersionedNodePrefixPatterns(home) {
+			if strings.Contains(pattern, "pnpm") {
+				continue // pnpm's global dirs hold packages, not binaries
+			}
+			for _, prefix := range newestVersionedDirs(pattern, unixVersionedPrefixLimit) {
+				dirs = append(dirs, filepath.Join(prefix, "bin"))
+			}
+		}
+	}
+	return append(dirs,
+		filepath.Join(home, ".linuxbrew", "bin"),
+		"/home/linuxbrew/.linuxbrew/bin",
+	)
+}
+
+func unixMachineAgentBinDirs() []string {
+	var dirs []string
 	for _, prefix := range machinePrefixes() {
 		dirs = append(dirs, filepath.Join(prefix, "bin"))
 	}
@@ -339,12 +520,22 @@ func validUnixAgentVersion(version string) bool {
 	return unixAgentSemver.MatchString(version)
 }
 
-// ExtractUnixAgentVersion takes the last semver-looking token of a
-// `--version` first line ("codex-cli 0.142.0", "2.1.187 (Claude Code)").
+// ValidUnixAgentVersion reports whether version is a bounded, semver-like
+// agent version exactly as discovery accepts it from package metadata. The
+// root parent re-validates the worker's user-influenced answers with it.
+func ValidUnixAgentVersion(version string) bool {
+	return validUnixAgentVersion(version)
+}
+
+// ExtractUnixAgentVersion takes the first semver-looking token of a
+// `--version` first line ("codex-cli 0.142.0", "2.1.187 (Claude Code)",
+// "v1.4.2"). Only surrounding punctuation and a leading "v" are removed, so
+// a prerelease that ends in "v" ("1.2.0-dev") keeps its last letter.
 func ExtractUnixAgentVersion(line string) string {
 	fields := strings.Fields(line)
 	for i := range fields {
-		token := strings.Trim(fields[i], "()[],v")
+		token := strings.Trim(fields[i], "()[],")
+		token = strings.Trim(strings.TrimPrefix(token, "v"), "()[],")
 		if validUnixAgentVersion(token) {
 			return token
 		}

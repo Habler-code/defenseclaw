@@ -11,17 +11,16 @@ import (
 	"syscall"
 )
 
-func enterpriseHookWorkerSysProcAttr(account enterpriseHookWorkerAccount) *syscall.SysProcAttr {
+func enterpriseHookWorkerSysProcAttr(account enterpriseHookWorkerAccount, supplementary []int) *syscall.SysProcAttr {
 	attr := &syscall.SysProcAttr{Setsid: true}
 	if os.Geteuid() == 0 {
-		attr.Credential = &syscall.Credential{
-			Uid:    uint32(account.UID),
-			Gid:    uint32(account.GID),
-			Groups: []uint32{uint32(account.GID)},
-		}
+		attr.Credential = enterpriseHookWorkerCredential(account, supplementary, enterpriseHookWorkerMaxGroups)
 	}
 	return attr
 }
+
+// enterpriseHookWorkerMaxGroups is the portable POSIX minimum NGROUPS_MAX.
+const enterpriseHookWorkerMaxGroups = 8
 
 // hardenEnterpriseHookWorkerProcess is a no-op on other Unix systems.
 func hardenEnterpriseHookWorkerProcess() {}

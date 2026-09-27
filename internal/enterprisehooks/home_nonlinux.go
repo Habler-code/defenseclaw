@@ -1,4 +1,4 @@
-//go:build !windows && !linux
+//go:build !windows && !linux && !darwin
 
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 //
@@ -6,7 +6,21 @@
 
 package enterprisehooks
 
-import "syscall"
+import (
+	"errors"
+	"syscall"
+)
 
-// enokey has no equivalent outside Linux; errno 0 never matches an error.
+// enokey has no equivalent on this platform.
 const enokey = syscall.Errno(0)
+
+// ecryptfsSupported: ecryptfs private homes exist only on Linux.
+const ecryptfsSupported = false
+
+// platformMountAt cannot read a mount table here; the lock check then
+// never trusts markers and the user-mount check does not apply.
+func platformMountAt(string) (unixMount, bool, error) {
+	return unixMount{}, false, errors.New("no mount table reader on this platform")
+}
+
+func platformLiveSession(int) bool { return false }

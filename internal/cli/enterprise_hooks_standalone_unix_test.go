@@ -600,7 +600,11 @@ func TestStandaloneReconcileSeparatesPendingFromTrustFailures(t *testing.T) {
 	f := newStandaloneFixture(t, resolver)
 	alice := f.home(t, "alice", 0o700)
 	bob := filepath.Join(f.homes, "bob") // not created yet: pam_mkhomedir has not run
-	carol := f.home(t, "carol", 0o770)
+	carolReal := f.home(t, "carol-real", 0o700)
+	carol := filepath.Join(f.homes, "carol")
+	if err := os.Symlink(carolReal, carol); err != nil {
+		t.Fatal(err)
+	}
 	for name, home := range map[string]string{"alice": alice, "bob": bob, "carol": carol} {
 		resolver.accounts[name] = unixidentity.Account{Name: name, UID: uid, GID: gid, Home: home, Shell: "/bin/bash"}
 	}
@@ -629,8 +633,8 @@ func TestStandaloneReconcileSeparatesPendingFromTrustFailures(t *testing.T) {
 	if !run.Rows[2].Pending || run.Rows[2].Error != "" {
 		t.Fatalf("a missing home is pending, not a failure: %+v", run.Rows[2])
 	}
-	if run.Rows[3].OK || !strings.Contains(run.Rows[3].Error, "group/other writable") {
-		t.Fatalf("a group-writable home is a trust failure: %+v", run.Rows[3])
+	if run.Rows[3].OK || !strings.Contains(run.Rows[3].Error, "symlink") {
+		t.Fatalf("a symlinked home is a trust failure: %+v", run.Rows[3])
 	}
 	if got := len(f.requests); got != 1 {
 		t.Fatalf("one worker per user expected, got %d requests", got)
@@ -1127,5 +1131,243 @@ func TestEnterpriseHookWorkerPathIncludesDiscoveryDirsAfterSystemDirs(t *testing
 			t.Fatalf("worker PATH repeats %q: %q", part, path)
 		}
 		seen[part] = true
+	}
+}
+
+// A home that could be inspected when its target was protected and now
+// refuses the guardian (for example a filesystem the user mounted over it)
+// is a failure; staying pending stopped every repair for that user.
+func TestStandaloneReconcileFailsAProtectedHomeThatNowRefusesInspection(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	bob := f.home(t, "bob", 0o700)
+	for name, home := range map[string]string{"alice": alice, "bob": bob} {
+		resolver.accounts[name] = unixidentity.Account{Name: name, UID: uid, GID: gid, Home: home, Shell: "/bin/bash"}
+	}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"},
+		enterprisehooks.ManifestTarget{User: "bob", Connector: "codex"},
+	)
+	aliceKey := enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "alice", Connector: "codex"})
+	f.writeBindings(t, map[string]enterpriseHookUnixBinding{aliceKey: {UID: uid, Home: alice}})
+	enterpriseHookCheckHome = func(home string, _ int) enterprisehooks.HomeCheck {
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending, AccessDenied: true, Reason: "user home " + home + " refused inspection: permission denied"}
+	}
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 2 || len(f.requests) != 0 {
+		t.Fatalf("rows = %+v (%d worker requests)", run.Rows, len(f.requests))
+	}
+	if row := run.Rows[0]; row.OK || row.Pending || !strings.Contains(row.Error, "was available when this target was protected") {
+		t.Fatalf("a protected home that now refuses inspection must fail: %+v", row)
+	}
+	if row := run.Rows[1]; !row.Pending || row.Error != "" {
+		t.Fatalf("a never-protected home that refuses inspection stays pending: %+v", row)
+	}
+}
+
+// A user who loosened their own home (chmod g+w ~) made every reconcile
+// fail the row before dispatch, so nothing ever repaired their hooks. The
+// user's own worker now removes group/other write and repairs.
+func TestStandaloneReconcileTightensALoosenedEnrolledHome(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	dave := f.home(t, "dave", 0o770)
+	resolver.accounts["dave"] = unixidentity.Account{Name: "dave", UID: uid, GID: gid, Home: dave, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "dave", Connector: "opencode"})
+	var log bytes.Buffer
+	enterpriseHookWorkerLog = &log
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 1 || !run.Rows[0].OK || run.Failures != 0 {
+		t.Fatalf("a loosened enrolled home must be repaired: %+v failures=%d", run.Rows, run.Failures)
+	}
+	if len(f.requests) != 1 || !f.requests[0].TightenHome {
+		t.Fatalf("the worker must be asked to remove group/other write first: %+v", f.requests)
+	}
+	if !strings.Contains(log.String(), "group/other writable") {
+		t.Fatalf("the loosened mode must still be reported: %q", log.String())
+	}
+}
+
+func TestEnterpriseHookWorkerTightensTheUsersOwnHome(t *testing.T) {
+	useEnterpriseHookWorkerHelper(t, "ok")
+	account := selfWorkerAccount(t)
+	if err := os.Chmod(account.Home, 0o772); err != nil {
+		t.Fatal(err)
+	}
+	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+		Operation:   enterpriseHookWorkerOpApply,
+		Standalone:  true,
+		TightenHome: true,
+		Targets:     []enterpriseHookWorkerTarget{workerTarget(account, 0, enterpriseHookWorkerModeVerifyOrRepair, "opencode", true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Targets; len(got) != 1 || !got[0].OK {
+		t.Fatalf("targets = %+v", got)
+	}
+	info, err := os.Stat(account.Home)
+	if err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("home mode = %v (%v), want 0750", info.Mode().Perm(), err)
+	}
+	// A home path that is a symlink is refused, not followed.
+	link := filepath.Join(t.TempDir(), "home-link")
+	if err := os.Symlink(account.Home, link); err != nil {
+		t.Fatal(err)
+	}
+	linked := account
+	linked.Home = link
+	response, err = runEnterpriseHookWorker(context.Background(), linked, enterpriseHookWorkerRequest{
+		Operation:   enterpriseHookWorkerOpApply,
+		Standalone:  true,
+		TightenHome: true,
+		Targets:     []enterpriseHookWorkerTarget{workerTarget(linked, 0, enterpriseHookWorkerModeVerifyOrRepair, "opencode", true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Targets; len(got) != 1 || got[0].OK || !strings.Contains(got[0].Error, "remove group/other write") {
+		t.Fatalf("a symlinked home must not be tightened or repaired: %+v", got)
+	}
+}
+
+// alice was deleted and bob created with her reused uid: the failed row
+// carried alice's previous ledger entry, which still names that uid, so
+// bob's hook calls matched it. A reassigned identity now revokes the
+// carried protection; an account that is merely not found (what a
+// directory outage also looks like) keeps it.
+func TestStandaloneReconcileRevokesProtectionOfAReassignedUID(t *testing.T) {
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"bob":  {Name: "bob", UID: 5001, GID: 5001, Home: "/home/bob", Shell: "/bin/bash"},
+		"dave": {Name: "dave", UID: 7002, GID: 7002, Home: "/home/dave", Shell: "/bin/bash"},
+	}}
+	f := newStandaloneFixture(t, resolver)
+	row := func(name string, uid int) enterprisehooks.ManifestTarget {
+		home := filepath.Join(f.homes, name)
+		return enterprisehooks.ManifestTarget{User: name, UserHome: home, UID: &uid, GID: &uid, Connector: "opencode"}
+	}
+	f.writeManifest(t, row("alice", 5001), row("carol", 6001), row("dave", 7001), row("erin", 8001))
+	var protected []enterpriseHookReconcileRow
+	bindings := map[string]enterpriseHookUnixBinding{}
+	for name, uid := range map[string]int{"alice": 5001, "carol": 6001, "dave": 7001, "erin": 0} {
+		home := filepath.Join(f.homes, name)
+		prior := protectedRow(name, home, "opencode")
+		prior.UID = uid
+		protected = append(protected, prior)
+		if uid > 0 {
+			bindings[enterpriseHookProtectedTargetKey(prior)] = enterpriseHookUnixBinding{UID: uid, Home: home}
+		}
+	}
+	// erin's manifest row names uid 8001, but her binding recorded uid 5001.
+	erinKey := enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "erin", Connector: "opencode"})
+	bindings[erinKey] = enterpriseHookUnixBinding{UID: 5001, Home: filepath.Join(f.homes, "erin")}
+	f.writeLedger(t, protected...)
+	f.writeBindings(t, bindings)
+
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if run.Failures != 4 || len(f.requests) != 0 {
+		t.Fatalf("every row fails before dispatch: %+v", run.Rows)
+	}
+	kept := map[string]bool{}
+	for _, target := range f.ledger(t).ProtectedTargets {
+		kept[target.User] = true
+	}
+	if kept["alice"] || kept["dave"] || kept["erin"] {
+		t.Fatalf("a reassigned uid must not inherit the old authorization: %v", kept)
+	}
+	if !kept["carol"] {
+		t.Fatalf("an account that is only not found keeps its protection: %v", kept)
+	}
+	saved := loadEnterpriseHookUnixBindings().Bindings
+	if _, ok := saved[enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "alice", Connector: "opencode"})]; ok {
+		t.Fatalf("a reassigned identity's repair binding must be dropped: %v", saved)
+	}
+	if _, ok := saved[enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "carol", Connector: "opencode"})]; !ok {
+		t.Fatalf("carol's binding must be kept: %v", saved)
+	}
+}
+
+type supplementaryGroupResolver struct {
+	standaloneTestResolver
+	groups []int
+	err    error
+}
+
+func (r supplementaryGroupResolver) GroupIDs(unixidentity.Account) ([]int, error) {
+	return r.groups, r.err
+}
+
+// The worker's credential carried only the primary group, so an agent
+// under an administrator prefix readable only by a group (or a config
+// reachable only through one) was invisible to discovery and repair.
+func TestEnterpriseHookWorkerCredentialKeepsSupplementaryGroups(t *testing.T) {
+	account := enterpriseHookWorkerAccount{UID: 1001, GID: 1001, User: "alice", Home: "/home/alice"}
+	cred := enterpriseHookWorkerCredential(account, []int{1001, 2000, 2000, -1, 3000}, 16)
+	if cred.Uid != 1001 || cred.Gid != 1001 || fmt.Sprint(cred.Groups) != "[1001 2000 3000]" {
+		t.Fatalf("credential = %+v", cred)
+	}
+	if cred := enterpriseHookWorkerCredential(account, []int{1, 2, 3, 4, 5}, 3); fmt.Sprint(cred.Groups) != "[1001 1 2]" {
+		t.Fatalf("the group list must respect the platform limit with the primary group first: %v", cred.Groups)
+	}
+	if enterpriseHookWorkerMaxGroups < 8 || enterpriseHookWorkerMaxGroups > 65536 {
+		t.Fatalf("implausible group limit %d", enterpriseHookWorkerMaxGroups)
+	}
+	t.Cleanup(func() { enterprisehooks.SetStandaloneResolver(nil) })
+	enterprisehooks.SetStandaloneResolver(supplementaryGroupResolver{groups: []int{1001, 2000}})
+	if got := enterpriseHookWorkerGroupIDs(account); fmt.Sprint(got) != "[1001 2000]" {
+		t.Fatalf("supplementary groups must come from the account resolver: %v", got)
+	}
+	origLog := enterpriseHookWorkerLog
+	t.Cleanup(func() { enterpriseHookWorkerLog = origLog })
+	enterpriseHookWorkerLog = io.Discard
+	enterprisehooks.SetStandaloneResolver(supplementaryGroupResolver{err: errors.New("sssd: backend offline")})
+	if got := enterpriseHookWorkerGroupIDs(account); got != nil {
+		t.Fatalf("an unavailable directory falls back to the primary group only: %v", got)
+	}
+}
+
+// frank was protected under an old uid (his binding and the prior ledger
+// row carry it) and now resolves to a new one. If this pass fails, the old
+// uid, which may already belong to someone else, must not stay authorized.
+func TestStandaloneReconcileDropsProtectionWhenTheNameMovedToANewUID(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	real := f.home(t, "frank-real", 0o700)
+	frank := filepath.Join(f.homes, "frank")
+	if err := os.Symlink(real, frank); err != nil { // untrusted: this pass fails
+		t.Fatal(err)
+	}
+	resolver.accounts["frank"] = unixidentity.Account{Name: "frank", UID: uid, GID: gid, Home: frank, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "frank", UserHome: frank, UID: &uid, GID: &gid, Connector: "opencode"})
+	prior := protectedRow("frank", frank, "opencode")
+	prior.UID = uid + 1
+	f.writeLedger(t, prior)
+	f.writeBindings(t, map[string]enterpriseHookUnixBinding{enterpriseHookProtectedTargetKey(prior): {UID: uid + 1, Home: frank}})
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if run.Failures != 1 {
+		t.Fatalf("rows = %+v", run.Rows)
+	}
+	if got := f.ledger(t).ProtectedTargets; len(got) != 0 {
+		t.Fatalf("the old uid must not stay authorized: %+v", got)
 	}
 }

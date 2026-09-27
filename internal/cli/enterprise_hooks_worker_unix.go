@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // The apply-target worker runs every user-home operation of the standalone
@@ -118,6 +119,10 @@ type enterpriseHookWorkerRequest struct {
 	// ForeignCleanup asks the worker to remove unapproved foreign hooks
 	// from the user's own vendor config (foreign_cleanup operation).
 	ForeignCleanup []enterpriseHookWorkerForeignCleanup `json:"foreign_cleanup,omitempty"`
+	// TightenHome asks the worker to remove group/other write from the
+	// user's own home before an apply, so an enrolled user cannot stop
+	// repair of their hooks by loosening their home's mode.
+	TightenHome bool `json:"tighten_home,omitempty"`
 }
 
 // enterpriseHookWorkerForeignCleanup is one connector's foreign-hook
@@ -306,6 +311,14 @@ var (
 func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWorkerRequest) enterpriseHookWorkerResponse {
 	registry := connector.NewDefaultRegistry()
 	results := make([]enterpriseHookWorkerTargetResult, 0, len(request.Targets))
+	if request.TightenHome {
+		if err := tightenEnterpriseHookWorkerHome(request.Home, request.UID); err != nil {
+			for _, target := range request.Targets {
+				results = append(results, enterpriseHookWorkerTargetResult{Index: target.Index, Error: err.Error()})
+			}
+			return enterpriseHookWorkerResponse{Targets: results}
+		}
+	}
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
@@ -348,6 +361,33 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		results = append(results, outcome)
 	}
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// tightenEnterpriseHookWorkerHome removes group/other write from the
+// worker user's own home. It runs as that user (an owner may chmod their
+// home) through a no-follow directory handle, so a swapped path or a home
+// that is not the user's own is refused rather than changed.
+func tightenEnterpriseHookWorkerHome(home string, uid int) error {
+	fd, err := syscall.Open(home, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: open user home %s to remove group/other write: %w", home, err)
+	}
+	defer syscall.Close(fd)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return fmt.Errorf("enterprise hooks: inspect user home %s: %w", home, err)
+	}
+	if uint32(st.Mode)&syscall.S_IFMT != syscall.S_IFDIR || int(st.Uid) != uid {
+		return fmt.Errorf("enterprise hooks: user home %s is not a directory owned by uid %d", home, uid)
+	}
+	mode := uint32(st.Mode) & 0o7777
+	if mode&0o022 == 0 {
+		return nil
+	}
+	if err := syscall.Fchmod(fd, mode&^0o022); err != nil {
+		return fmt.Errorf("enterprise hooks: remove group/other write from user home %s: %w", home, err)
+	}
+	return nil
 }
 
 func (o enterpriseHookWorkerOptions) installOptions(registry *connector.Registry) enterprisehooks.InstallOptions {
@@ -488,7 +528,11 @@ func runEnterpriseHookWorker(
 	stderr := &workerOutputBuffer{limit: enterpriseHookWorkerStderrLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.SysProcAttr = enterpriseHookWorkerSysProcAttr(account)
+	var supplementary []int
+	if os.Geteuid() == 0 {
+		supplementary = enterpriseHookWorkerGroupIDs(account)
+	}
+	cmd.SysProcAttr = enterpriseHookWorkerSysProcAttr(account, supplementary)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -525,6 +569,43 @@ func runEnterpriseHookWorker(
 		return response, fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr)
 	}
 	return response, nil
+}
+
+// enterpriseHookWorkerGroupIDs resolves the account's primary and
+// supplementary groups (initgroups through NSS or Directory Services), so
+// discovery, install and cleanup run with the user's real rights: an agent
+// under an administrator prefix readable only by a group, or a config
+// reachable only through one, is otherwise invisible to the worker. When
+// the directory cannot answer, the worker runs with the primary group only,
+// which can only grant less. Replaceable in tests.
+var enterpriseHookWorkerGroupIDs = func(account enterpriseHookWorkerAccount) []int {
+	ids, err := enterprisehooks.StandaloneResolver().GroupIDs(unixidentity.Account{Name: account.User, UID: account.UID, GID: account.GID})
+	if err != nil {
+		if enterpriseHookWorkerLog != nil {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] worker uid=%d: supplementary groups unavailable, using the primary group only: %v\n", account.UID, err)
+		}
+		return nil
+	}
+	return ids
+}
+
+// enterpriseHookWorkerCredential is the worker's exact identity: the
+// target uid and primary gid, then the supplementary groups in order,
+// without duplicates, up to the platform's group limit.
+func enterpriseHookWorkerCredential(account enterpriseHookWorkerAccount, supplementary []int, limit int) *syscall.Credential {
+	groups := []uint32{uint32(account.GID)}
+	seen := map[int]bool{account.GID: true}
+	for _, gid := range supplementary {
+		if len(groups) >= limit {
+			break
+		}
+		if gid < 0 || seen[gid] {
+			continue
+		}
+		seen[gid] = true
+		groups = append(groups, uint32(gid))
+	}
+	return &syscall.Credential{Uid: uint32(account.UID), Gid: uint32(account.GID), Groups: groups}
 }
 
 // enterpriseHookWorkerPath lets connector setup find an agent where

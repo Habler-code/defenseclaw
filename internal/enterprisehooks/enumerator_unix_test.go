@@ -17,6 +17,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -279,7 +280,9 @@ func TestEnumerateUnixPreservesKnownRowsThroughDirectoryFailures(t *testing.T) {
 		listErr:   errors.New("enumeration disabled"),
 	}
 	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}}
-	opts := UnixEnumerateOptions{ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1, State: state}
+	// No directory backend is configured, so "no such user" is definitive.
+	opts := UnixEnumerateOptions{ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1, State: state,
+		DirectoryConfigured: func() bool { return false }}
 	cfg := enumeratorConfig("codex")
 	for cycle := 1; cycle <= UnixRevokeAfterMisses; cycle++ {
 		manifest, _, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
@@ -588,4 +591,348 @@ func statInode(t *testing.T, info os.FileInfo) uint64 {
 		t.Fatal("no stat_t")
 	}
 	return uint64(st.Ino)
+}
+
+// A manifest that does not load (here an administrator disabled a deferred
+// row without clearing deferred) must fail the cycle. Rebuilding it from
+// scratch re-enabled the disabled row and dropped every user who was not
+// rediscovered this cycle, without the miss count.
+func TestEnumerateUnixKeepsAnUnloadableManifest(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	manifestPath := filepath.Join(root, "targets.yaml")
+	raw := []byte("version: 1\ntargets:\n  - user: alice\n    user_home: " + alice + "\n    connector: codex\n    agent_version: 0.140.0\n    enabled: false\n    deferred: true\n")
+	if err := os.WriteFile(manifestPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}},
+		listed:   []string{"alice"},
+	}
+	opts := UnixEnumerateOptions{
+		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+			return map[string]string{"codex": "0.150.0"}, nil, nil
+		},
+	}
+	manifest, _, err := EnumerateUnix(context.Background(), enumeratorConfig("codex"), connector.NewDefaultRegistry(), opts)
+	if err == nil || !strings.Contains(err.Error(), "does not load") {
+		t.Fatalf("an unloadable manifest must fail the cycle, got err=%v manifest=%+v", err, manifest)
+	}
+	if len(manifest.Targets) != 0 {
+		t.Fatalf("no manifest may be produced for publication: %+v", manifest.Targets)
+	}
+	after, readErr := os.ReadFile(manifestPath)
+	if readErr != nil || string(after) != string(raw) {
+		t.Fatalf("the administrator's manifest must be left unchanged: %v\n%s", readErr, after)
+	}
+	// A missing manifest is still a first run.
+	if _, _, err := EnumerateUnix(context.Background(), enumeratorConfig("codex"), connector.NewDefaultRegistry(), UnixEnumerateOptions{
+		ExistingManifestPath: filepath.Join(root, "absent.yaml"), Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+	}); err != nil {
+		t.Fatalf("a missing manifest must not fail the cycle: %v", err)
+	}
+}
+
+// A locked ecryptfs home shows its lower mountpoint directory, whose inode
+// differs from the mounted root the user was enrolled under. Comparing the
+// two re-enrolled the user as a new target (and revoked a per-user row) on
+// every logout; a pending home's inode must be neither compared nor bound.
+func TestEnumerateUnixPendingHomeKeepsTheEnrolledInode(t *testing.T) {
+	SetStandaloneUnix(true) // deferred Unix rows load only in the standalone profile
+	t.Cleanup(func() { SetStandaloneUnix(false) })
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := filepath.Join(homes, "alice")
+	bob := filepath.Join(homes, "bob")
+	enabled := true
+	manifestPath := filepath.Join(root, "targets.yaml")
+	previous := Manifest{Version: 1, Targets: []ManifestTarget{{
+		User: "alice", UserHome: alice, UID: intPointer(uid), GID: intPointer(gid), Connector: "opencode",
+		DataDir: filepath.Join(alice, ".defenseclaw"), AgentVersion: "1.0.0", Enabled: &enabled, HomeInode: 555,
+	}}}
+	data, _ := MarshalUnixTargetsManifest(previous)
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{
+			"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"},
+			"bob":   {Name: "bob", UID: uid, GID: gid, Home: bob, Shell: "/bin/bash"},
+		},
+		listed: []string{"alice", "bob"},
+	}
+	state := map[string]HomeCheck{
+		alice: {State: HomePending, Reason: "locked", Inode: 777},
+		bob:   {State: HomePending, Reason: "locked", Inode: 888},
+	}
+	var logs []string
+	opts := UnixEnumerateOptions{
+		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+		CheckHome:      func(home string, _ int) HomeCheck { return state[home] },
+		MachineVersion: func(string) string { return "1.0.0" },
+		Logger:         func(_, reason string) { logs = append(logs, reason) },
+	}
+	cfg := enumeratorConfig("opencode")
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]ManifestTarget{}
+	for _, target := range manifest.Targets {
+		rows[target.User] = target
+	}
+	if got := rows["alice"]; !got.Deferred || got.HomeInode != 555 || got.AgentVersion != "1.0.0" || report.Revoked != 0 {
+		t.Fatalf("a locked home must keep the enrolled row and inode: %+v report=%+v logs=%v", got, report, logs)
+	}
+	if got := rows["bob"]; !got.Deferred || got.HomeInode != 0 {
+		t.Fatalf("a new deferred row must not bind a pending home's inode: %+v", got)
+	}
+	if strings.Contains(strings.Join(logs, "\n"), "re-enrolling") {
+		t.Fatalf("a lock state change is not an identity change: %v", logs)
+	}
+	// Unlocked again: the mounted root has the enrolled inode.
+	state[alice] = HomeCheck{State: HomeAvailable, Inode: 555}
+	data, _ = MarshalUnixTargetsManifest(manifest)
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, report, err = EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range manifest.Targets {
+		if target.User == "alice" && (target.Deferred || target.HomeInode != 555) {
+			t.Fatalf("an unlocked home must resume the enrolled row: %+v", target)
+		}
+	}
+	if report.New != 0 || report.Revoked != 0 {
+		t.Fatalf("unlock must not re-enroll: %+v", report)
+	}
+}
+
+func availableHome(string, int) HomeCheck { return HomeCheck{State: HomeAvailable, Inode: 42} }
+
+func writeTestManifest(t *testing.T, path string, targets ...ManifestTarget) {
+	t.Helper()
+	enabled := true
+	for i := range targets {
+		targets[i].Enabled = &enabled
+	}
+	data, err := MarshalUnixTargetsManifest(Manifest{Version: 1, Targets: targets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func manifestUsers(m Manifest) map[string]bool {
+	users := map[string]bool{}
+	for _, target := range m.Targets {
+		users[target.User] = true
+	}
+	return users
+}
+
+// login.defs UID_MAX (60000 on RHEL and Ubuntu) excluded every SSSD
+// id-mapped, FreeIPA and systemd-homed account. It now bounds only local
+// accounts unless enterprise.enrollment.uid_max is set; systemd's dynamic
+// service uids are never enrolled.
+func TestEnumerateUnixDirectoryUIDsAreNotBoundByLoginDefs(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	accounts := map[string]unixidentity.Account{}
+	var listed []string
+	for name, uid := range map[string]int{"adalice": 1234401103, "homed": 60100, "localhigh": 70000, "localuser": 1500, "dyn": 61200} {
+		accounts[name] = unixidentity.Account{Name: name, UID: uid, GID: uid, Home: filepath.Join(homes, name), Shell: "/bin/bash"}
+		listed = append(listed, name)
+	}
+	resolver := &fakeResolver{accounts: accounts, listed: listed}
+	opts := UnixEnumerateOptions{
+		Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000, CheckHome: availableHome,
+		LocalAccounts: func() (map[string]int, error) {
+			return map[string]int{"root": 0, "localhigh": 70000, "localuser": 1500}, nil
+		},
+		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+			return map[string]string{"opencode": "1.0.0"}, nil, nil
+		},
+	}
+	cfg := enumeratorConfig("opencode")
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := manifestUsers(manifest)
+	want := map[string]bool{"adalice": true, "homed": true, "localuser": true}
+	if runtime.GOOS != "linux" {
+		want["dyn"] = true
+	}
+	if len(users) != len(want) {
+		t.Fatalf("enrolled = %v, want %v (skipped %v)", users, want, report.Skipped)
+	}
+	for name := range want {
+		if !users[name] {
+			t.Fatalf("enrolled = %v, want %v (skipped %v)", users, want, report.Skipped)
+		}
+	}
+	// An explicit uid_max applies to every account.
+	cfg.Enterprise.Enrollment.UIDMax = 100000
+	manifest, _, err = EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if users := manifestUsers(manifest); users["adalice"] || !users["localhigh"] || !users["homed"] {
+		t.Fatalf("uid_max=100000 enrolled %v", users)
+	}
+	// Without the local account database every account keeps UID_MAX.
+	cfg.Enterprise.Enrollment.UIDMax = 0
+	opts.LocalAccounts = func() (map[string]int, error) { return nil, errors.New("unreadable") }
+	manifest, _, err = EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if users := manifestUsers(manifest); users["adalice"] || !users["localuser"] {
+		t.Fatalf("an unknown account source must keep UID_MAX: %v", users)
+	}
+}
+
+// getent exits 2 for a deleted account and for every directory account
+// while sssd, nslcd or ypbind cannot reach the directory. A directory
+// user's "no such user" counts only when another directory account resolved
+// in the same cycle; a local account's counts at once.
+func TestEnumerateUnixDirectoryOutageNeverRevokes(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	manifestPath := filepath.Join(root, "targets.yaml")
+	uid := 1234401103
+	writeTestManifest(t, manifestPath,
+		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(uid), GID: intPointer(uid), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "carol", UserHome: filepath.Join(homes, "carol"), UID: intPointer(1500), GID: intPointer(1500), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+	)
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"alice": unixSourceDirectory, "carol": unixSourceFiles}}
+	// The outage: only local accounts answer; alice and the deleted local
+	// user carol both come back "not found" (exit 2).
+	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
+		"root": {Name: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/bash"},
+	}, listed: []string{"root"}}
+	opts := UnixEnumerateOptions{
+		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000,
+		CheckHome: availableHome, State: state,
+		LocalAccounts:       func() (map[string]int, error) { return map[string]int{"root": 0}, nil },
+		DirectoryConfigured: func() bool { return true },
+	}
+	cfg := enumeratorConfig("opencode")
+	for cycle := 1; cycle <= UnixRevokeAfterMisses+3; cycle++ {
+		manifest, _, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		users := manifestUsers(manifest)
+		if !users["alice"] {
+			t.Fatalf("cycle %d: a directory outage revoked alice (misses=%v)", cycle, state.Misses)
+		}
+		if wantCarol := cycle < UnixRevokeAfterMisses; users["carol"] != wantCarol {
+			t.Fatalf("cycle %d: deleted local user present=%v, want %v", cycle, users["carol"], wantCarol)
+		}
+		writeTestManifest(t, manifestPath, manifest.Targets...)
+	}
+	// The directory answers again (bob resolves) but alice is really gone.
+	resolver.accounts["bob"] = unixidentity.Account{Name: "bob", UID: 1234401200, GID: 1234401200, Home: filepath.Join(homes, "bob"), Shell: "/bin/bash"}
+	resolver.listed = append(resolver.listed, "bob")
+	for cycle := 1; cycle <= UnixRevokeAfterMisses; cycle++ {
+		manifest, _, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wantAlice := cycle < UnixRevokeAfterMisses; manifestUsers(manifest)["alice"] != wantAlice {
+			t.Fatalf("directory up, cycle %d: alice present=%v, want %v", cycle, !wantAlice, wantAlice)
+		}
+		writeTestManifest(t, manifestPath, manifest.Targets...)
+	}
+	if _, ok := state.Sources["alice"]; ok {
+		t.Fatalf("a revoked user's source must be forgotten: %v", state.Sources)
+	}
+}
+
+// A missing include-group membership can be a partial answer from a
+// degraded directory; it revoked an enrolled user in the same cycle.
+func TestEnumerateUnixGroupFilterRevocationUsesMissCounting(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	manifestPath := filepath.Join(root, "targets.yaml")
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{
+			"dev":        {Name: "dev", UID: 2001, GID: 2001, Home: filepath.Join(homes, "dev"), Shell: "/bin/bash"},
+			"contractor": {Name: "contractor", UID: 2002, GID: 2002, Home: filepath.Join(homes, "contractor"), Shell: "/bin/bash"},
+		},
+		listed:     []string{"dev", "contractor"},
+		groups:     map[string][]int{"dev": {}, "contractor": {5001, 6000}},
+		groupNames: map[int]string{5001: "ai-devs", 6000: "contractors"},
+	}
+	writeTestManifest(t, manifestPath,
+		ManifestTarget{User: "dev", UserHome: filepath.Join(homes, "dev"), UID: intPointer(2001), GID: intPointer(2001), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "contractor", UserHome: filepath.Join(homes, "contractor"), UID: intPointer(2002), GID: intPointer(2002), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+	)
+	cfg := enumeratorConfig("opencode")
+	cfg.Enterprise.Enrollment.IncludeGroups = []string{"ai-devs"}
+	cfg.Enterprise.Enrollment.ExcludeGroups = []string{"contractors"}
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}}
+	opts := UnixEnumerateOptions{ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000, CheckHome: availableHome, State: state}
+	for cycle := 1; cycle <= UnixRevokeAfterMisses; cycle++ {
+		manifest, _, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		users := manifestUsers(manifest)
+		if users["contractor"] {
+			t.Fatalf("cycle %d: membership of an excluded group revokes at once", cycle)
+		}
+		if wantDev := cycle < UnixRevokeAfterMisses; users["dev"] != wantDev {
+			t.Fatalf("cycle %d: dev present=%v, want %v (misses=%v)", cycle, users["dev"], wantDev, state.Misses)
+		}
+		writeTestManifest(t, manifestPath, manifest.Targets...)
+	}
+}
+
+// The gateway matches exempt_users by kernel-verified uid, the enumerator
+// only by name, so no single spelling worked for a directory user in both.
+func TestEnumerateUnixExcludeAndExemptAcceptUIDs(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	accounts := map[string]unixidentity.Account{}
+	for name, uid := range map[string]int{"svc-release": 1500, "build": 1600, "alice": 1700} {
+		accounts[name] = unixidentity.Account{Name: name, UID: uid, GID: uid, Home: filepath.Join(homes, name), Shell: "/bin/bash"}
+	}
+	resolver := &fakeResolver{accounts: accounts, listed: []string{"svc-release", "build", "alice"}}
+	cfg := enumeratorConfig("opencode")
+	cfg.Enterprise.Enrollment.ExemptUsers = []string{"1500"}
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"1600"}
+	opts := UnixEnumerateOptions{
+		Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000, CheckHome: availableHome,
+		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+			return map[string]string{"opencode": "1.0.0"}, nil, nil
+		},
+	}
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if users := manifestUsers(manifest); len(users) != 1 || !users["alice"] {
+		t.Fatalf("enrolled = %v (skipped %v)", users, report.Skipped)
+	}
+	joined := strings.Join(report.Skipped, "\n")
+	if !strings.Contains(joined, "svc-release: exempt") || !strings.Contains(joined, "build: excluded") {
+		t.Fatalf("skipped = %v", report.Skipped)
+	}
 }
