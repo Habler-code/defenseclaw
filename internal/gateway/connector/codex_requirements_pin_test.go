@@ -118,3 +118,70 @@ func TestCodexManagedSetupRepairsHooksUnderMachineHooksPin(t *testing.T) {
 		t.Fatalf("guardian presence without the pin = %t, %v; want absent", present, err)
 	}
 }
+
+// A setup under the machine hooks pin keeps the user's own
+// [features] hooks = false. Teardown through the drifted-config path (Codex
+// itself adds [projects] trust entries after setup) must keep it too, so
+// removing DefenseClaw does not turn the user's hooks back on.
+func TestCodexTeardownKeepsTheUsersDisabledHooksFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows publishes the pin with its managed hook matrix")
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	userConfig := "model_provider = \"openai\"\n[features]\nhooks = false\n"
+	if err := os.WriteFile(configPath, []byte(userConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	originalInspector := codexPolicyInspector
+	originalPinned := codexUserHooksFeaturePinned
+	t.Cleanup(func() {
+		CodexConfigPathOverride = ""
+		codexPolicyInspector = originalInspector
+		codexUserHooksFeaturePinned = originalPinned
+	})
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{}, nil
+	}
+	codexUserHooksFeaturePinned = func(SetupOpts) bool { return true }
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:           dir,
+		ProxyAddr:         "127.0.0.1:4000",
+		APIAddr:           "127.0.0.1:18970",
+		ManagedEnterprise: true,
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("pinned managed Setup: %v", err)
+	}
+	installed, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drifted := append(installed, []byte("\n[projects.\"/tmp/x\"]\ntrust_level = \"trusted\"\n")...)
+	if err := os.WriteFile(configPath, drifted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if features, _ := cfg["features"].(map[string]interface{}); features["hooks"] != false {
+		t.Fatalf("teardown removed the user's [features] hooks = false:\n%s", raw)
+	}
+	if cfg["model_provider"] != "openai" || cfg["projects"] == nil {
+		t.Fatalf("teardown lost user settings:\n%s", raw)
+	}
+	if _, ok := cfg["hooks"]; ok {
+		t.Fatalf("DefenseClaw hooks survived teardown:\n%s", raw)
+	}
+}

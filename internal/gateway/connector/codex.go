@@ -2565,8 +2565,15 @@ func restoreOwnedCodexConfigFromTOML(
 
 	if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hookEventsRemain) {
 		if features, ok := cfg["features"].(map[string]interface{}); ok {
-			delete(features, "hooks")
-			delete(features, "codex_hooks")
+			for _, key := range []string{"hooks", "codex_hooks"} {
+				// DefenseClaw only ever turns hooks on. An explicit false is the
+				// user's own setting, which a setup under the machine hooks pin
+				// keeps, so teardown must keep it too.
+				if enabled, isBool := features[key].(bool); isBool && !enabled {
+					continue
+				}
+				delete(features, key)
+			}
 			if len(features) == 0 {
 				delete(cfg, "features")
 			} else {
