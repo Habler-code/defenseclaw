@@ -143,6 +143,22 @@ $failures = & $module {
             $failures.Add('uninstall does not quiesce the sensor helper between transaction open and the servicing assertion')
         }
 
+        # A committed standalone uninstall retires bin with the ACP bridge and
+        # the sensor helper still present; Secure Client keeps its allowlist.
+        $retired = 'C:\\RetiredRoot'
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        $standaloneFiles = @((Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired).files)
+        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe')) {
+            if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $standaloneFiles) {
+                $failures.Add("standalone retired-tree allowlist lacks $leaf")
+            }
+        }
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+        $secureClientFiles = @((Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired).files)
+        if ($secureClientFiles.Count -ne ($standaloneFiles.Count - 2)) {
+            $failures.Add('Secure Client retired-tree allowlist changed')
+        }
+
         # Wiring: the deferred managed-hook rollback restart starts the helper
         # before the restored services and then applies its boot policy.
         $definition = $ast.Find({

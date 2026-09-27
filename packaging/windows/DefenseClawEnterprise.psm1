@@ -17908,6 +17908,17 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\install-enterprise.ps1'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\DefenseClawEnterprise.psm1')
     )
+    if (Test-DefenseClawStandaloneProfile) {
+        # The standalone payload also installs the ACP bridge and the sensor
+        # helper under bin. Without them a committed standalone uninstall
+        # could never retire its InstallRoot ("committed InstallRoot contains
+        # unexpected content: ...\bin\defenseclaw-acp.exe"), and every retry
+        # failed the same way.
+        $files += @(
+            (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-acp.exe'),
+            (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-sensor-helper.exe')
+        )
+    }
     return @{
         directories = @(
             $directories |
