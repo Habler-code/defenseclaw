@@ -109,6 +109,28 @@ func TestWindowsSecretStoreUsesTheGatewayReaderDACL(t *testing.T) {
 		t.Fatalf("the gateway SID may modify the credential: %#x", seen[gateway.String()])
 	}
 
+	// The directory grants the gateway SID exactly what its trust walk
+	// needs on the directory itself: READ_CONTROL, SYNCHRONIZE,
+	// FILE_READ_ATTRIBUTES and FILE_TRAVERSE, not inherited by files.
+	dirACEs := windowsSecretTestACEs(t, dir)
+	if len(dirACEs) != 3 {
+		t.Fatalf("secrets directory DACL principals %v", dirACEs)
+	}
+	for _, sid := range []*windows.SID{system, admins} {
+		ace, ok := dirACEs[sid.String()]
+		if !ok || ace.flags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) != windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE {
+			t.Fatalf("secrets directory ACE for %s = %+v, want an inherited full-control ACE", sid, ace)
+		}
+	}
+	reader, ok := dirACEs[gateway.String()]
+	if !ok {
+		t.Fatalf("secrets directory DACL has no ACE for the gateway SID %s: the gateway cannot read the directory's security descriptor", gateway)
+	}
+	const wantReaderAccess = windows.READ_CONTROL | windows.SYNCHRONIZE | windows.FILE_READ_ATTRIBUTES | windows.FILE_TRAVERSE
+	if reader.mask != wantReaderAccess || reader.flags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE|windows.INHERIT_ONLY_ACE) != 0 {
+		t.Fatalf("gateway directory ACE = mask %#x flags %#x, want mask %#x and no inheritance", uint32(reader.mask), reader.flags, uint32(wantReaderAccess))
+	}
+
 	t.Setenv(managed.WindowsServiceAccountEnv, windowsSecretGatewayAccount)
 	got, source, err := managed.ResolveServiceCredential("ai-defense-api-key", dir)
 	if err != nil || string(got) != value || source != managed.CredentialFromFile {
@@ -143,4 +165,39 @@ func TestWindowsSecretRefusals(t *testing.T) {
 	if _, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, ""); err == nil || commandExitCode(err) != windowsSecretExitFailure {
 		t.Fatalf("a non-elevated token must be refused, got %v", err)
 	}
+}
+
+type windowsSecretTestACE struct {
+	mask  windows.ACCESS_MASK
+	flags uint8
+}
+
+// windowsSecretTestACEs returns the allow ACEs of path's DACL by SID.
+func windowsSecretTestACEs(t *testing.T, path string) map[string]windowsSecretTestACE {
+	t.Helper()
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("%s has no DACL: %v", path, err)
+	}
+	aces := map[string]windowsSecretTestACE{}
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			t.Fatal(err)
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			t.Fatalf("%s: unexpected ACE type %#x", path, ace.Header.AceType)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		aces[sid.String()] = windowsSecretTestACE{mask: ace.Mask, flags: ace.Header.AceFlags}
+	}
+	return aces
 }

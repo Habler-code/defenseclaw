@@ -43,6 +43,7 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 		"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
 		"DEFENSECLAW_DISABLE_REDACTION",
 		"DEFENSECLAW_DAEMON",
+		"DEFENSECLAW_ENTERPRISE_PROFILE",
 		"CLAUDE_CONFIG_DIR",
 		"NODE_OPTIONS",
 		"SSL_CERT_DIR",
@@ -68,6 +69,7 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 			"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n" +
 			"DEFENSECLAW_DISABLE_REDACTION=1\n" +
 			"DEFENSECLAW_DAEMON=1\n" +
+			"DEFENSECLAW_ENTERPRISE_PROFILE=standalone\n" +
 			"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n" +
 			"NODE_OPTIONS=--require=/tmp/attacker.js\n" +
 			"SSL_CERT_DIR=/tmp/attacker-ca-directory\n" +

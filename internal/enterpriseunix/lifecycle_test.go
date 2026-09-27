@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -558,6 +559,44 @@ func TestDarwinInstallWritesLaunchDaemons(t *testing.T) {
 		if !h.services.isActive(label) {
 			t.Fatalf("%s not started", label)
 		}
+	}
+}
+
+// TestStandaloneConfigMustDeclareTheProfileOnDarwin: the services pin the
+// standalone profile, but hooks and admin tools read the same file without
+// the pin, and on macOS an unset profile means secure_client to them. The
+// lifecycle refuses such a config instead of installing it unchanged; on
+// Linux the default is standalone everywhere, so the line stays optional.
+func TestStandaloneConfigMustDeclareTheProfileOnDarwin(t *testing.T) {
+	for _, tc := range []struct {
+		goos   string
+		wantOK bool
+	}{{goos: "darwin"}, {goos: "linux", wantOK: true}} {
+		t.Run(tc.goos, func(t *testing.T) {
+			if tc.wantOK && runtime.GOOS != "linux" {
+				// The config loader applies the host OS rule, and a Linux
+				// lifecycle only ever runs on Linux.
+				t.Skip("the Linux default applies only on a Linux host")
+			}
+			h := newTestHost(t, tc.goos)
+			cfg := filepath.Join(t.TempDir(), "config.yaml")
+			body := strings.Replace(string(DefaultConfig(h.env.Layout)), "enterprise:\n  profile: standalone\n", "enterprise:\n  network:\n    https_proxy: http://proxy.example.test:3128\n", 1)
+			if strings.Contains(body, "profile: standalone") {
+				t.Fatal("test config still declares the profile")
+			}
+			if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
+			if tc.wantOK {
+				requireOK(t, r)
+				return
+			}
+			requireError(t, r, codeConfig)
+			if exists(h.env.P(h.env.Layout.ConfigPath)) {
+				t.Fatal("the undeclared-profile config was installed")
+			}
+		})
 	}
 }
 

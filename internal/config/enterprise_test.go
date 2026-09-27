@@ -31,7 +31,10 @@ func TestResolveEnterpriseConfigProfiles(t *testing.T) {
 		{name: "secure client default keeps today's posture", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileSecureClient},
 		{name: "darwin default", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileSecureClient},
 		{name: "linux default", goos: "linux", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileStandalone},
-		{name: "pinned standalone", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise"}, pinned: "standalone", want: managed.ProfileStandalone},
+		{name: "pinned standalone", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}, pinned: "standalone", want: managed.ProfileStandalone},
+		{name: "pinned standalone needs a declared profile on windows", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise"}, pinned: "standalone", wantErr: "enterprise.profile must be set to standalone"},
+		{name: "pinned standalone needs a declared profile on darwin", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Inspection: EnterpriseInspectionConfig{AIDefense: EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}}}}, pinned: "standalone", wantErr: "enterprise.profile must be set to standalone"},
+		{name: "pinned standalone on linux may leave the profile unset", goos: "linux", cfg: Config{DeploymentMode: "managed_enterprise"}, pinned: "standalone", want: managed.ProfileStandalone},
 		{name: "unmanaged ignores empty block", goos: "linux", cfg: Config{}, want: ""},
 		{name: "unmanaged rejects block", goos: "linux", cfg: Config{Enterprise: EnterpriseConfig{Enrollment: EnterpriseEnrollmentConfig{Mode: "auto"}}}, wantErr: "requires deployment_mode"},
 		{name: "secure client rejects standalone knobs", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client", Coexistence: EnterpriseCoexistenceConfig{PerUserInstall: "block"}}}, wantErr: "apply only to the standalone profile"},
@@ -60,6 +63,9 @@ func TestResolveEnterpriseConfigProfiles(t *testing.T) {
 			}
 			if got := cfg.EnterpriseProfile(); got != tc.want {
 				t.Fatalf("EnterpriseProfile() = %q, want %q", got, tc.want)
+			}
+			if got, want := cfg.DeclaredEnterpriseProfile(), managed.NormalizeEnterpriseProfile(tc.cfg.Enterprise.Profile); managed.IsManagedEnterprise(tc.cfg.DeploymentMode) && got != want {
+				t.Fatalf("DeclaredEnterpriseProfile() = %q, want %q", got, want)
 			}
 		})
 	}

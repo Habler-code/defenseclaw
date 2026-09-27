@@ -109,6 +109,18 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 	if !cfg.StandaloneEnterprise() {
 		return nil, fmt.Errorf("config enterprise.profile must be %s", managed.ProfileStandalone)
 	}
+	// On macOS an unset profile means secure_client to every process that
+	// reads the config without the service pin (hooks, admin shells,
+	// status), so the file itself must say standalone. The loader enforces
+	// this for the host OS; checking the target OS here keeps plans built
+	// on another host honest.
+	if managed.DefaultEnterpriseProfile(e.GOOS) != managed.ProfileStandalone &&
+		cfg.DeclaredEnterpriseProfile() != managed.ProfileStandalone {
+		return nil, fmt.Errorf(
+			"config must set enterprise.profile: %s: on %s a process that reads it without the service pin treats an unset profile as %s",
+			managed.ProfileStandalone, e.GOOS, managed.DefaultEnterpriseProfile(e.GOOS),
+		)
+	}
 	if clean := strings.TrimRight(cfg.DataDir, "/"); clean != e.Layout.DataDir {
 		return nil, fmt.Errorf("config data_dir %q must be %s: the service sandbox only allows writes there", cfg.DataDir, e.Layout.DataDir)
 	}

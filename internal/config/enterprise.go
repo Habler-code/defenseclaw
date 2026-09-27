@@ -267,6 +267,7 @@ func ValidEnterpriseCredentialName(name string) bool {
 // resolveEnterpriseConfig resolves the profile against the service pin and
 // validates the enterprise block. goos is injected for tests.
 func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
+	declared := managed.NormalizeEnterpriseProfile(cfg.Enterprise.Profile)
 	profile, err := managed.ResolveEnterpriseProfile(goos, cfg.DeploymentMode, pinnedProfile, cfg.Enterprise.Profile)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -277,11 +278,43 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		}
 		return nil
 	}
+	if err := requireDeclaredStandaloneProfile(goos, pinnedProfile, declared); err != nil {
+		return err
+	}
+	cfg.declaredEnterpriseProfile = declared
 	cfg.Enterprise.Profile = profile
 	if cfg.StandaloneEnterprise() {
 		standaloneRulePackDefault(cfg, cfg.DataDir)
 	}
 	return validateEnterpriseConfig(cfg)
+}
+
+// requireDeclaredStandaloneProfile refuses a standalone-pinned load of a
+// config that leaves enterprise.profile unset on an OS whose default is
+// secure_client. The services would run standalone, but every process that
+// reads the same file without the pin (hooks, admin shells, status) would
+// resolve secure_client and reject the standalone settings, so the tools
+// and the services on the host would disagree about the profile.
+func requireDeclaredStandaloneProfile(goos, pinnedProfile, declared string) error {
+	if !managed.IsStandaloneProfile(pinnedProfile) || declared != "" ||
+		managed.DefaultEnterpriseProfile(goos) == managed.ProfileStandalone {
+		return nil
+	}
+	return fmt.Errorf(
+		"config: enterprise.profile must be set to %s: on %s a process that reads this config without the %s service pin treats an unset profile as %s",
+		managed.ProfileStandalone, goos, managed.EnterpriseProfileEnv, managed.DefaultEnterpriseProfile(goos),
+	)
+}
+
+// DeclaredEnterpriseProfile returns enterprise.profile as the config source
+// declared it (normalized), before the service pin or the per-OS default
+// filled it in. It is "" when the source leaves it unset or when the Config
+// was not built by the loader.
+func (c *Config) DeclaredEnterpriseProfile() string {
+	if c == nil {
+		return ""
+	}
+	return c.declaredEnterpriseProfile
 }
 
 // standaloneRulePackDefault keeps the default rule pack inside policy_dir.

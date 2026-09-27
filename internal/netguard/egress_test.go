@@ -15,6 +15,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+
+	"golang.org/x/net/http/httpproxy"
 )
 
 func TestParseEgressProxyURL(t *testing.T) {
@@ -72,5 +74,43 @@ func TestEgressProxyWithoutConfigKeepsTheEnvironmentProxy(t *testing.T) {
 	}
 	if _, err := (EgressProxy{HTTPSProxy: "ftp://x"}).Transport(); err == nil {
 		t.Fatal("an invalid enterprise proxy must fail transport construction")
+	}
+}
+
+func TestEgressProxyEnvironmentRoutesEnvironmentClients(t *testing.T) {
+	env := EgressProxy{HTTPSProxy: " http://proxy.corp:3128 ", NoProxy: "internal.corp"}.Environment()
+	want := map[string]string{
+		"HTTPS_PROXY": "http://proxy.corp:3128", "https_proxy": "http://proxy.corp:3128",
+		"NO_PROXY": "internal.corp", "no_proxy": "internal.corp",
+	}
+	if len(env) != len(want) {
+		t.Fatalf("Environment() = %v, want %v", env, want)
+	}
+	for key, value := range want {
+		if env[key] != value {
+			t.Fatalf("Environment()[%s] = %q, want %q", key, env[key], value)
+		}
+	}
+	// The same selection http.ProxyFromEnvironment makes from these values.
+	selector := (&httpproxy.Config{HTTPSProxy: env["HTTPS_PROXY"], NoProxy: env["NO_PROXY"]}).ProxyFunc()
+	for _, tc := range []struct {
+		target string
+		proxy  string
+	}{
+		{target: "https://judge.example.com/v1", proxy: "http://proxy.corp:3128"},
+		{target: "https://api.internal.corp/v1", proxy: ""},
+		{target: "https://127.0.0.1:18970/health", proxy: ""},
+	} {
+		target, _ := url.Parse(tc.target)
+		got, err := selector(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (got == nil && tc.proxy != "") || (got != nil && got.String() != tc.proxy) {
+			t.Fatalf("%s routed through %v, want %q", tc.target, got, tc.proxy)
+		}
+	}
+	if env := (EgressProxy{}).Environment(); len(env) != 0 {
+		t.Fatalf("the zero value must set no proxy variables: %v", env)
 	}
 }

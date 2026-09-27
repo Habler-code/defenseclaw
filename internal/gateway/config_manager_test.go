@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -723,6 +724,62 @@ func TestDiffConfigsMarksACPChangedHotReloadable(t *testing.T) {
 	}
 	if slices.Contains(diff.RestartRequired, "acp") {
 		t.Fatalf("restart_required = %v, ACP must hot reload", diff.RestartRequired)
+	}
+}
+
+func standaloneDiffTestConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	cfg.Enterprise = config.EnterpriseConfig{
+		Profile: managed.ProfileStandalone,
+		Inspection: config.EnterpriseInspectionConfig{AIDefense: config.EnterpriseAIDefenseConfig{
+			Enabled: true, Credential: "ai-defense-api-key",
+		}},
+		Enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"svc-release"}},
+		MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{
+			"codex": {AllowedHooks: []string{}},
+		}},
+		Network: config.EnterpriseNetworkConfig{HTTPSProxy: "http://proxy.corp:3128"},
+	}
+	return cfg
+}
+
+func TestDiffConfigsMarksEnterpriseChangesRestartRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*config.Config)
+	}{
+		{name: "disable AI Defense", mutate: func(c *config.Config) { c.Enterprise.Inspection.AIDefense.Enabled = false }},
+		{name: "change the credential", mutate: func(c *config.Config) { c.Enterprise.Inspection.AIDefense.Credential = "other-key" }},
+		{name: "change the proxy", mutate: func(c *config.Config) { c.Enterprise.Network.HTTPSProxy = "http://proxy2.corp:3128" }},
+		{name: "change enrollment", mutate: func(c *config.Config) { c.Enterprise.Enrollment.ExemptUsers = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldCfg := standaloneDiffTestConfig()
+			newCfg := cloneConfig(oldCfg)
+			tc.mutate(newCfg)
+
+			diff := diffConfigs(oldCfg, newCfg)
+			if !slices.Contains(diff.Changed, "enterprise") {
+				t.Fatalf("changed = %v, missing enterprise", diff.Changed)
+			}
+			if !slices.Contains(diff.RestartRequired, "enterprise") {
+				t.Fatalf("restart_required = %v, missing enterprise: the gateway would keep its startup AI Defense client", diff.RestartRequired)
+			}
+		})
+	}
+}
+
+func TestDiffConfigsSeesNoEnterpriseChangeAcrossAClone(t *testing.T) {
+	oldCfg := standaloneDiffTestConfig()
+	if diff := diffConfigs(oldCfg, cloneConfig(oldCfg)); slices.Contains(diff.Changed, "enterprise") {
+		t.Fatalf("an unchanged enterprise block diffed as changed: %v", diff.Changed)
+	}
+	secureClient := config.DefaultConfig()
+	secureClient.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	secureClient.Enterprise.Profile = managed.ProfileSecureClient
+	if diff := diffConfigs(secureClient, cloneConfig(secureClient)); len(diff.Changed) != 0 || len(diff.RestartRequired) != 0 {
+		t.Fatalf("an unchanged Secure Client config diffed as %+v", diff)
 	}
 }
 

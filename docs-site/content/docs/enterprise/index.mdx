@@ -146,6 +146,20 @@ guardrail:
   mode: observe
 ```
 
+`enterprise.network` is the gateway's outbound proxy. With `https_proxy` set,
+the gateway reaches AI Defense, LLM providers (the judge and the guardrail
+proxy), the LLM passthrough, webhooks, the remote model router and telemetry
+exporters (OTLP over HTTP and gRPC, Splunk HEC, HTTP JSONL) through it, and
+sets `HTTPS_PROXY`/`NO_PROXY` for its other HTTPS clients. `no_proxy` lists
+hosts, domains and CIDRs that connect directly; loopback always does. The
+gateway opens an HTTP `CONNECT` tunnel to the destination host name, so the
+proxy's host rules apply and TLS stays end to end. Webhook, passthrough and
+telemetry destinations still pass the gateway's address check first, so their
+host names must resolve on the device. The proxy URL cannot carry
+credentials, and LLM provider connections need an `http://` proxy URL: with an
+`https://` one the gateway refuses those calls rather than connecting
+directly.
+
 An inline `cisco_ai_defense.api_key` is rejected in the standalone profile.
 Store the key with `defenseclaw-gateway enterprise secret set --name
 ai-defense-api-key --from-stdin`. The value is read from standard input and

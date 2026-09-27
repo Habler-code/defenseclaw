@@ -1278,10 +1278,14 @@
         {
           "location": "internal/managed/profile.go",
           "description": "Profile resolution rules and the per-OS default"
+        },
+        {
+          "location": "internal/cli/root.go",
+          "description": "Refuses the pin from .env files so only the service definition sets it"
         }
       ],
       "since": "1.0.0",
-      "security_note": "Immutable profile boundary. Must agree with config.yaml enterprise.profile; a mismatch refuses to start. Only meaningful with DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise; setting it on an unmanaged process is an error."
+      "security_note": "Immutable profile boundary. Must agree with config.yaml enterprise.profile; a mismatch refuses to start. Only meaningful with DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise; setting it on an unmanaged process is an error. Refused from .env files: only the service definition may set it."
     },
     {
       "name": "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST",

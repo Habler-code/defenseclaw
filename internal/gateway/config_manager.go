@@ -958,6 +958,14 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("data_dir", oldCfg.DataDir, newCfg.DataDir)
 	add("audit_db", oldCfg.AuditDB, newCfg.AuditDB)
 	add("judge_bodies_db", oldCfg.JudgeBodiesDB, newCfg.JudgeBodiesDB)
+	// The standalone enterprise block is captured when the gateway starts:
+	// the AI Defense client (credential, endpoint, egress transport), the
+	// process proxy environment and the hook-socket enrollment authorizer.
+	// It is not hot-reloadable, so an edit is reported as restart-required
+	// instead of being applied to the Config while the old clients keep
+	// running. A Secure Client config carries only the resolved profile, and
+	// a profile change is refused before diffing.
+	add("enterprise", oldCfg.Enterprise, newCfg.Enterprise)
 
 	var restart []string
 	hotReloadable := map[string]struct{}{

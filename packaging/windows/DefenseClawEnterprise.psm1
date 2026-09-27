@@ -17069,6 +17069,108 @@ function Assert-DefenseClawManagedTreeNoReparse {
     }
 }
 
+# The standalone credential store, <StateRoot>\secrets, is written by
+# `defenseclaw-gateway enterprise secret set`. The gateway's credential reader
+# walks every ancestor of a credential and reads its owner and DACL, so the
+# directory grants the gateway service SID READ_CONTROL, SYNCHRONIZE,
+# FILE_READ_ATTRIBUTES and FILE_TRAVERSE on itself only (no list, create or
+# write right), and each credential file grants it read access. These are the
+# exact descriptors internal/cli/enterprise_secret_windows.go writes (a
+# contract test pins the two copies together).
+function Get-DefenseClawStandaloneSecretsDirectorySddl {
+    param([Parameter(Mandatory)][string]$GatewayServiceSID)
+    return (
+        'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;{0})' -f
+            $GatewayServiceSID
+    )
+}
+
+function Get-DefenseClawStandaloneSecretFileSddl {
+    param([Parameter(Mandatory)][string]$GatewayServiceSID)
+    return (
+        'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;{0})' -f
+            $GatewayServiceSID
+    )
+}
+
+function Set-DefenseClawStandaloneSecretSddl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][bool]$IsDirectory,
+        [Parameter(Mandatory)][string]$Sddl
+    )
+    Assert-DefenseClawNoReparsePath -Path $Path
+    $security = if ($IsDirectory) {
+        [Security.AccessControl.DirectorySecurity]::new()
+    }
+    else {
+        [Security.AccessControl.FileSecurity]::new()
+    }
+    $security.SetSecurityDescriptorSddlForm(
+        $Sddl,
+        [Security.AccessControl.AccessControlSections]::All
+    )
+    Microsoft.PowerShell.Security\Set-Acl `
+        -LiteralPath $Path `
+        -AclObject $security `
+        -ErrorAction Stop
+    Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
+}
+
+# A non-purge uninstall resets every retained item to administrator-only ACLs
+# (Set-DefenseClawPreservedStateAcls), which removes the gateway's entries from
+# the credential store. Install, upgrade and reconcile call this before the
+# gateway starts so a reinstalled gateway can read its AI Defense credential
+# again without another `enterprise secret set`. Only the directory and the
+# entries named like credentials (managed.ValidCredentialName) are touched;
+# temporary files and anything else keep their descriptors, and a reparse
+# point anywhere in the store is refused.
+function Set-DefenseClawStandaloneSecretsAcls {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $secrets = Microsoft.PowerShell.Management\Join-Path `
+        $Layout.StateRoot `
+        'secrets'
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $secrets)) {
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $secrets
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $secrets `
+            -PathType Container)) {
+        throw "standalone credential store is occupied by a non-directory: $secrets"
+    }
+    $items = @(Microsoft.PowerShell.Management\Get-ChildItem `
+        -LiteralPath $secrets `
+        -Force)
+    foreach ($item in $items) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "refusing credential ACL repair through reparse point: $($item.FullName)"
+        }
+    }
+    Set-DefenseClawStandaloneSecretSddl `
+        -Path $secrets `
+        -IsDirectory $true `
+        -Sddl (Get-DefenseClawStandaloneSecretsDirectorySddl `
+            -GatewayServiceSID $GatewayServiceSID)
+    foreach ($item in $items) {
+        if ($item.PSIsContainer -or
+            $item.Name -cnotmatch '^[a-z0-9][a-z0-9-]{0,62}\z') {
+            continue
+        }
+        Set-DefenseClawStandaloneSecretSddl `
+            -Path $item.FullName `
+            -IsDirectory $false `
+            -Sddl (Get-DefenseClawStandaloneSecretFileSddl `
+                -GatewayServiceSID $GatewayServiceSID)
+    }
+}
+
 function Set-DefenseClawPreservedStateAcls {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -21009,6 +21111,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -ManagedHooksActivation $managedHooksActivation
         Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
+        Set-DefenseClawStandaloneSecretsAcls `
+            -Layout $Layout `
+            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
 
         # Validate the complete static deployment while both services remain
         # disabled. This is the only state that also blocks a restart already
@@ -21640,6 +21745,9 @@ function Invoke-DefenseClawReconcileLifecycle {
     Set-DefenseClawManagedAcls `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
+    Set-DefenseClawStandaloneSecretsAcls `
+        -Layout $Layout `
+        -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
     if ([bool]$Layout.CodexTargetEnabled) {
         Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
         Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout

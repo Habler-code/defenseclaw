@@ -64,6 +64,11 @@ func init() {
 }
 
 func runSidecar(cmd *cobra.Command, _ []string) error {
+	// Before any outbound client exists: a standalone gateway routes its
+	// outbound clients through enterprise.network.
+	if err := applyStandaloneEgress(cfg); err != nil {
+		return fmt.Errorf("sidecar: apply enterprise.network: %w", err)
+	}
 	if sidecarToken != "" {
 		fmt.Fprintln(os.Stderr,
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+

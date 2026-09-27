@@ -232,6 +232,10 @@ const CurrentConfigVersion = 7
 type Config struct {
 	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
 	ConfigFilePath string `mapstructure:"-" yaml:"-"`
+	// declaredEnterpriseProfile is enterprise.profile as the config source
+	// declared it, before the service pin or the per-OS default filled it
+	// in. Set only by the loader; not serialized.
+	declaredEnterpriseProfile string
 
 	// LLM is the top-level unified LLM configuration. Every LLM-using
 	// component (guardrail, judge, mcp scanner, skill scanner, plugin

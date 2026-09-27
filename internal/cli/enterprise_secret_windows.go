@@ -39,8 +39,10 @@ import (
 // <ProgramData>\Cisco\DefenseClaw\secrets, owned by Administrators, with a
 // protected DACL that grants full control only to LocalSystem and
 // Administrators and read-only access to the gateway service SID — exactly
-// what managed.ResolveServiceCredential accepts. Values arrive on stdin or
-// from an administrator-only file and are never printed.
+// what managed.ResolveServiceCredential accepts. The directory grants the
+// gateway SID only what its trust walk needs (see
+// windowsSecretDirectorySDDL). Values arrive on stdin or from an
+// administrator-only file and are never printed.
 
 const (
 	windowsSecretExitInvalid = 1639
@@ -172,11 +174,38 @@ func readWindowsSecretValue(source io.Reader) ([]byte, error) {
 	return data, nil
 }
 
-// windowsSecretDirectorySDDL: Administrators own the directory; only
-// LocalSystem and Administrators hold rights, inherited by new files.
-const windowsSecretDirectorySDDL = "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+// windowsSecretDirectoryReaderAccess is the directory right set of the
+// gateway service SID: READ_CONTROL | SYNCHRONIZE | FILE_READ_ATTRIBUTES |
+// FILE_TRAVERSE. The gateway's credential reader walks every ancestor of the
+// credential and reads its owner and DACL (GetNamedSecurityInfo needs
+// READ_CONTROL); without this ACE the virtual account is denied on this
+// directory and AI Defense inspection never starts. It grants no list,
+// create, delete or write right.
+const windowsSecretDirectoryReaderAccess = "0x1200a0"
 
-func ensureWindowsSecretsDir(dir string) error {
+// windowsSecretDirectorySDDL: Administrators own the directory; LocalSystem
+// and Administrators hold full control, inherited by new files. The reader
+// (the gateway service SID) gets a non-inheritable ACE with only
+// windowsSecretDirectoryReaderAccess on the directory itself. The Windows
+// installer re-applies this descriptor and windowsSecretFileSDDL on install,
+// upgrade and reconcile (Set-DefenseClawStandaloneSecretsAcls in
+// DefenseClawEnterprise.psm1), because a non-purge uninstall resets the
+// retained store to administrator-only ACLs; a contract test keeps the two
+// copies identical.
+func windowsSecretDirectorySDDL(reader *windows.SID) string {
+	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;" + windowsSecretDirectoryReaderAccess + ";;;" + reader.String() + ")"
+}
+
+// windowsSecretFileSDDL: a credential file is readable by the reader (the
+// gateway service SID) and writable only by LocalSystem and Administrators.
+func windowsSecretFileSDDL(reader *windows.SID) string {
+	return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + reader.String() + ")"
+}
+
+func ensureWindowsSecretsDir(dir string, reader *windows.SID) error {
+	if reader == nil {
+		return errors.New("the secrets directory needs the gateway service SID")
+	}
 	info, err := os.Lstat(dir)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -190,53 +219,22 @@ func ensureWindowsSecretsDir(dir string) error {
 	}
 	// The credential write below proves the whole chain through the
 	// gateway's own reader check.
-	return applyWindowsSDDL(dir, windowsSecretDirectorySDDL)
+	return applyWindowsSDDL(dir, windowsSecretDirectorySDDL(reader))
 }
 
 func writeWindowsSecret(dir, name string, value []byte) error {
-	if err := ensureWindowsSecretsDir(dir); err != nil {
-		return err
-	}
 	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
 	if err != nil || gateway == nil {
 		return fmt.Errorf("resolve the gateway service SID (%s): %v", windowsSecretGatewayAccount, err)
 	}
-	fileSDDL := "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + gateway.String() + ")"
-	suffix := make([]byte, 8)
-	if _, err := rand.Read(suffix); err != nil {
-		return err
-	}
-	tmp := filepath.Join(dir, "."+name+".tmp-"+hex.EncodeToString(suffix))
-	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	final, err := storeWindowsSecret(dir, name, value, gateway)
 	if err != nil {
 		return err
 	}
-	cleanup := func() { _ = os.Remove(tmp) }
-	if err := applyWindowsSDDL(tmp, fileSDDL); err != nil {
-		_ = file.Close()
-		cleanup()
-		return err
-	}
-	if _, err := file.Write(value); err != nil {
-		_ = file.Close()
-		cleanup()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		cleanup()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	final := filepath.Join(dir, name)
-	if err := os.Rename(tmp, final); err != nil {
-		cleanup()
-		return err
-	}
-	// Prove the gateway's reader accepts the stored credential.
+	// Prove the gateway's reader accepts the stored credential. This runs
+	// with the administrator's token, so it checks the path, owner and ACL
+	// shape; the gateway's own rights come from the reader ACEs above
+	// (pinned by TestWindowsSecretStoreUsesTheGatewayReaderDACL).
 	previous, had := os.LookupEnv(managed.WindowsServiceAccountEnv)
 	_ = os.Setenv(managed.WindowsServiceAccountEnv, windowsSecretGatewayAccount)
 	_, _, verifyErr := managed.ResolveServiceCredential(name, dir)
@@ -250,6 +248,50 @@ func writeWindowsSecret(dir, name string, value []byte) error {
 		return fmt.Errorf("the stored credential failed the gateway's trust check and was removed: %w", verifyErr)
 	}
 	return nil
+}
+
+// storeWindowsSecret writes value to dir\name atomically with the protected
+// credential DACL for reader, after (re)applying the secrets directory DACL,
+// and returns the final path.
+func storeWindowsSecret(dir, name string, value []byte, reader *windows.SID) (string, error) {
+	if err := ensureWindowsSecretsDir(dir, reader); err != nil {
+		return "", err
+	}
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
+	}
+	tmp := filepath.Join(dir, "."+name+".tmp-"+hex.EncodeToString(suffix))
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	cleanup := func() { _ = os.Remove(tmp) }
+	if err := applyWindowsSDDL(tmp, windowsSecretFileSDDL(reader)); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", err
+	}
+	if _, err := file.Write(value); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", err
+	}
+	final := filepath.Join(dir, name)
+	if err := os.Rename(tmp, final); err != nil {
+		cleanup()
+		return "", err
+	}
+	return final, nil
 }
 
 func applyWindowsSDDL(path, sddl string) error {

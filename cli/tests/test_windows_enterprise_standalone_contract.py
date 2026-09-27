@@ -295,3 +295,48 @@ def test_standalone_uninstall_accepts_and_removes_only_its_ipc_directory() -> No
     smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-ipc-uninstall-smoke.ps1")
     assert "Secure Client allow-list" in smoke
     assert "symbolic link named like the socket (removal)" in smoke
+
+
+def test_standalone_credential_store_permissions_return_after_a_reinstall() -> None:
+    # A non-purge uninstall resets the retained credential store to
+    # administrator-only ACLs; install, upgrade and reconcile give the gateway
+    # its entries back, with the Go writer's exact descriptors, before the
+    # gateway starts.
+    module = _text(MODULE)
+    writer = _text(ROOT / "internal" / "cli" / "enterprise_secret_windows.go")
+    names = _text(ROOT / "internal" / "managed" / "credentials.go")
+
+    access = re.search(r'windowsSecretDirectoryReaderAccess = "(0x[0-9a-f]+)"', writer)
+    assert access is not None
+    assert (
+        'return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;" + '
+        'windowsSecretDirectoryReaderAccess + ";;;" + reader.String() + ")"'
+    ) in writer
+    assert 'return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + reader.String() + ")"' in writer
+    directory = _function_body(module, "Get-DefenseClawStandaloneSecretsDirectorySddl")
+    assert f"'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;{access.group(1)};;;{{0}})'" in directory
+    credential = _function_body(module, "Get-DefenseClawStandaloneSecretFileSddl")
+    assert "'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;{0})'" in credential
+
+    pattern = re.search(r"serviceCredentialNamePattern = regexp\.MustCompile\(`\^(.+)\$`\)", names)
+    assert pattern is not None
+    repair = _function_body(module, "Set-DefenseClawStandaloneSecretsAcls")
+    assert f"-cnotmatch '^{pattern.group(1)}\\z'" in repair
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in repair
+    assert repair.index("ReparsePoint") < repair.index("Set-DefenseClawStandaloneSecretSddl")
+
+    call = "Set-DefenseClawStandaloneSecretsAcls `"
+    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    metadata = install.index("Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath")
+    repaired = install.index(call, metadata)
+    assert repaired < install.index("Assert-DefenseClawEnterpriseDeployment", metadata)
+    assert repaired < install.index("Start-DefenseClawService", metadata)
+    reconcile = _function_body(module, "Invoke-DefenseClawReconcileLifecycle")
+    assert call in reconcile
+    uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
+    assert "Set-DefenseClawPreservedStateAcls `" in uninstall
+    assert call not in uninstall
+
+    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-secrets-acl-smoke.ps1")
+    assert "Set-DefenseClawPreservedStateAcls -Layout" in smoke
+    assert "link named like a credential" in smoke

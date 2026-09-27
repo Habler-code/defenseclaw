@@ -83,6 +83,23 @@ func (p EgressProxy) ProxyFunc() (func(*http.Request) (*url.URL, error), error) 
 	}, nil
 }
 
+// Environment returns the proxy variables that send environment-driven
+// outbound clients (http.ProxyFromEnvironment, gRPC dialers) through the
+// administrator's proxy: HTTPS_PROXY/https_proxy when a proxy is set and
+// NO_PROXY/no_proxy when exclusions are set. The zero value returns none.
+func (p EgressProxy) Environment() map[string]string {
+	env := map[string]string{}
+	if proxy := strings.TrimSpace(p.HTTPSProxy); proxy != "" {
+		env["HTTPS_PROXY"] = proxy
+		env["https_proxy"] = proxy
+	}
+	if noProxy := strings.TrimSpace(p.NoProxy); noProxy != "" {
+		env["NO_PROXY"] = noProxy
+		env["no_proxy"] = noProxy
+	}
+	return env
+}
+
 // Transport returns a clone of http.DefaultTransport that selects the proxy
 // with ProxyFunc, for outbound clients that otherwise use the default
 // transport.

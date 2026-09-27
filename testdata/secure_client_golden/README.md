@@ -20,6 +20,7 @@ per-OS default).
 | `go/config_mode_pin.json` (darwin, windows) | `internal/config` | `DEFENSECLAW_DEPLOYMENT_MODE` service pin: fills, matches, conflicts, invalid |
 | `go/gateway_posture.json` | `internal/gateway` | AI Defense-only decisions (local detectors, CodeGuard, and regex bypassed), fail-open when AI Defense has no verdict or is unwired, managed inspector requires a registered cloud provider and an endpoint, multi-connector refusal without a provider, no OS toasts, runtime config PATCH denied |
 | `go/ipc_socket.json` (darwin, windows) | `internal/ipc` | Secure Client GUI IPC socket path, env-override immunity, socket-mode ceilings |
+| `go/cli_dotenv_profile_pin.json` | `internal/cli` | a data-directory `.env` cannot supply `DEFENSECLAW_ENTERPRISE_PROFILE`, so the Secure Client shape still resolves `secure_client` on darwin and windows |
 | `go/sensor_socket.json` (darwin, windows) | `internal/sensor/acquire` | managed sensor-helper socket path and env-override immunity |
 | `windows/codex_requirements_*.toml`, `windows/codex_requirements_contract.json` | `internal/gateway/connector` | bytes of `%ProgramData%\OpenAI\Codex\requirements.toml` after reconcile (including today's re-marshal that drops administrator comments), refusals, hook groups, managed hook command, report |
 | `windows/claude_managed_policy_*.json` | `internal/gateway/connector` (Windows only) | bytes of `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` |
@@ -36,7 +37,7 @@ source tripwire run on every platform.
 ```bash
 go test -count=1 -run TestSecureClientGolden \
   ./internal/config ./internal/ipc ./internal/sensor/acquire \
-  ./internal/gateway/connector ./internal/gateway
+  ./internal/gateway/connector ./internal/gateway ./internal/cli
 packaging/macos/tests/run_tests.sh packaging/macos/tests/test_secure_client_golden.sh   # macOS
 python3 scripts/secure_client_golden.py
 uv run --frozen python -m pytest cli/tests/test_secure_client_golden.py -q
@@ -58,7 +59,7 @@ intended:
 # so run this on macOS and on Windows.
 DEFENSECLAW_UPDATE_SECURE_CLIENT_GOLDEN=1 go test -count=1 -run TestSecureClientGolden \
   ./internal/config ./internal/ipc ./internal/sensor/acquire \
-  ./internal/gateway/connector ./internal/gateway
+  ./internal/gateway/connector ./internal/gateway ./internal/cli
 
 # Windows lifecycle (on Windows; run elevated on a host without a
 # managed_enterprise deployment). The script is read-only: it creates no

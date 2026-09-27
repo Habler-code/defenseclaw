@@ -1,0 +1,7 @@
+{
+  "dotenv_profile_pin_loaded": false,
+  "secure_client_shape_resolves": {
+    "darwin": "secure_client",
+    "windows": "secure_client"
+  }
+}
