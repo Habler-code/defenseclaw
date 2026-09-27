@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // A root guardian never touches a user's home with its own credentials and
@@ -100,6 +101,10 @@ type targetWorkerRequest struct {
 	GID       int             `json:"gid"`
 	Home      string          `json:"home"`
 	Payload   json.RawMessage `json:"payload"`
+	// BinaryVersion is the guardian's release version. The worker exits
+	// before CLI initialization records it, and operations stamp it into
+	// the files they write (the hook contract lock's defenseclaw_version).
+	BinaryVersion string `json:"binary_version,omitempty"`
 }
 
 type targetWorkerResponse struct {
@@ -331,6 +336,8 @@ func spawnTargetWorker(ctx context.Context, target TargetCredentials, operation 
 		GID:       target.GID,
 		Home:      target.UserHome,
 		Payload:   payload,
+
+		BinaryVersion: version.Current().BinaryVersion,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("enterprise hooks: encode target worker request: %w", err)
@@ -505,6 +512,9 @@ func runTargetWorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	_ = syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0})
 	syscall.Umask(0o077)
+	if binaryVersion := strings.TrimSpace(request.BinaryVersion); binaryVersion != "" {
+		version.SetBinaryVersion(binaryVersion)
+	}
 	targetWorkerActive.Store(true)
 	// The guardian kills the worker's process group at its deadline. macOS
 	// has no parent-death signal, so a worker orphaned by a guardian crash

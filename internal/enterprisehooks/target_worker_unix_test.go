@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // targetWorkerTestSwapEnv tells a worker started by these tests to replace
@@ -62,6 +63,7 @@ type testTargetIdentity struct {
 	Home          string   `json:"home"`
 	Env           []string `json:"env"`
 	Echo          string   `json:"echo"`
+	BinaryVersion string   `json:"binary_version"`
 }
 
 func init() {
@@ -77,7 +79,7 @@ func init() {
 		identity := testTargetIdentity{
 			UID: os.Getuid(), EUID: os.Geteuid(), GID: os.Getgid(), EGID: os.Getegid(),
 			Groups: groups, Dumpable: testProcessDumpable(), Home: target.UserHome,
-			Env: os.Environ(), Echo: echo,
+			Env: os.Environ(), Echo: echo, BinaryVersion: version.Current().BinaryVersion,
 		}
 		if err := verifySavedTargetIDs(target.UID, target.GID); err != nil {
 			identity.SavedIDsErr = err.Error()
@@ -152,6 +154,15 @@ func stubBeforeTargetPathMutation(t *testing.T, hook func(string)) {
 	original := beforeTargetPathMutation
 	beforeTargetPathMutation = hook
 	t.Cleanup(func() { beforeTargetPathMutation = original })
+}
+
+// setGuardianBinaryVersion records a release version in this (guardian)
+// process the way CLI startup does; the worker never runs CLI startup.
+func setGuardianBinaryVersion(t *testing.T, value string) {
+	t.Helper()
+	previous := version.Current().BinaryVersion
+	version.SetBinaryVersion(value)
+	t.Cleanup(func() { version.SetBinaryVersion(previous) })
 }
 
 func currentTestTarget(t *testing.T) TargetCredentials {
@@ -406,6 +417,7 @@ func TestSpawnTargetWorkerRequiresWorkerEntrypoint(t *testing.T) {
 func TestTargetWorkerSubprocessRunsOperationAsTarget(t *testing.T) {
 	target := currentTestTarget(t)
 	t.Setenv("DEFENSECLAW_TEST_UNLISTED_SECRET", "must-not-pass")
+	setGuardianBinaryVersion(t, "9.8.7-worker-test")
 	var identity testTargetIdentity
 	if err := runTargetOperationInWorkerForTest(t, target, testTargetOperationIdentity, "hello", &identity); err != nil {
 		t.Fatalf("worker identity operation: %v", err)
@@ -418,6 +430,9 @@ func TestTargetWorkerSubprocessRunsOperationAsTarget(t *testing.T) {
 	}
 	if identity.Home != target.UserHome || identity.Echo != "hello" {
 		t.Fatalf("worker saw home %q payload %q", identity.Home, identity.Echo)
+	}
+	if identity.BinaryVersion != "9.8.7-worker-test" {
+		t.Fatalf("worker binary version = %q, want the guardian's 9.8.7-worker-test", identity.BinaryVersion)
 	}
 	if runtime.GOOS == "linux" && identity.Dumpable != 0 {
 		t.Fatalf("worker dumpable = %d, want 0", identity.Dumpable)
@@ -483,10 +498,12 @@ func TestTargetWorkerSubprocessInstallsAndVerifiesTarget(t *testing.T) {
 	}
 	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
 	opts.AllowMissingHookConfigRepair = true
+	setGuardianBinaryVersion(t, "9.8.7-worker-test")
 	result, err := installThroughTargetWorker(context.Background(), opts, targetOperationInstall)
 	if err != nil {
 		t.Fatalf("worker Install: %v", err)
 	}
+	requireHookContractLockVersion(t, target.UserHome, "codex", "9.8.7-worker-test")
 	if result.Connector != "codex" || len(result.HookConfigPaths) != 1 || result.HookConfigPaths[0] != codexConfig {
 		t.Fatalf("worker Install result = %+v", result)
 	}
@@ -506,6 +523,27 @@ func TestTargetWorkerSubprocessInstallsAndVerifiesTarget(t *testing.T) {
 	opts.AllowMissingHookConfigRepair = false
 	if _, err := installThroughTargetWorker(context.Background(), opts, targetOperationVerify); err != nil {
 		t.Fatalf("worker Verify: %v", err)
+	}
+}
+
+// requireHookContractLockVersion checks the release version a worker install
+// recorded for connectorName in the target's hook contract lock.
+func requireHookContractLockVersion(t *testing.T, home, connectorName, want string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json"))
+	if err != nil {
+		t.Fatalf("read hook contract lock: %v", err)
+	}
+	var lock struct {
+		Connectors map[string]struct {
+			DefenseClawVersion string `json:"defenseclaw_version"`
+		} `json:"connectors"`
+	}
+	if err := json.Unmarshal(data, &lock); err != nil {
+		t.Fatalf("decode hook contract lock: %v", err)
+	}
+	if got := lock.Connectors[connectorName].DefenseClawVersion; got != want {
+		t.Fatalf("hook contract lock %s defenseclaw_version = %q, want the guardian's %q", connectorName, got, want)
 	}
 }
 
@@ -813,6 +851,7 @@ func TestRootGuardianRepairsThroughWorkerWithoutChangingItsOwnCredentials(t *tes
 			runtime.Gosched()
 		}
 	}()
+	setGuardianBinaryVersion(t, "9.8.7-root-worker-test")
 	result, installErr := Install(context.Background(), f.repairOptions())
 	_, verifyErr := Verify(context.Background(), codexInstallOptions(f.home, f.uid, f.gid))
 	var identity testTargetIdentity
@@ -833,6 +872,10 @@ func TestRootGuardianRepairsThroughWorkerWithoutChangingItsOwnCredentials(t *tes
 
 	if result.UserHome != f.home || len(result.HookConfigPaths) != 1 {
 		t.Fatalf("root Install result = %+v", result)
+	}
+	requireHookContractLockVersion(t, f.home, "codex", "9.8.7-root-worker-test")
+	if identity.BinaryVersion != "9.8.7-root-worker-test" {
+		t.Fatalf("root worker binary version = %q, want the guardian's", identity.BinaryVersion)
 	}
 	if identity.UID != f.uid || identity.EUID != f.uid || identity.GID != f.gid || identity.EGID != f.gid ||
 		!slices.Equal(identity.Groups, []int{f.gid}) || identity.CanRegainRoot || identity.SavedIDsErr != "" {
