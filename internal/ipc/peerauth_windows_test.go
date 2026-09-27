@@ -300,7 +300,12 @@ func (r *rejectRecorder) snapshot() []recordedReject {
 // listener built with the production resolvers.
 func serveSecureClientAPI(t *testing.T, inner net.Listener, policy windowsPeerPolicy, recorder *rejectRecorder) {
 	t.Helper()
-	listener, err := newWindowsPeerAuthListener(inner, policy, productionWindowsPeerResolvers(), recorder.log)
+	serveSecureClientAPIWith(t, inner, policy, productionWindowsPeerResolvers(), recorder)
+}
+
+func serveSecureClientAPIWith(t *testing.T, inner net.Listener, policy windowsPeerPolicy, resolvers windowsPeerResolvers, recorder *rejectRecorder) {
+	t.Helper()
+	listener, err := newWindowsPeerAuthListener(inner, policy, resolvers, recorder.log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,6 +551,137 @@ func TestWindowsSecureClientListenerRejectsLookAlikeRoot(t *testing.T) {
 	// look-alike NT path, not a file the gateway opened.
 	if !strings.HasPrefix(first.id.ImagePath, `\Device\`) || !strings.Contains(first.id.ImagePath, "File\u017f") {
 		t.Fatalf("rejected image = %q, want the look-alike NT path", first.id.ImagePath)
+	}
+}
+
+// shortPathOf returns the 8.3 short form Windows gives for path, the
+// form a launcher that shortens paths passes to CreateProcess.
+func shortPathOf(t *testing.T, path string) string {
+	t.Helper()
+	long, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]uint16, windows.MAX_PATH)
+	n, err := windows.GetShortPathName(long, &buffer[0], uint32(len(buffer)))
+	if err != nil || n == 0 || int(n) >= len(buffer) {
+		t.Fatalf("GetShortPathName(%s) = %d, %v", path, n, err)
+	}
+	return windows.UTF16ToString(buffer[:n])
+}
+
+// TestWindowsShortNameReadsTheEntryOfAPolicyPath checks the production
+// short-name lookup: it reports the short name of the entry the path
+// names, "" for an entry without one, and fails for anything that is
+// not a canonical path to an existing entry, including a wildcard and a
+// path that reaches the entry through its short name.
+func TestWindowsShortNameReadsTheEntryOfAPolicyPath(t *testing.T) {
+	root, err := filepath.EvalSymlinks(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "Cisco Secure Client")
+	if err := os.MkdirAll(filepath.Join(dir, "UI"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if name, err := windowsShortName(filepath.Join(dir, "UI")); err != nil || name != "" {
+		t.Fatalf(`windowsShortName(UI) = (%q, %v), want ("", nil)`, name, err)
+	}
+	for _, bad := range []string{
+		filepath.Join(dir, "missing"),
+		filepath.Join(dir, "U?"),
+		filepath.Join(dir, "*"),
+		dir + `\`,
+		`C:\`,
+		`C:`,
+		`Cisco Secure Client`,
+		`\\?\` + dir,
+	} {
+		if name, err := windowsShortName(bad); err == nil {
+			t.Errorf("windowsShortName(%q) = %q, want an error", bad, name)
+		}
+	}
+
+	short := shortPathOf(t, dir)
+	want := short[strings.LastIndexByte(short, '\\')+1:]
+	if want == "Cisco Secure Client" {
+		t.Skipf("no 8.3 names on this volume: %s", short)
+	}
+	name, err := windowsShortName(dir)
+	if err != nil || name != want {
+		t.Fatalf("windowsShortName(%s) = (%q, %v), want %q", dir, name, err, want)
+	}
+	if name, err := windowsShortName(filepath.Join(root, want)); err == nil {
+		t.Fatalf("lookup through the short name %s returned %q, want an error", want, name)
+	}
+}
+
+// TestWindowsSecureClientListenerMatchesShortNameLaunch starts the
+// client through the 8.3 short form of the GUI path in a scratch
+// Program Files root. With short-name matching off, the client is
+// refused on its image name, which shows the kernel records the short
+// name as launched. With the production resolvers the name matches the
+// allowed path, so the unsigned client is refused later, by the
+// Authenticode check of the policy's own file.
+func TestWindowsSecureClientListenerMatchesShortNameLaunch(t *testing.T) {
+	if os.Getenv(peerAuthHelperSocketEnv) != "" {
+		t.Skip("running as helper")
+	}
+	root, err := filepath.EvalSymlinks(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gui := filepath.Join(root, "Cisco", "Cisco Secure Client", "UI", "csc_ui.exe")
+	copyTestFile(t, selfExecutable(t), gui)
+	shortGUI := shortPathOf(t, gui)
+	if !strings.Contains(shortGUI, "~") {
+		t.Skipf("no 8.3 names on this volume: %s", shortGUI)
+	}
+	policy, err := newWindowsPeerPolicy([]string{root}, []string{`UI\csc_ui.exe`}, []string{testCiscoSigner}, dosDeviceForDrive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReject := func(resolvers windowsPeerResolvers) recordedReject {
+		t.Helper()
+		inner, socketPath := listenTestUnix(t)
+		recorder := &rejectRecorder{}
+		serveSecureClientAPIWith(t, inner, policy, resolvers, recorder)
+		command := exec.Command(shortGUI, "-test.run=^TestWindowsPeerAuthHelperProcess$", "-test.count=1")
+		command.Env = append(os.Environ(), peerAuthHelperSocketEnv+"="+socketPath)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper failed: %v\n%s", err, output)
+		}
+		if strings.Contains(string(output), "HELPER-RECEIVED") || !strings.Contains(string(output), "HELPER-REJECTED") {
+			t.Fatalf("unsigned client started through %s was not refused:\n%s", shortGUI, output)
+		}
+		rejects := recorder.snapshot()
+		if len(rejects) == 0 {
+			t.Fatal("no rejection recorded")
+		}
+		if rejects[0].id.PID == uint32(os.Getpid()) || rejects[0].id.PID == 0 {
+			t.Fatalf("rejected pid = %d, want the helper's pid", rejects[0].id.PID)
+		}
+		return rejects[0]
+	}
+
+	longOnly := productionWindowsPeerResolvers()
+	longOnly.shortName = nil
+	refused := firstReject(longOnly)
+	if !strings.Contains(refused.reason, "not an allowed Secure Client GUI executable") ||
+		!strings.Contains(refused.reason, "8.3 short name") {
+		t.Fatalf("long names only: reason = %q, want an image-name refusal naming the short path", refused.reason)
+	}
+	if !strings.HasPrefix(refused.id.ImagePath, `\Device\`) || !strings.Contains(refused.id.ImagePath, "~") {
+		t.Fatalf("premise: kernel image name %q is not the short form %s", refused.id.ImagePath, shortGUI)
+	}
+
+	matched := firstReject(productionWindowsPeerResolvers())
+	if !strings.Contains(matched.reason, "signature rejected") {
+		t.Fatalf("short names matched: reason = %q, want an Authenticode rejection", matched.reason)
+	}
+	if !strings.EqualFold(matched.id.ImagePath, gui) {
+		t.Fatalf("checked image = %q, want the policy's long path %s", matched.id.ImagePath, gui)
 	}
 }
 
