@@ -3,7 +3,6 @@ claudecode supported
 cursor supported
 amp supported
 opencode supported
-windsurf unsupported
-geminicli unsupported
+devin unsupported
 copilot unsupported
 hermes unsupported

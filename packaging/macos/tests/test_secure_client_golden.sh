@@ -65,7 +65,7 @@ t_sc_golden_render_targets() {
   local users="alice:501:20:/Users/alice
 bob:502:20:/Users/bob"
   _sc_golden_compare "render_targets_multi.yaml" \
-    "$(render_targets_manifest "${SC_SUPPORT}" "codex,claudecode,cursor,amp,opencode,windsurf" "${users}")"
+    "$(render_targets_manifest "${SC_SUPPORT}" "codex,claudecode,cursor,amp,opencode,devin" "${users}")"
 }
 
 t_sc_golden_endpoints() {
@@ -84,7 +84,7 @@ t_sc_golden_endpoints() {
 
 t_sc_golden_supported_connectors() {
   local out="" c
-  for c in codex claudecode cursor amp opencode windsurf geminicli copilot hermes; do
+  for c in codex claudecode cursor amp opencode devin copilot hermes; do
     if is_supported_connector "${c}"; then out+="${c} supported"$'\n'; else out+="${c} unsupported"$'\n'; fi
   done
   _sc_golden_compare "supported_connectors.txt" "${out%$'\n'}"
