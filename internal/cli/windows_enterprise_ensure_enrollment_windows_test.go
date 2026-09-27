@@ -10,7 +10,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -29,7 +31,10 @@ func stageEnsureManifestForEnrollmentTest(t *testing.T, enrollment config.Enterp
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
 		windowsEnterpriseProgramDataResolver = previousProgramData
 	})
+	programData := t.TempDir()
+	var loaderDataDir string
 	windowsEnterpriseEnsureConfigLoader = func(string) (*config.Config, error) {
+		loaderDataDir = os.Getenv(windowsEnterpriseEnsureDataDirEnv)
 		return standaloneWindowsEnrollmentConfig(enrollment), nil
 	}
 	calls := 0
@@ -37,10 +42,8 @@ func stageEnsureManifestForEnrollmentTest(t *testing.T, enrollment config.Enterp
 		calls++
 		return enterprisehooks.Manifest{}, errors.New("enumeration stopped by the test")
 	}
-	// Stop before any protected staging directory is created.
 	windowsEnterpriseProgramDataResolver = func() (string, error) {
-		calls++
-		return "", errors.New("staging stopped by the test")
+		return programData, nil
 	}
 	cmd := &cobra.Command{}
 	cmd.SetErr(new(bytes.Buffer))
@@ -52,7 +55,30 @@ func stageEnsureManifestForEnrollmentTest(t *testing.T, enrollment config.Enterp
 	if cleanup != nil {
 		cleanup()
 	}
+	// The config was loaded with data_dir on the protected staging directory,
+	// and every failed staging removed it.
+	if loaderDataDir == "" || !strings.EqualFold(filepath.Dir(loaderDataDir), programData) ||
+		!strings.HasPrefix(filepath.Base(loaderDataDir), "DefenseClaw-Ensure-") {
+		t.Fatalf("config loaded with data_dir %q, want a protected staging directory under %q", loaderDataDir, programData)
+	}
+	if entries, readErr := os.ReadDir(programData); readErr != nil || len(entries) != 0 {
+		t.Fatalf("staging left %d entries under ProgramData (err=%v)", len(entries), readErr)
+	}
 	return calls, err
+}
+
+// Setup runs the lifecycle with a scratch profile whose default data_dir does
+// not exist; the first-install config load must not depend on it.
+func TestWindowsEnterpriseEnsureLoadsTheConfigWithAProtectedDataDir(t *testing.T) {
+	t.Setenv(windowsEnterpriseEnsureDataDirEnv, "")
+	if _, err := stageEnsureManifestForEnrollmentTest(t, config.EnterpriseEnrollmentConfig{
+		Mode: config.EnterpriseEnrollmentAuto,
+	}); err == nil {
+		t.Fatal("the test enumerator should stop staging")
+	}
+	if value, set := os.LookupEnv(windowsEnterpriseEnsureDataDirEnv); set && value != "" {
+		t.Fatalf("staging leaked %s=%q", windowsEnterpriseEnsureDataDirEnv, value)
+	}
 }
 
 // In enterprise.enrollment.mode manifest the installed enumerator stays idle,

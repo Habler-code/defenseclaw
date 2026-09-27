@@ -1256,6 +1256,10 @@ var errWindowsEnterpriseEnsureManifestRequired = errors.New(
 // windowsEnterpriseEnsureStagingErrorCode classifies a first-manifest
 // staging failure. A missing --manifest in manifest mode is an argument
 // error the MDM must fix, not a transient failure to retry.
+// windowsEnterpriseEnsureDataDirEnv is the data_dir override the config
+// loader honors (config.DefaultDataPath).
+const windowsEnterpriseEnsureDataDirEnv = "DEFENSECLAW_HOME"
+
 func windowsEnterpriseEnsureStagingErrorCode(err error) string {
 	if errors.Is(err, errWindowsEnterpriseEnsureManifestRequired) {
 		return "invalid_arguments"
@@ -1278,22 +1282,6 @@ func stageWindowsEnterpriseEnsureManifest(
 	if err != nil {
 		return "", nil, err
 	}
-	restore := setTemporaryEnvironment(map[string]string{
-		managed.ConfigPathEnv:        absolute,
-		managed.DeploymentModeEnv:    managed.DeploymentModeManagedEnterprise,
-		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
-	})
-	cfg, loadErr := windowsEnterpriseEnsureConfigLoader(absolute)
-	restore()
-	if loadErr != nil {
-		return "", nil, fmt.Errorf("load the standalone config for enumeration: %w", loadErr)
-	}
-	// In manifest mode the administrator owns targets.yaml and the installed
-	// enumerator stays idle, so a manifest staged here from discovery would
-	// never be updated or pruned again.
-	if strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
-		return "", nil, errWindowsEnterpriseEnsureManifestRequired
-	}
 	programData, err := windowsEnterpriseProgramDataResolver()
 	if err != nil {
 		return "", nil, err
@@ -1309,6 +1297,31 @@ func stageWindowsEnterpriseEnsureManifest(
 		return "", nil, err
 	}
 	cleanup := func() { _ = os.RemoveAll(directory) }
+	// Setup runs the lifecycle with a scratch profile, so the default
+	// data_dir (%USERPROFILE%\.defenseclaw) does not exist and the managed
+	// data_dir trust check refused every first install ("GetFileAttributesEx
+	// ...\scratch\.defenseclaw: The system cannot find the file specified").
+	// Enumeration reads only the enterprise settings; point data_dir at this
+	// protected administrator-only directory so the check stays strict.
+	restore := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv:             absolute,
+		managed.DeploymentModeEnv:         managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv:      managed.ProfileStandalone,
+		windowsEnterpriseEnsureDataDirEnv: directory,
+	})
+	cfg, loadErr := windowsEnterpriseEnsureConfigLoader(absolute)
+	restore()
+	if loadErr != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("load the standalone config for enumeration: %w", loadErr)
+	}
+	// In manifest mode the administrator owns targets.yaml and the installed
+	// enumerator stays idle, so a manifest staged here from discovery would
+	// never be updated or pruned again.
+	if strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+		cleanup()
+		return "", nil, errWindowsEnterpriseEnsureManifestRequired
+	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		Logger: enumerationLoggerForStderr(cmd.ErrOrStderr()),
 	}))
