@@ -89,9 +89,26 @@ which hands off to the latest `install.sh`. It does not need to run again.
 
 ## Changing the config schema
 
-A new `config.yaml` key only needs a default in the loaders. Renaming or
-removing a key needs one step in `CONFIG_MIGRATIONS`
-(`cli/defenseclaw/migrations.py`), a bump of `CURRENT_CONFIG_VERSION`
-(`cli/defenseclaw/config.py`) and of `MaxSupportedConfigVersion` in the Go
-config package. Audit database changes are forward-only migrations applied by
-the gateway at startup.
+`config.yaml` is validated against the closed schema
+`schemas/config/v8/defenseclaw-config.schema.json` (every object sets
+`additionalProperties: false`), by both the gateway and the CLI.
+
+- **A new key:** add it to that schema and give it a default in the Python
+  (`cli/defenseclaw/config.py`) and Go (`internal/config`) loaders. No
+  migration is needed. An older release with the same `config_version`
+  rejects the key, so do not write it by default while downgrading to such a
+  release must still work.
+- **Renaming, removing or re-shaping a key:** prefer adding a new key and
+  reading the old one. A `config_version` bump is a larger change: one step in
+  `CONFIG_MIGRATIONS` (`cli/defenseclaw/migrations.py`, keyed by the old
+  version; the runner writes the new version), `CURRENT_CONFIG_VERSION`
+  (`cli/defenseclaw/config.py`), `MaxSupportedConfigVersion`
+  (`internal/config/observability_v8_types.go`), the schema's
+  `config_version` `const`, and every place that still expects exactly 8
+  (`git grep -nE '!= 8|== 8' -- cli/defenseclaw internal`). Do not touch Go's
+  `CurrentConfigVersion` (7), the legacy decoder. `defenseclaw migrate --check`
+  does not validate these steps, so test that a migrated file loads in both
+  loaders.
+- **Audit database changes** are forward-only migrations the gateway applies
+  at startup (`internal/audit/store.go`, and the judge-body and inventory
+  stores); never edit or reorder an existing one.

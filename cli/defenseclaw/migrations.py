@@ -21,7 +21,9 @@ after stopping the gateway, so migrations always execute the new release's
 code. Two kinds of steps exist:
 
 * ``CONFIG_MIGRATIONS`` moves ``config.yaml`` from ``config_version`` N to
-  N+1. New keys only need loader defaults; renames and removals need a step.
+  N+1. New keys need only the schema entry and loader defaults; renames and
+  removals need a step (see "Changing the config schema" in
+  docs/RELEASE_RUNBOOK.md for everything a version bump touches).
 * ``MIGRATIONS`` is the frozen 0.x chain. It imports installs older than the
   0.8.5 schema-v8 hard cut and never grows.
 
