@@ -194,3 +194,52 @@ func TestCodexRequirementsPinRemovalFailsClosedOnEditedRegion(t *testing.T) {
 		t.Fatalf("removal from a clean document: changed=%t removeFile=%t err=%v", changed, removeFile, err)
 	}
 }
+
+// With the dotted root layout, the administrator may later delete their own
+// features.* keys. Removing DefenseClaw's line then leaves no features table,
+// which is what the administrator's document means.
+func TestCodexRequirementsPinRemovesDottedPinAfterAdministratorFeaturesAreGone(t *testing.T) {
+	rendered, _, err := renderCodexRequirementsPin([]byte("features.web = true\n[otel]\nx = 1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := bytes.Replace(rendered, []byte("features.web = true\n"), nil, 1)
+	restored, removeFile, changed, err := removeCodexRequirementsPin(edited)
+	if err != nil || !changed || removeFile || string(restored) != "[otel]\nx = 1\n" {
+		t.Fatalf("remove = %q, removeFile=%t changed=%t err=%v", restored, removeFile, changed, err)
+	}
+}
+
+// DefenseClaw bytes that cannot be removed exactly are reported, so the
+// uninstaller warns instead of leaving the pin in place silently.
+func TestCodexRequirementsPinRemovalReportsUnremovableOwnedBytes(t *testing.T) {
+	rendered, _, err := renderCodexRequirementsPin([]byte("model = \"o5\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := []byte(codexRequirementsPinRegionEnd + "\n")
+	for name, edited := range map[string][]byte{
+		"missing END marker":        bytes.Replace(rendered, end, nil, 1),
+		"stray BEGIN marker":        append([]byte(codexRequirementsPinRegionBegin+"\n"), rendered...),
+		"missing BEGIN marker":      bytes.Replace(rendered, []byte(codexRequirementsPinRegionBegin+"\n"), nil, 1),
+		"stray leading END":         append(append([]byte(nil), end...), rendered...),
+		"stray trailing END":        append(append([]byte(nil), rendered...), end...),
+		"edited region":             bytes.Replace(rendered, []byte("hooks = true\n"), []byte("hooks = true\nweb_search = true\n"), 1),
+		"CRLF missing BEGIN marker": bytes.ReplaceAll(bytes.Replace(rendered, []byte(codexRequirementsPinRegionBegin+"\n"), nil, 1), []byte("\n"), []byte("\r\n")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, changed, err := removeCodexRequirementsPin(edited)
+			if changed || !errors.Is(err, errCodexRequirementsPinUnremovable) {
+				t.Fatalf("remove: changed=%t err=%v, want the manual-removal guidance", changed, err)
+			}
+			if !strings.Contains(err.Error(), "delete the lines marked") {
+				t.Fatalf("removal guidance = %q", err)
+			}
+			// The pin is still in force and DefenseClaw marked it, so it is
+			// not reported as the administrator's own pin.
+			if state, err := inspectCodexRequirementsPin(edited); err != nil || state != CodexRequirementsPinOwned {
+				t.Fatalf("inspect = %q, %v; want owned", state, err)
+			}
+		})
+	}
+}

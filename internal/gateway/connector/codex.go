@@ -1235,7 +1235,8 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		return false, nil
 	}
 	// Machine requirements that pin [features] hooks = true make a user-level
-	// hooks = false inactive, so it does not count as removal.
+	// hooks = false inactive, so it does not count as removal. The deprecated
+	// codex_hooks = false still does (see codexUserHooksFlagInactive).
 	hooksPinned := codexUserHooksFeaturePinned(opts)
 	userConfigPath := codexConfigPath()
 	data, err := os.ReadFile(userConfigPath)
@@ -1256,7 +1257,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 			for _, key := range []string{"hooks", "codex_hooks"} {
 				if rawEnabled, exists := features[key]; exists {
 					enabled, ok := rawEnabled.(bool)
-					if !ok || (!enabled && !hooksPinned) {
+					if !ok || (!enabled && !codexUserHooksFlagInactive(key, hooksPinned)) {
 						return false, nil
 					}
 				}
@@ -1284,7 +1285,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		for _, key := range []string{"hooks", "codex_hooks"} {
 			if rawEnabled, exists := features[key]; exists {
 				enabled, ok := rawEnabled.(bool)
-				if !ok || (!enabled && !hooksPinned) {
+				if !ok || (!enabled && !codexUserHooksFlagInactive(key, hooksPinned)) {
 					return false, nil
 				}
 			}
@@ -1590,22 +1591,22 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			features = map[string]interface{}{}
 		}
 		// Machine requirements that pin [features] hooks = true keep Codex
-		// hooks on regardless of these user flags, so a managed setup repairs
-		// its hooks and leaves the inactive user flags as they are.
+		// hooks on regardless of a user-level hooks = false, so a managed setup
+		// repairs its hooks and leaves that inactive flag as it is.
 		hooksPinned := codexUserHooksFeaturePinned(opts)
-		if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled && !hooksPinned {
+		if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled &&
+			!codexUserHooksFlagInactive("hooks", hooksPinned) {
 			return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector")
 		}
-		aliasEnabled, aliasSet := features["codex_hooks"].(bool)
-		if aliasSet && !aliasEnabled && !hooksPinned {
+		// The pin does not cover the deprecated codex_hooks name (see
+		// codexUserHooksFlagInactive), so its false still refuses.
+		if enabled, explicitlySet := features["codex_hooks"].(bool); explicitlySet && !enabled {
 			return fmt.Errorf("Codex hooks are disabled by deprecated [features].codex_hooks; enable hooks before installing the Codex connector")
 		}
 		// Remove the retired alias when it is enabled. Current Codex accepts the
 		// [features].hooks key (and enables hooks by default) and warns on the old
 		// name.
-		if !aliasSet || aliasEnabled {
-			delete(features, "codex_hooks")
-		}
+		delete(features, "codex_hooks")
 
 		// Native OTel exporter — runs on every install regardless of
 		// enforcement mode. Codex's [otel] block produces structured
@@ -2565,8 +2566,15 @@ func restoreOwnedCodexConfigFromTOML(
 
 	if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hookEventsRemain) {
 		if features, ok := cfg["features"].(map[string]interface{}); ok {
-			delete(features, "hooks")
-			delete(features, "codex_hooks")
+			for _, key := range []string{"hooks", "codex_hooks"} {
+				// DefenseClaw only ever turns hooks on. An explicit false is the
+				// user's own setting, which a setup under the machine hooks pin
+				// keeps, so teardown must keep it too.
+				if enabled, isBool := features[key].(bool); isBool && !enabled {
+					continue
+				}
+				delete(features, key)
+			}
 			if len(features) == 0 {
 				delete(cfg, "features")
 			} else {

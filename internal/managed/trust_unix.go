@@ -54,6 +54,13 @@ func ValidateTrustedFilePath(path, label string) error {
 	return validateTrustedPathElement(filepath.VolumeName(clean)+string(filepath.Separator), true, label)
 }
 
+// ValidateTrustedPathACL rejects a path whose macOS extended ACL grants
+// write-like access beyond its mode bits, the entry check every trusted path
+// element gets. It checks only path itself and is a no-op off macOS.
+func ValidateTrustedPathACL(path string) error {
+	return validateTrustedPathACL(path)
+}
+
 // ValidateTrustedRuntimeDir rejects managed_enterprise runtime directories that
 // a standard user could replace or edit. Unlike authoritative config and
 // manifest files, runtime state may be owned by the packaged DefenseClaw
