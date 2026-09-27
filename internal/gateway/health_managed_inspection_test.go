@@ -338,6 +338,9 @@ func TestManagedHealthTickerRewiresAnUnwiredHookLane(t *testing.T) {
 
 	var buildable atomic.Bool
 	var builds atomic.Int32
+	// The fake is reached through the in-process lane, which the Windows
+	// gateway otherwise refuses in favour of the credential broker.
+	setCMIDDirectLaneRefused(t, false)
 	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
 		builds.Add(1)
 		if !buildable.Load() {
@@ -461,6 +464,9 @@ func TestRefreshManagedInspectionHealthClearsAfterAnInFlightPublish(t *testing.T
 func TestManagedHookInspectorRetryReportsARepeatedBuildFailureOnce(t *testing.T) {
 	var cause atomic.Value
 	cause.Store("managed cloud auth library not trusted yet")
+	// On Windows the in-process lane is otherwise refused before the fake
+	// runs, with one fixed cause, so a changed cause would never be seen.
+	setCMIDDirectLaneRefused(t, false)
 	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
 		return nil, errors.New(cause.Load().(string))
 	})
