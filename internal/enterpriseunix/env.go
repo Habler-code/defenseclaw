@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
 
 // CommandResult is the captured outcome of one external command.
@@ -183,6 +184,9 @@ type Env struct {
 	Trust func(path string, kind TrustKind) error
 	// HealthGet fetches the gateway /health document.
 	HealthGet func(ctx context.Context) (int, []byte, error)
+	// HookSocketPeer connects to the hook socket and returns the kernel
+	// credentials of the process serving it.
+	HookSocketPeer func(ctx context.Context) (peercred.Credentials, error)
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
@@ -268,6 +272,10 @@ func (e *Env) fillDefaults() {
 		addr := e.Layout.APIAddr
 		e.HealthGet = func(ctx context.Context) (int, []byte, error) { return httpHealth(ctx, addr) }
 	}
+	if e.HookSocketPeer == nil {
+		path := e.P(e.Layout.HookSocketPath)
+		e.HookSocketPeer = func(ctx context.Context) (peercred.Credentials, error) { return hookSocketPeer(ctx, path) }
+	}
 	if e.Services == nil {
 		e.Services = newServiceManager(e)
 	}
@@ -350,6 +358,43 @@ func httpHealth(ctx context.Context, addr string) (int, []byte, error) {
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return resp.StatusCode, body, err
+}
+
+// hookSocketPeer dials the hook socket and reads the listener's
+// credentials.
+func hookSocketPeer(ctx context.Context, path string) (peercred.Credentials, error) {
+	conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return peercred.Credentials{}, err
+	}
+	defer conn.Close()
+	return peercred.FromConn(conn)
+}
+
+// gatewayServing checks, on macOS, that the gateway job itself serves the
+// hook socket. There the gateway binds 127.0.0.1:18970 itself, so a /health
+// answer on that port can come from any local process that bound it first,
+// while the real gateway retries its bind and launchd still reports it
+// running; the gateway serves the hook socket only after its TCP listener is
+// up. The socket lives in a directory only the service account can write,
+// and the kernel reports who is listening on it. On Linux PID 1 holds both
+// listeners and hands them only to the gateway unit, so the check is not
+// needed (and dialling a socket-activated listener would start the unit).
+func (e *Env) gatewayServing(ctx context.Context, gateway Unit, serviceUID int) error {
+	if e.GOOS != "darwin" {
+		return nil
+	}
+	peer, err := e.HookSocketPeer(ctx)
+	if err != nil {
+		return fmt.Errorf("the gateway does not serve the hook socket %s: %w", e.Layout.HookSocketPath, err)
+	}
+	if peer.UID != serviceUID && peer.UID != 0 {
+		return fmt.Errorf("the hook socket %s is served by uid %d, not the %s service account (uid %d)", e.Layout.HookSocketPath, peer.UID, e.Layout.ServiceUser, serviceUID)
+	}
+	if status, err := e.Services.Status(ctx, gateway); err == nil && status.PID > 0 && peer.PID > 0 && status.PID != peer.PID {
+		return fmt.Errorf("the hook socket %s is served by pid %d, not the gateway job (pid %d)", e.Layout.HookSocketPath, peer.PID, status.PID)
+	}
+	return nil
 }
 
 // CurrentGOOS is the host OS; the CLI refuses a lifecycle for another OS.

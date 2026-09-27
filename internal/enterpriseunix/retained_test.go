@@ -55,3 +55,63 @@ func TestReinstallAfterNonPurgeUninstallRecognizesRetainedState(t *testing.T) {
 		})
 	}
 }
+
+// ext4 and XFS reuse a freed inode number for the next directory created,
+// so a state directory deleted and recreated in place can carry the device,
+// inode and owner uninstall recorded. The marker uninstall leaves inside
+// the directory still tells the two apart.
+func TestRetainedStateNeedsTheUninstallMarker(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			for name, tamper := range map[string]func(h *testHost, marker string){
+				// Same directory identity, no marker: what a recreated directory
+				// on a reused inode looks like.
+				"marker missing": func(h *testHost, marker string) {
+					if err := os.Remove(marker); err != nil {
+						t.Fatal(err)
+					}
+				},
+				"marker forged": func(h *testHost, marker string) {
+					if err := h.env.writeFileAtomic(marker, []byte("0000\n"), 0o600, rootOwner()); err != nil {
+						t.Fatal(err)
+					}
+				},
+				"marker not root-owned": func(h *testHost, marker string) {
+					h.owners[marker] = [2]int{1000, 1000}
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					h := newTestHost(t, goos)
+					l := h.env.Layout
+					requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+					if err := os.WriteFile(h.env.P(l.DataDir)+"/audit.db", []byte("x"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					requireOK(t, h.run(Options{Action: ActionUninstall}))
+					marker := retainedMarkerPath(h.env.P(l.DataDir))
+					if !exists(marker) {
+						t.Fatal("non-purge uninstall left no marker in the kept state directory")
+					}
+					tamper(h, marker)
+					requireError(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}), codeUnmanagedLayout)
+				})
+			}
+		})
+	}
+}
+
+// A reinstall that resumes the kept state removes the markers, so the
+// running deployment's directories hold only its own files.
+func TestReinstallRemovesTheRetainedMarkers(t *testing.T) {
+	h := newTestHost(t, "linux")
+	l := h.env.Layout
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	if err := os.WriteFile(h.env.P(l.DataDir)+"/audit.db", []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	if exists(retainedMarkerPath(h.env.P(l.DataDir))) {
+		t.Fatal("the retained marker survived the reinstall")
+	}
+}

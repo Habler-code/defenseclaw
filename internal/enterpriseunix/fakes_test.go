@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
 
 // fakeServices is an in-memory service manager.
@@ -38,11 +39,32 @@ type fakeServices struct {
 	failStart map[string]error
 	reloads   int
 	inner     ServiceManager // definition paths and unit list
+	env       *Env
 }
 
 func newFakeServices(env *Env) *fakeServices {
 	inner := newServiceManager(env)
-	return &fakeServices{goos: env.GOOS, version: 255, active: map[string]bool{}, enabled: map[string]bool{}, failStart: map[string]error{}, inner: inner}
+	return &fakeServices{goos: env.GOOS, version: 255, active: map[string]bool{}, enabled: map[string]bool{}, failStart: map[string]error{}, inner: inner, env: env}
+}
+
+func (f *fakeServices) Enabled(_ context.Context, u Unit) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.enabled[u.Name]
+}
+
+// FragmentPath follows systemd's search order for the two unit directories
+// the lifecycle uses.
+func (f *fakeServices) FragmentPath(_ context.Context, u Unit) string {
+	if f.goos != "linux" {
+		return ""
+	}
+	for _, dir := range []string{"/etc/systemd/system", "/usr/lib/systemd/system"} {
+		if path := filepath.Join(dir, u.Name); exists(f.env.P(path)) {
+			return path
+		}
+	}
+	return ""
 }
 
 func (f *fakeServices) record(call string) {
@@ -68,6 +90,17 @@ func (f *fakeServices) Start(_ context.Context, u Unit) error {
 	return nil
 }
 
+func (f *fakeServices) Restart(_ context.Context, u Unit) error {
+	f.record("restart " + u.Name)
+	if err := f.failStart[u.Name]; err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.active[u.Name] = true
+	f.mu.Unlock()
+	return nil
+}
+
 func (f *fakeServices) Stop(_ context.Context, u Unit) error {
 	f.record("stop " + u.Name)
 	f.mu.Lock()
@@ -78,13 +111,17 @@ func (f *fakeServices) Stop(_ context.Context, u Unit) error {
 
 func (f *fakeServices) Enable(_ context.Context, u Unit) error {
 	f.record("enable " + u.Name)
+	f.mu.Lock()
 	f.enabled[u.Name] = true
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeServices) Disable(_ context.Context, u Unit) error {
 	f.record("disable " + u.Name)
+	f.mu.Lock()
 	f.enabled[u.Name] = false
+	f.mu.Unlock()
 	return nil
 }
 
@@ -230,6 +267,14 @@ func newTestHost(t *testing.T, goos string) *testHost {
 			return 200, []byte(`{"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
 		}
 		return 0, nil, errors.New("connection refused")
+	}
+	env.HookSocketPeer = func(context.Context) (peercred.Credentials, error) {
+		// The gateway serves its hook socket when it is healthy.
+		if h.healthy && h.services.isActive(labelGateway) {
+			account := h.accounts.accounts[layout.ServiceUser]
+			return peercred.Credentials{UID: account.UID, GID: account.GID}, nil
+		}
+		return peercred.Credentials{}, errors.New("connection refused")
 	}
 	env.fillDefaults()
 	h.env = env

@@ -125,6 +125,8 @@ def test_systemd_sensor_helper_owns_its_socket_directory():
     assert not any(line.startswith("EnvironmentFile=") for line in lines)
     assert any("--service-account defenseclaw --home-dirs-from-manifest /etc/defenseclaw/hook-guardian/targets.yaml" in line for line in lines)
     assert any(line.startswith("SystemCallFilter=@system-service") for line in lines)
+    # Plane C's fanotify watch: fanotify_* are in @privileged, not @system-service.
+    assert "SystemCallFilter=fanotify_init fanotify_mark" in lines
     assert "Before=defenseclaw-gateway.service" in lines
 
 

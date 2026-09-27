@@ -8,8 +8,11 @@
 # environment file is involved.
 #
 # SystemCallFilter: start from @system-service plus @network-io (netlink and
-# packet sockets). Re-derive on a new kernel with SystemCallLog= in audit
-# mode before tightening further.
+# packet sockets), plus fanotify_init and fanotify_mark for the Plane C
+# file-access watch on credential roots: they belong to @privileged, which
+# @system-service does not include, and the filter would answer EPERM even
+# with CAP_SYS_ADMIN granted. Re-derive on a new kernel with SystemCallLog=
+# in audit mode before tightening further.
 
 [Unit]
 Description=DefenseClaw sensor helper (privileged AI runtime acquisition)
@@ -55,6 +58,7 @@ RemoveIPC=true
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_PACKET AF_INET AF_INET6
 SystemCallArchitectures=native
 SystemCallFilter=@system-service @network-io
+SystemCallFilter=fanotify_init fanotify_mark
 SystemCallFilter=~@clock @cpu-emulation @module @mount @obsolete @raw-io @reboot @swap
 SystemCallErrorNumber=EPERM
 

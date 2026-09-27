@@ -110,6 +110,8 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// serviceUID is the gateway account of the running transaction.
+	serviceUID int
 }
 
 // Run executes one lifecycle action and returns its result; the result's
@@ -168,7 +170,12 @@ func (l *lifecycle) run(ctx context.Context) int {
 	}
 	defer lock.release()
 
-	l.recoverInterrupted(ctx)
+	if !l.recoverInterrupted(ctx) && l.opts.Action != ActionUninstall {
+		// The previous deployment's files are only in the kept snapshot;
+		// changing anything now would lose them. Uninstall removes the
+		// deployment either way, so it proceeds.
+		return 0
+	}
 	record, err := env.loadDeployment()
 	if err != nil {
 		r.AddError(codeState, err.Error())
@@ -219,6 +226,14 @@ func (l *lifecycle) run(ctx context.Context) int {
 		if noop, reason := l.ensureNoop(ctx, record); noop {
 			r.Noop = true
 			r.NoopReason = reason
+			if !exists(env.committedConfigPath()) {
+				// A deployment committed before the lifecycle kept the applied
+				// config; the installed file is exactly that config.
+				if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil && sha256Bytes(raw) == record.ConfigSHA256 {
+					_ = env.saveCommittedConfig(raw)
+				}
+			}
+			l.settleRejectedConfig()
 			l.describe(ctx, record, false)
 			return 0
 		}
@@ -270,51 +285,94 @@ func (l *lifecycle) freshInstall(ctx context.Context) int {
 	if l.opts.FromPackage {
 		channel = ChannelPackage
 	}
+	if l.opts.PayloadDir == "" && !l.opts.FromPackage {
+		r.AddError(codeInvalidArguments, "install needs --payload or --from-package")
+		return enterprisestatus.InvalidArgsExitCode(env.GOOS)
+	}
+	var adopting *adoption
 	if leftovers := env.unmanagedLeftovers(env.Services, channel); len(leftovers) > 0 {
 		if !l.opts.AdoptExisting {
 			r.AddError(codeUnmanagedLayout, "existing DefenseClaw machine state is not owned by a committed deployment ("+strings.Join(leftovers, ", ")+"); rerun with --adopt-existing to back it up and take it over")
 			return 0
 		}
-		if err := l.adopt(ctx, leftovers); err != nil {
-			r.AddError(codeUnmanagedLayout, err.Error())
-			return 0
-		}
+		adopting = env.planAdoption(leftovers, channel)
 	}
-	if l.opts.PayloadDir == "" && !l.opts.FromPackage {
-		r.AddError(codeInvalidArguments, "install needs --payload or --from-package")
-		return enterprisestatus.InvalidArgsExitCode(env.GOOS)
-	}
-	return l.apply(ctx, nil)
+	return l.applyAdopting(ctx, nil, adopting)
 }
 
-// adopt archives the unmanaged leftovers, then stops and removes legacy
-// units so the fresh install starts from a known state. Config and state
+// adoption is the takeover of a pre-existing unmanaged layout. It runs
+// inside the install transaction: the plan is validated first, the unit
+// files it removes are in the snapshot, and the units it stops and
+// disables are restarted and re-enabled if the install rolls back.
+type adoption struct {
+	// leftovers are archived before anything changes.
+	leftovers []string
+	// units are stopped and disabled.
+	units []string
+	// removeFiles are unit files that would shadow or duplicate the new
+	// deployment's units.
+	removeFiles []string
+}
+
+// planAdoption decides what adopting leftovers changes. Config and state
 // stay in place; a valid legacy config is reused when no --config is given.
-func (l *lifecycle) adopt(ctx context.Context, leftovers []string) error {
+func (e *Env) planAdoption(leftovers []string, channel string) *adoption {
+	a := &adoption{leftovers: leftovers}
+	if e.GOOS != "linux" {
+		return a
+	}
+	a.units = append(a.units, legacyLinuxUnits...)
+	for _, unit := range e.Services.Units() {
+		a.units = append(a.units, unit.Name)
+	}
+	for _, name := range legacyLinuxUnits {
+		if path := filepath.Join("/etc/systemd/system", name); exists(e.P(path)) {
+			a.removeFiles = append(a.removeFiles, path)
+		}
+	}
+	if channel == ChannelPackage {
+		// systemd loads /etc/systemd/system before /usr/lib/systemd/system:
+		// a unit an earlier manual deployment left there under a packaged
+		// name would replace the package's definition.
+		for _, unit := range e.Services.Units() {
+			if path := e.Services.DefinitionPath(unit, ChannelPayload); exists(e.P(path)) {
+				a.removeFiles = append(a.removeFiles, path)
+			}
+		}
+	}
+	return a
+}
+
+// archiveAdoption backs up the leftovers before the transaction changes
+// anything.
+func (l *lifecycle) archiveAdoption(a *adoption) error {
 	env := l.env
-	archive := filepath.Join(env.P(env.Layout.LifecycleDir), adoptedPrefix+env.Now().UTC().Format("20060102T150405Z")+".tar.gz")
-	if err := env.archivePaths(archive, leftovers); err != nil {
+	archive := filepath.Join(env.P(env.Layout.LifecycleDir), adoptedPrefix+env.Now().UTC().Format("20060102T150405.000000000Z")+".tar.gz")
+	if err := env.archivePaths(archive, a.leftovers); err != nil {
 		return fmt.Errorf("back up the existing layout: %w", err)
 	}
 	l.result.AddWarning("adopted_existing_layout", "backed up the existing layout to "+archive)
-	if env.GOOS == "linux" {
-		names := append([]string{}, legacyLinuxUnits...)
-		for _, unit := range env.Services.Units() {
-			names = append(names, unit.Name)
-		}
-		for _, name := range names {
-			unit := Unit{Name: name}
-			_ = env.Services.Stop(ctx, unit)
-			_ = env.Services.Disable(ctx, unit)
-		}
-		for _, name := range legacyLinuxUnits {
-			if err := removeFile(env.P(filepath.Join("/etc/systemd/system", name))); err != nil {
-				return err
-			}
-		}
-		_ = env.Services.Reload(ctx)
-	}
 	return nil
+}
+
+// takeOver stops and disables the adopted units and removes the unit
+// files that would shadow the new deployment.
+func (l *lifecycle) takeOver(ctx context.Context, a *adoption) error {
+	env := l.env
+	if len(a.units) == 0 && len(a.removeFiles) == 0 {
+		return nil
+	}
+	for _, name := range a.units {
+		unit := Unit{Name: name}
+		_ = env.Services.Stop(ctx, unit)
+		_ = env.Services.Disable(ctx, unit)
+	}
+	for _, path := range a.removeFiles {
+		if err := removeFile(env.P(path)); err != nil {
+			return err
+		}
+	}
+	return env.Services.Reload(ctx)
 }
 
 // archivePaths writes a gzip tar of the given canonical paths.
@@ -396,6 +454,9 @@ type plan struct {
 	intended      []string
 	machinePolicy []string
 	render        renderInputs
+	// packageUnits are the digests of the unit files the Linux package
+	// placed (package channel), keyed by canonical path.
+	packageUnits map[string]string
 }
 
 // buildPlan computes the desired state without mutating the host. account
@@ -505,6 +566,15 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeApply, err: err}
 	}
 	p.files = files
+	if p.channel == ChannelPackage && env.GOOS == "linux" {
+		p.packageUnits = map[string]string{}
+		for _, unit := range env.Services.Units() {
+			path := env.Services.DefinitionPath(unit, ChannelPackage)
+			if digest, err := sha256File(env.P(path)); err == nil {
+				p.packageUnits[path] = digest
+			}
+		}
+	}
 	serviceGroup := fileOwner{UID: 0, GID: account.GID}
 	p.files = append(p.files, desiredFile{Path: env.Layout.ConfigPath, Data: validated.Raw, SHA: validated.SHA, Mode: 0o640, Owner: serviceGroup, Kind: "config"})
 
@@ -525,8 +595,8 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		for path := range record.Files {
 			if !want[path] {
-				if p.channel == ChannelPackage && strings.HasPrefix(path, env.Layout.BinDir+"/") {
-					continue // the package owns the binaries now
+				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/")) {
+					continue // the package owns the binaries and units now
 				}
 				p.stale = append(p.stale, path)
 			}
@@ -584,6 +654,11 @@ func errorCode(err error, fallback string) string {
 
 // apply runs the install/upgrade/repair transaction.
 func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
+	return l.applyAdopting(ctx, record, nil)
+}
+
+// applyAdopting is apply that first takes over an adopted layout.
+func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopting *adoption) int {
 	env, r := l.env, l.result
 	serviceName := env.Layout.ServiceUser
 	account, err := env.Accounts.Ensure(ctx, serviceName)
@@ -591,17 +666,54 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 		r.AddError(codeAccount, err.Error())
 		return 0
 	}
+	committedConfig := l.inPlaceConfigEdit(record)
 	p, err := l.buildPlan(ctx, record, account)
 	if err != nil {
-		r.AddError(errorCode(err, codeApply), err.Error())
+		code := errorCode(err, codeApply)
+		r.AddError(code, err.Error())
+		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
+			l.revertRejectedConfig(record, committedConfig)
+		}
 		return 0
 	}
+	l.serviceUID = account.UID
 
 	units := env.Services.Units()
 	previouslyActive := []string{}
 	for _, unit := range units {
 		if env.Services.Active(ctx, unit) {
 			previouslyActive = append(previouslyActive, unit.Name)
+		}
+	}
+	// What started at boot before the transaction is put back if it rolls
+	// back: activation enables every managed unit, and a packaged unit file
+	// stays on disk after a rollback, so a unit left enabled would start at
+	// the next boot as an uncommitted deployment.
+	_, enabledRecorded := env.Services.(enabledReporter)
+	previouslyEnabled := []string{}
+	for _, unit := range units {
+		if unitEnabled(ctx, env.Services, unit) {
+			previouslyEnabled = append(previouslyEnabled, unit.Name)
+		}
+	}
+	if adopting != nil {
+		// What the adopted layout was running and starting at boot is put
+		// back if this install rolls back.
+		for _, name := range adopting.units {
+			if isManagedUnit(units, name) {
+				continue // recorded above
+			}
+			unit := Unit{Name: name}
+			if env.Services.Active(ctx, unit) {
+				previouslyActive = append(previouslyActive, name)
+			}
+			if unitEnabled(ctx, env.Services, unit) {
+				previouslyEnabled = append(previouslyEnabled, name)
+			}
+		}
+		if err := l.archiveAdoption(adopting); err != nil {
+			r.AddError(codeUnmanagedLayout, err.Error())
+			return 0
 		}
 	}
 
@@ -611,6 +723,9 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 		snapPaths = append(snapPaths, file.Path)
 	}
 	snapPaths = append(snapPaths, p.stale...)
+	if adopting != nil {
+		snapPaths = append(snapPaths, adopting.removeFiles...)
+	}
 	snapPaths = append(snapPaths, filepath.Join(env.Layout.LifecycleDir, deploymentFileName))
 	dirPaths := []string{}
 	for _, dir := range p.dirs {
@@ -621,7 +736,10 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 		r.AddError(codeApply, err.Error())
 		return 0
 	}
-	pending := &Pending{Action: l.opts.Action, StartedAt: env.Now().UTC().Format(time.RFC3339), SnapshotDir: snap.Dir, Phase: "quiesce", PreviouslyActive: previouslyActive}
+	pending := &Pending{
+		Action: l.opts.Action, StartedAt: env.Now().UTC().Format(time.RFC3339), SnapshotDir: snap.Dir, Phase: "quiesce",
+		PreviouslyActive: previouslyActive, PreviouslyEnabled: previouslyEnabled, EnabledRecorded: enabledRecorded,
+	}
 	if err := env.savePending(pending); err != nil {
 		env.discardSnapshot(snap)
 		r.AddError(codeApply, err.Error())
@@ -638,16 +756,36 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 				r.AddWarning(codeMachinePolicy, "remove machine policy after the failed install: "+err.Error())
 			}
 		}
-		if err := l.rollback(ctx, snap, previouslyActive); err != nil {
+		var revertConfig func()
+		if committedConfig != nil {
+			// The snapshot of an in-place edit holds the edited bytes; the
+			// previous deployment's config is the last applied copy. It goes
+			// back before the services restart.
+			revertConfig = func() { l.revertRejectedConfig(record, committedConfig) }
+		}
+		restored, err := l.rollback(ctx, snap, pending, false, revertConfig)
+		if err != nil {
 			r.AddError(codeRollbackFailed, err.Error())
 		} else {
 			r.AddWarning(codeRolledBack, "restored the previous deployment")
+		}
+		if !restored {
+			// The snapshot holds the only copy of the previous files (a full
+			// disk is the usual cause). Keep it and the pending intent so the
+			// next lifecycle run retries the restore.
+			r.AddWarning(codeRollbackFailed, keptSnapshotAdvice)
+			return 0
 		}
 		_ = env.clearPending()
 		env.discardSnapshot(snap)
 		return 0
 	}
 
+	if adopting != nil {
+		if err := l.takeOver(ctx, adopting); err != nil {
+			return failAndRollback(codeUnmanagedLayout, err)
+		}
+	}
 	l.quiesce(ctx, units)
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
@@ -666,12 +804,7 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 	if err := l.publishMachinePolicy(p, changed); err != nil {
 		return failAndRollback(errorCode(err, codeMachinePolicy), err)
 	}
-	restartSockets := record != nil && record.ProductVersion != p.version && p.channel == ChannelPackage
-	for _, unit := range units {
-		if unit.Kind == "socket" && changed[env.Services.DefinitionPath(unit, p.channel)] {
-			restartSockets = true
-		}
-	}
+	restartSockets := socketsToRestart(env, units, record, p, changed)
 	if err := env.initialManifest(account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
@@ -726,6 +859,11 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 		for name, digest := range p.payload.Digests {
 			newRecord.Files[filepath.Join(env.Layout.BinDir, name)] = digest
 		}
+		// The applied package units, so the next upgrade restarts a socket
+		// only when its definition actually changed.
+		for path, digest := range p.packageUnits {
+			newRecord.Files[path] = digest
+		}
 	}
 
 	if !l.opts.NoStart {
@@ -739,7 +877,11 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 	_ = env.clearPending()
 	// The deployment owns its state again; a kept-state record from an
 	// earlier non-purge uninstall no longer applies.
-	_ = removeFile(env.retainedStatePath())
+	env.clearRetainedState()
+	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
+		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
+	}
+	l.settleRejectedConfig()
 	env.discardSnapshot(snap)
 	r.Installed = true
 	r.InstalledVersion = newRecord.ProductVersion
@@ -844,10 +986,44 @@ func (e *Env) initialManifest(account Account) error {
 	return e.writeFileAtomic(path, []byte("version: 1\ntargets: []\n"), 0o640, fileOwner{UID: 0, GID: account.GID})
 }
 
+// packageUnitDir is where the Linux package installs its units.
+const packageUnitDir = "/usr/lib/systemd/system"
+
+// socketsToRestart lists the listening sockets whose definition changed in
+// this transaction. Every other socket keeps its listener: PID 1 holds it
+// across the gateway restart, so queued hooks survive and no other local
+// process can bind the port while the definition is replaced. A package
+// upgrade that leaves a socket unit byte-identical does not restart it; a
+// record written before the lifecycle tracked package units falls back to
+// restarting on a version change.
+func socketsToRestart(env *Env, units []Unit, record *Deployment, p *plan, changed map[string]bool) map[string]bool {
+	restart := map[string]bool{}
+	for _, unit := range units {
+		if unit.Kind != "socket" {
+			continue
+		}
+		path := env.Services.DefinitionPath(unit, p.channel)
+		switch {
+		case changed[path]:
+			restart[unit.Name] = true
+		case p.channel == ChannelPackage && record != nil:
+			previous, tracked := record.Files[path]
+			if tracked {
+				restart[unit.Name] = previous != p.packageUnits[path]
+			} else {
+				restart[unit.Name] = record.ProductVersion != p.version
+			}
+		}
+	}
+	return restart
+}
+
 // activate enables and starts the units in stage order and waits for the
 // gateway to report healthy. A running socket keeps its listener (queued
-// hooks survive the change) unless its definition changed.
-func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets bool) error {
+// hooks survive the change) unless its definition changed; a changed one is
+// restarted in one service-manager job, so the port is unbound only for
+// the moment the listener is replaced.
+func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool) error {
 	env := l.env
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
@@ -863,12 +1039,13 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets b
 			continue
 		}
 		if unit.Kind == "socket" && env.Services.Active(ctx, unit) {
-			if !restartSockets {
+			if !restartSockets[unit.Name] {
 				continue
 			}
-			if err := env.Services.Stop(ctx, unit); err != nil {
+			if err := restartUnit(ctx, env.Services, unit); err != nil {
 				return fmt.Errorf("restart %s: %w", unit.Name, err)
 			}
+			continue
 		}
 		if err := env.Services.Start(ctx, unit); err != nil {
 			return fmt.Errorf("start %s: %w", unit.Name, err)
@@ -890,7 +1067,10 @@ func (l *lifecycle) waitGatewayReady(ctx context.Context, unit Unit) error {
 		if env.Services.Active(ctx, unit) {
 			status, _, err := env.HealthGet(ctx)
 			if err == nil && status == 200 {
-				return nil
+				err = env.gatewayServing(ctx, unit, l.serviceUID)
+				if err == nil {
+					return nil
+				}
 			}
 			if err != nil {
 				lastErr = err
@@ -911,11 +1091,41 @@ func (l *lifecycle) waitGatewayReady(ctx context.Context, unit Unit) error {
 	}
 }
 
-// rollback stops everything, restores the snapshot and restarts what was
-// running before the transaction.
-func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, previouslyActive []string) error {
+// keptSnapshotAdvice tells the administrator what a kept snapshot means.
+const keptSnapshotAdvice = "the previous deployment could not be fully restored; its snapshot and the pending transaction are kept and the next lifecycle run retries the restore (free disk space first if the disk is full)"
+
+// rollback puts the host back as the pending intent recorded it: the units
+// the transaction enabled are disabled again, everything is stopped, the
+// snapshot is restored and what was running and enabled before is started
+// and enabled again. With restoreFirst the files are put back before any
+// service is touched (linking and renaming are safe while the services
+// run), and a restore that fails returns without stopping or starting
+// anything. restored is false when any file could not be put back; the
+// snapshot must then be kept for a retry.
+func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeStart func()) (restored bool, err error) {
 	env := l.env
 	units := env.Services.Units()
+	previouslyActive, previouslyEnabled := intent.PreviouslyActive, intent.PreviouslyEnabled
+	var disableErrs []error
+	if intent.EnabledRecorded {
+		// Disabled while the unit files still exist (a failed payload install
+		// removes its own). A packaged unit file stays in /usr/lib after the
+		// rollback, so an enabled one would start an uncommitted gateway, or
+		// sockets next to a restored legacy layout, at the next boot.
+		for _, unit := range units {
+			if !unit.Activate || unit.Name == env.SelfUnit || contains(previouslyEnabled, unit.Name) || !unitEnabled(ctx, env.Services, unit) {
+				continue
+			}
+			if err := env.Services.Disable(ctx, unit); err != nil {
+				disableErrs = append(disableErrs, fmt.Errorf("disable %s: %w", unit.Name, err))
+			}
+		}
+	}
+	if restoreFirst {
+		if err := env.restoreFiles(snap); err != nil {
+			return false, errors.Join(append(disableErrs, err)...)
+		}
+	}
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	for _, unit := range ordered {
@@ -927,9 +1137,17 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, previouslyActi
 		_ = env.Services.Stop(ctx, unit)
 	}
 	restoreErr := env.restore(snap)
+	if beforeStart != nil {
+		beforeStart()
+	}
 	reloadErr := env.Services.Reload(ctx)
-	sort.SliceStable(units, func(i, j int) bool { return units[i].Stage < units[j].Stage })
 	var startErrs []error
+	for _, name := range previouslyEnabled {
+		if err := env.Services.Enable(ctx, Unit{Name: name}); err != nil {
+			startErrs = append(startErrs, err)
+		}
+	}
+	sort.SliceStable(units, func(i, j int) bool { return units[i].Stage < units[j].Stage })
 	for _, unit := range units {
 		if contains(previouslyActive, unit.Name) && unit.Name != env.SelfUnit {
 			if err := env.Services.Start(ctx, unit); err != nil {
@@ -937,34 +1155,62 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, previouslyActi
 			}
 		}
 	}
-	return errors.Join(restoreErr, reloadErr, errors.Join(startErrs...))
+	// Units of an adopted layout that this deployment does not manage.
+	for _, name := range previouslyActive {
+		if !isManagedUnit(units, name) {
+			if err := env.Services.Start(ctx, Unit{Name: name}); err != nil {
+				startErrs = append(startErrs, err)
+			}
+		}
+	}
+	return restoreErr == nil, errors.Join(restoreErr, reloadErr, errors.Join(disableErrs...), errors.Join(startErrs...))
 }
 
-// recoverInterrupted rolls back a transaction a previous run left pending.
-func (l *lifecycle) recoverInterrupted(ctx context.Context) {
+// recoverInterrupted rolls back a transaction a previous run left pending,
+// or whose rollback could not restore every file. It returns false when
+// the snapshot still could not be restored: the snapshot and the intent are
+// kept, and the run must not change the host.
+func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	env, r := l.env, l.result
 	pending, err := env.loadPending()
 	if err != nil {
 		r.AddWarning(codeRecovered, "discarded an unreadable pending transaction: "+err.Error())
 		_ = env.clearPending()
-		return
+		return true
 	}
 	if pending == nil {
-		return
+		return true
 	}
 	snap, err := env.loadSnapshot(pending.SnapshotDir)
+	if err == nil {
+		err = env.checkBlobs(snap)
+	}
 	if err != nil {
 		r.AddWarning(codeRecovered, fmt.Sprintf("an interrupted %s left no usable snapshot (%v); this run re-applies the desired state", pending.Action, err))
 		_ = env.clearPending()
-		return
+		if snap != nil {
+			env.discardSnapshot(snap)
+		}
+		return true
 	}
-	if err := l.rollback(ctx, snap, pending.PreviouslyActive); err != nil {
+	// The files go back before any service is touched: a restore that
+	// still fails (the disk is still full) then leaves the running services
+	// alone instead of stopping and restarting the gateway on every apply
+	// trigger, MDM ensure or package postinstall until it succeeds.
+	restored, err := l.rollback(ctx, snap, pending, true, nil)
+	switch {
+	case !restored:
+		r.AddError(codeRollbackFailed, fmt.Sprintf("could not roll back the interrupted %s started at %s: %v", pending.Action, pending.StartedAt, err))
+		r.AddWarning(codeRollbackFailed, keptSnapshotAdvice)
+		return false
+	case err != nil:
 		r.AddWarning(codeRecovered, fmt.Sprintf("rolled back an interrupted %s with errors: %v", pending.Action, err))
-	} else {
+	default:
 		r.AddWarning(codeRecovered, fmt.Sprintf("rolled back an interrupted %s started at %s", pending.Action, pending.StartedAt))
 	}
 	_ = env.clearPending()
 	env.discardSnapshot(snap)
+	return true
 }
 
 // ensureNoop reports whether the installed deployment already matches the
@@ -1031,6 +1277,24 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
+	stopUnit := func(unit Unit) {
+		_ = env.Services.Stop(ctx, unit)
+		if unit.Activate {
+			_ = env.Services.Disable(ctx, unit)
+		}
+	}
+	// The guardian repairs any DefenseClaw registration that goes missing
+	// from a manifest target, the enumerator republishes the manifest, and
+	// the apply and verify triggers start lifecycle runs. All of them stop
+	// before any registration is removed; otherwise the guardian puts each
+	// removed hook back within its debounce and the users are left with
+	// registrations naming a binary this uninstall deletes. The gateway and
+	// its sockets keep answering hooks until the registrations are gone.
+	for _, unit := range ordered {
+		if repairsRegistrations(unit) {
+			stopUnit(unit)
+		}
+	}
 	var errs []error
 	// Per-user registrations go first, while the binaries they name still
 	// exist: each user's worker removes only DefenseClaw's own entries.
@@ -1053,9 +1317,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	for _, unit := range ordered {
-		_ = env.Services.Stop(ctx, unit)
-		if unit.Activate {
-			_ = env.Services.Disable(ctx, unit)
+		if !repairsRegistrations(unit) {
+			stopUnit(unit)
 		}
 	}
 	// On Linux the deb/rpm removes its own files. A macOS pkg has no
@@ -1116,7 +1379,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	_ = removeFile(env.deploymentPath())
 	_ = env.clearPending()
+	// No config is running once the deployment is gone; a reinstall that
+	// keeps the retained config.yaml starts without an old rejection.
+	_ = removeFile(env.rejectedConfigPath())
 	_ = os.RemoveAll(filepath.Join(env.P(env.Layout.LifecycleDir), snapshotsDirName))
+	env.removeSideStores("")
 
 	if l.opts.Purge {
 		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir, env.Layout.LifecycleDir} {

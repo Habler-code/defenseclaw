@@ -678,6 +678,36 @@ jobs:
             "$RUNNER_TEMP/defenseclaw-gateway" \
             "$RUNNER_TEMP/defenseclaw-acp"
 
+  unix-standalone-lifecycle:
+    # The standalone Linux and macOS lifecycle engine, its units and the
+    # Unix peer-identity code. Linux-only and darwin-only tests run on their
+    # own OS, and the systemd units get a static systemd-analyze check.
+    name: Unix Standalone Lifecycle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Lifecycle, unit and identity tests
+        shell: bash
+        run: >-
+          go test -count=1
+          ./internal/enterpriseunix/...
+          ./internal/unixidentity/...
+          ./internal/peercred/...
+      - name: systemd-analyze verify
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/verify-systemd-units.sh
+
   secure-client-golden:
     # Production Secure Client (release-defenseclaw-enterprise-26.8.4) ships
     # the macOS and Windows managed_enterprise lifecycle. Linux CI already

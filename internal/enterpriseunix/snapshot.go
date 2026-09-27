@@ -13,6 +13,8 @@
 package enterpriseunix
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"syscall"
 )
 
 const snapshotIndexName = "index.json"
@@ -33,6 +36,9 @@ type snapshotEntry struct {
 	UID     int         `json:"uid,omitempty"`
 	GID     int         `json:"gid,omitempty"`
 	Blob    string      `json:"blob,omitempty"`
+	// Store is the managed root whose per-filesystem store holds Blob, when
+	// the file could not be linked into the snapshot directory itself.
+	Store string `json:"store,omitempty"`
 }
 
 type snapshot struct {
@@ -42,13 +48,19 @@ type snapshot struct {
 
 // takeSnapshot preserves every canonical path in files (regular files) and
 // dirs (mode and owner only) under a fresh directory in the lifecycle
-// state. The returned directory is recorded in the pending intent before
-// the first mutation.
-func (e *Env) takeSnapshot(id string, files, dirs []string) (*snapshot, error) {
+// state; preserve places a file from another filesystem in a store on its
+// own. The returned directory is recorded in the pending intent before the
+// first mutation.
+func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err error) {
 	dir := filepath.Join(e.P(e.Layout.LifecycleDir), snapshotsDirName, id)
 	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o700); err != nil {
 		return nil, fmt.Errorf("create snapshot: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			e.discardSnapshot(&snapshot{Dir: dir})
+		}
+	}()
 	snap := &snapshot{Dir: dir}
 	seen := map[string]bool{}
 	for index, canonical := range files {
@@ -69,10 +81,11 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (*snapshot, error) {
 			return nil, fmt.Errorf("snapshot %s: not a regular file", canonical)
 		default:
 			blob := strconv.Itoa(index)
-			if err := linkOrCopy(path, filepath.Join(dir, "files", blob)); err != nil {
+			store, err := e.preserve(dir, path, blob)
+			if err != nil {
 				return nil, fmt.Errorf("snapshot %s: %w", canonical, err)
 			}
-			entry.Present, entry.Mode, entry.UID, entry.GID, entry.Blob = true, mode.Perm(), uid, gid, blob
+			entry.Present, entry.Mode, entry.UID, entry.GID, entry.Blob, entry.Store = true, mode.Perm(), uid, gid, blob, store
 		}
 		snap.Entries = append(snap.Entries, entry)
 	}
@@ -112,11 +125,124 @@ func (e *Env) loadSnapshot(dir string) (*snapshot, error) {
 	return snap, nil
 }
 
-// restore puts every file back exactly as snapshotted and removes files
-// that did not exist before. Directories only get their mode and owner
-// back; directories the transaction created stay (they are harmless and
-// uninstall owns their removal).
+// sideStoreName is the per-filesystem snapshot store below a managed root.
+const sideStoreName = ".lifecycle-snapshots"
+
+// sideStoreRoots are the managed directories that can hold a snapshot's
+// preserved links for files on another filesystem than the lifecycle
+// state: with /var on its own partition (CIS layouts) the binaries under
+// /opt and the config and units under /etc are elsewhere.
+func (e *Env) sideStoreRoots() []string {
+	return []string{e.Layout.InstallRoot, e.Layout.ConfigDir}
+}
+
+func (e *Env) sideStoreDir(root, id string) string {
+	return filepath.Join(e.P(root), sideStoreName, id)
+}
+
+// preserve keeps the current inode of path as blob for a rollback and
+// returns the store root it used ("" for the snapshot directory). A hard
+// link is the rule: replacements are renamed in, so the preserved link
+// keeps the previous inode and the rollback relinks it without needing
+// free space, and a full disk is the usual reason a transaction fails. A
+// file on another filesystem than the lifecycle state is linked into a
+// store below a managed root on its own filesystem; a byte copy into the
+// snapshot directory is the last resort.
+func (e *Env) preserve(snapDir, path, blob string) (string, error) {
+	err := os.Link(path, filepath.Join(snapDir, "files", blob))
+	if err == nil {
+		return "", nil
+	}
+	if errors.Is(err, syscall.EXDEV) {
+		id := filepath.Base(snapDir)
+		if root := e.sideStoreFor(path, id); root != "" {
+			if err := os.Link(path, filepath.Join(e.sideStoreDir(root, id), blob)); err == nil {
+				return root, nil
+			}
+		}
+	}
+	return "", copyPreserved(path, filepath.Join(snapDir, "files", blob))
+}
+
+// sideStoreFor returns the managed root on the filesystem of path, with
+// the store of snapshot id created below it, or "" when there is none.
+func (e *Env) sideStoreFor(path, id string) string {
+	file, err := os.Lstat(path)
+	if err != nil {
+		return ""
+	}
+	for _, root := range e.sideStoreRoots() {
+		info, err := os.Lstat(e.P(root))
+		if err != nil || !info.IsDir() || !sameDevice(info, file) {
+			continue
+		}
+		parent := filepath.Join(e.P(root), sideStoreName)
+		if err := os.Mkdir(parent, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if info, err := os.Lstat(parent); err != nil || !info.IsDir() {
+			continue
+		}
+		if err := os.Mkdir(e.sideStoreDir(root, id), 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return root
+	}
+	return ""
+}
+
+func sameDevice(a, b os.FileInfo) bool {
+	sa, okA := a.Sys().(*syscall.Stat_t)
+	sb, okB := b.Sys().(*syscall.Stat_t)
+	return okA && okB && sa.Dev == sb.Dev
+}
+
+// blobPath is where the preserved copy of entry is, or "" when the index
+// names a store this lifecycle does not use.
+func (e *Env) blobPath(snap *snapshot, entry snapshotEntry) string {
+	if entry.Store == "" {
+		return filepath.Join(snap.Dir, "files", entry.Blob)
+	}
+	if !contains(e.sideStoreRoots(), entry.Store) {
+		return ""
+	}
+	return filepath.Join(e.sideStoreDir(entry.Store, filepath.Base(snap.Dir)), entry.Blob)
+}
+
+// checkBlobs reports a snapshot whose preserved files are missing, which no
+// retry can restore.
+func (e *Env) checkBlobs(snap *snapshot) error {
+	for _, entry := range snap.Entries {
+		if entry.Dir || !entry.Present {
+			continue
+		}
+		blob := e.blobPath(snap, entry)
+		if blob == "" {
+			return fmt.Errorf("preserved copy of %s is in an unknown store %s", entry.Path, entry.Store)
+		}
+		info, err := os.Lstat(blob)
+		if err != nil {
+			return fmt.Errorf("preserved copy of %s: %w", entry.Path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("preserved copy of %s is not a regular file", entry.Path)
+		}
+	}
+	return nil
+}
+
+// restore puts every file back exactly as snapshotted, removes files that
+// did not exist before and then the directories the transaction created.
 func (e *Env) restore(snap *snapshot) error {
+	return errors.Join(e.restoreFiles(snap), e.removeCreatedDirs(snap))
+}
+
+// restoreFiles puts every file back exactly as snapshotted and removes
+// files that did not exist before. Directories only get their mode and
+// owner back. Every step replaces or removes a name atomically, so it is
+// safe while the services run, and repeating it is cheap: a file already
+// restored is the preserved inode and only gets its metadata checked.
+func (e *Env) restoreFiles(snap *snapshot) error {
 	var errs []error
 	for _, entry := range snap.Entries {
 		path := e.P(entry.Path)
@@ -131,12 +257,16 @@ func (e *Env) restore(snap *snapshot) error {
 				}
 			}
 		case entry.Present:
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			if err := mkdirParents(filepath.Dir(path)); err != nil {
 				errs = append(errs, err)
 				continue
 			}
-			blob := filepath.Join(snap.Dir, "files", entry.Blob)
-			if err := e.copyFileAtomic(blob, path, entry.Mode, fileOwner{UID: entry.UID, GID: entry.GID}); err != nil {
+			blob := e.blobPath(snap, entry)
+			if blob == "" {
+				errs = append(errs, fmt.Errorf("restore %s: the preserved copy is in an unknown store %s", entry.Path, entry.Store))
+				continue
+			}
+			if err := e.restoreFile(blob, path, entry.Mode, fileOwner{UID: entry.UID, GID: entry.GID}); err != nil {
 				errs = append(errs, fmt.Errorf("restore %s: %w", entry.Path, err))
 			}
 		default:
@@ -145,8 +275,69 @@ func (e *Env) restore(snap *snapshot) error {
 			}
 		}
 	}
-	errs = append(errs, e.removeCreatedDirs(snap))
 	return errors.Join(errs...)
+}
+
+// restoreFile puts a preserved blob back at path without copying its bytes
+// whenever it can. The snapshot hard-links the previous file, so a file the
+// transaction never replaced is still that inode and only needs its mode and
+// owner back, and a replaced one is restored by linking the blob to a
+// same-directory temporary name and renaming it over the target: neither
+// needs free data blocks, which matters because a full disk is a common
+// reason the transaction failed. A byte copy is the fallback when no store
+// on the file's filesystem could hold the preserved link.
+func (e *Env) restoreFile(blob, path string, mode os.FileMode, owner fileOwner) error {
+	blobInfo, err := os.Lstat(blob)
+	if err != nil {
+		return err
+	}
+	if current, err := os.Lstat(path); err == nil && current.Mode().IsRegular() && os.SameFile(blobInfo, current) {
+		return e.fixMetadata(path, mode, owner)
+	}
+	if err := e.linkAtomic(blob, path, mode, owner); err == nil {
+		return nil
+	} else if !errors.Is(err, errLinkUnavailable) {
+		return err
+	}
+	return e.copyFileAtomic(blob, path, mode, owner)
+}
+
+// errLinkUnavailable marks a hard link the filesystem refused, so the
+// caller falls back to copying.
+var errLinkUnavailable = errors.New("hard link unavailable")
+
+// linkAtomic makes path a new name of src, atomically replacing path.
+func (e *Env) linkAtomic(src, path string, mode os.FileMode, owner fileOwner) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to replace it", path)
+	}
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	tmp := filepath.Join(dir, "."+filepath.Base(path)+".dc-"+hex.EncodeToString(suffix))
+	if err := os.Link(src, tmp); err != nil {
+		return fmt.Errorf("%w: %v", errLinkUnavailable, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := os.Chmod(tmp, mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", path, err)
+	}
+	if err := e.Lchown(tmp, owner.UID, owner.GID); err != nil {
+		return fmt.Errorf("chown %s: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	committed = true
+	syncDir(dir)
+	return nil
 }
 
 // removeCreatedDirs removes the directories the rolled-back transaction
@@ -183,5 +374,26 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 func (e *Env) discardSnapshot(snap *snapshot) {
 	if snap != nil && snap.Dir != "" {
 		_ = os.RemoveAll(snap.Dir)
+		e.removeSideStores(filepath.Base(snap.Dir))
+	}
+}
+
+// removeSideStores removes the per-filesystem stores of snapshot id, or
+// every store when id is "".
+func (e *Env) removeSideStores(id string) {
+	if id == "." || id == ".." || id == string(filepath.Separator) {
+		return
+	}
+	for _, root := range e.sideStoreRoots() {
+		parent := filepath.Join(e.P(root), sideStoreName)
+		if info, err := os.Lstat(parent); err != nil || !info.IsDir() {
+			continue
+		}
+		if id == "" {
+			_ = os.RemoveAll(parent)
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(parent, id))
+		_ = removeDirIfEmpty(parent)
 	}
 }

@@ -22,6 +22,14 @@ macOS the `com.cisco.defenseclaw.apply` daemon, run `ensure` when the file
 changes. On Windows, run `ensure` again from the MDM. `ensure` is a no-op
 when nothing changed.
 
+On Linux and macOS, when `ensure` rejects an edited config (it fails
+validation, or the services do not come up healthy with it), the lifecycle
+puts the last applied config back and keeps the rejected file as
+`rejected-config.yaml` in the lifecycle directory. Until the config file is
+written again, `status` warns and `verify` fails with `config_rejected`, so
+compliance checks see it. Push a corrected config to clear it; pushing the
+previous config again clears it too.
+
 The apply trigger watches the config file and the top level of the
 secrets and policies directories. After editing a rule pack in a
 subdirectory, run `ensure` (or restart the gateway) so the gateway loads it.

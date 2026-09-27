@@ -282,13 +282,9 @@ func statOwnerMode(path string) (int, int, os.FileMode, error) {
 	return int(st.Uid), int(st.Gid), info.Mode(), nil
 }
 
-// linkOrCopy preserves src at dst for a snapshot: a hard link when src and
-// dst share a filesystem (replacements are renamed in, so the snapshot
-// keeps the old inode), otherwise a byte copy.
-func linkOrCopy(src, dst string) error {
-	if err := os.Link(src, dst); err == nil {
-		return nil
-	}
+// copyPreserved preserves src at dst for a snapshot as a byte copy, when
+// no hard link can keep its inode.
+func copyPreserved(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err

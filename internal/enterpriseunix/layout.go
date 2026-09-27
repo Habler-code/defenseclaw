@@ -227,7 +227,9 @@ func (e *Env) secureClientPresent() (bool, string) {
 // unmanagedLeftovers lists pre-existing DefenseClaw machine state that no
 // committed deployment record accounts for. Inputs an MDM may stage before
 // installing (config, policies, secrets, manifest) are not leftovers, and
-// neither are binaries a package placed for the package channel.
+// neither are binaries a package placed for the package channel. Drop-ins
+// in a unit's .d directory are an administrator extension point and are
+// not leftovers either.
 func (e *Env) unmanagedLeftovers(services ServiceManager, channel string) []string {
 	l := e.Layout
 	candidates := []string{l.DescriptorPath}
@@ -245,9 +247,10 @@ func (e *Env) unmanagedLeftovers(services ServiceManager, channel string) []stri
 		}
 	}
 	for _, unit := range services.Units() {
-		if channel != ChannelPackage || e.GOOS == "darwin" {
-			candidates = append(candidates, services.DefinitionPath(unit, ChannelPayload))
-		}
+		// On the package channel a Linux unit file in /etc/systemd/system
+		// is not the package's: systemd prefers it over the packaged
+		// /usr/lib definition, so it is a leftover on every channel.
+		candidates = append(candidates, services.DefinitionPath(unit, ChannelPayload))
 	}
 	if e.GOOS == "linux" {
 		for _, name := range legacyLinuxUnits {

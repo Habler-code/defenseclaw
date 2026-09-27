@@ -28,6 +28,7 @@ no user process can take them over.
 | `/var/lib/defenseclaw` | `defenseclaw` | Gateway state |
 | `/var/lib/defenseclaw-hook-guardian` | root, group `defenseclaw` | Authorization ledger |
 | `/var/lib/defenseclaw-enterprise` | root, `0700` | Lifecycle lock, snapshots, deployment record |
+| `/opt/defenseclaw/.lifecycle-snapshots`, `/etc/defenseclaw/.lifecycle-snapshots` | root, `0700` | Only during a lifecycle transaction (or while a rollback waits for a retry) when `/var` is on its own filesystem: the snapshot's hard links to the files there |
 | `/var/log/defenseclaw` | `defenseclaw` | Logs |
 | `/run/defenseclaw-hook/hook.sock` | created by PID 1 | Hook socket |
 

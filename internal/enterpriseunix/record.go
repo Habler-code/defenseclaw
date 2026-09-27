@@ -82,6 +82,17 @@ type Pending struct {
 	SnapshotDir      string   `json:"snapshot_dir"`
 	Phase            string   `json:"phase"`
 	PreviouslyActive []string `json:"previously_active"`
+	// PreviouslyEnabled lists the units that started at boot before the
+	// transaction (the managed units and, for an adoption, the adopted
+	// ones); rollback enables them again.
+	PreviouslyEnabled []string `json:"previously_enabled,omitempty"`
+	// EnabledRecorded is set when PreviouslyEnabled covers every managed
+	// unit, so rollback also disables the managed units the transaction
+	// enabled. An intent from a service manager that cannot report whether
+	// a unit is enabled (launchd, whose failed first install removes its
+	// plists instead) leaves it unset, and so does an intent written
+	// before the field existed.
+	EnabledRecorded bool `json:"enabled_recorded,omitempty"`
 }
 
 func (e *Env) deploymentPath() string {

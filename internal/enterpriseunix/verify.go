@@ -63,7 +63,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	if strict {
 		for _, warning := range r.Warnings {
-			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeHookContractUnverified || warning.Code == codeGuardianTargetFailed {
+			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeHookContractUnverified || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected {
 				problems = append(problems, warning.Message)
 			}
 		}
@@ -154,6 +154,17 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 	} else if secretsSHA != record.SecretsSHA256 {
 		add("protected credentials changed since they were applied; run ensure")
 	}
+	if fragments, ok := env.Services.(fragmentReporter); ok {
+		// An override elsewhere on the unit path (a unit an earlier manual
+		// deployment left in /etc/systemd/system over a packaged unit, say)
+		// replaces the definition this deployment installed.
+		for _, unit := range env.Services.Units() {
+			want := env.Services.DefinitionPath(unit, record.Channel)
+			if got := fragments.FragmentPath(ctx, unit); got != "" && !sameUnitFile(env, got, want) {
+				add("%s is loaded from %s instead of %s; remove the other unit file and run ensure", unit.Name, got, want)
+			}
+		}
+	}
 	if record.Channel == ChannelPackage && env.GOOS == "linux" {
 		for _, unit := range env.Services.Units() {
 			embedded, _ := systemdunits.ReadFile(unit.Name)
@@ -173,6 +184,13 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 			add("gateway health: %v", err)
 		} else if status != 200 {
 			add("gateway health returned HTTP %d", status)
+		}
+		for _, unit := range env.Services.Units() {
+			if unit.Kind == "gateway" {
+				if err := env.gatewayServing(ctx, unit, record.ServiceUID); err != nil {
+					add("%v", err)
+				}
+			}
 		}
 	}
 
@@ -194,6 +212,22 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 		}
 	}
 	return problems
+}
+
+// sameUnitFile reports whether systemd's fragment path names the expected
+// unit file. Split-/usr builds search /lib/systemd/system before
+// /usr/lib/systemd/system, and on a merged-/usr host both are one
+// directory, so the same file can be reported under either name.
+func sameUnitFile(env *Env, got, want string) bool {
+	if got == want {
+		return true
+	}
+	gotInfo, err := os.Stat(env.P(got))
+	if err != nil {
+		return false
+	}
+	wantInfo, err := os.Stat(env.P(want))
+	return err == nil && os.SameFile(gotInfo, wantInfo)
 }
 
 // ledgerProblem checks the guardian authorization ledger freshness.
@@ -231,7 +265,11 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		case "gateway":
 			if active {
 				if code, body, err := env.HealthGet(ctx); err == nil && code == 200 {
-					r.Readiness.Gateway = true
+					serviceUID := 0
+					if record != nil {
+						serviceUID = record.ServiceUID
+					}
+					r.Readiness.Gateway = env.gatewayServing(ctx, unit, serviceUID) == nil
 					l.readInspection(body)
 				}
 			}
@@ -248,6 +286,11 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.InstalledVersion = record.ProductVersion
 	}
 	r.Enrollment = l.enrollmentCounts()
+	if problem := env.rejectedConfigProblem(); problem != "" {
+		// Not a verifyInstalled problem: the installed files match the
+		// record, and ensure must stay a no-op until config.yaml changes.
+		r.AddWarning(codeConfigRejected, problem)
+	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0
 	l.describeHookContracts()

@@ -56,6 +56,61 @@ type ServiceManager interface {
 	Active(ctx context.Context, unit Unit) bool
 }
 
+// repairsRegistrations reports whether a unit writes or re-triggers
+// DefenseClaw's per-user and machine-policy registrations: the guardian and
+// its reconcile oneshot, the enumerator that feeds them, and the apply and
+// verify triggers that start lifecycle runs.
+func repairsRegistrations(unit Unit) bool {
+	switch unit.Kind {
+	case "guardian", "enumerator", "path", "timer", "oneshot":
+		return true
+	}
+	return false
+}
+
+// isManagedUnit reports whether name is one of units.
+func isManagedUnit(units []Unit, name string) bool {
+	for _, unit := range units {
+		if unit.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// enabledReporter is implemented by service managers that can tell whether
+// a unit starts at boot.
+type enabledReporter interface {
+	Enabled(ctx context.Context, unit Unit) bool
+}
+
+func unitEnabled(ctx context.Context, services ServiceManager, unit Unit) bool {
+	reporter, ok := services.(enabledReporter)
+	return ok && reporter.Enabled(ctx, unit)
+}
+
+// restarter is implemented by service managers that restart a unit in one
+// job.
+type restarter interface {
+	Restart(ctx context.Context, unit Unit) error
+}
+
+func restartUnit(ctx context.Context, services ServiceManager, unit Unit) error {
+	if r, ok := services.(restarter); ok {
+		return r.Restart(ctx, unit)
+	}
+	if err := services.Stop(ctx, unit); err != nil {
+		return err
+	}
+	return services.Start(ctx, unit)
+}
+
+// fragmentReporter is implemented by service managers that report the file
+// a unit's definition was loaded from.
+type fragmentReporter interface {
+	FragmentPath(ctx context.Context, unit Unit) string
+}
+
 func newServiceManager(env *Env) ServiceManager {
 	if env.GOOS == "darwin" {
 		return &launchdManager{env: env}
@@ -152,6 +207,12 @@ func (m *systemdManager) Start(ctx context.Context, unit Unit) error {
 	return m.run(ctx, "start", unit.Name)
 }
 
+// Restart replaces a unit in one systemd job; for a socket unit the
+// listener is closed and reopened within that job.
+func (m *systemdManager) Restart(ctx context.Context, unit Unit) error {
+	return m.run(ctx, "restart", unit.Name)
+}
+
 func (m *systemdManager) Stop(ctx context.Context, unit Unit) error {
 	return m.run(ctx, "stop", unit.Name)
 }
@@ -201,6 +262,16 @@ func (m *systemdManager) Status(ctx context.Context, unit Unit) (enterprisestatu
 
 func (m *systemdManager) Active(ctx context.Context, unit Unit) bool {
 	return m.properties(ctx, unit.Name, "ActiveState")["ActiveState"] == "active"
+}
+
+// Enabled reports whether the unit is enabled to start at boot.
+func (m *systemdManager) Enabled(ctx context.Context, unit Unit) bool {
+	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "enabled"
+}
+
+// FragmentPath is the unit file systemd loaded the unit from.
+func (m *systemdManager) FragmentPath(ctx context.Context, unit Unit) string {
+	return m.properties(ctx, unit.Name, "FragmentPath")["FragmentPath"]
 }
 
 // Sandbox returns the systemd properties verify asserts for a unit.
