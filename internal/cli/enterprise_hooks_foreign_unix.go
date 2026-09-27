@@ -156,6 +156,13 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	return removed
 }
 
+// enterpriseForeignHookUserEnvRedirects adds nothing on Unix: the per-user
+// worker cleans with its own environment and the redirects the user's hooks
+// recorded.
+func enterpriseForeignHookUserEnvRedirects(enterprisehooks.TargetCredentials, enterprisepolicy.GuardRequest) ([]enterprisepolicy.EnvRedirect, error) {
+	return nil, nil
+}
+
 // runEnterpriseHookWorkerForeignCleanup runs inside the worker as the user.
 func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, now time.Time) map[string]enterpriseHookWorkerCleanupReport {
 	out := map[string]enterpriseHookWorkerCleanupReport{}

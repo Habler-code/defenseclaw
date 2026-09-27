@@ -39,7 +39,13 @@ foreign-hook guard closes that gap for agents without a vendor lock.
    `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`, or a `HOME` that is not
    the account's) is covered too: the hook records the locations it sees in
    `~/.defenseclaw/foreign-hook-env.json`, and the guardian cleans them on its
-   next pass.
+   next pass. On Windows the guardian also reads each user's persistent
+   environment variables (`HKEY_USERS\<SID>\Environment`, with the machine
+   variables and the sign-in profile variables, expanded as Windows expands
+   them) from the user's loaded registry hive, and cleans the folders they
+   name, whether or not a hook has run yet. The guardian never loads a hive
+   itself: while a user's hive is not loaded, it skips those folders for that
+   user and logs the skip.
 2. **Blocks while a project hook is present.** Repository files are never
    rewritten. Before each call the hook checks the working directory and its
    parents up to the repository root (on Windows, up to and including the
@@ -172,7 +178,10 @@ approved digests; it contains no secrets.
   process lookup fails, only the session ID carries the block, and the next
   session start (a restart, resume, clear or compact) resets it.
 - The guardian cleans an environment-moved location only after a DefenseClaw
-  hook has run with that environment. A relative `OPENCODE_CONFIG` and
+  hook has run with that environment. On Windows it also cleans the
+  locations the user's persistent environment variables name, while the
+  user's registry hive is loaded; a variable set only for one shell or
+  process still needs a hook run. A relative `OPENCODE_CONFIG` and
   `OPENCODE_CONFIG_CONTENT` are never cleaned; the hook still blocks while
   they name a foreign plugin.
 - Plugins are code. The guard stops them from loading unapproved, but an

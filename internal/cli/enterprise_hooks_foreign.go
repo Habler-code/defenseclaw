@@ -57,14 +57,28 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		Policy:        policy,
 		OwnedCommands: perUserOwnedHookCommands(name, target.UserHome, dataDir),
 	}
+	return cleanEnterpriseForeignHooksAsTarget(target, request, time.Now())
+}
+
+// enterpriseForeignHookRunAsTarget runs fn as the user. Replaceable in tests
+// (a test process cannot take on another profile's token).
+var enterpriseForeignHookRunAsTarget = enterprisehooks.RunAsTarget
+
+// cleanEnterpriseForeignHooksAsTarget cleans request's user config as
+// target: the default locations and every location an environment variable
+// moves it to.
+func cleanEnterpriseForeignHooksAsTarget(target enterprisehooks.TargetCredentials, request enterprisepolicy.GuardRequest, now time.Time) (enterprisepolicy.CleanupResult, error) {
 	var result enterprisepolicy.CleanupResult
-	err = enterprisehooks.RunAsTarget(target, func() error {
+	err := enterpriseForeignHookRunAsTarget(target, func() error {
 		// The guardian has no user environment: the user's hooks recorded
-		// the config locations their agents' environment redirects to.
-		redirects, redirectErr := enterprisepolicy.LoadEnvRedirects(target.UserHome, name)
+		// the config locations their agents' environment redirects to, and
+		// on Windows the user's persistent environment names more.
+		redirects, redirectErr := enterprisepolicy.LoadEnvRedirects(target.UserHome, request.Connector)
+		userEnv, userEnvErr := enterpriseForeignHookUserEnvRedirects(target, request)
+		redirects = append(redirects, userEnv...)
 		var cleanErr error
-		result, cleanErr = enterprisepolicy.CleanUserForeignHooksWithRedirects(request, redirects, time.Now())
-		return errors.Join(cleanErr, redirectErr)
+		result, cleanErr = enterprisepolicy.CleanUserForeignHooksWithRedirects(request, redirects, now)
+		return errors.Join(cleanErr, redirectErr, userEnvErr)
 	})
 	return result, err
 }
@@ -78,7 +92,7 @@ var enterpriseForeignHookCollectBlocks = func(target enterprisehooks.TargetCrede
 	}
 	var blocks []enterprisepolicy.BlockSummary
 	dropped := 0
-	err := enterprisehooks.RunAsTarget(target, func() error {
+	err := enterpriseForeignHookRunAsTarget(target, func() error {
 		var collectErr error
 		blocks, dropped, collectErr = enterprisepolicy.CollectForeignHookBlocks(target.UserHome, time.Now())
 		return collectErr
