@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // windowsFloorOptions roots Program Files and ProgramData in a protected
@@ -95,6 +97,85 @@ func TestWindowsClaudeVersionFloorPublishWithdrawAndRemove(t *testing.T) {
 	before := *locked
 	if _, err := RemoveWindowsClaudeVersionFloor(opts); err != nil || *locked != before {
 		t.Fatalf("a second removal has nothing to lock: %v", err)
+	}
+}
+
+// A floor file DefenseClaw did not write, or that changed since, is the
+// administrator's on Windows too: every mode, verify_only, ownership off and
+// the uninstall leave it byte for byte, and with nothing recorded the
+// uninstall takes no lock.
+func TestWindowsClaudeVersionFloorLeavesAnAdministratorFile(t *testing.T) {
+	opts, locked := windowsFloorOptions(t)
+	path := filepath.Join(opts.WindowsProgramFiles, "ClaudeCode", "managed-settings.d", ClaudeVersionFloorDropInName)
+	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err != nil || readFile(t, path) != wantClaudeFloorBytes {
+		t.Fatalf("publish: %v", err)
+	}
+	edited := "{\n  \"requiredMinimumVersion\": \"2.1.200\"\n}\n"
+	writeFile(t, path, edited)
+	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err != nil || readFile(t, path) != edited {
+		t.Fatalf("a changed floor is the administrator's: %v %q", err, readFile(t, path))
+	}
+	if recorded, err := ClaudeVersionFloorRecorded(opts); err != nil || recorded {
+		t.Fatalf("the record of a changed floor must go: %v %v", recorded, err)
+	}
+
+	// The version-floor export deployed by the administrator: the same bytes
+	// DefenseClaw writes, without DefenseClaw's record.
+	writeFile(t, path, wantClaudeFloorBytes)
+	report, off := opts, opts
+	report.ClaudeVersionFloor = config.ClaudeVersionFloorReport
+	off.ClaudeVersionFloor = config.ClaudeVersionFloorOff
+	for name, pass := range map[string]Options{
+		"enforce":       opts,
+		"report":        report,
+		"off":           off,
+		"verify_only":   withPolicy(opts, "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipVerifyOnly }),
+		"ownership off": withPolicy(opts, "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipOff }),
+	} {
+		if _, err := PublishWindowsClaudeVersionFloor(pass, []string{"claudecode"}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := readFile(t, path); got != wantClaudeFloorBytes {
+			t.Fatalf("%s changed the administrator's floor file: %q", name, got)
+		}
+		if recorded, err := ClaudeVersionFloorRecorded(opts); err != nil || recorded {
+			t.Fatalf("%s recorded the administrator's file: %v %v", name, recorded, err)
+		}
+	}
+	before := *locked
+	if _, err := RemoveWindowsClaudeVersionFloor(opts); err != nil || *locked != before || readFile(t, path) != wantClaudeFloorBytes {
+		t.Fatalf("uninstall must leave the administrator's file without taking the lock: %v locked=%d/%d", err, *locked, before)
+	}
+}
+
+// The Windows floor follows connectors.claudecode.ownership, unlike the
+// lifecycle's 90-defenseclaw.json: merge writes it, verify_only neither
+// writes nor removes it, and off removes DefenseClaw's floor.
+func TestWindowsClaudeVersionFloorFollowsClaudeOwnership(t *testing.T) {
+	opts, _ := windowsFloorOptions(t)
+	path := filepath.Join(opts.WindowsProgramFiles, "ClaudeCode", "managed-settings.d", ClaudeVersionFloorDropInName)
+	verifyOnly := withPolicy(opts, "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipVerifyOnly })
+	if _, err := PublishWindowsClaudeVersionFloor(verifyOnly, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("verify_only must not write the floor: %v", err)
+	}
+	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err != nil || readFile(t, path) != wantClaudeFloorBytes {
+		t.Fatalf("merge must write the floor: %v", err)
+	}
+	if _, err := PublishWindowsClaudeVersionFloor(verifyOnly, []string{"claudecode"}); err != nil || readFile(t, path) != wantClaudeFloorBytes {
+		t.Fatalf("verify_only must not remove the floor: %v", err)
+	}
+	off := withPolicy(opts, "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipOff })
+	if _, err := PublishWindowsClaudeVersionFloor(off, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("ownership off must remove DefenseClaw's floor: %v", err)
+	}
+	if recorded, err := ClaudeVersionFloorRecorded(opts); err != nil || recorded {
+		t.Fatalf("ownership off must remove the floor record: %v %v", recorded, err)
 	}
 }
 

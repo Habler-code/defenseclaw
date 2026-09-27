@@ -47,6 +47,15 @@ import (
 // honors managedSourcesBehavior: merge, and every build the floor is meant to
 // stop is older than that. While such a source is in force without the key,
 // the floor in the files does not apply; verify says so.
+//
+// A file under the drop-in name is DefenseClaw's only while its ownership
+// record names it and the file's SHA-256 is the recorded postimage. Any other
+// file there, including the `version-floor` export an administrator deployed
+// (the same bytes DefenseClaw writes), is an administrator source: DefenseClaw
+// reads it and never rewrites, removes or claims it, so it cannot place its
+// own floor there either. A crash between writing the drop-in and saving its
+// record leaves such an unrecorded file; it is then reported as the
+// administrator's and removed only by hand.
 const ClaudeVersionFloorDropInName = "00-defenseclaw-version-floor.json"
 
 const (
@@ -61,11 +70,6 @@ const (
 	VersionFloorOwnerAdministrator = "administrator"
 	VersionFloorOwnerNone          = "none"
 )
-
-// claudeVersionFloorShape matches DefenseClaw's rendering of the floor
-// drop-in for any floor, so a drop-in an earlier release wrote with a lower
-// floor, or one whose ownership record a crash lost, is still recognized.
-var claudeVersionFloorShape = regexp.MustCompile(`^\{\n  "requiredMinimumVersion": "[0-9]+\.[0-9]+\.[0-9]+"\n\}\n$`)
 
 // claudeVersionPattern is a major.minor.patch version, optionally with a
 // pre-release or build suffix.
@@ -174,10 +178,12 @@ func renderClaudeVersionFloor(floor string) ([]byte, error) {
 	return encodeOrdered(doc)
 }
 
-// claudeVersionFloorStrip treats DefenseClaw's rendering as its whole file;
-// any other content under the drop-in name is kept as the preimage.
+// claudeVersionFloorStrip never claims content: the floor drop-in is
+// DefenseClaw's only as the exact bytes its record holds, which
+// restoreOrStrip checks by hash. A file under the drop-in name that is not
+// what DefenseClaw last wrote is left byte for byte, whatever it contains.
 func claudeVersionFloorStrip() stripFunc {
-	return wholeFileStrip(claudeVersionFloorShape.Match)
+	return wholeFileStrip(func([]byte) bool { return false })
 }
 
 // claudeFloorSetting is one administrator source that sets the key.
@@ -195,15 +201,18 @@ type claudeFloorPlan struct {
 	current []byte
 	exists  bool
 	record  *ownershipRecord
-	// owned: the drop-in at path is DefenseClaw's (its ownership record
-	// names it, or it is exactly DefenseClaw's rendering).
+	// owned: the drop-in at path is the one DefenseClaw last wrote (its
+	// ownership record names path and the file's hash is the recorded
+	// postimage). A file at path that is not owned is an administrator
+	// source that DefenseClaw never edits (occupied).
 	owned bool
 	// admin is the effective administrator setting; nil when none sets it.
 	admin *claudeFloorSetting
 	// adminInvalid: admin's value is not a major.minor.patch version, which
-	// Claude Code ignores. adminOutranks: admin merges after DefenseClaw's
-	// drop-in (a higher-precedence source, or a drop-in whose name sorts
-	// after it), so its value replaces the floor.
+	// Claude Code ignores. adminOutranks: DefenseClaw's drop-in cannot
+	// replace admin's value: admin merges after the drop-in (a
+	// higher-precedence source, or a drop-in whose name sorts after it), or
+	// it is the administrator's own file under the drop-in name.
 	adminInvalid  bool
 	adminOutranks bool
 	// ignoredBy names the first higher-precedence source when none of them
@@ -221,6 +230,13 @@ func (p claudeFloorPlan) effectiveAdmin() bool {
 	return p.admin != nil && !(p.adminInvalid && !p.adminOutranks)
 }
 
+// occupied reports whether the drop-in name holds a file DefenseClaw did not
+// write (or that changed since): an administrator source that DefenseClaw
+// never rewrites or removes, so it cannot place its floor there.
+func (p claudeFloorPlan) occupied() bool {
+	return p.exists && !p.owned
+}
+
 func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []higherClaudeSource) (claudeFloorPlan, error) {
 	plan := claudeFloorPlan{mode: opts.claudeVersionFloorMode(), floor: ClaudeVersionFloor()}
 	path, err := ClaudeVersionFloorPath(opts)
@@ -234,7 +250,8 @@ func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []highe
 	if plan.record, err = loadRecord(opts, claudeVersionFloorRecord); err != nil {
 		return plan, err
 	}
-	plan.owned = plan.exists && ((plan.record != nil && plan.record.Path == path) || claudeVersionFloorShape.Match(plan.current))
+	plan.owned = plan.exists && plan.record != nil && plan.record.Path == path &&
+		sha256Hex(plan.current) == plan.record.PostimageSHA256
 	for _, source := range sources {
 		if plan.owned && source.name == path {
 			continue
@@ -261,7 +278,7 @@ func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []highe
 	if plan.admin != nil {
 		version, _ := plan.admin.value.(string)
 		plan.adminInvalid = !claudeVersionPattern.MatchString(strings.TrimSpace(version))
-		plan.adminOutranks = plan.admin.higher || claudeDropInSortsAfterFloor(opts, plan.admin.source)
+		plan.adminOutranks = plan.admin.higher || plan.admin.source == path || claudeDropInSortsAfterFloor(opts, plan.admin.source)
 	}
 	return plan, nil
 }
@@ -280,12 +297,12 @@ func claudeDropInSortsAfterFloor(opts Options, source string) bool {
 }
 
 // wanted reports whether DefenseClaw's floor drop-in should be in place:
-// under enforce and merge, while no administrator value applies. An
-// administrator value that is not a version and merges before the drop-in
-// does not count: Claude Code ignores it, and the drop-in's later value
-// replaces it.
+// under enforce and merge, while no administrator value applies and no
+// administrator file holds the drop-in name. An administrator value that is
+// not a version and merges before the drop-in does not count: Claude Code
+// ignores it, and the drop-in's later value replaces it.
 func (p claudeFloorPlan) wanted(policy config.ResolvedConnectorPolicy) bool {
-	return p.mode == config.ClaudeVersionFloorEnforce && p.floor != "" && !p.effectiveAdmin() &&
+	return p.mode == config.ClaudeVersionFloorEnforce && p.floor != "" && !p.effectiveAdmin() && !p.occupied() &&
 		policy.Ownership == config.MachinePolicyOwnershipMerge
 }
 
@@ -311,9 +328,6 @@ func applyClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPolicy
 		if err != nil {
 			return err
 		}
-		if plan.exists && !plan.owned {
-			state.detail("%s held content DefenseClaw did not write; it is kept as the preimage and restored when DefenseClaw removes its floor", plan.path)
-		}
 		changed, err := publishWithRecord(opts, claudeVersionFloorRecord, plan.path, plan.current, plan.exists, rendered,
 			plan.owned && bytes.Equal(plan.current, rendered), claudeVersionFloorStrip(), state)
 		state.Changed = state.Changed || changed
@@ -325,31 +339,22 @@ func applyClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPolicy
 	return withdrawClaudeVersionFloor(opts, plan, state)
 }
 
-// withdrawClaudeVersionFloor removes DefenseClaw's floor drop-in, restoring
-// the recorded preimage when the file is what DefenseClaw last wrote.
+// withdrawClaudeVersionFloor removes DefenseClaw's floor drop-in when the
+// file is what DefenseClaw last wrote, and drops the record of one that
+// changed since. Without a record there is nothing of DefenseClaw's to
+// withdraw: a file under the drop-in name is the administrator's and stays.
 func withdrawClaudeVersionFloor(opts Options, plan claudeFloorPlan, state *State) error {
-	switch {
-	case plan.record != nil:
-		before := state.Changed
-		state.Changed = false
-		err := restoreOrStrip(opts, claudeVersionFloorRecord, plan.path, claudeVersionFloorStrip(), true, state)
-		state.Changed = before || state.Changed
-		return err
-	case plan.owned:
-		// DefenseClaw's exact rendering whose record a crash lost.
-		if err := removePolicyFile(opts, plan.path); err != nil {
-			return err
-		}
-		state.Changed = true
-		state.detail("removed %s", plan.path)
+	if plan.record == nil {
+		return nil
 	}
-	return nil
+	return restoreOrStrip(opts, claudeVersionFloorRecord, plan.path, claudeVersionFloorStrip(), true, state)
 }
 
 // removeClaudeVersionFloor removes the floor drop-in DefenseClaw recorded
-// writing (uninstall, retire). Without a record the file is the
-// administrator's (for example the `version-floor` export deployed under
-// verify_only) and stays.
+// writing (uninstall, retire), while the file is still what DefenseClaw
+// wrote. Without a record, or once the file changed, it is the
+// administrator's (for example the `version-floor` export they deployed) and
+// stays.
 func removeClaudeVersionFloor(opts Options, state *State) error {
 	path, err := ClaudeVersionFloorPath(opts)
 	if err != nil {
@@ -378,23 +383,12 @@ func recordExists(opts Options, name string) (bool, error) {
 	return false, nil
 }
 
-// claudeVersionFloorPresent reports whether a floor drop-in or its record
-// exists, so a pass with nothing to write or remove takes no lock and
-// creates no directory.
+// claudeVersionFloorPresent reports whether DefenseClaw records a floor
+// drop-in, so a pass with nothing to write or remove takes no lock and
+// creates no directory. An unrecorded file under the drop-in name is the
+// administrator's and never needs the lock.
 func claudeVersionFloorPresent(opts Options) (bool, error) {
-	if recorded, err := recordExists(opts, claudeVersionFloorRecord); err != nil || recorded {
-		return recorded, err
-	}
-	path, err := ClaudeVersionFloorPath(opts)
-	if err != nil {
-		return false, err
-	}
-	if _, err := os.Lstat(platformPath(opts, path)); err == nil {
-		return true, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	return false, nil
+	return recordExists(opts, claudeVersionFloorRecord)
 }
 
 // claudeFloorTransaction runs fn with the managed-settings.d directory under
@@ -495,6 +489,9 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 		case plan.adminInvalid:
 			floor.Invalid = true
 			message := fmt.Sprintf("Claude Code version floor: %s sets requiredMinimumVersion to %s, which is not a major.minor.patch version, and it merges after DefenseClaw's %s; Claude Code ignores an invalid value, so builds below %s can start; set a version such as %q there or remove the key", plan.admin.source, floor.Value, plan.path, plan.floor, plan.floor)
+			if plan.admin.source == plan.path {
+				message = fmt.Sprintf("Claude Code version floor: %s, a file DefenseClaw did not write under its drop-in name, sets requiredMinimumVersion to %s, which is not a major.minor.patch version; DefenseClaw never edits that file and Claude Code ignores an invalid value, so builds below %s can start; set a version such as %q there, or remove the file so DefenseClaw can write its floor", plan.path, floor.Value, plan.floor, plan.floor)
+			}
 			if promised {
 				state.conflict("%s", message)
 			} else {
@@ -531,6 +528,8 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 			unset = fmt.Sprintf("%s sets requiredMinimumVersion to %s, which is not a major.minor.patch version and which Claude Code ignores", plan.admin.source, claudeFloorValueText(plan.admin.value))
 		}
 		switch {
+		case promised && plan.occupied():
+			state.conflict("Claude Code version floor: %s, and %s holds a file DefenseClaw did not write, which it never edits or replaces, so Claude Code builds below %s can start; add \"requiredMinimumVersion\": %q to that file, or move its settings to another drop-in and remove it so DefenseClaw can write its floor", unset, plan.path, plan.floor, plan.floor)
 		case promised:
 			state.conflict("Claude Code version floor: %s and DefenseClaw's %s is missing, so Claude Code builds below %s can start; the next reconcile writes it", unset, plan.path, plan.floor)
 		case plan.mode == config.ClaudeVersionFloorEnforce:

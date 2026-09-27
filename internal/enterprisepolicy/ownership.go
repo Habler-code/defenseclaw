@@ -193,11 +193,11 @@ func (r *ownershipRecord) noteRewrite(now time.Time) int {
 	return count
 }
 
+// flapConflict reports a second writer that keeps replacing a file
+// DefenseClaw owns. The Claude Code version floor drop-in never gets here: a
+// floor file that changed is the administrator's, and DefenseClaw does not
+// rewrite it.
 func flapConflict(state *State, connector, path string, count int) {
-	if count >= flapThreshold && connector == claudeVersionFloorRecord {
-		state.conflict("another writer replaced %s %d times in 24h; to set your own Claude Code version floor, put requiredMinimumVersion in your own managed settings file (DefenseClaw then withdraws its drop-in), or set enterprise.machine_policy.claudecode.version_floor: off", path, count)
-		return
-	}
 	if count >= flapThreshold {
 		state.conflict("another writer replaced %s %d times in 24h and removed DefenseClaw's hooks each time; if an MDM or configuration tool owns this file, set enterprise.machine_policy.connectors.%s.ownership: verify_only and deploy the output of `defenseclaw-gateway enterprise policy export --connector %s` through that tool", path, count, connector, connector)
 	}
