@@ -64,38 +64,64 @@ stopped`. Nothing is changed; use the install command above.
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
 
-## [Unreleased] — Kiro CLI hooks
+## [Unreleased] — Kiro CLI hooks and the Claude Code version floor
 
 ### Fixed
 
-- **Kiro on native Windows blocks again, per-user installs included.** Setup
-  registers `defenseclaw-hook.exe hook --connector kiro --hook-surface v3`
-  for Kiro IDE and `kiro-cli --v3`, but the hook binary did not know
-  `--hook-surface` and exited 1, which Kiro treats as a failed hook: it
-  showed a warning and let every prompt and tool call through. The CLI 2.x
-  agent hook, which carries no marker, instead exited 2 on every event,
-  because the binary had no Kiro contract, so it blocked every tool call. The
-  binary now accepts the hidden `--hook-surface` flag (per-connector values;
-  Kiro: `v3`), answers exactly like `kiro-hook.sh`, and forwards the surface
-  in the new `X-DefenseClaw-Hook-Dialect` header (the gateway still reads
-  `X-DefenseClaw-Kiro-Surface` from `kiro-hook.sh`). Every DefenseClaw-side
-  failure of a Kiro hook, including a usage error, now exits 2, the only
-  status Kiro honors as a block.
+- **Kiro on native Windows blocks again, per-user installs included (owner
+  decision D6).** Setup registered `& '<defenseclaw-hook.exe>' hook
+  --connector kiro --hook-surface v3` for Kiro IDE and `kiro-cli --v3`, but
+  the hook binary did not know `--hook-surface` and exited 1, which Kiro
+  treats as a failed hook: it showed a warning and let every prompt and tool
+  call through. The CLI 2.x agent hook, which carries no marker, instead
+  exited 2 on every event, because the binary had no Kiro contract, so it
+  blocked every tool call. And the call-operator command itself lost exit 2:
+  `cmd.exe` rejects it, and PowerShell does not wait for the GUI-subsystem
+  release launcher. The binary now accepts the hidden `--hook-surface` flag
+  (per-connector values; Kiro: `v3`), answers exactly like `kiro-hook.sh`,
+  and forwards the surface in the new `X-DefenseClaw-Hook-Dialect` header
+  (the gateway still reads `X-DefenseClaw-Kiro-Surface` from
+  `kiro-hook.sh`). Both Kiro commands are now the encoded system PowerShell
+  bridge (`Start-Process -NoNewWindow -Wait -PassThru`), which returns exit 2
+  through `cmd.exe` or a direct launch; a launcher that uses `powershell
+  -Command` still reports it as 1, and Kiro does not document its Windows
+  hook shell. `defenseclaw setup kiro` replaces the older entries. A Kiro
+  hook that fails closed (managed, or fail mode `closed`) exits 2 on a
+  DefenseClaw-side failure, including a usage error; a fail-open hook exits 1
+  as before.
 - **Enterprise (standalone) Kiro follows kiro-cli self-updates.** Kiro's hook
   contract is not version-gated, so the Linux and macOS guardian refused
   every repair after a kiro-cli update ("hook contract drift detected"). It
-  now follows updates at or above kiro-cli 2.24.1, the certified minimum,
-  refuses to enroll older builds in action mode, and keeps a row at its
-  certified version when the CLI is downgraded below the minimum.
+  now follows updates at or above kiro-cli 2.24.1, the certified minimum, and
+  keeps a row at its certified version when the CLI is downgraded below the
+  minimum. In action mode it refuses to enroll a new user below 2.24.1; a
+  user an earlier release enrolled below it keeps being repaired at that
+  version until kiro-cli reaches 2.24.1.
 
 ### Changed
 
 - **Enterprise Kiro route.** `enterprise policy show|verify` reports Kiro as
   `per_user` on Linux and macOS, where the guardian enrolls it, instead of
   `acp`. A managed Kiro install writes only each user's global
-  `~/.kiro/hooks/defenseclaw.json` (plus the CLI 2.x agent), never a copy in
-  the machine-wide workspace directory. Windows keeps the `acp` route: the
-  Windows guardian does not enroll Kiro.
+  `~/.kiro/hooks/defenseclaw.json` and the CLI 2.x `defenseclaw` agent, and
+  makes that agent the `chat.defaultAgent`; it never writes a copy in the
+  machine-wide workspace directory and never edits the user's own agents.
+  Windows keeps the `acp` route: the Windows guardian does not enroll Kiro.
+
+### Added
+
+- **Claude Code version floor (enterprise standalone profile).** DefenseClaw
+  sets Claude Code's `requiredMinimumVersion` to the lowest version with a
+  verified hook contract (2.1.154) in its own drop-in,
+  `managed-settings.d/00-defenseclaw-version-floor.json`, so older builds
+  refuse to start; `90-defenseclaw.json` is unchanged. An administrator's own
+  version wins and DefenseClaw withdraws its drop-in; a value that is not a
+  version does not count. `enterprise policy show|verify` report who sets the
+  floor and fail when no floor reaches the builds it targets, for example
+  while HKLM `Settings` or macOS managed preferences are in force without the
+  key. `export --format version-floor` renders the drop-in, and
+  `enterprise.machine_policy.claudecode.version_floor: enforce | report |
+  off` (default `enforce`) controls it.
 
 ## [Unreleased] — Hook collector unification
 

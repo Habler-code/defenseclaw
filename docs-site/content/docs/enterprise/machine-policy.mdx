@@ -263,16 +263,23 @@ enterprise:
 
 | `version_floor` | What DefenseClaw does |
 | --- | --- |
-| `enforce` (default) | Writes the floor drop-in while no other source sets `requiredMinimumVersion`, and removes it once one does |
+| `enforce` (default) | Writes the floor drop-in while no other source sets `requiredMinimumVersion` to a version, and removes it once one does |
 | `report` | Writes nothing; `policy show` reports that older builds can start |
 | `off` | Writes nothing and does not manage the setting |
 
 - **Your value wins.** When `managed-settings.json`, another drop-in,
   `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` or the macOS managed
-  preferences set `requiredMinimumVersion`, DefenseClaw leaves that file
-  alone and removes its own drop-in at the next reconcile. `policy show`
-  names the source, and says so when the value is below 2.1.154 or is not
-  a version.
+  preferences set `requiredMinimumVersion` to a version, DefenseClaw leaves
+  that file alone and removes its own drop-in at the next reconcile, even
+  when the value is below 2.1.154. `policy show` names the source and says
+  when the value is below 2.1.154.
+- **A value that is not a version does not count.** Claude Code ignores
+  it. When it is in a file that merges before DefenseClaw's drop-in
+  (`managed-settings.json`, or a drop-in whose name sorts before
+  `00-defenseclaw-version-floor.json`), DefenseClaw keeps its drop-in, whose
+  later value applies, and never edits your file. When it merges after the
+  drop-in (a later drop-in, a higher-precedence source), no floor applies
+  and `policy verify` fails until you fix or remove the value.
 - **When it applies.** The drop-in is written only in the standalone
   profile, while `claudecode` is enabled with `ownership: merge`. Linux and
   macOS write it at install and every reconcile; on Windows the guardian
@@ -280,12 +287,18 @@ enterprise:
   `90-defenseclaw.json`. Uninstall removes it. With `ownership: verify_only`,
   deploy `policy export --connector claudecode --format version-floor`
   yourself.
+- **Higher-precedence sources.** Claude Code builds older than 2.1.242
+  ignore `"managedSourcesBehavior": "merge"` and read only the
+  higher-precedence source (`HKLM\SOFTWARE\Policies\ClaudeCode\Settings`,
+  the macOS managed preferences) while one is in force. Every build the
+  floor is meant to stop is older than that, so the floor in the managed
+  settings files does not reach them, with or without `merge`, even when that
+  source carries DefenseClaw's hooks (for example the `claude-hklm-json`
+  export). Add `"requiredMinimumVersion": "2.1.154"` to that source. Until
+  then `policy show` marks the floor `not applied` and `policy verify` fails
+  (a warning with `higher_precedence_sources: warn`).
 - **Limits.** The check runs when a session starts; running sessions go
-  on. Claude Code ignores an invalid value, and builds that predate the
-  setting ignore it. While a higher-precedence source without
-  `"managedSourcesBehavior": "merge"` is in force, Claude Code ignores the
-  managed settings files, the floor drop-in included; set the key in that
-  source instead.
+  on. Builds that predate the setting ignore it.
 
 ## Higher-precedence sources
 

@@ -141,6 +141,10 @@ not-found answers.
 | M-15 | W-15 | A failed upgrade leaves mixed state | Transaction snapshot and rollback | Lifecycle tests |
 | M-16 | — | The standalone and Secure Client profiles are installed together | The standalone lifecycle refuses when a Secure Client deployment is present | `secureClientPresent` tests |
 | M-17 | W-27 | An old, copied or self-built agent client ignores `/etc/codex/requirements.toml` or the Claude Code managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and Santa (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15) | Application-control profile on a host |
+| M-18 | W-57 | A user has an agent only as a desktop app or editor extension and is never enrolled | Not in this release: machine-policy hook calls are inspected under the default contract or refused (`unenrolled_users`), and per-user connectors get no hooks ([R25](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#912](https://github.com/cisco-ai-defense/defenseclaw/issues/912)) | Tracked in #912 |
+| M-19 | W-58 | A Copilot agent chat in VS Code's Local harness runs without DefenseClaw policy or audit | Not in this release ([R26](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913)) | Tracked in #913 |
+| M-20 | W-60 | Devin Desktop runs without DefenseClaw hooks for a user without the `devin` CLI | Not in this release ([R28](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915)) | Tracked in #915 |
+| M-21 | W-61 | The Kiro IDE is not discovered and has no version floor; its reading of the global `~/.kiro/hooks` file is not live-verified | Not in this release ([R29](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916)); `kiro-cli` is covered per user (R22) | Tracked in #916 |
 
 ## Residual risks
 
