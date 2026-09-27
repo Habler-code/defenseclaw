@@ -51,6 +51,9 @@ package ipc
 // refused, and the refusal reason says why (shortNameLaunchHint).
 
 import (
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -61,6 +64,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/authenticode"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
@@ -87,9 +91,31 @@ type windowsPeerProcess struct {
 // windowsImageSigner is the leaf certificate WinVerifyTrust validated
 // for the primary embedded Authenticode signature of an executable.
 type windowsImageSigner struct {
+	// CommonName is the one common name (CN attribute) in the subject,
+	// or "" when the subject has none, more than one, or one that is not
+	// a string. It follows authenticode.SubjectCommonName, the rule the
+	// CMID broker and the enterprise lifecycle module apply to the same
+	// publisher.
 	CommonName       string
 	Organizations    []string
 	ThumbprintSHA256 string
+}
+
+// windowsImageSignerFromCertificate identifies the signer of a verified
+// image by its DER leaf certificate. The common name is read from the
+// encoded subject, not from x509.Name.CommonName, which keeps the last
+// of several CN attributes.
+func windowsImageSignerFromCertificate(encoded []byte) (windowsImageSigner, error) {
+	certificate, err := x509.ParseCertificate(encoded)
+	if err != nil {
+		return windowsImageSigner{}, fmt.Errorf("parse signer certificate: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return windowsImageSigner{
+		CommonName:       authenticode.SubjectCommonName(certificate.RawSubject),
+		Organizations:    append([]string(nil), certificate.Subject.Organization...),
+		ThumbprintSHA256: hex.EncodeToString(digest[:]),
+	}, nil
 }
 
 // windowsPeerImage is a peer executable held open for verification.

@@ -23,9 +23,6 @@ package ipc
 // system process snapshot are available to any caller.
 
 import (
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -489,16 +486,7 @@ func (i *openedWindowsPeerImage) VerifySigner() (windowsImageSigner, error) {
 	if err != nil {
 		return windowsImageSigner{}, err
 	}
-	certificate, err := x509.ParseCertificate(encoded)
-	if err != nil {
-		return windowsImageSigner{}, fmt.Errorf("parse signer certificate: %w", err)
-	}
-	digest := sha256.Sum256(encoded)
-	return windowsImageSigner{
-		CommonName:       certificate.Subject.CommonName,
-		Organizations:    append([]string(nil), certificate.Subject.Organization...),
-		ThumbprintSHA256: hex.EncodeToString(digest[:]),
-	}, nil
+	return windowsImageSignerFromCertificate(encoded)
 }
 
 var (

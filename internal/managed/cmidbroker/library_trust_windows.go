@@ -15,6 +15,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/authenticode"
 )
 
 const maxLibrarySignerCertificateBytes = 64 << 10
@@ -224,7 +226,7 @@ func librarySignerFromContext(context *windows.CertContext) (LibrarySigner, erro
 	copy(encoded, unsafe.Slice(context.EncodedCert, context.Length))
 	digest := sha256.Sum256(encoded)
 	return LibrarySigner{
-		CommonName:        subjectCommonName(certificateSubject(context)),
+		CommonName:        authenticode.SubjectCommonName(certificateSubject(context)),
 		CertificateSHA256: hex.EncodeToString(digest[:]),
 	}, nil
 }
