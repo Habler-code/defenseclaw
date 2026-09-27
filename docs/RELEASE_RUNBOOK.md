@@ -36,13 +36,27 @@ mode, on users' Macs. To publish such an app anyway (a fork, a test), run with
 
 To try a release on real machines before users see it, run the workflow with
 `draft: true` and download the draft's assets (`gh release download X.Y.Z`).
-Check them against the signed checksum list before running anything:
+Use disposable test machines or VMs, not anyone's working install: an
+unpublished release has not been through users yet. Check the assets against
+the signed checksum list before running anything:
 
 ```bash
 cosign verify-blob --bundle checksums.txt.bundle \
   --certificate-identity https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
 sha256sum --check --ignore-missing checksums.txt   # macOS: shasum -a 256 --check --ignore-missing checksums.txt
+```
+
+On Windows (PowerShell, with `cosign.exe` on PATH):
+
+```powershell
+cosign verify-blob --bundle checksums.txt.bundle `
+  --certificate-identity https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main `
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+Get-Content checksums.txt | ForEach-Object {
+  $hash, $name = -split $_
+  if ((Test-Path $name) -and (Get-FileHash -Algorithm SHA256 $name).Hash -ne $hash) { throw "$name does not match checksums.txt" }
+}
 ```
 
 Then install them with `install.sh --local DIR` or `install.ps1 -Local DIR`,
