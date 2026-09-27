@@ -757,9 +757,22 @@ defenseclaw_response_failure_reason() {
 # user with root-controlled identities, so it cannot admit a listener that
 # another unprivileged user owns.
 #
-# Nothing listening is left to curl, which then fails to connect. Other
-# platforms, and gateway addresses that are not local loopback, are out
-# of scope and return 0. On refusal it returns 1 with
+# A port nobody listens on is refused with "gateway unreachable", the
+# reason curl's failed connect would report. Leaving it to curl would let
+# another user hold the port with a socket that is bound but not yet
+# listening (such a socket is not in the listener table) and call
+# listen() once the check had passed.
+#
+# The check is a snapshot taken just before curl opens its own
+# connection; it is not bound to that connection. After it passes, a
+# different listener can receive the request only if the trusted gateway
+# stops listening and another user binds and listens on the port within
+# that gap. The native managed transport
+# (internal/gateway/connector/hookexec) verifies the connected socket
+# itself and has no such gap.
+#
+# Other platforms, and gateway addresses that are not local loopback, are
+# out of scope and return 0. On refusal it returns 1 with
 # DEFENSECLAW_LISTENER_REASON set; callers route that through their
 # transport fail mode.
 #
@@ -822,6 +835,10 @@ defenseclaw_verify_gateway_listener() {
   fi
   if [ "$owners" = "!" ]; then
     DEFENSECLAW_LISTENER_REASON="cannot verify the owner of the gateway listener on port ${port}"
+    return 1
+  fi
+  if [ -z "$owners" ]; then
+    DEFENSECLAW_LISTENER_REASON="gateway unreachable"
     return 1
   fi
   for owner in $owners; do

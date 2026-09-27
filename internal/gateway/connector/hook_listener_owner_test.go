@@ -231,8 +231,9 @@ func TestHookListenerCheckScope(t *testing.T) {
 }
 
 // TestHookListenerCheckAcceptsOwnListener binds a real loopback listener as
-// the test account; the hook check must accept it, and must also accept a
-// port nobody listens on (curl then fails to connect).
+// the test account; the hook check must accept it. Once it is closed the
+// check must refuse the port with curl's "gateway unreachable" reason, so a
+// socket bound after the check is never the first thing to answer.
 func TestHookListenerCheckAcceptsOwnListener(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		if _, err := exec.LookPath("netstat"); err != nil {
@@ -260,8 +261,8 @@ func TestHookListenerCheckAcceptsOwnListener(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if out, ok := runHardeningShell(t, `defenseclaw_verify_gateway_listener "$1" || { printf '%s' "$DEFENSECLAW_LISTENER_REASON"; exit 1; }`, addr); !ok {
-		t.Fatalf("closed port %s refused: %s", addr, out)
+	if out, ok := runHardeningShell(t, `defenseclaw_verify_gateway_listener "$1" || { printf '%s' "$DEFENSECLAW_LISTENER_REASON"; exit 1; }`, addr); ok || out != "gateway unreachable" {
+		t.Fatalf("closed port %s = ok %v reason %q, want refusal with %q", addr, ok, out, "gateway unreachable")
 	}
 }
 
@@ -377,6 +378,9 @@ func TestHookListenerCheckTrustSet(t *testing.T) {
 		{name: "per-user other user", platform: "Linux", owners: "1001", wantReason: "held by 1001, not this user's gateway"},
 		{name: "per-user service account", platform: "Linux", owners: "998", service: "998", wantReason: "held by 998"},
 		{name: "per-user mixed owners", platform: "Linux", owners: "1000 1001", wantReason: "held by 1001"},
+		{name: "per-user nothing listening", platform: "Linux", owners: "", wantReason: "gateway unreachable"},
+		{name: "managed nothing listening", platform: "Linux", owners: "", managed: "1", service: "998", wantReason: "gateway unreachable"},
+		{name: "per-user macos nothing listening", platform: "Darwin", owners: "", wantReason: "gateway unreachable"},
 		{name: "managed linux service account", platform: "Linux", owners: "998", managed: "1", service: "998", wantOK: true},
 		{name: "managed linux root and service account", platform: "Linux", owners: "0 998", managed: "1", service: "998", wantOK: true},
 		{name: "managed linux root without service account", platform: "Linux", owners: "0", managed: "1", wantOK: true},
