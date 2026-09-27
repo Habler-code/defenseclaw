@@ -69,11 +69,18 @@ func pluginListenerScenarios(t *testing.T, managedSupported bool) []pluginListen
 
 func renderPluginBridgeForTest(t *testing.T, asset, apiAddr, tokenPath, failMode string, managed bool) string {
 	t.Helper()
-	tmpl, err := hookFS.ReadFile("hooks/" + asset)
+	program, err := hookListenerCheckProgram()
 	if err != nil {
 		t.Fatal(err)
 	}
-	program, err := hookListenerCheckProgram()
+	return renderPluginBridgeWithListenerCheckForTest(t, asset, apiAddr, tokenPath, failMode, managed, program)
+}
+
+// renderPluginBridgeWithListenerCheckForTest renders asset with program as
+// its DC_LISTENER_CHECK.
+func renderPluginBridgeWithListenerCheckForTest(t *testing.T, asset, apiAddr, tokenPath, failMode string, managed bool, program string) string {
+	t.Helper()
+	tmpl, err := hookFS.ReadFile("hooks/" + asset)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,6 +260,62 @@ func TestAmpPluginChecksGatewayListenerOwner(t *testing.T) {
 			}
 			checkPluginScenario(t, sc, runPluginHarness(t, node, harness, plugin))
 		})
+	}
+}
+
+// TestPluginBridgesRefuseEmptyListenerCheck pins that an OpenCode or Amp
+// bridge whose listener check is empty on Linux or macOS refuses the request
+// as unverifiable, as the OmniGent module does: `/bin/sh -c ""` exits 0, so
+// running an empty check would send the bearer without verifying the
+// listener. Nothing is sent, and the fail mode decides.
+func TestPluginBridgesRefuseEmptyListenerCheck(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required")
+	}
+	dir := testenv.PrivateTempDir(t)
+	nodeRunsTypeScript := false
+	probe := filepath.Join(dir, "probe.ts")
+	if err := os.WriteFile(probe, []byte("const x: number = 1\nconsole.log(x)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, probe).CombinedOutput(); err == nil && strings.TrimSpace(string(out)) == "1" {
+		nodeRunsTypeScript = true
+	}
+	own := trustedHookListenerAddr(t)
+	for _, bridge := range []struct {
+		name, asset, extension, harness string
+		typeScript                      bool
+	}{
+		{name: "opencode", asset: "opencode-plugin.js", extension: ".mjs", harness: openCodeListenerHarness},
+		{name: "amp", asset: "amp-plugin.ts", extension: ".ts", harness: ampListenerHarness, typeScript: true},
+	} {
+		for _, failMode := range []string{"closed", "open"} {
+			t.Run(bridge.name+" fail "+failMode, func(t *testing.T) {
+				if bridge.typeScript && !nodeRunsTypeScript {
+					t.Skip("node cannot run TypeScript directly")
+				}
+				tokenPath := filepath.Join(dir, ".hook-"+bridge.name+".token")
+				if err := os.WriteFile(tokenPath, []byte(strings.Repeat("c", 64)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				harness := filepath.Join(dir, bridge.name+"-harness.mjs")
+				if err := os.WriteFile(harness, []byte(bridge.harness), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				plugin := filepath.Join(dir, bridge.name+"-empty-check-"+failMode+bridge.extension)
+				rendered := renderPluginBridgeWithListenerCheckForTest(t, bridge.asset, own, tokenPath, failMode, false, "")
+				if err := os.WriteFile(plugin, []byte(rendered), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				want := pluginListenerScenario{name: "empty listener check", addr: own, failMode: failMode}
+				if failMode == "closed" {
+					want.wantBlocked = true
+					want.wantReason = "cannot verify the owner of the gateway listener"
+				}
+				checkPluginScenario(t, want, runPluginHarness(t, node, harness, plugin))
+			})
+		}
 	}
 }
 

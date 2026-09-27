@@ -122,9 +122,12 @@ async function scopedHookToken(): Promise<string> {
 // install, or to the managed gateway for a managed one, so another local user
 // who binds the port while the gateway is down never receives the bearer or
 // the payload. The check runs with a fixed PATH and environment, so the
-// agent's environment cannot choose the tools it relies on.
+// agent's environment cannot choose the tools it relies on. An empty check
+// (`/bin/sh -c ""` exits 0) is refused as unverifiable, as the OmniGent bridge
+// does, instead of passing without checking anything.
 function listenerRefusal(): Promise<string> {
 	if (process.platform !== "linux" && process.platform !== "darwin") return Promise.resolve("")
+	if (!DC_LISTENER_CHECK) return Promise.resolve(DC_LISTENER_UNVERIFIED)
 	return new Promise((resolve) => {
 		try {
 			execFile(
