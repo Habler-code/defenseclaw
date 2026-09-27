@@ -449,10 +449,9 @@ has curl || [[ -n "${LOCAL_DIR}" ]] || die "curl is required"
 # Never pick up uv settings (overrides, indexes) from a project in the cwd.
 export UV_NO_CONFIG=1
 if ! has uv; then
-    info "Installing uv (Python package manager)"
-    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh >/dev/null \
-        || die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry"
-    export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+    info "Installing uv ${UV_VERSION} (Python package manager)"
+    install_uv || die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry"
+    export PATH="${BIN_DIR}:${PATH}"
     has uv || die "uv was installed but is not on PATH"
 fi
 
@@ -629,6 +628,40 @@ exit ${START_RC}
 
 # ── Snapshot, swap, restore ──────────────────────────────────────────────────
 # Defined outside main() is fine: bash parses the whole file before main runs.
+
+# uv, when it is missing: a pinned release, checked against the digests below
+# (from the release's .sha256 files) before anything runs. Bump them together.
+readonly UV_VERSION="0.12.13"
+uv_sha256() {
+    case "$1" in
+        uv-aarch64-apple-darwin.tar.gz) echo 7e6ddb9316acc00f2296c82ff4d99977870ee34b2f0ddcae9444d714db9364ed ;;
+        uv-x86_64-unknown-linux-musl.tar.gz) echo 4e2bfd0c9007b1032a50e539e965fd0a6037d87ad93ae1580d220a92d4c94098 ;;
+        uv-aarch64-unknown-linux-musl.tar.gz) echo f44bc1037a17889fe562fffd2002d4ed108e499fbe68b4f022af244dc7b8244f ;;
+    esac
+}
+install_uv() {
+    local target tmp asset
+    case "${OS}/${ARCH}" in
+        darwin/arm64) target=aarch64-apple-darwin ;;
+        linux/amd64) target=x86_64-unknown-linux-musl ;;
+        linux/arm64) target=aarch64-unknown-linux-musl ;;
+        *) return 1 ;;
+    esac
+    asset="uv-${target}.tar.gz"
+    tmp="$(mktemp -d)" || return 1
+    if curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/${asset}" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${asset}" \
+        && [[ "$(sha256_of "${tmp}/${asset}")" == "$(uv_sha256 "${asset}")" ]] \
+        && tar -xzf "${tmp}/${asset}" -C "${tmp}" \
+        && mkdir -p "${BIN_DIR}" \
+        && cp "${tmp}/uv-${target}/uv" "${tmp}/uv-${target}/uvx" "${BIN_DIR}/"; then
+        chmod 755 "${BIN_DIR}/uv" "${BIN_DIR}/uvx"
+        rm -rf "${tmp}"
+        return 0
+    fi
+    rm -rf "${tmp}"
+    return 1
+}
 
 is_machinery() {
     local name="$1" pattern

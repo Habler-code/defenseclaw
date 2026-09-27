@@ -303,6 +303,35 @@ function ConvertTo-ProcessArgument([string]$Value) {
     return '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
 }
 
+# uv, when it is missing: a pinned release, checked against this digest (from
+# the release's .sha256 file) before anything runs. Bump them together.
+$UvVersion = "0.12.13"
+$UvZipSha256 = "a86c9dc7bad9b03f388583b7187c05fe9951c2e0d392217e8fd43d97787f6ec2"
+
+function Install-Uv {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("defenseclaw-uv-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $tmp | Out-Null
+    try {
+        $zip = Join-Path $tmp "uv.zip"
+        if (-not (Save-Url "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip" $zip)) { return "" }
+        if ((Get-Sha256 $zip) -ne $UvZipSha256) { Write-Err "The uv download does not match its pinned checksum"; return "" }
+        Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tmp "uv") -Force
+        New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+        foreach ($name in @("uv.exe", "uvx.exe", "uvw.exe")) {
+            $file = Join-Path $tmp "uv\$name"
+            if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination (Join-Path $BinDir $name) -Force }
+        }
+        $uv = Join-Path $BinDir "uv.exe"
+        if (Test-Path -LiteralPath $uv) { return $uv }
+        return ""
+    } catch {
+        Write-Err $_.Exception.Message
+        return ""
+    } finally {
+        Invoke-Quietly { Remove-Tree $tmp }
+    }
+}
+
 function Get-Cosign {
     # cosign 2.0 or later if it is installed, else "". A -CosignPath that is
     # not one stops the install rather than silently skipping the check.
@@ -1262,13 +1291,9 @@ function Invoke-Install {
     $env:UV_NO_CONFIG = "1"
     $Uv = [string](Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
     if (-not $Uv) {
-        Write-Info "Installing uv (Python package manager)"
-        $env:UV_INSTALL_DIR = $BinDir
-        $env:UV_NO_MODIFY_PATH = "1"
-        $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
-        & (Join-Path $PSHOME $shell) -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex" *> $null
-        $Uv = Join-Path $BinDir "uv.exe"
-        if (-not (Test-Path -LiteralPath $Uv)) { Die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry" }
+        Write-Info "Installing uv $UvVersion (Python package manager)"
+        $Uv = Install-Uv
+        if (-not $Uv) { Die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry" }
     }
 
     New-InstallDirectory $Staging
