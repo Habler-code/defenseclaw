@@ -250,7 +250,7 @@ def test_certification_doc_lists_the_protected_staging_set() -> None:
     assert "byte-copies the installer, adjacent module, gateway, hook, required CLI, and" not in flat
 
 
-def test_certification_doc_names_every_binary_a_cli_upgrade_takes() -> None:
+def test_upgrade_docs_name_every_binary_a_cli_upgrade_replaces() -> None:
     flags = re.findall(
         r'flags\.StringVar\(&opts\.\w+Binary, "([\w-]+)-binary"',
         _read(LIFECYCLE_CLI),
@@ -258,13 +258,17 @@ def test_certification_doc_names_every_binary_a_cli_upgrade_takes() -> None:
     assert set(flags) == {"broker", "gateway", "acp", "hook", "sensor-helper", "cli"}, flags
     names = {"broker": "broker", "gateway": "gateway", "acp": "ACP", "hook": "hook", "sensor-helper": "sensor helper"}
 
-    flat = _flat(_read(CERTIFICATION_DOC))
-    start = flat.index("it remains valid for an upgrade that omits `--cli-binary`")
-    sentence = flat[start : flat.index(".", start)]
-    for flag in flags:
-        if flag != "cli":
-            assert names[flag] in sentence, flag
-    assert "broker/gateway/hook-only" not in flat
+    for path, lead in (
+        (CERTIFICATION_DOC, "it remains valid for an upgrade that omits `--cli-binary`"),
+        (DEPLOYMENT_DOC, "Running the installed CLI is still valid for an upgrade that omits `--cli-binary`"),
+    ):
+        flat = _flat(_read(path))
+        start = flat.index(lead)
+        sentence = flat[start : flat.index(".", start)]
+        for flag in flags:
+            if flag != "cli":
+                assert names[flag] in sentence, (path.name, flag)
+        assert "broker/gateway/hook-only" not in flat, path.name
 
 
 def test_codex_requirements_doc_names_the_guardian_reconcile() -> None:

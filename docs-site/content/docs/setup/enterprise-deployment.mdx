@@ -1076,8 +1076,9 @@ $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
   --json
 ```
 
-Running the installed CLI is still valid for a broker/gateway/hook-only upgrade when
-`--cli-binary` is omitted.
+Running the installed CLI is still valid for an upgrade that omits
+`--cli-binary` and replaces only the broker, gateway, ACP, hook, and sensor
+helper.
 
 Only an administrator can remove the service registration:
 
