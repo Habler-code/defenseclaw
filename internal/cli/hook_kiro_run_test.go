@@ -107,10 +107,12 @@ func TestKiroHookCommandRunsAndForwardsItsSurface(t *testing.T) {
 	}
 }
 
-// A flag error before --connector is parsed still exits with Kiro's
-// blocking status: the connector comes from the raw arguments.
+// A flag error before --connector and --fail-mode are parsed still exits
+// with Kiro's blocking status: both come from the raw arguments.
 func TestKiroHookFlagErrorBeforeConnectorBlocks(t *testing.T) {
-	args := []string{"--not-a-hook-flag", "--connector", "kiro"}
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "")
+	args := []string{"--not-a-hook-flag", "--connector", "kiro", "--fail-mode", "closed"}
 	previous := hookRawArgs
 	hookRawArgs = func() []string { return append([]string{"hook"}, args...) }
 	t.Cleanup(func() { hookRawArgs = previous })

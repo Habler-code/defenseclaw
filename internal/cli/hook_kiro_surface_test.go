@@ -18,6 +18,8 @@ package cli
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -39,21 +41,45 @@ func TestHookAcceptsKiroHookSurface(t *testing.T) {
 
 // A Kiro hook that fails before it can run (a flag it does not know, a value
 // it does not list, a stray argument) must exit 2 so Kiro blocks instead of
-// going ahead. Other connectors keep cobra's status 1.
+// going ahead, when its policy is to fail closed: an administrator-managed
+// hook, or fail mode closed from --fail-mode, the hook sidecar or
+// DEFENSECLAW_FAIL_MODE. A fail-open Kiro hook and every other connector
+// keep cobra's status 1 (decision D6 approved the --hook-surface fix, not a
+// change of the fail-open policy).
 func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		want int
+		name    string
+		args    []string
+		sidecar string
+		env     string
+		want    int
 	}{
-		{name: "kiro unknown flag", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, want: 2},
-		{name: "kiro unlisted surface", args: []string{"--connector", "kiro", "--hook-surface", "v9"}, want: 2},
-		{name: "kiro positional argument", args: []string{"--connector", "kiro", "stray"}, want: 2},
-		{name: "kiro connector spelled with =", args: []string{"--connector=kiro", "--not-a-hook-flag"}, want: 2},
-		{name: "codex unknown flag", args: []string{"--connector", "codex", "--not-a-hook-flag"}, want: 1},
+		{name: "kiro fail closed, unknown flag", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 2},
+		{name: "kiro fail closed, unlisted surface", args: []string{"--connector", "kiro", "--fail-mode=closed", "--hook-surface", "v9"}, want: 2},
+		{name: "kiro fail closed, positional argument", args: []string{"--connector", "kiro", "--fail-mode", "closed", "stray"}, want: 2},
+		{name: "kiro managed, connector spelled with =", args: []string{"--connector=kiro", "--not-a-hook-flag", "--enterprise-managed"}, want: 2},
+		{name: "kiro closed in the hook sidecar", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"closed"}}`, want: 2},
+		{name: "kiro closed in the environment", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, env: "closed", want: 2},
+		{name: "kiro fail open keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, want: 1},
+		{name: "kiro open in the sidecar keeps 1", args: []string{"--connector", "kiro", "--hook-surface", "v9"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"}}`, want: 1},
+		{name: "codex unknown flag", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 1},
 		{name: "surface on a connector that lists none", args: []string{"--connector", "codex", "--hook-surface", "v3"}, want: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", home)
+			t.Setenv("DEFENSECLAW_FAIL_MODE", tc.env)
+			if tc.sidecar != "" {
+				if err := os.MkdirAll(filepath.Join(home, "hooks"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(home, "hooks", ".hookcfg"), []byte(tc.sidecar), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous := hookRawArgs
+			hookRawArgs = func() []string { return tc.args }
+			t.Cleanup(func() { hookRawArgs = previous })
 			cmd := newHookCmd()
 			cmd.SetArgs(tc.args)
 			cmd.SetOut(io.Discard)

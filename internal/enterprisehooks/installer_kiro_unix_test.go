@@ -101,3 +101,45 @@ func TestUnixKnownKiroRowDoesNotFollowADowngradeBelowTheFloor(t *testing.T) {
 		t.Fatalf("a row below the floor has nothing certified to keep, got %q", refused)
 	}
 }
+
+// A Kiro user enrolled by an earlier release below the certified minimum
+// (there was no floor then) keeps a hook contract lock. The floor gates new
+// enrollments only: the guardian keeps repairing that user's hooks at the
+// same version instead of refusing the row, which would make the gateway
+// refuse the user's hook calls. A version change below the floor is still
+// refused as drift, and an upgrade to the floor is followed.
+func TestStandaloneKiroKeepsRepairingARowEnrolledBelowTheFloor(t *testing.T) {
+	skipIfRoot(t)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+
+	// The earlier release's install: no floor applied, so it wrote a lock.
+	earlier := kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
+	if _, err := Install(context.Background(), earlier); err != nil {
+		t.Fatalf("earlier install: %v", err)
+	}
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")); err != nil {
+		t.Fatalf("repair of a row enrolled below the floor: %v", err)
+	}
+	if _, err := Verify(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")); err != nil {
+		t.Fatalf("verify of a row enrolled below the floor: %v", err)
+	}
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.23.0")); err == nil ||
+		!strings.Contains(err.Error(), "hook contract drift detected") {
+		t.Fatalf("a version change below the floor = %v, want the drift refusal", err)
+	}
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.24.1")); err != nil {
+		t.Fatalf("upgrade to the floor: %v", err)
+	}
+
+	// A new enrollment below the floor is still refused.
+	fresh := newTestHome(t)
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(fresh, "kiro-cli 2.22.0")); err == nil ||
+		!strings.Contains(err.Error(), "below the certified minimum 2.24.1") {
+		t.Fatalf("new enrollment below the floor = %v, want the certified-minimum refusal", err)
+	}
+}

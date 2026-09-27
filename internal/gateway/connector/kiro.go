@@ -94,7 +94,7 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := captureManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath); err != nil {
 		return fmt.Errorf("kiro capture settings backup: %w", err)
 	}
-	if err := patchKiroDefaultAgentSetting(settingsPath); err != nil {
+	if err := patchKiroDefaultAgentSetting(settingsPath, kiroManaged(opts)); err != nil {
 		return fmt.Errorf("kiro default agent setting: %w", err)
 	}
 	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath); err != nil {
@@ -123,7 +123,22 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 		}
 		discardManagedFileBackup(opts.DataDir, c.Name(), logical)
 	}
+	written := map[string]bool{}
 	for _, path := range c.agentConfigPaths(opts) {
+		written[path] = true
+	}
+	for _, path := range c.agentCleanupPaths(opts) {
+		if !written[path] {
+			// A managed install never writes the user's default agent; only
+			// remove DefenseClaw hooks an earlier build left there, and
+			// otherwise leave the file byte for byte.
+			if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil || !present {
+				if err != nil {
+					errs = append(errs, fmt.Errorf("kiro inspect agent %s: %w", path, err))
+				}
+				continue
+			}
+		}
 		logical := kiroAgentBackupLogicalName(path)
 		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
 		if err != nil {
@@ -168,8 +183,8 @@ func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 			return fmt.Errorf("kiro teardown incomplete: hook config still references %s", path)
 		}
 	}
-	for _, path := range append(c.agentConfigPaths(opts), kiroBuiltInDefaultAgentPath()) {
-		if present, err := kiroV2AgentReferencesHook(path, command); err != nil {
+	for _, path := range append(c.agentCleanupPaths(opts), kiroBuiltInDefaultAgentPath()) {
+		if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil {
 			return err
 		} else if present {
 			return fmt.Errorf("kiro teardown incomplete: agent config still references %s", path)
@@ -317,8 +332,70 @@ func (c *KiroConnector) HookScripts(opts SetupOpts) []string {
 }
 
 func (c *KiroConnector) hookCommand(opts SetupOpts) string {
-	unixCommand := filepath.Join(opts.DataDir, "hooks", kiroHookScriptName)
-	return hookInvocationCommandFor(runtime.GOOS, c.Name(), unixCommand)
+	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), "")
+}
+
+// kiroHookInvocationCommandFor renders one Kiro hook command. surface marks
+// the .kiro/hooks configuration (KiroHookSurfaceV3); the CLI 2.x agent
+// configuration is unmarked.
+//
+// On Windows both commands are the encoded system PowerShell bridge that
+// Codex and Antigravity use: it starts the GUI-subsystem launcher without a
+// window, waits for it, and exits with its status, so exit 2 (Kiro's only
+// block) reaches Kiro when Kiro runs the command through cmd.exe (Node's
+// shell: true, `cmd /C`) or directly. The earlier `& '<launcher>' ...` form
+// failed under cmd.exe ("& was unexpected at this time", exit 1) and, under
+// PowerShell, returned before the GUI launcher finished; either way Kiro
+// proceeded. A launcher that evaluates the command with `powershell -Command`
+// reports any native exit status other than 0 as 1, which no command string
+// can change; Kiro does not document which shell it uses (see the Kiro
+// connector docs).
+func kiroHookInvocationCommandFor(goos, unixCommand, surface string) string {
+	if goos != "windows" {
+		if surface != "" {
+			return unixCommand + " --hook-surface " + surface
+		}
+		return unixCommand
+	}
+	return windowsKiroHookCommandForBinary(defenseclawHookBinary(), surface)
+}
+
+func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
+	if surface == "" {
+		return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary)
+	}
+	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, "--hook-surface", surface)
+}
+
+// kiroWindowsOwnedHookCommands are the Windows Kiro commands DefenseClaw
+// wrote for every launcher it may have registered: the current encoded
+// bridge (both surfaces) and the `& '<launcher>' hook --connector kiro`
+// call-operator form earlier builds wrote. Setup replaces and teardown
+// removes an older form in the CLI 2.x agent files, whose entries are
+// otherwise matched by exact command.
+func kiroWindowsOwnedHookCommands() []string {
+	var commands []string
+	for _, binary := range nativeHookBinaryOwnershipCandidates() {
+		legacy := "& " + powershellQuoteLiteral(binary) + " " + nativeHookFlag + "kiro"
+		commands = append(commands,
+			windowsKiroHookCommandForBinary(binary, ""),
+			windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3),
+			legacy,
+			legacy+" --hook-surface "+KiroHookSurfaceV3,
+		)
+	}
+	return uniqueNonEmptyStrings(commands)
+}
+
+// kiroOwnedHookCommands are the commands DefenseClaw recognizes as its own
+// Kiro hook entries: hookScript plus, on Windows, every form in
+// kiroWindowsOwnedHookCommands.
+func kiroOwnedHookCommands(hookScript string) []string {
+	commands := []string{hookScript}
+	if runtime.GOOS == "windows" {
+		commands = append(commands, kiroWindowsOwnedHookCommands()...)
+	}
+	return uniqueNonEmptyStrings(commands)
 }
 
 // hookCommandForV3Surface marks the .kiro/hooks command so the gateway can
@@ -328,7 +405,7 @@ func (c *KiroConnector) hookCommand(opts SetupOpts) string {
 // an argument there would orphan DefenseClaw's own entry. An absent marker
 // already resolves to the 2.x veto surface, which is what that config is.
 func (c *KiroConnector) hookCommandForV3Surface(opts SetupOpts) string {
-	return c.hookCommand(opts) + " --hook-surface " + KiroHookSurfaceV3
+	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), KiroHookSurfaceV3)
 }
 
 // kiroManaged reports whether opts render the administrator-managed Kiro
@@ -381,10 +458,30 @@ func kiroWorkspaceHooksPath(opts SetupOpts) string {
 	return filepath.Join(root, ".kiro", "hooks", kiroManagedHooksName)
 }
 
+// agentConfigPaths are the CLI 2.x agent files Setup writes. A per-user
+// install also adds DefenseClaw's hooks to the user's own default agent
+// (chat.defaultAgent), which bare `kiro-cli` runs. A managed install never
+// edits the user's agents: it writes only the defenseclaw agent and makes it
+// the default (patchKiroDefaultAgentSetting), so bare `kiro-cli` runs a
+// hooked agent; an agent the user picks explicitly runs without DefenseClaw's
+// hooks (documented residual).
 func (c *KiroConnector) agentConfigPaths(opts SetupOpts) []string {
-	_ = opts
 	paths := []string{kiroManagedAgentPath()}
+	if kiroManaged(opts) {
+		return paths
+	}
 	if custom := kiroConfiguredDefaultAgentPath(); custom != "" && custom != paths[0] {
+		paths = append(paths, custom)
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
+// agentCleanupPaths are the agent files teardown and VerifyClean check: the
+// files Setup writes plus, for a managed install, the user's default agent,
+// in case an earlier build added hooks there.
+func (c *KiroConnector) agentCleanupPaths(opts SetupOpts) []string {
+	paths := c.agentConfigPaths(opts)
+	if custom := kiroConfiguredDefaultAgentPath(); custom != "" {
 		paths = append(paths, custom)
 	}
 	return uniqueNonEmptyStrings(paths)

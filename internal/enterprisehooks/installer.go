@@ -1005,11 +1005,6 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	if connector.HookContractNeedsActionOverride(resolution) {
 		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, resolution.Reason)
 	}
-	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" {
-		if admitted, reason := standaloneNotGatedVersionAdmitted(resolution); !admitted {
-			return fmt.Errorf("enterprise hooks: connector %s agent version %q is not certified for the standalone profile: %s", conn.Name(), opts.AgentVersion, reason)
-		}
-	}
 	// Native Windows managed runtimes are administrator-published regular
 	// files. Unix guardians intentionally install hardened per-user symlinks,
 	// so keep their established contract reader and digest semantics.
@@ -1021,6 +1016,18 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
+	}
+	// The standalone floor of a not-gated connector (Kiro) gates new
+	// enrollments only. A user whose hooks an earlier release installed
+	// below the floor already has a contract lock: keep repairing that
+	// user's hooks at the version they were rendered for (a version change
+	// below the floor is still refused as drift, below), because refusing
+	// the repair would leave the row not OK, the gateway would then refuse
+	// the user's hook calls, and the hook script fails open by default.
+	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" && previous.Connector == "" {
+		if admitted, reason := standaloneNotGatedVersionAdmitted(resolution); !admitted {
+			return fmt.Errorf("enterprise hooks: connector %s agent version %q is not certified for the standalone profile: %s", conn.Name(), opts.AgentVersion, reason)
+		}
 	}
 	if previous.Connector != "" {
 		current, err := connector.NewHookContractLockEntryForMode(
@@ -1036,7 +1043,13 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 			if standaloneAcceptsAgentVersionChange(resolution) {
 				return nil
 			}
-			return fmt.Errorf("enterprise hooks: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+			floorNote := ""
+			if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" {
+				if _, reason := standaloneNotGatedVersionAdmitted(resolution); reason != "" {
+					floorNote = "; " + reason
+				}
+			}
+			return fmt.Errorf("enterprise hooks: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s%s", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID, floorNote)
 		}
 	}
 	return nil

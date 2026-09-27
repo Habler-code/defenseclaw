@@ -126,3 +126,72 @@ func TestKiroPerUserFootprintIsUnchanged(t *testing.T) {
 		t.Fatalf("per-user scope = %q, want workspace", scope)
 	}
 }
+
+// A managed install never edits the user's own agents. With a custom
+// chat.defaultAgent, it leaves that agent byte for byte and makes the
+// defenseclaw agent the default instead, so bare kiro-cli still runs a
+// hooked agent; teardown puts the user's setting back.
+func TestKiroManagedSetupLeavesTheUsersDefaultAgentAlone(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	custom := filepath.Join(home, "agents", "mine.json")
+	settings := filepath.Join(home, "settings", "cli.json")
+	for path, body := range map[string]string{
+		custom:   "{\n  \"name\": \"mine\",\n  \"tools\": [\"*\"]\n}\n",
+		settings: "{\"chat.defaultAgent\": \"mine\"}\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	customBefore, _ := os.ReadFile(custom)
+	settingsBefore, _ := os.ReadFile(settings)
+
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "closed", ManagedEnterprise: true}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if after, _ := os.ReadFile(custom); string(after) != string(customBefore) {
+		t.Fatalf("managed Setup edited the user's agent:\n%s", after)
+	}
+	assertKiroDefaultAgentSetting(t, settings)
+	assertKiroV2AgentHooks(t, filepath.Join(home, "agents", kiroManagedAgentName+".json"), conn.hookCommand(opts))
+	for _, path := range conn.AgentPaths(opts).PatchedFiles {
+		if path == custom {
+			t.Fatalf("managed footprint lists the user's agent %s", path)
+		}
+	}
+	present, err := conn.ownedHookContractPresent(opts)
+	if err != nil || !present {
+		t.Fatalf("managed hook registration present = %v, %v", present, err)
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+	if after, _ := os.ReadFile(custom); string(after) != string(customBefore) {
+		t.Fatalf("managed teardown edited the user's agent:\n%s", after)
+	}
+	if after, _ := os.ReadFile(settings); string(after) != string(settingsBefore) {
+		t.Fatalf("managed teardown did not restore the user's default agent: %s", after)
+	}
+
+	// A per-user install still guards the custom default agent itself.
+	perUser := opts
+	perUser.ManagedEnterprise = false
+	if err := conn.Setup(context.Background(), perUser); err != nil {
+		t.Fatalf("per-user Setup: %v", err)
+	}
+	if present, err := kiroV2AgentReferencesHook(custom, conn.hookCommand(perUser)); err != nil || !present {
+		t.Fatalf("per-user Setup must still hook the custom default agent: %v %v", present, err)
+	}
+}

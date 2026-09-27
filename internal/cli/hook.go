@@ -62,7 +62,7 @@ func newHookCmd() *cobra.Command {
 		Short:  "Run an agent guardrail hook (invoked by the agent runtime)",
 		Hidden: true,
 		Args: func(cmd *cobra.Command, args []string) error {
-			return hookFailure(hookFailureConnector(connector), cobra.NoArgs(cmd, args))
+			return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, cobra.NoArgs(cmd, args))
 		},
 		// The hook is a short-lived per-event subprocess. Skip the daemon's
 		// PersistentPreRunE/PostRun (config load and audit store open):
@@ -72,7 +72,7 @@ func newHookCmd() *cobra.Command {
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateHookSurface(connector, hookSurface); err != nil {
-				return hookFailure(connector, err)
+				return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, err)
 			}
 			if foreignHookCheck {
 				// The standalone Amp and OpenCode plugins ask for the
@@ -93,7 +93,7 @@ func newHookCmd() *cobra.Command {
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {
-					return hookFailure(connector, fmt.Errorf("--input-file is only supported for the Cursor Windows hook adapter"))
+					return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, fmt.Errorf("--input-file is only supported for the Cursor Windows hook adapter"))
 				}
 				var err error
 				input, err = openCursorHookInputFile(opts.HookDir, inputFile)
@@ -136,7 +136,7 @@ func newHookCmd() *cobra.Command {
 	// A flag the hook does not know (or a malformed value) fails before
 	// RunE. Report it with the connector's failure status, not cobra's 1.
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return hookFailure(hookFailureConnector(connector), err)
+		return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, err)
 	})
 
 	return cmd
@@ -163,52 +163,112 @@ func validateHookSurface(connectorName, surface string) error {
 	return fmt.Errorf("--hook-surface %q is not valid for connector %q", surface, connectorName)
 }
 
+// hookFailureContext is what a hook invocation that failed before hookexec
+// ran says about itself: the flags parsed before the failure. A flag error
+// stops parsing, so resolve completes them from the raw arguments.
+type hookFailureContext struct {
+	connector string
+	failMode  string
+	managed   bool
+}
+
+func (c hookFailureContext) resolve() hookFailureContext {
+	if strings.TrimSpace(c.connector) == "" {
+		c.connector = hookRawFlagValue("connector")
+	}
+	if strings.TrimSpace(c.failMode) == "" {
+		c.failMode = hookRawFlagValue("fail-mode")
+	}
+	if !c.managed {
+		c.managed = hookRawBoolFlag("enterprise-managed")
+	}
+	return c
+}
+
 // hookFailureExitCode is the exit status of a hook invocation that fails
 // before hookexec runs: an unknown flag, a malformed or unlisted flag value,
 // a positional argument. Cobra reports these as 1. Kiro treats every status
 // other than 0 and 2 as a failed hook, shows its stderr as a warning and
-// lets the prompt or tool call go ahead (kiro.dev/docs/hooks/actions), so a
-// Kiro hook that failed that way would allow everything. Kiro failures exit
-// 2, the only status Kiro honors as a block. Other connectors keep 1.
-func hookFailureExitCode(connectorName string) int {
-	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") {
+// lets the prompt or tool call go ahead (kiro.dev/docs/hooks/actions). A
+// Kiro hook that fails closed (an administrator-managed hook, or fail mode
+// closed from the flag, the hook sidecar or DEFENSECLAW_FAIL_MODE, resolved
+// as hookexec resolves it) exits 2, the only status Kiro honors as a block.
+// A fail-open Kiro hook and every other connector keep 1.
+func hookFailureExitCode(failure hookFailureContext) int {
+	failure = failure.resolve()
+	if strings.EqualFold(strings.TrimSpace(failure.connector), "kiro") && hookPreRunFailsClosed(failure) {
 		return 2
 	}
 	return 1
 }
 
+// hookPreRunFailsClosed reports whether the failed invocation's policy is to
+// fail closed, with buildHookOptionsForRuntime's precedence: a managed hook
+// always does; otherwise --fail-mode, else the sidecar, then an inherited
+// DEFENSECLAW_FAIL_MODE (for a packaged hook only when it tightens).
+func hookPreRunFailsClosed(failure hookFailureContext) bool {
+	if failure.managed || implicitEnterpriseManagedHook() {
+		return true
+	}
+	home, trusted := trustedNativeHookHome()
+	if !trusted {
+		home = config.DefaultDataPath()
+	}
+	mode := strings.TrimSpace(failure.failMode)
+	if mode == "" {
+		mode = hookSidecarFailMode(readHookSidecar(filepath.Join(home, "hooks", ".hookcfg")), failure.connector)
+	}
+	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" && (!trusted || strings.EqualFold(strings.TrimSpace(v), "closed")) {
+		mode = v
+	}
+	return strings.EqualFold(strings.TrimSpace(mode), "closed")
+}
+
 // hookFailure labels a pre-run hook failure with the connector's failure
 // status (see hookFailureExitCode).
-func hookFailure(connectorName string, err error) error {
+func hookFailure(failure hookFailureContext, err error) error {
 	if err == nil {
 		return nil
 	}
-	if code := hookFailureExitCode(connectorName); code != 1 {
+	if code := hookFailureExitCode(failure); code != 1 {
 		return withExitCode(err, code)
 	}
 	return err
 }
 
-// hookFailureConnector is the connector a failed invocation names: the
-// parsed --connector value when parsing reached it, otherwise the value in
-// the raw arguments.
-func hookFailureConnector(parsed string) string {
-	if strings.TrimSpace(parsed) != "" {
-		return parsed
-	}
+// hookRawFlagValue returns --name's value in the raw arguments ("--name v"
+// or "--name=v"), stopping at "--".
+func hookRawFlagValue(name string) string {
 	args := hookRawArgs()
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
 		case arg == "--":
 			return ""
-		case arg == "--connector" && index+1 < len(args):
+		case arg == "--"+name && index+1 < len(args):
 			return args[index+1]
-		case strings.HasPrefix(arg, "--connector="):
-			return strings.TrimPrefix(arg, "--connector=")
+		case strings.HasPrefix(arg, "--"+name+"="):
+			return strings.TrimPrefix(arg, "--"+name+"=")
 		}
 	}
 	return ""
+}
+
+// hookRawBoolFlag reports whether the raw arguments set the boolean --name.
+func hookRawBoolFlag(name string) bool {
+	for _, arg := range hookRawArgs() {
+		if arg == "--" {
+			return false
+		}
+		if arg == "--"+name {
+			return true
+		}
+		if value, ok := strings.CutPrefix(arg, "--"+name+"="); ok {
+			set, err := strconv.ParseBool(value)
+			return err == nil && set
+		}
+	}
+	return false
 }
 
 const cursorHookInputMaxBytes int64 = 1 << 20
