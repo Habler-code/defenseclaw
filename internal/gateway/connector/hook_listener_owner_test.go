@@ -318,13 +318,15 @@ s=socket.socket(); s.bind(("127.0.0.1",%d)); s.listen(1); print("up",flush=True)
 	if _, err := stdout.Read(buf); err != nil {
 		t.Skipf("foreign listener did not start: %v", err)
 	}
-	check := func(uid string, target int) (string, bool) {
-		cmd := exec.Command("/usr/bin/sudo", "-u", "#"+uid, "/bin/bash", "-c",
+	checkMode := func(uid string, target int, managed string) (string, bool) {
+		cmd := exec.Command("/usr/bin/sudo", "-u", "#"+uid, "/usr/bin/env", "-i",
+			"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "DEFENSECLAW_MANAGED_HOOK="+managed, "/bin/bash", "-c",
 			`. "$0"; defenseclaw_verify_gateway_listener "$1" || { printf '%s' "$DEFENSECLAW_LISTENER_REASON"; exit 1; }`,
 			helperPath, fmt.Sprintf("127.0.0.1:%d", target))
 		out, err := cmd.Output()
 		return strings.TrimSpace(string(out)), err == nil
 	}
+	check := func(uid string, target int) (string, bool) { return checkMode(uid, target, "") }
 	if out, ok := check(raw, port); !ok {
 		t.Fatalf("root-owned listener refused for uid %s: %s", raw, out)
 	}
@@ -333,6 +335,17 @@ s=socket.socket(); s.bind(("127.0.0.1",%d)); s.listen(1); print("up",flush=True)
 	}
 	if out, ok := check(raw, port+1); !ok {
 		t.Fatalf("owner's own listener refused: %s", out)
+	}
+	// A managed hook trusts the root listener (the managed gateway) and
+	// refuses the listener its own user holds, as well as another user's.
+	if out, ok := checkMode(raw, port, "1"); !ok {
+		t.Fatalf("managed hook refused the root-owned listener for uid %s: %s", raw, out)
+	}
+	if out, ok := checkMode(raw, port+1, "1"); ok || !strings.Contains(out, "not the managed gateway") {
+		t.Fatalf("managed hook check of its own user's listener = ok %v reason %q, want refusal", ok, out)
+	}
+	if out, ok := checkMode(other, port+1, "1"); ok || !strings.Contains(out, "held by") {
+		t.Fatalf("managed hook check of another user's listener = ok %v reason %q, want refusal", ok, out)
 	}
 }
 
