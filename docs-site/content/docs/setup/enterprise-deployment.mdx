@@ -1295,7 +1295,10 @@ Cursor has no equivalent setting. On Windows managed endpoints the DefenseClaw
 workspace-level (`.cursor\hooks.json`, `.claude\settings*.json`) `preToolUse`
 hook is registered that the administrator has not approved. The denial names
 the file and the handler's `sha256` digest. Files that cannot be verified
-(links, files over 1 MiB, invalid JSON) also deny. To approve a handler, add its
+(links and other reparse points, files over 1 MiB, invalid JSON) also deny, and
+so does a workspace whose folders cannot all be checked: more than 32 distinct
+folders, or a folder that Cursor reports as a remote or relative path rather
+than a local one. To approve a handler, add its
 digest to `connector_hooks.cursor.approved_foreign_hooks` and let the guardian
 reconcile; the allowlist is published in the protected Cursor machine state.
 
