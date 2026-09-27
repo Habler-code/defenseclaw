@@ -4527,6 +4527,26 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_KIRO_SHELL_CHILD",
+      "category": "test_fixture",
+      "purpose": "Turns the Windows connector test binary into a stand-in for the GUI-subsystem hook launcher when the Kiro shell-boundary test runs a rendered Kiro hook command; the value names the hook surface it expects.",
+      "default": "unset",
+      "accepted_values": [
+        "v3",
+        "v2",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/kiro_windows_shell_test.go",
+          "description": "Test-only child-process selector for the Kiro Windows shell-boundary test"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_LEAK",
       "category": "test_fixture",
       "purpose": "Marker a test sets in the parent environment to prove the per-user apply-target worker does not inherit it.",
