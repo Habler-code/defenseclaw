@@ -846,10 +846,18 @@ func validateOmnigentInterpreter(path string) error {
 
 func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string) string {
 	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+	// The listener check comes from the embedded hooks/_hardening.sh, so it
+	// can only be missing in a defective build; the module then refuses
+	// every request as unverifiable instead of skipping the check.
+	listenerCheck, err := hookListenerCheckProgram()
+	if err != nil {
+		listenerCheck = ""
+	}
 	replacer := strings.NewReplacer(
 		"{{API_ADDR_B64}}", encode(strings.TrimSpace(apiAddr)),
 		"{{TOKEN_FILE_B64}}", encode(tokenFile),
 		"{{FAIL_MODE_B64}}", encode(normalizeHookFailMode(failMode)),
+		"{{LISTENER_CHECK_B64}}", encode(listenerCheck),
 	)
 	return replacer.Replace(template)
 }

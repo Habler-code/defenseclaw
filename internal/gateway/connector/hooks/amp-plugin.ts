@@ -16,6 +16,7 @@
 // does not read secrets or policy from process environment variables.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
+import { execFile } from 'node:child_process'
 import { userInfo } from 'node:os'
 
 const DC_API_ADDR = "{{.APIAddr}}"
@@ -24,6 +25,10 @@ const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
+const DC_LISTENER_CHECK = "{{.ListenerCheckJS}}"
+const DC_MANAGED_HOOK = "{{if .Managed}}1{{end}}"
+const DC_LISTENER_CHECK_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+const DC_LISTENER_UNVERIFIED = "cannot verify the owner of the gateway listener"
 // Gateway maxBodyMiddleware accepts 1 MiB. Leave headroom for UTF-8 encoding
 // differences and future envelope fields.
 const DC_MAX_BODY_BYTES = 900 * 1024
@@ -106,6 +111,42 @@ async function scopedHookToken(): Promise<string> {
 	const token = raw.trim()
 	if (!DC_TOKEN_PATTERN.test(token)) throw new Error("invalid scoped hook credential")
 	return token
+}
+
+// listenerRefusal resolves to "" when the gateway port may receive the scoped
+// bearer, and otherwise to the reason it may not. It runs the shell hooks'
+// listener-owner check (DC_LISTENER_CHECK, the self-contained block of
+// hooks/_hardening.sh substituted at setup time) on Linux and macOS: every
+// listener on the port must belong to this user or root for a per-user
+// install, or to the managed gateway for a managed one, so another local user
+// who binds the port while the gateway is down never receives the bearer or
+// the payload. The check runs with a fixed PATH and environment, so the
+// agent's environment cannot choose the tools it relies on.
+function listenerRefusal(): Promise<string> {
+	if (process.platform !== "linux" && process.platform !== "darwin") return Promise.resolve("")
+	return new Promise((resolve) => {
+		try {
+			execFile(
+				"/bin/sh",
+				["-c", DC_LISTENER_CHECK, "defenseclaw-listener-check", DC_API_ADDR],
+				{
+					env: { PATH: DC_LISTENER_CHECK_PATH, LC_ALL: "C", DEFENSECLAW_MANAGED_HOOK: DC_MANAGED_HOOK },
+					timeout: 5000,
+					maxBuffer: 64 * 1024,
+					windowsHide: true,
+				},
+				(error, stdout) => {
+					if (!error) {
+						resolve("")
+						return
+					}
+					resolve(String(stdout || "").trim() || DC_LISTENER_UNVERIFIED)
+				},
+			)
+		} catch {
+			resolve(DC_LISTENER_UNVERIFIED)
+		}
+	})
 }
 
 // agent.end includes the user prompt plus the turn transcript. Project only
@@ -270,6 +311,11 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 			return { action: "allow" }
 		}
+
+		// A listener that is not the trusted gateway is a transport failure:
+		// nothing is sent, and the fail mode decides.
+		const refusal = await listenerRefusal()
+		if (refusal) return failureResponse(refusal)
 
 		const controller = new AbortController()
 		const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS)

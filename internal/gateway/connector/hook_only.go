@@ -1730,11 +1730,16 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
 		failMode = "open"
 	}
+	listenerCheck, err := hookListenerCheckProgram()
+	if err != nil {
+		return fmt.Errorf("%s render plugin listener check: %w", c.name, err)
+	}
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:     opts.APIAddr,
-		TokenFileJS: javaScriptStringContent(tokenPath),
-		FailMode:    failMode,
-		Managed:     opts.ManagedEnterprise,
+		APIAddr:         opts.APIAddr,
+		TokenFileJS:     javaScriptStringContent(tokenPath),
+		ListenerCheckJS: javaScriptStringContent(listenerCheck),
+		FailMode:        failMode,
+		Managed:         opts.ManagedEnterprise,
 	})
 	if err != nil {
 		return fmt.Errorf("%s render plugin template: %w", c.name, err)

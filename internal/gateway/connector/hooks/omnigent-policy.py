@@ -15,6 +15,8 @@ import json
 import math
 import os
 import re
+import subprocess
+import sys
 import urllib.error
 import urllib.request
 from typing import Any
@@ -42,6 +44,9 @@ def _decoded(value: str) -> str:
 _API_ADDR = _decoded("{{API_ADDR_B64}}")
 _TOKEN_FILE = _decoded("{{TOKEN_FILE_B64}}")
 _FAIL_MODE = _decoded("{{FAIL_MODE_B64}}")
+_LISTENER_CHECK = _decoded("{{LISTENER_CHECK_B64}}")
+_LISTENER_CHECK_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+_LISTENER_UNVERIFIED = "cannot verify the owner of the gateway listener"
 _ENDPOINT = f"http://{_API_ADDR}/api/v1/omnigent/hook"
 _TIMEOUT_SECONDS = 10
 _MAX_RESPONSE_BYTES = 1024 * 1024
@@ -376,6 +381,39 @@ def _identity_headers() -> dict[str, str]:
     return headers
 
 
+def _listener_refusal() -> str:
+    """Return why the gateway port must not receive the credential, or "".
+
+    Runs the shell hooks' listener-owner check (the self-contained block of
+    hooks/_hardening.sh, substituted at setup time) on Linux and macOS: every
+    listener on the gateway port must belong to this user or root, so another
+    local user who binds the port while the gateway is down never receives
+    the credential or the request. The check runs with a fixed PATH and
+    environment, so the process environment cannot choose the tools it
+    relies on.
+    """
+    if not (sys.platform.startswith("linux") or sys.platform == "darwin"):
+        return ""
+    if not _LISTENER_CHECK:
+        return _LISTENER_UNVERIFIED
+    try:
+        completed = subprocess.run(
+            ["/bin/sh", "-c", _LISTENER_CHECK, "defenseclaw-listener-check", _API_ADDR],
+            env={"PATH": _LISTENER_CHECK_PATH, "LC_ALL": "C"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _LISTENER_UNVERIFIED
+    if completed.returncode == 0:
+        return ""
+    reason = completed.stdout.decode("utf-8", "replace").strip()
+    return reason or _LISTENER_UNVERIFIED
+
+
 def _scoped_hook_token() -> str:
     """Load one strict credential without exposing path, bytes, or read errors."""
     with open(_TOKEN_FILE, "rb") as stream:
@@ -401,6 +439,11 @@ def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:
     try:
         if not _API_ADDR:
             return _failure("bridge is not configured")
+        # A listener that is not the trusted gateway is a transport failure:
+        # nothing is sent, and the fail mode decides.
+        refusal = _listener_refusal()
+        if refusal:
+            return _failure(refusal)
         payload = _payload(event)
         if payload.get("omnigent_content_truncated"):
             return _failure("request content exceeds bridge limit")
