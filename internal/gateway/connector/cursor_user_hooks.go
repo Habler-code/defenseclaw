@@ -155,10 +155,58 @@ func removeCursorHookRegistrations(data []byte, owned cursorHookCommandMatcher) 
 		}
 		hooks[event] = kept
 	}
-	if !cursorJSONValuesEqual(original, updated) {
+	if !cursorJSONValuesSameText(original, updated) {
 		return nil, nil, errors.New("Cursor hooks JSON: removing DefenseClaw entries would change other content")
 	}
 	return out, removed, nil
+}
+
+// cursorJSONValuesSameText reports whether left and right, decoded with
+// UseNumber, are the same JSON value with every number written the same way.
+// The check above compares two decodings of the same bytes, so a kept number
+// is written identically in both. Comparing numbers as text keeps the check
+// linear in the size of the file: cursorJSONValuesEqual parses each number as
+// an exact fraction, which takes milliseconds for one number such as 1e999999
+// and fails for a larger exponent, and the file is the user's.
+func cursorJSONValuesSameText(left, right interface{}) bool {
+	switch leftValue := left.(type) {
+	case nil:
+		return right == nil
+	case bool:
+		rightValue, ok := right.(bool)
+		return ok && leftValue == rightValue
+	case string:
+		rightValue, ok := right.(string)
+		return ok && leftValue == rightValue
+	case json.Number:
+		rightValue, ok := right.(json.Number)
+		return ok && leftValue == rightValue
+	case []interface{}:
+		rightValue, ok := right.([]interface{})
+		if !ok || len(leftValue) != len(rightValue) {
+			return false
+		}
+		for index := range leftValue {
+			if !cursorJSONValuesSameText(leftValue[index], rightValue[index]) {
+				return false
+			}
+		}
+		return true
+	case map[string]interface{}:
+		rightValue, ok := right.(map[string]interface{})
+		if !ok || len(leftValue) != len(rightValue) {
+			return false
+		}
+		for key, value := range leftValue {
+			rightItem, exists := rightValue[key]
+			if !exists || !cursorJSONValuesSameText(value, rightItem) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 // matchedCursorHookCommand returns the command field value by which matcher

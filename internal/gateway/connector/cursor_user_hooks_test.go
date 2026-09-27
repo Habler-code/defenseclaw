@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
@@ -383,6 +384,39 @@ func TestRemoveCursorPerUserHookRegistrationsKeepsTheByteOrderMark(t *testing.T)
 	}
 	if want := "\xef\xbb\xbf{\"version\":1,\"hooks\":{\"preToolUse\":[{\"command\":\"a.sh\"}]}}"; string(got) != want || len(removed) != 1 {
 		t.Fatalf("got (%q, %#v), want %q and one removal", got, removed, want)
+	}
+}
+
+// The check that the result is the original document without the removed
+// entries runs on the user's own file in the LocalSystem guardian, so its cost
+// must stay in proportion to the file's size. Kept numbers are compared as
+// they are written: an exponent too large for an exact fraction is kept, and
+// many large exponents do not slow the cleanup down (each one took about
+// 16 ms to compare as a fraction).
+func TestRemoveCursorPerUserHookRegistrationsKeepsNumbersOfAnySize(t *testing.T) {
+	f := newCursorUserHooksFixture(t)
+	command := cursorUserHooksJSONString(t, f.setupPerUser(t))
+	for name, numbers := range map[string]string{
+		"exponents beyond an exact fraction": "1e1000001, -2.5E-1000001",
+		"many large exponents":               strings.TrimSuffix(strings.Repeat("1e999999, ", 300), ", "),
+	} {
+		t.Run(name, func(t *testing.T) {
+			kept := `{"command":"a.sh","limits":[` + numbers + `]}`
+			data := `{"version":1,"limits":[` + numbers + `],"hooks":{"preToolUse":[{"command":` + command + `},` + kept + `]}}`
+			want := `{"version":1,"limits":[` + numbers + `],"hooks":{"preToolUse":[` + kept + `]}}`
+			started := time.Now()
+			got, removed, err := f.remove(t, []byte(data))
+			elapsed := time.Since(started)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != want || len(removed) != 1 {
+				t.Fatalf("got (%q, %#v), want the numbers kept as written and one removal", got, removed)
+			}
+			if elapsed > 2*time.Second {
+				t.Fatalf("removal took %v for a %d-byte file", elapsed, len(data))
+			}
+		})
 	}
 }
 
