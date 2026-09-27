@@ -16,11 +16,19 @@ import (
 
 func openDescriptorCount(t *testing.T) int {
 	t.Helper()
-	entries, err := os.ReadDir("/dev/fd")
+	// List the names only. os.ReadDir also stats each entry, and fstatat of
+	// some descriptors under /dev/fd (the watcher's kqueue among them) fails
+	// with EBADF on current macOS runners.
+	dir, err := os.Open("/dev/fd")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return len(entries)
+	defer dir.Close()
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(names)
 }
 
 // The guardian opens a watched directory and its named regular files, not
