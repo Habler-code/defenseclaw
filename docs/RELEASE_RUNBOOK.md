@@ -2,7 +2,9 @@
 
 A release is one run of the Release workflow. Installed clients upgrade by
 running the latest release's installer, so nothing else has to be updated
-between versions.
+between versions. The one exception is a single run after the first 1.x
+release, which points 0.8.8–0.8.10 upgrades at it (see "One-time: move
+0.8.8–0.8.10 upgrades to 1.x" below).
 
 ## Cut a release
 
