@@ -185,3 +185,67 @@ func TestCodexTeardownKeepsTheUsersDisabledHooksFlag(t *testing.T) {
 		t.Fatalf("DefenseClaw hooks survived teardown:\n%s", raw)
 	}
 }
+
+// The machine pin sets the hooks key. Codex 0.124 through 0.128 still read the
+// deprecated codex_hooks name and ignore that pin, so a user-level
+// codex_hooks = false must keep failing setup and the guardian check.
+func TestCodexHooksPinDoesNotRelaxTheDeprecatedCodexHooksFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows publishes the pin with its managed hook matrix")
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("model_provider = \"openai\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	originalInspector := codexPolicyInspector
+	originalPinned := codexUserHooksFeaturePinned
+	t.Cleanup(func() {
+		CodexConfigPathOverride = ""
+		codexPolicyInspector = originalInspector
+		codexUserHooksFeaturePinned = originalPinned
+	})
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{}, nil
+	}
+	codexUserHooksFeaturePinned = func(SetupOpts) bool { return true }
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:           dir,
+		ProxyAddr:         "127.0.0.1:4000",
+		APIAddr:           "127.0.0.1:18970",
+		ManagedEnterprise: true,
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("pinned managed Setup: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	features, _ := cfg["features"].(map[string]interface{})
+	if features == nil {
+		features = map[string]interface{}{}
+	}
+	features["codex_hooks"] = false
+	cfg["features"] = features
+	disabled, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, disabled, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := c.ownedHookContractPresent(opts); err != nil || present {
+		t.Fatalf("guardian presence with codex_hooks = false under the pin = %t, %v; want absent", present, err)
+	}
+	if err := c.Setup(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "codex_hooks") {
+		t.Fatalf("pinned Setup with codex_hooks = false = %v, want the deprecated-flag refusal", err)
+	}
+}

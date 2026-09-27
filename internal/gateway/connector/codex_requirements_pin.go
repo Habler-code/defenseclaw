@@ -43,6 +43,19 @@ var codexUserHooksFeaturePinned = func(opts SetupOpts) bool {
 	return codexRequirementsPinHooks(raw)
 }
 
+// codexUserHooksFlagInactive reports whether a user-level [features] key set
+// to false leaves Codex hooks on because the machine requirements pin
+// hooks = true. Only the hooks key qualifies. Codex 0.124 through 0.128 (hook
+// contract codex-hooks-v1) name the feature codex_hooks and skip a hooks
+// requirement they do not know, so there a user codex_hooks = false still
+// turns hooks off while hooks = false is itself ignored; from 0.129 the pin
+// covers both. Treating codex_hooks = false as active is therefore right for
+// every supported build, and the user can resolve it by deleting the
+// deprecated key.
+func codexUserHooksFlagInactive(key string, hooksPinned bool) bool {
+	return hooksPinned && key == "hooks"
+}
+
 // codexRequirementsPinHooks reports whether a requirements document sets
 // [features] hooks = true.
 func codexRequirementsPinHooks(raw []byte) bool {
