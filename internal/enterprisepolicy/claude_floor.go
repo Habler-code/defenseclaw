@@ -78,7 +78,7 @@ var claudeVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-
 // VersionFloorState is Claude Code's requiredMinimumVersion as the
 // claudecode machine policy report shows it.
 type VersionFloorState struct {
-	// Mode is enterprise.machine_policy.claudecode.version_floor.
+	// Mode is enterprise.machine_policy.connectors.claudecode.version_floor.
 	Mode string `json:"mode"`
 	// Floor is the lowest Claude Code version with a verified hook contract.
 	Floor string `json:"floor"`
@@ -573,7 +573,7 @@ func claudeFloorValueText(value any) string {
 // administrator's own policy tool.
 func exportClaudeVersionFloor(opts Options) ([]byte, error) {
 	if opts.claudeVersionFloorMode() == config.ClaudeVersionFloorOff {
-		return nil, errors.New("the Claude Code version floor is off (enterprise.machine_policy.claudecode.version_floor)")
+		return nil, errors.New("the Claude Code version floor is off (enterprise.machine_policy.connectors.claudecode.version_floor)")
 	}
 	floor := ClaudeVersionFloor()
 	if floor == "" {

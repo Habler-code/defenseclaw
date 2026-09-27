@@ -89,7 +89,7 @@ type Options struct {
 	// Policies are the resolved per-connector enterprise.machine_policy
 	// settings; a connector missing from the map uses the secure defaults.
 	Policies map[string]config.ResolvedConnectorPolicy
-	// ClaudeVersionFloor is enterprise.machine_policy.claudecode.version_floor
+	// ClaudeVersionFloor is enterprise.machine_policy.connectors.claudecode.version_floor
 	// (enforce, report or off); "" means the default, enforce.
 	ClaudeVersionFloor string
 	// Now is injectable for tests.

@@ -756,8 +756,11 @@ func TestStandaloneOptionsCarryTheVersionFloorMode(t *testing.T) {
 	if err != nil || opts.ClaudeVersionFloor != config.ClaudeVersionFloorEnforce {
 		t.Fatalf("default mode: %q %v", opts.ClaudeVersionFloor, err)
 	}
-	cfg.Enterprise.MachinePolicy.ClaudeCode.VersionFloor = "Report"
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"claudecode": {VersionFloor: "Report"}}
 	if opts, err = StandaloneOptions(layout, "", "", cfg); err != nil || opts.ClaudeVersionFloor != config.ClaudeVersionFloorReport {
 		t.Fatalf("configured mode: %q %v", opts.ClaudeVersionFloor, err)
+	}
+	if policy := opts.PolicyFor("claudecode"); policy.Ownership != config.MachinePolicyOwnershipMerge {
+		t.Fatalf("version_floor alone must leave the other claudecode keys at their defaults: %+v", policy)
 	}
 }

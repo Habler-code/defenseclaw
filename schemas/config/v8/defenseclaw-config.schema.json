@@ -3740,6 +3740,36 @@
         }
       }
     },
+    "enterpriseClaudeCodeConnectorPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "enterprise.machine_policy.connectors.claudecode: the connector policy keys plus version_floor, which only Claude Code has.",
+      "properties": {
+        "ownership": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/ownership"
+        },
+        "managed_hooks_only": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/managed_hooks_only"
+        },
+        "foreign_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/foreign_hooks"
+        },
+        "higher_precedence_sources": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/higher_precedence_sources"
+        },
+        "allowed_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/allowed_hooks"
+        },
+        "version_floor": {
+          "type": "string",
+          "enum": [
+            "enforce",
+            "report",
+            "off"
+          ]
+        }
+      }
+    },
     "enterprise": {
       "type": "object",
       "additionalProperties": false,
@@ -3889,22 +3919,13 @@
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9_-]{0,63}$"
               },
+              "properties": {
+                "claudecode": {
+                  "$ref": "#/$defs/enterpriseClaudeCodeConnectorPolicy"
+                }
+              },
               "additionalProperties": {
                 "$ref": "#/$defs/enterpriseConnectorPolicy"
-              }
-            },
-            "claudecode": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "version_floor": {
-                  "type": "string",
-                  "enum": [
-                    "enforce",
-                    "report",
-                    "off"
-                  ]
-                }
               }
             }
           }

@@ -107,7 +107,7 @@ const (
 	HigherPrecedenceWarn = "warn"
 
 	// Claude Code version floor modes
-	// (enterprise.machine_policy.claudecode.version_floor).
+	// (enterprise.machine_policy.connectors.claudecode.version_floor).
 	ClaudeVersionFloorEnforce = "enforce"
 	ClaudeVersionFloorReport  = "report"
 	ClaudeVersionFloorOff     = "off"
@@ -122,30 +122,31 @@ type EnterpriseConnectorPolicy struct {
 	ForeignHooks            string   `mapstructure:"foreign_hooks"             yaml:"foreign_hooks,omitempty"`
 	HigherPrecedenceSources string   `mapstructure:"higher_precedence_sources" yaml:"higher_precedence_sources,omitempty"`
 	AllowedHooks            []string `mapstructure:"allowed_hooks"             yaml:"allowed_hooks,omitempty"`
+	// VersionFloor is valid only in connectors.claudecode (validation
+	// refuses it in default and in any other connector). It controls
+	// DefenseClaw's requiredMinimumVersion drop-in
+	// (managed-settings.d/00-defenseclaw-version-floor.json), which makes
+	// Claude Code builds older than the lowest verified hook contract refuse
+	// to start. enforce (default) writes it while no administrator source
+	// sets requiredMinimumVersion; report only reports; off does neither.
+	// It does not inherit from default.
+	VersionFloor string `mapstructure:"version_floor" yaml:"version_floor,omitempty"`
 }
+
+// versionFloorConnector is the only connector with a version_floor key.
+const versionFloorConnector = "claudecode"
 
 // EnterpriseMachinePolicyConfig holds the default connector policy and
 // per-connector overrides.
 type EnterpriseMachinePolicyConfig struct {
 	Default    EnterpriseConnectorPolicy            `mapstructure:"default"    yaml:"default,omitempty"`
 	Connectors map[string]EnterpriseConnectorPolicy `mapstructure:"connectors" yaml:"connectors,omitempty"`
-	ClaudeCode EnterpriseClaudeCodePolicyConfig     `mapstructure:"claudecode" yaml:"claudecode,omitempty"`
 }
 
-// EnterpriseClaudeCodePolicyConfig holds the machine policy settings only
-// Claude Code has.
-type EnterpriseClaudeCodePolicyConfig struct {
-	// VersionFloor controls DefenseClaw's requiredMinimumVersion drop-in
-	// (managed-settings.d/00-defenseclaw-version-floor.json), which makes
-	// Claude Code builds older than the lowest verified hook contract refuse
-	// to start. enforce (default) writes it while no administrator source
-	// sets requiredMinimumVersion; report only reports; off does neither.
-	VersionFloor string `mapstructure:"version_floor" yaml:"version_floor,omitempty"`
-}
-
-// ClaudeVersionFloor returns the effective Claude Code version floor mode.
+// ClaudeVersionFloor returns the effective Claude Code version floor mode
+// (enterprise.machine_policy.connectors.claudecode.version_floor).
 func (m EnterpriseMachinePolicyConfig) ClaudeVersionFloor() string {
-	if value := strings.ToLower(strings.TrimSpace(m.ClaudeCode.VersionFloor)); value != "" {
+	if value := strings.ToLower(strings.TrimSpace(m.Connectors[versionFloorConnector].VersionFloor)); value != "" {
 		return value
 	}
 	return ClaudeVersionFloorEnforce
@@ -379,14 +380,13 @@ func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
 }
 
 func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
-	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0 &&
-		strings.TrimSpace(m.ClaudeCode.VersionFloor) == ""
+	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0
 }
 
 func connectorPolicyEmpty(p EnterpriseConnectorPolicy) bool {
 	return strings.TrimSpace(p.Ownership) == "" && strings.TrimSpace(p.ManagedHooksOnly) == "" &&
 		strings.TrimSpace(p.ForeignHooks) == "" && strings.TrimSpace(p.HigherPrecedenceSources) == "" &&
-		len(p.AllowedHooks) == 0
+		len(p.AllowedHooks) == 0 && strings.TrimSpace(p.VersionFloor) == ""
 }
 
 // validateEnterpriseConfig checks a managed deployment's enterprise block.
@@ -470,9 +470,6 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return err
 		}
 	}
-	if err := oneOf("enterprise.machine_policy.claudecode.version_floor", e.MachinePolicy.ClaudeCode.VersionFloor, ClaudeVersionFloorEnforce, ClaudeVersionFloorReport, ClaudeVersionFloorOff); err != nil {
-		return err
-	}
 	if err := oneOf("enterprise.trust.mode", e.Trust.Mode, EnterpriseTrustAuthenticode, EnterpriseTrustHashPinned); err != nil {
 		return err
 	}
@@ -528,7 +525,11 @@ func validateConnectorPolicy(prefix string, p EnterpriseConnectorPolicy) error {
 			return fmt.Errorf("config: %s.allowed_hooks entry %q must be a SHA-256 digest", prefix, digest)
 		}
 	}
-	return nil
+	floorPrefix := "enterprise.machine_policy.connectors." + versionFloorConnector
+	if prefix != floorPrefix && strings.TrimSpace(p.VersionFloor) != "" {
+		return fmt.Errorf("config: %s.version_floor is not a setting; the Claude Code version floor is %s.version_floor", prefix, floorPrefix)
+	}
+	return oneOf(prefix+".version_floor", p.VersionFloor, ClaudeVersionFloorEnforce, ClaudeVersionFloorReport, ClaudeVersionFloorOff)
 }
 
 // validateEnterpriseAgentPrefix accepts an absolute, administrator-style
