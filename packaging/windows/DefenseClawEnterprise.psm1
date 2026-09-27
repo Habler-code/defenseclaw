@@ -9044,6 +9044,78 @@ function Get-DefenseClawClaudeEffectivePolicyBinding {
     }
 }
 
+function Get-DefenseClawClaudeEffectivePolicyProofBaseline {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources
+    )
+    # -AttestClaudeEffectivePolicy records a live Claude proof the
+    # administrator ran before this transaction started, so it can only vouch
+    # for the Claude policy and hook binary installed at that point. Capture
+    # that identity before anything is staged, and refuse up front when the
+    # transaction would replace the hook the proof exercised (threat model
+    # W-34).
+    try {
+        $baseline = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+    }
+    catch {
+        throw (
+            '-AttestClaudeEffectivePolicy requires the installed DefenseClaw ' +
+            'Claude policy and hook binary that the live Claude proof ' +
+            "exercised: $($_.Exception.Message)"
+        )
+    }
+    if ($Sources.ContainsKey('hook') -and
+        -not [string]::Equals(
+            [string]$Sources['hook'].sha256,
+            [string]$baseline.hook_sha256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: the supplied hook binary ' +
+            'differs from the installed DefenseClaw hook binary that the live ' +
+            'Claude proof exercised. Run this transaction without ' +
+            '-AttestClaudeEffectivePolicy, rerun the live Claude proof against ' +
+            'the new hook, then run Repair -AttestClaudeEffectivePolicy with ' +
+            'the same hook binary'
+        )
+    }
+    return $baseline
+}
+
+function Assert-DefenseClawClaudeEffectivePolicyProofBaseline {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][Collections.IDictionary]$Baseline
+    )
+    # The evidence writer hashes the policy and hook on disk after staging.
+    # Both must still be the bytes captured before this transaction, so the
+    # published binding never names bytes the live proof did not run.
+    try {
+        $current = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+    }
+    catch {
+        throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"
+    }
+    if ([string]$current.hook_sha256 -cne [string]$Baseline.hook_sha256) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: this transaction replaced ' +
+            'the DefenseClaw hook binary that the live Claude proof exercised; ' +
+            'rerun the live Claude proof against the new hook, then run ' +
+            'Repair -AttestClaudeEffectivePolicy'
+        )
+    }
+    if ([string]$current.managed_policy_sha256 -cne
+        [string]$Baseline.managed_policy_sha256) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: the DefenseClaw Claude ' +
+            'policy changed during this transaction, so the live Claude proof ' +
+            'did not exercise it; rerun the live Claude proof, then run ' +
+            'Repair -AttestClaudeEffectivePolicy'
+        )
+    }
+}
+
 function Write-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     if ([bool]$Layout.CoreHardeningCertification) {
@@ -16618,16 +16690,87 @@ function Test-DefenseClawClaudeHookPathSame {
         [AllowNull()]$Left,
         [AllowNull()]$Right
     )
+    # The gateway matches a handler command to the hook binary with
+    # pathidentity.Same (Test-DefenseClawSamePathIdentity), so a junction,
+    # hard link, short name, or extended-length or UNC spelling of the hook
+    # binary matches it, and a path typed in another case still matches.
     if ($Left -isnot [string] -or $Right -isnot [string] -or
         [string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
         return $false
     }
+    return (Test-DefenseClawSamePathIdentity -Left $Left -Right $Right)
+}
+
+function Get-DefenseClawPathIdentityForComparison {
+    param(
+        [Parameter(Mandatory)][Type]$NativeSecurityType,
+        [Parameter(Mandatory)][string]$Path
+    )
+    # The volume serial and file index of the object at Path (reparse points
+    # followed, as os.Stat does), '' when it does not exist, and $null when
+    # the lookup fails any other way.
     try {
-        return [bool]([IO.Path]::GetFullPath($Left) -ieq [IO.Path]::GetFullPath($Right))
+        return ([string]$NativeSecurityType::GetFileIdentity($Path)).ToLowerInvariant()
     }
     catch {
+        $exception = $_.Exception
+        while ($null -ne $exception -and
+            $exception -isnot [ComponentModel.Win32Exception]) {
+            $exception = $exception.InnerException
+        }
+        # ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND and ERROR_BAD_NETPATH,
+        # the codes Go reports as os.ErrNotExist.
+        if ($null -ne $exception -and
+            [int]$exception.NativeErrorCode -in @(2, 3, 53)) {
+            return ''
+        }
+        return $null
+    }
+}
+
+function Test-DefenseClawSamePathIdentity {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Left,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Right
+    )
+    # Mirrors internal/pathidentity.Same, which the gateway uses to match a
+    # handler command to the hook binary. Two existing paths match only when
+    # they open the same file, so a junction, hard link, short name, or
+    # extended-length or UNC spelling of the hook binary matches it. Two
+    # missing paths match when their full paths are equal ignoring case. An
+    # existing and a missing path, or any other lookup failure, never match.
+    $paths = [Collections.Generic.List[string]]::new()
+    foreach ($value in @($Left, $Right)) {
+        try {
+            $full = [IO.Path]::GetFullPath($value)
+            $root = [IO.Path]::GetPathRoot($full)
+        }
+        catch {
+            return $false
+        }
+        if ($null -ne $root -and $full.Length -gt $root.Length) {
+            $full = $full.TrimEnd('\')
+        }
+        $paths.Add($full)
+    }
+    $nativeSecurityType = Initialize-DefenseClawNativeSecurity
+    $leftIdentity = Get-DefenseClawPathIdentityForComparison `
+        -NativeSecurityType $nativeSecurityType `
+        -Path $paths[0]
+    $rightIdentity = Get-DefenseClawPathIdentityForComparison `
+        -NativeSecurityType $nativeSecurityType `
+        -Path $paths[1]
+    if ($null -eq $leftIdentity -or $null -eq $rightIdentity) {
         return $false
     }
+    if ($leftIdentity.Length -eq 0 -and $rightIdentity.Length -eq 0) {
+        return [string]::Equals(
+            $paths[0],
+            $paths[1],
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    }
+    return [bool]($leftIdentity.Length -ne 0 -and $leftIdentity -ceq $rightIdentity)
 }
 
 function Test-DefenseClawClaudeHandlerTargetsHook {
@@ -20759,6 +20902,26 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         }
         Remove-DefenseClawService -Name $name
     }
+    # Every exact managed service is gone, so this scope no longer owns the
+    # per-user self-update policy. Only a value that still carries the
+    # deployment's owner marker is removed; a Group Policy or MDM value stays.
+    if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {
+        foreach ($name in $expectedServiceNames) {
+            if (Test-DefenseClawServiceExists -Name ([string]$name)) {
+                throw "exact-scope purge refused to release the self-update policy while service exists: $name"
+            }
+        }
+        try {
+            [void](Remove-DefenseClawOwnedSelfUpdatePolicy)
+        }
+        catch {
+            throw (
+                'Uninstall -Purge removed the managed services, but the owned ' +
+                'DisableSelfUpdate machine policy could not be removed; retry ' +
+                "Uninstall -Purge: $($_.Exception.Message)"
+            )
+        }
+    }
     foreach ($path in @($requestPath, $reportPath)) {
         if (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $path `
@@ -21103,6 +21266,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$NoStart
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    # Pending-transaction recovery has already run, so this is the Claude
+    # policy identity the administrator's live proof exercised. Capture it
+    # before any service, journal, or artifact is touched.
+    $claudeProofBaseline = $null
+    if ($RefreshClaudeEffectivePolicyAttestation) {
+        $claudeProofBaseline = Get-DefenseClawClaudeEffectivePolicyProofBaseline `
+            -Layout $Layout `
+            -Sources $Sources
+    }
     if ($Sources.ContainsKey('provider_library')) {
         $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
     }
@@ -21567,6 +21739,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($RefreshClaudeEffectivePolicyAttestation -and
             -not [bool]$Layout.ClaudeTargetEnabled) {
             throw '-AttestClaudeEffectivePolicy requires at least one enabled Claude target in the protected manifest'
+        }
+        if ($RefreshClaudeEffectivePolicyAttestation) {
+            Assert-DefenseClawClaudeEffectivePolicyProofBaseline `
+                -Layout $Layout `
+                -Baseline $claudeProofBaseline
         }
         if (-not [bool]$Layout.ClaudeTargetEnabled -and
             [bool]$Layout.ClaudeEffectivePolicyVerified) {

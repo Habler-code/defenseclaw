@@ -244,3 +244,36 @@ def test_claude_hklm_policy_smoke(engine: str, tmp_path: Path) -> None:
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "Claude HKLM policy smoke passed" in completed.stdout
+
+
+def test_status_matches_the_hook_binary_by_file_identity() -> None:
+    # #899 review: the gateway matches a handler command to the hook binary
+    # with pathidentity.Same. A string comparison missed a junction, hard link
+    # or extended-length spelling, so Status reported a policy with such a
+    # DefenseClaw handler outside the matrix as carrying the hooks.
+    module = MODULE.read_text(encoding="utf-8")
+    connector = (ROOT / "internal" / "gateway" / "connector" / "claudecode.go").read_text(encoding="utf-8")
+    pathidentity = (ROOT / "internal" / "pathidentity" / "pathidentity.go").read_text(encoding="utf-8")
+
+    go_target = _slice(connector, "func claudeCodeHandlerTargetsCurrentRuntime(", "\nfunc ")
+    assert "pathidentity.Same(command, expectedCommand)" in go_target
+    assert "os.SameFile(leftInfo, rightInfo)" in pathidentity
+    assert "errors.Is(leftStatErr, os.ErrNotExist) && errors.Is(rightStatErr, os.ErrNotExist)" in pathidentity
+
+    ps_target = _slice(
+        module, "function Test-DefenseClawClaudeHandlerTargetsHook", "function Get-DefenseClawClaudeEntryHookHandlerCount"
+    )
+    assert "Test-DefenseClawClaudeHookPathSame -Left $command.Value -Right $Contract.command" in ps_target
+    path_same = _slice(
+        module, "function Test-DefenseClawClaudeHookPathSame", "function Get-DefenseClawPathIdentityForComparison"
+    )
+    assert "Test-DefenseClawSamePathIdentity -Left $Left -Right $Right" in path_same
+    assert "GetFullPath" not in path_same
+    identity = _slice(
+        module, "function Get-DefenseClawPathIdentityForComparison", "function Test-DefenseClawSamePathIdentity"
+    )
+    assert "$NativeSecurityType::GetFileIdentity($Path)" in identity
+    assert "-in @(2, 3, 53)" in identity
+    same = _slice(module, "function Test-DefenseClawSamePathIdentity", "function Test-DefenseClawClaudeHandlerTargetsHook")
+    assert "Get-DefenseClawPathIdentityForComparison `" in same
+    assert "[StringComparison]::OrdinalIgnoreCase" in same

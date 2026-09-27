@@ -617,7 +617,16 @@ user signs in. A failing row keeps the guardian not ready. Unless it was never
 protected and its user is signed out, it also withholds deferred-policy staging
 and the protected enrollment set for every other target, as any other failed
 target does, so re-render such rows with `Install`, `Upgrade` or `Repair`
-`-Mode` (or supply a corrected `-Manifest`). An enabled
+`-Mode` (or supply a corrected `-Manifest`). The DefenseClaw Claude policy is one
+machine-wide file rendered from the Claude hook contract of each enrolled row,
+so the `-Mode`/`-Connector` renderer records a user who has no Claude client
+yet at the minimum of the newest contract a detected client on the endpoint
+uses: 2.1.219 beside a client at 2.1.219 or newer (a pre-release or build
+suffix is ignored, as it is for contract selection), otherwise 2.1.154. Rows on
+different contracts, such as clients at 2.1.200 and 2.1.250 on one endpoint,
+still render different policies and leave the Claude effective-policy
+evidence stale after each enrollment, so keep an endpoint's Claude clients in
+one contract range. An enabled
 Codex target is complete when its protected managed hook policy is installed
 and verified.
 
@@ -670,7 +679,12 @@ binds the live Claude proof to the Claude policy identity it exercised: the
 DefenseClaw `90-defenseclaw.json` machine policy and the installed
 `defenseclaw-hook.exe`. Enrollment changes that only rewrite `targets.yaml` keep
 it current. A different policy or hook binary reports it unverified until the
-proof and this Repair are repeated. The Repair still rebinds it when it first
+proof and this Repair are repeated. The identity is captured before the
+transaction stages anything, so pass the same `defenseclaw-hook.exe` the proof
+ran against: an Upgrade or Repair with `-AttestClaudeEffectivePolicy` and a
+different hook binary is refused before its transaction opens. Do not keep the attestation
+on an Upgrade command line; upgrade, repeat the proof, then run this Repair.
+The Repair still rebinds it when it first
 recovers an interrupted transaction. Install refuses
 `-AttestClaudeEffectivePolicy` up front, because no DefenseClaw Claude policy
 exists yet for a live proof to have exercised. Application-control evidence, a
@@ -1105,6 +1119,17 @@ $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
 Running the installed CLI is still valid for an upgrade that omits
 `--cli-binary` and replaces only the broker, gateway, ACP, hook, and sensor
 helper.
+
+Upgrade moves forward only. Do not run an earlier release's installer against a
+deployment this release installed or attested. The application-control
+evidence this release writes uses schema 3 and the Claude 2.1.154 client
+floor, which earlier releases such as 26.8.4 do not accept, so every lifecycle
+action of such a release, Uninstall included, stops before doing any work.
+Such a release also cannot remove the owned `DisableSelfUpdate` machine
+policy. To
+return to an earlier release, run `Uninstall` with this release's installer,
+then `Install` the earlier release and repeat its live Claude proof and
+attestations.
 
 Only an administrator can remove the service registration:
 

@@ -12,14 +12,20 @@ contract to render a managed policy for.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / "cli" / "defenseclaw" / "inventory" / "hook_contracts.json"
 MODULE = ROOT / "packaging" / "windows" / "DefenseClawEnterprise.psm1"
 INSTALLER = ROOT / "packaging" / "windows" / "install-enterprise.ps1"
 GO_GATE = ROOT / "internal" / "enterprisehooks" / "install_windows.go"
+PLACEHOLDER_SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-claude-placeholder-smoke.ps1"
 
 
 def _version(value: str) -> tuple[int, ...]:
@@ -113,3 +119,80 @@ def test_manifest_load_tolerates_legacy_rows_that_enrollment_refuses() -> None:
         body = gate[gate.index(platform_gate) :]
         body = body[: body.index("\n}\n")]
         assert "requireWindowsEnterpriseManagedAgentVersion(" in body
+
+
+def test_claude_placeholder_follows_the_detected_hook_contract() -> None:
+    # #895 review: the machine-wide Claude policy is rendered from each row's
+    # hook contract. A no-client row at the lowest contract beside a detected
+    # newer client rewrote the policy on enrollment and staled the evidence.
+    installer = INSTALLER.read_text(encoding="utf-8")
+    table = re.search(r"\$script:DefenseClawClaudeHookContractMinimums = @\(([^)]*)\)", installer)
+    assert table is not None
+    contracts = json.loads(CONTRACTS.read_text(encoding="utf-8"))["connectors"]["claudecode"]["contracts"]
+    minimums = sorted((c["agent_version"]["min_inclusive"] for c in contracts), key=_version)
+    assert re.findall(r"'([0-9.]+)'", table.group(1)) == minimums
+
+    # A detected version counts by its leading major.minor.patch, the part the
+    # gateway normalizes (64-bit components, suffix ignored) before it picks
+    # the contract, so 2.1.250-beta.1 is on the newest contract.
+    key = installer[
+        installer.index("function ConvertTo-DefenseClawClaudeContractVersionKey") : installer.index(
+            "function Get-DefenseClawClaudeBootstrapPlaceholder"
+        )
+    ]
+    assert "ConvertTo-DefenseClawConnectorMetadataVersion -Value $Value" in key
+    assert "-cnotmatch '^([0-9]+)\\.([0-9]+)\\.([0-9]+)'" in key
+    assert "[long]::TryParse(" in key
+    placeholder = installer[installer.index("function Get-DefenseClawClaudeBootstrapPlaceholder") :]
+    placeholder = placeholder[: placeholder.index("\n}\n")]
+    assert "ConvertTo-DefenseClawClaudeContractVersionKey -Value ([string]$detected)" in placeholder
+    go = (ROOT / "internal" / "gateway" / "connector" / "hook_contract.go").read_text(encoding="utf-8")
+    assert (
+        "versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\\.([0-9]+))?(?:\\.([0-9]+))?`)" in go
+    )
+    normalize = go[go.index("func NormalizeAgentVersion(") :]
+    normalize = normalize[: normalize.index("\n}\n")]
+    assert "strconv.Atoi(parts[i])" in normalize
+
+    render = installer[installer.index("function Get-DefenseClawRenderedEnterpriseTargets") :]
+    render = render[: render.index("\n$bootstrapEnvironment = $null")]
+    # Every row is discovered before the first row is rendered, and Claude
+    # rows take the contract-aligned placeholder.
+    assert render.index("$claudePlaceholder = Get-DefenseClawClaudeBootstrapPlaceholder `") < render.index(
+        "[void]$sb.AppendLine(\"  - user: "
+    )
+    assert "-Default ([string]$script:DefenseClawWindowsAgentVersionMinimum['claudecode'])" in render
+
+
+def _powershell_engines() -> list[str]:
+    candidates: list[str | None] = [shutil.which("powershell.exe"), shutil.which("pwsh.exe")]
+    windows_root = os.environ.get("SystemRoot")
+    if windows_root:
+        candidates.append(str(Path(windows_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"))
+    engines: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            resolved = str(Path(candidate).resolve())
+            if os.path.normcase(resolved) not in seen:
+                seen.add(os.path.normcase(resolved))
+                engines.append(resolved)
+    if not engines and os.name == "nt":
+        return ["<no-powershell-engine-found>"]
+    return engines
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell installer smoke")
+@pytest.mark.parametrize("engine", _powershell_engines())
+def test_claude_placeholder_smoke(engine: str, tmp_path: Path) -> None:
+    assert engine != "<no-powershell-engine-found>", "no PowerShell engine found on Windows"
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(PLACEHOLDER_SMOKE), "-ScratchRoot", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Claude placeholder smoke passed" in completed.stdout

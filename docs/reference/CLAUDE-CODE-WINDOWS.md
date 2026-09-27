@@ -162,14 +162,18 @@ windows status --json` reports `claude_policy_shadowed_by_hklm`,
 `claude_minimum_client_version` (v2.1.242 under a merge policy that does not
 carry the DefenseClaw hooks) and
 `agent_application_control_claude_minimum_version` (the floor the
-application-control evidence was attested at). A shadowed policy, or a merge
+application-control evidence was attested at). Status reads the policy by
+the same rules as enrollment, comparing it with the installed DefenseClaw
+drop-in, so a policy enrollment refuses, such as one that carries the hooks
+without the lock, reports `claude_policy_shadowed_by_hklm=true`. The value
+must be strict JSON (no comments, trailing commas or single quotes), settings
+keys match by exact case, a repeated key keeps its last value and values
+compare by JSON type, as Claude reads them, and an empty `Settings` value or
+`{}` is no policy. A handler is the DefenseClaw hook when its command opens
+the installed hook binary, however the path is spelled (a junction, hard link,
+short name, or extended-length or UNC form). A shadowed policy, or a merge
 policy whose floor is not attested, reports
-`claude_effective_policy_verified=false`. Status reads the policy by the same
-rules as enrollment, comparing it with the installed DefenseClaw drop-in:
-the value must be strict JSON (no comments, trailing commas or single quotes),
-settings keys match by exact case, a repeated key keeps its last value and
-values compare by JSON type, as Claude reads them, and an empty `Settings`
-value or `{}` is no policy.
+`claude_effective_policy_verified=false`.
 
 ## Hook contract
 
