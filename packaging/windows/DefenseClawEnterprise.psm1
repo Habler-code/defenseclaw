@@ -15531,11 +15531,14 @@ function Get-DefenseClawStandaloneManifestAdoption {
         deferred row), after the last lifecycle transaction bound the
         deployment's managed-hook activation evidence to the manifest it
         activated. The guardian then reconciles the new manifest and records
-        its SHA-256 in its protected activation record. When that record is
-        healthy and binds the installed manifest exactly, the drift is the
-        enumerator's own publication that the guardian has already activated,
-        and the lifecycle may adopt it. Anything else keeps failing closed.
-        Secure Client deployments never adopt.
+        its SHA-256 in its protected activation record. When that record, the
+        guardian state and the protected authorization describe one complete,
+        failure-free reconcile of exactly the installed manifest, the drift is
+        the enumerator's own publication that the guardian already activated,
+        and the lifecycle may adopt it. Freshness is not required: a stopped
+        guardian (a quiesced or recovering transaction) still proves what it
+        last activated, and live readiness is probed separately. Anything else
+        keeps failing closed. Secure Client deployments never adopt.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -15563,47 +15566,90 @@ function Get-DefenseClawStandaloneManifestAdoption {
     $report = Get-DefenseClawGuardianStatusReport `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
-    if ($null -eq $report -or
-        $null -eq $report.PSObject.Properties['ok'] -or
-        -not [bool]$report.ok) {
-        $issues = @()
-        if ($null -ne $report -and
-            $null -ne $report.PSObject.Properties['errors']) {
-            $issues = @($report.errors | Microsoft.PowerShell.Core\Where-Object {
-                -not [string]::IsNullOrWhiteSpace([string]$_)
-            })
+    $retry = 'wait for the guardian''s next pass (about a minute) and retry'
+    $diagnostic = 'guardian status reported no records'
+    if ($null -ne $report -and
+        $null -ne $report.PSObject.Properties['errors']) {
+        $issues = @($report.errors | Microsoft.PowerShell.Core\Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_)
+        })
+        if ($issues.Count -gt 0) {
+            $diagnostic = ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')
         }
-        $detail = if ($issues.Count -gt 0) {
-            ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')
-        }
-        else {
-            'guardian status reported no healthy activation'
-        }
-        return & $result $false (
-            'the hook enumerator republished targets.yaml and the hook guardian ' +
-            "has not yet activated it without errors: $detail; " +
-            'wait for the guardian''s next pass (about a minute) and retry'
-        ) -1
     }
-    if ($null -eq $report.PSObject.Properties['activation'] -or
-        $null -eq $report.activation -or
-        $null -eq $report.activation.PSObject.Properties['manifest_sha256'] -or
-        $null -eq $report.activation.PSObject.Properties['target_count']) {
-        return & $result $false 'guardian status has no protected activation record' -1
+    $records = @{}
+    foreach ($name in @('activation', 'state', 'authorization')) {
+        if ($null -eq $report -or
+            $null -eq $report.PSObject.Properties[$name] -or
+            $null -eq $report.$name) {
+            return & $result $false (
+                'the hook enumerator republished targets.yaml and the hook ' +
+                "guardian has no protected $name record for it ($diagnostic); $retry"
+            ) -1
+        }
+        $records[$name] = $report.$name
     }
-    $guardianManifestSHA256 = [string]$report.activation.manifest_sha256
+    $field = {
+        param($Record, [string]$Name)
+        $property = $Record.PSObject.Properties[$Name]
+        if ($null -eq $property) {
+            return $null
+        }
+        return $property.Value
+    }
+    $count = {
+        param($Record, [string]$Name)
+        $value = & $field $Record $Name
+        if ($null -eq $value) {
+            # pending_count is omitted when zero.
+            if ($Name -ceq 'pending_count') {
+                return [int64]0
+            }
+            return [int64]-1
+        }
+        try {
+            return [Convert]::ToInt64($value)
+        }
+        catch {
+            return [int64]-1
+        }
+    }
+    $stamp = {
+        param($Record)
+        $value = & $field $Record 'updated_at'
+        if ($value -is [DateTime]) {
+            return ([DateTime]$value).ToUniversalTime().ToString('o')
+        }
+        return [string]$value
+    }
+    $guardianManifestSHA256 = [string](& $field $records.activation 'manifest_sha256')
     if ($guardianManifestSHA256 -cne $InstalledManifestSHA256) {
         return & $result $false (
-            "the hook guardian last activated targets.yaml $guardianManifestSHA256, " +
-            "not the installed $InstalledManifestSHA256; wait for the " +
-            'guardian''s next pass (about a minute) and retry'
+            'the hook enumerator republished targets.yaml and the hook guardian ' +
+            "last activated $guardianManifestSHA256, not the installed " +
+            "$InstalledManifestSHA256; $retry"
         ) -1
     }
-    try {
-        $targetCount = [Convert]::ToInt64($report.activation.target_count)
-    }
-    catch {
-        return & $result $false 'guardian activation has an invalid target count' -1
+    $targetCount = & $count $records.activation 'target_count'
+    $activationStamp = & $stamp $records.activation
+    foreach ($name in @('activation', 'state', 'authorization')) {
+        $record = $records[$name]
+        $success = & $count $record 'success_count'
+        $failure = & $count $record 'failure_count'
+        $pending = & $count $record 'pending_count'
+        if (-not [bool](& $field $record 'ok') -or
+            $failure -ne 0 -or
+            $success -lt 0 -or
+            $pending -lt 0 -or
+            (& $count $record 'target_count') -ne $targetCount -or
+            $success + $pending -ne $targetCount -or
+            [string]::IsNullOrWhiteSpace($activationStamp) -or
+            (& $stamp $record) -cne $activationStamp) {
+            return & $result $false (
+                'the hook guardian has not completed one failure-free reconcile ' +
+                "of the republished targets.yaml ($name record; $diagnostic); $retry"
+            ) -1
+        }
     }
     if ($targetCount -lt 0 -or $targetCount -gt 384) {
         return & $result $false 'guardian activation target count is outside its bound' -1

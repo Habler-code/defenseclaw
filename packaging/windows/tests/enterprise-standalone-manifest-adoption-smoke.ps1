@@ -135,16 +135,41 @@ try {
                     $utf8
                 )
             }
-            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount) {
-                $script:TestGuardianReport = [pscustomobject][ordered]@{
-                    ok = $Ok
-                    errors = @(if (-not $Ok) { 'last guardian reconcile failed for dcw-std1/codex: marker' })
-                    activation = [pscustomobject][ordered]@{
+            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale) {
+                $stamp = '2026-09-27T15:55:44Z'
+                if ([string]::IsNullOrEmpty($StateStamp)) {
+                    $StateStamp = $stamp
+                }
+                $record = {
+                    param([string]$Updated)
+                    return [pscustomobject][ordered]@{
                         version = 1
-                        manifest_sha256 = $ManifestSHA256
+                        updated_at = $Updated
+                        ok = ($Failures -eq 0)
                         target_count = $TargetCount
+                        success_count = ($TargetCount - $Failures)
+                        failure_count = $Failures
                     }
                 }
+                $activation = & $record $stamp
+                $activation | Microsoft.PowerShell.Utility\Add-Member -NotePropertyName manifest_sha256 -NotePropertyValue $ManifestSHA256
+                $errors = @()
+                if ($Stale) {
+                    $errors += "hook guardian state is not fresh: updated_at $stamp is stale (older than 5m0s)"
+                }
+                if ($Failures -ne 0) {
+                    $errors += 'last guardian reconcile failed for dcw-std1/codex: marker'
+                }
+                $report = [ordered]@{
+                    ok = $Ok
+                    errors = $errors
+                    activation = $activation
+                    state = (& $record $StateStamp)
+                }
+                if (-not $NoAuthorization) {
+                    $report['authorization'] = (& $record $stamp)
+                }
+                $script:TestGuardianReport = [pscustomobject]$report
             }
             function Get-TestMetadataText {
                 return [IO.File]::ReadAllText($layout.MetadataPath)
@@ -196,11 +221,28 @@ try {
                 $failures.Add("guardian-activated republication was not adoptable: $($adoption.reason)")
             }
 
-            # The guardian has not activated the republished manifest yet.
+            # A stopped guardian (quiesced or recovering transaction) still
+            # proves what it last activated: staleness alone does not refuse.
+            Set-TestGuardian $false $republishedSHA256 2 -Stale
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok) {
+                $failures.Add("a stale but exact guardian activation was refused: $($adoption.reason)")
+            }
+
+            # The guardian has not activated the republished manifest yet, or
+            # its records do not describe one failure-free reconcile of it.
             Set-TestGuardian $true $activatedSHA256 1
             Assert-TestSyncRefuses 'guardian still on the old manifest' 'guardian'
-            Set-TestGuardian $false $republishedSHA256 2
+            Set-TestGuardian $false $republishedSHA256 2 1
             Assert-TestSyncRefuses 'guardian reconcile failed' 'marker'
+            Set-TestGuardian $true $republishedSHA256 2 0 '2026-09-27T15:50:44Z'
+            Assert-TestSyncRefuses 'guardian records from two reconciles' 'state record'
+            Set-TestGuardian $true $republishedSHA256 2 -NoAuthorization
+            Assert-TestSyncRefuses 'guardian authorization missing' 'authorization'
 
             # A never-activated (no-start) deployment has no guardian proof.
             Set-TestMetadata $activatedSHA256 'never_activated' 1
