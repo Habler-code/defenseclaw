@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -350,5 +351,46 @@ func TestSplitStandaloneLifecycleJSONKeepsOnlyTheResultOnStdout(t *testing.T) {
 	document, diagnostics = splitStandaloneLifecycleJSON(plain)
 	if string(document) != string(plain) || diagnostics != nil {
 		t.Fatalf("plain output = %q / %q, want it unchanged", document, diagnostics)
+	}
+}
+
+// A command line that does not parse can never succeed on retry. The
+// standalone Setup reports it as 1639 so an MDM stops retrying; the Secure
+// Client Setup keeps its 0-or-1603 contract.
+func TestRunEnterpriseSetupReportsBadCommandLinesByFlavor(t *testing.T) {
+	original := enterpriseSetupPayloadLoader
+	t.Cleanup(func() { enterpriseSetupPayloadLoader = original })
+	for _, tc := range []struct {
+		name       string
+		standalone bool
+		missing    bool
+		want       int
+	}{
+		{name: "standalone", standalone: true, want: 1639},
+		{name: "secure client", want: 1603},
+		{name: "no embedded payload", missing: true, want: 1603},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.missing {
+				enterpriseSetupPayloadLoader = func() (enterprisePayload, error) {
+					return enterprisePayload{}, errors.New("enterprise payload missing")
+				}
+			} else {
+				payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, tc.standalone)
+				enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { return loadEnterprisePayload(payloadFS) }
+			}
+			for _, arguments := range [][]string{
+				{"/ensure", "/bogus"},
+				{"/ensure", "ALLOWEDSIGNERS=nothex"},
+				{"/ensure", "PURGE=1"},
+				{"/status", "NOSTART=1"},
+				{"/install", "JSON=maybe"},
+			} {
+				var stdout, stderr bytes.Buffer
+				if got := runEnterpriseSetup(arguments, &stdout, &stderr); got != tc.want {
+					t.Fatalf("%q exit %d, want %d (stderr %q)", arguments, got, tc.want, stderr.String())
+				}
+			}
+		})
 	}
 }

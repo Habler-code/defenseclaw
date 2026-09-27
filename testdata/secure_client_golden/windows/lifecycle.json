@@ -149,6 +149,14 @@
     "trusted_installer_sid": "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
     "users_sid": "S-1-5-32-545"
   },
+  "cross_profile_records": {
+    "no_standalone_record": "allowed",
+    "planted_standalone_record": "allowed",
+    "planted_standalone_record_probe": {
+      "installed": false,
+      "untrusted": true
+    }
+  },
   "gateway_service_sid": "S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274",
   "layout": {
     "ACPPath": "%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-acp.exe",

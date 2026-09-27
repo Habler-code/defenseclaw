@@ -97,6 +97,19 @@ type windowsEnterpriseLifecycleOptions struct {
 	payloadManifest string
 	allowedSigners  []string
 	productVersion  string
+	// configTrustMode and configAllowedSigners are enterprise.trust from the
+	// supplied --config; only the standalone profile applies them.
+	configTrustMode      string
+	configAllowedSigners []string
+	// ignoredDeploymentRecords lists deployment records profile resolution
+	// found but ignored because an administrator did not write them. Only
+	// the standalone result reports them.
+	ignoredDeploymentRecords []string
+	// deploymentTrustMode is the payload trust the deployment records
+	// (deployment.json trust_mode), taken from the installer report the
+	// standalone result was built from. The marker publishes it rather than
+	// trustMode, which defaults to authenticode when no flag is given.
+	deploymentTrustMode string
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -315,11 +328,22 @@ func runWindowsEnterpriseLifecycle(
 			return failPreflight(err)
 		}
 	}
+	// The Secure Client profile keeps its historical preflight text exactly;
+	// only the standalone profile classifies misuse as invalid arguments
+	// (1639) and accepts ensure.
 	if opts.purge && action != "uninstall" {
-		return failPreflight(windowsEnterpriseInvalidArguments("--purge is valid only with enterprise windows uninstall"))
+		if windowsEnterpriseStandalone(opts) {
+			return failPreflight(windowsEnterpriseInvalidArguments("--purge is valid only with enterprise windows uninstall"))
+		}
+		return failPreflight(errors.New("--purge is valid only with enterprise windows uninstall"))
 	}
-	if opts.noStart && action != "install" && action != "upgrade" && action != "repair" && action != "ensure" {
-		return failPreflight(windowsEnterpriseInvalidArguments("--no-start is valid only with install, upgrade, repair, or ensure"))
+	if opts.noStart && action != "install" && action != "upgrade" && action != "repair" {
+		if !windowsEnterpriseStandalone(opts) {
+			return failPreflight(errors.New("--no-start is valid only with install, upgrade, or repair"))
+		}
+		if action != "ensure" {
+			return failPreflight(windowsEnterpriseInvalidArguments("--no-start is valid only with install, upgrade, repair, or ensure"))
+		}
 	}
 	if err := validateWindowsEnterpriseLifecycleSecurityOptions(cmd, action, opts); err != nil {
 		if windowsEnterpriseStandalone(opts) {

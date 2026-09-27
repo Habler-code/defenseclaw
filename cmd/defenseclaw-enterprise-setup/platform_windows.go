@@ -41,7 +41,6 @@ const (
 	enterpriseSetupScratchDirName = "scratch"
 	maximumLifecycleOutput        = 2 << 20
 	enterpriseBusyExitCode        = 1618 // ERROR_INSTALL_ALREADY_RUNNING
-	enterpriseInvalidArgsExitCode = 1639 // ERROR_INVALID_COMMAND_LINE
 )
 
 func executeEnterpriseSetup(
@@ -55,7 +54,7 @@ func executeEnterpriseSetup(
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return 0, errors.New("DefenseClaw enterprise Setup requires an elevated administrator token")
 	}
-	payload, err := loadEmbeddedEnterprisePayload()
+	payload, err := enterpriseSetupPayloadLoader()
 	if err != nil {
 		return 0, err
 	}
@@ -64,7 +63,11 @@ func executeEnterpriseSetup(
 		return 0, errors.New("this enterprise Setup is unsigned and can run only with --allow-unsigned in exact disposable certification scope")
 	}
 	if !payload.Manifest.Unsigned && opts.AllowUnsigned {
-		return 0, errors.New("--allow-unsigned is forbidden for a signed enterprise Setup payload")
+		err := errors.New("--allow-unsigned is forbidden for a signed enterprise Setup payload")
+		if standalone {
+			return 0, enterpriseSetupInvalidArguments{err}
+		}
+		return 0, err
 	}
 	if !standalone && (opts.Action == "ensure" || strings.TrimSpace(opts.AllowedSigners) != "") {
 		return 0, errors.New("ensure and --allowed-signers are available only in the standalone enterprise Setup")
@@ -84,7 +87,7 @@ func executeEnterpriseSetup(
 		}
 		canonical, err := validateEnterpriseSetupInput(*input.value, input.label)
 		if err != nil {
-			return 0, err
+			return 0, standaloneEnterpriseSetupInputError(standalone, err)
 		}
 		*input.value = canonical
 	}
@@ -176,10 +179,27 @@ func executeEnterpriseSetup(
 	return enterpriseFailureExitCode, nil
 }
 
+// enterpriseSetupPathError is a CONFIG=/MANIFEST= value that is not an
+// existing absolute local path: a command-line error, not a security
+// refusal. Its text is unchanged.
+type enterpriseSetupPathError struct{ error }
+
+func (err enterpriseSetupPathError) Unwrap() error { return err.error }
+
+// standaloneEnterpriseSetupInputError reports a malformed or missing input
+// path as invalid arguments (1639) for the standalone Setup only.
+func standaloneEnterpriseSetupInputError(standalone bool, err error) error {
+	var path enterpriseSetupPathError
+	if standalone && errors.As(err, &path) {
+		return enterpriseSetupInvalidArguments{err}
+	}
+	return err
+}
+
 func validateEnterpriseSetupInput(value, label string) (string, error) {
 	if value == "" || strings.TrimSpace(value) != value || strings.Contains(value, "%") ||
 		strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) {
-		return "", fmt.Errorf("%s path is empty, relative, padded, or environment-expanded", label)
+		return "", enterpriseSetupPathError{fmt.Errorf("%s path is empty, relative, padded, or environment-expanded", label)}
 	}
 	full, err := filepath.Abs(value)
 	if err != nil {
@@ -189,9 +209,12 @@ func validateEnterpriseSetupInput(value, label string) (string, error) {
 	if len(volume) != 2 || volume[1] != ':' || strings.HasPrefix(full, `\\`) ||
 		strings.HasPrefix(full, `//`) || strings.HasPrefix(full, `\\?\`) ||
 		strings.HasPrefix(full, `\\.\`) {
-		return "", fmt.Errorf("%s must use an absolute local Win32 drive path", label)
+		return "", enterpriseSetupPathError{fmt.Errorf("%s must use an absolute local Win32 drive path", label)}
 	}
 	info, err := os.Lstat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", enterpriseSetupPathError{fmt.Errorf("inspect %s: %w", label, err)}
+	}
 	if err != nil {
 		return "", fmt.Errorf("inspect %s: %w", label, err)
 	}

@@ -1650,6 +1650,62 @@ function Assert-DefenseClawBootstrapModuleTrust {
     return $full
 }
 
+function Get-DefenseClawBootstrapRecordedModulePin {
+    <#
+        Standalone only. Returns the module SHA-256 a hash-pinned standalone
+        deployment recorded in its deployment metadata, or '' when there is
+        no such trusted record. The metadata must pass the same local-NTFS,
+        no-reparse, administrator-owned chain as the module itself, and the
+        running installer must be byte-identical to the one the deployment
+        recorded, so the pin admits only the payload already installed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$MetadataPath,
+        [Parameter(Mandatory)][string]$InstallerPath
+    )
+    try {
+        if (-not [IO.File]::Exists($MetadataPath)) {
+            return ''
+        }
+        $metadataFull = Assert-DefenseClawBootstrapModuleTrust `
+            -Path $MetadataPath `
+            -AllowUnsignedModule
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $metadataFull -Force
+        if ([int64]$item.Length -gt 1048576) {
+            return ''
+        }
+        $metadata = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $metadataFull `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $trust = $metadata.PSObject.Properties['trust_mode']
+        $recordedProfile = $metadata.PSObject.Properties['profile']
+        $hashes = $metadata.PSObject.Properties['hashes']
+        if ($null -eq $trust -or [string]$trust.Value -cne 'hash_pinned' -or
+            $null -eq $recordedProfile -or [string]$recordedProfile.Value -cne 'standalone' -or
+            $null -eq $hashes -or $null -eq $hashes.Value) {
+            return ''
+        }
+        $module = $hashes.Value.PSObject.Properties['module']
+        $installer = $hashes.Value.PSObject.Properties['installer']
+        if ($null -eq $module -or [string]$module.Value -cnotmatch '^[0-9a-f]{64}$' -or
+            $null -eq $installer -or [string]$installer.Value -cnotmatch '^[0-9a-f]{64}$') {
+            return ''
+        }
+        $running = (Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $InstallerPath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($running -cne [string]$installer.Value) {
+            return ''
+        }
+        return [string]$module.Value
+    }
+    catch {
+        # An unreadable or untrusted record admits nothing; the Authenticode
+        # requirement then applies unchanged.
+        return ''
+    }
+}
+
 # ---------------------------------------------------------------------------
 # QA shorthand renderer helpers (-Mode / -Connector). Mirror the macOS
 # install.sh render_config + render_targets_manifest heredocs
@@ -3195,6 +3251,20 @@ try {
             throw 'payload SHA-256 manifest does not pin DefenseClawEnterprise.psm1'
         }
         $bootstrapPinnedModuleSHA256 = [string]$moduleEntry.Value
+    }
+    elseif ($EnterpriseProfile -ceq 'Standalone' -and
+        $TrustMode -ceq 'Authenticode' -and
+        [string]::IsNullOrWhiteSpace($PayloadManifest) -and
+        $Action -cne 'Install' -and
+        -not $AllowUnsigned) {
+        # Nothing keeps a payload manifest after a hash-pinned install, so the
+        # installed CLI (Add/Remove Programs, MDM detect and uninstall
+        # scripts) arrives here with no pin. Admit the installed module by the
+        # digest the deployment's protected metadata recorded; the module then
+        # re-admits the rest of its installed payload the same way.
+        $bootstrapPinnedModuleSHA256 = Get-DefenseClawBootstrapRecordedModulePin `
+            -MetadataPath ([IO.Path]::Combine($StateRoot, 'install', 'deployment.json')) `
+            -InstallerPath $PSCommandPath
     }
     $bootstrapAllowedSigners = @()
     if ($EnterpriseProfile -ceq 'Standalone') {

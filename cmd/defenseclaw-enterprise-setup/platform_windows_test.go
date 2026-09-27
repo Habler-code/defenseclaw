@@ -6,6 +6,8 @@
 package main
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -86,5 +88,37 @@ func TestEnterpriseLifecycleArgumentsForStandalonePayload(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("enterpriseLifecycleArguments() = %#v, want %#v", got, want)
+	}
+}
+
+func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.T) {
+	for _, value := range []string{
+		"config.yaml",
+		` C:\dc\config.yaml`,
+		`%ProgramData%\config.yaml`,
+		filepath.Join(t.TempDir(), "missing", "config.yaml"),
+	} {
+		_, err := validateEnterpriseSetupInput(value, "config")
+		if err == nil {
+			t.Fatalf("%q accepted", value)
+		}
+		var invalid enterpriseSetupInvalidArguments
+		if standalone := standaloneEnterpriseSetupInputError(true, err); !errors.As(standalone, &invalid) || standalone.Error() != err.Error() {
+			t.Fatalf("%q: standalone error %v is not invalid arguments with the same text", value, standalone)
+		}
+		if secureClient := standaloneEnterpriseSetupInputError(false, err); errors.As(secureClient, &invalid) || secureClient != err {
+			t.Fatalf("%q: Secure Client error changed: %v", value, secureClient)
+		}
+	}
+	// An existing input that fails the trust check is a security refusal
+	// (1603), not a command-line error, for either flavor.
+	untrusted := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(untrusted, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := validateEnterpriseSetupInput(untrusted, "config")
+	var invalid enterpriseSetupInvalidArguments
+	if err == nil || errors.As(standaloneEnterpriseSetupInputError(true, err), &invalid) {
+		t.Fatalf("untrusted config: %v", err)
 	}
 }

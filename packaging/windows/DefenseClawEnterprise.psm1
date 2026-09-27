@@ -152,6 +152,8 @@ $script:DefenseClawEnterpriseProfile = 'SecureClient'
 $script:DefenseClawPinnedPayloadSHA256 = @{}
 $script:DefenseClawAllowedSignerSHA256 = @()
 $script:DefenseClawTrustMode = 'Authenticode'
+# Standalone roots a standard user created and Install moved aside.
+$script:DefenseClawQuarantinedRoots = @()
 
 function Set-DefenseClawEnterpriseProfile {
     param(
@@ -16735,6 +16737,9 @@ function Get-DefenseClawLifecycleStatus {
         }
         $status['installed_version'] = $recordedVersion
         $status['trust_mode'] = $recordedTrust
+        if (@($script:DefenseClawQuarantinedRoots).Count -gt 0) {
+            $status['quarantined_paths'] = @($script:DefenseClawQuarantinedRoots)
+        }
         $status['claude_effective_policy_stale_reason'] = $(
             if ([string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
                 $null
@@ -21779,12 +21784,209 @@ function Invoke-DefenseClawReconcileLifecycle {
     return $result
 }
 
+function Get-DefenseClawStandaloneSquattedRoots {
+    <#
+        Standalone production roots only. On a device without other Cisco
+        software, C:\ProgramData\Cisco does not exist until DefenseClaw creates
+        it, and where it does exist it usually carries the ProgramData ACL that
+        lets BUILTIN\Users create subfolders. A standard user can therefore
+        create the vendor directory, the state root, or the lifecycle lock
+        directory first and own it. The lifecycle never adopts such a tree.
+        Returns each existing root (outermost first; nothing beneath a
+        squatted one) whose owner is not SYSTEM, Administrators, or
+        TrustedInstaller, is not a plain directory, or cannot be inspected.
+    #>
+    $roots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+    $vendor = [IO.Path]::GetDirectoryName([string]$roots.StateRoot)
+    $squatted = [Collections.Generic.List[object]]::new()
+    foreach ($path in @($vendor, [string]$roots.StateRoot, [string]$roots.LifecycleDirectory)) {
+        if (@($squatted | Microsoft.PowerShell.Core\Where-Object {
+                    $path.StartsWith([string]$_.path + '\', [StringComparison]::OrdinalIgnoreCase)
+                }).Count -gt 0) {
+            continue
+        }
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            continue
+        }
+        $owner = ''
+        try {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                -not $item.PSIsContainer) {
+                $owner = 'not a plain directory'
+            }
+            else {
+                $ownerSID = ConvertTo-DefenseClawSID -Identity (
+                    Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path
+                ).Owner
+                if ($ownerSID -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+                    $owner = $ownerSID
+                }
+            }
+        }
+        catch {
+            $owner = 'unreadable security descriptor'
+        }
+        if (-not [string]::IsNullOrEmpty($owner)) {
+            $squatted.Add([pscustomobject]@{ path = $path; owner = $owner })
+        }
+    }
+    return @($squatted.ToArray())
+}
+
+function Move-DefenseClawStandaloneSquattedRoots {
+    <#
+        Install only. Moves each squatted standalone root aside, in place, to
+        <name>.untrusted-<UTC time>-<random> so the lifecycle can create its
+        protected roots fresh. The tree is renamed, never opened, followed,
+        re-owned, or deleted: a rename moves a reparse point itself, and the
+        user keeps whatever they put there. A root that holds content an
+        administrator owns (another product's data) is never moved, and the
+        shared vendor directory is moved only while it holds nothing but
+        DefenseClaw roots and content its own user owner created. Each move
+        is reported in quarantined_paths. Fails closed with root_squatted when
+        a root cannot be moved or is re-created before the lifecycle runs.
+    #>
+    param([Parameter(Mandatory)][object[]]$Squatted)
+    $vendor = [IO.Path]::GetDirectoryName(
+        [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).StateRoot
+    )
+    foreach ($entry in $Squatted) {
+        $path = [string]$entry.path
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force
+        $children = @()
+        if ($item.PSIsContainer -and
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            try {
+                $children = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop)
+            }
+            catch {
+                # A tree that hides its content from administrators is not
+                # another product's data; it is moved like any other.
+                $children = @()
+            }
+        }
+        # The vendor directory is a namespace other Cisco software shares.
+        # Move it only while everything in it is a DefenseClaw root or belongs
+        # to the user account (local, domain, or Entra ID) that owns the
+        # directory itself: that is the squatter's own content, which the move
+        # keeps intact. Content another principal owns, such as another
+        # product's service account, blocks the move, as does a vendor
+        # directory a service identity owns.
+        # Owners are compared as SIDs: an account that no longer resolves (or
+        # whose domain is unreachable) has no name to compare.
+        $isVendor = [string]::Equals($path, $vendor, [StringComparison]::OrdinalIgnoreCase)
+        $vendorOwner = $null
+        if ($isVendor) {
+            try {
+                $vendorOwner = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).GetOwner(
+                    [Security.Principal.SecurityIdentifier]
+                ).Value
+            }
+            catch {
+                $vendorOwner = $null
+            }
+        }
+        $vendorOwnerIsUser = $null -ne $vendorOwner -and
+            ([string]$vendorOwner -match '^S-1-(5-21|12-1)(-[0-9]+)+$')
+        foreach ($child in $children) {
+            $childOwner = $null
+            try {
+                $childOwner = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $child.FullName).GetOwner(
+                    [Security.Principal.SecurityIdentifier]
+                ).Value
+            }
+            catch {
+                # Content that hides its owner from administrators is not
+                # another product's data.
+                $childOwner = $null
+            }
+            if ($null -ne $childOwner -and
+                $childOwner -in @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+                throw (
+                    "root_squatted: $path is owned by $($entry.owner), not an administrator, " +
+                    "and holds administrator-owned content ($($child.FullName)); an administrator must " +
+                    'move or remove it before DefenseClaw can install'
+                )
+            }
+            if ($isVendor -and
+                -not ([string]$child.Name).StartsWith('DefenseClaw', [StringComparison]::OrdinalIgnoreCase) -and
+                -not ($vendorOwnerIsUser -and
+                    ($null -eq $childOwner -or
+                        [string]::Equals([string]$childOwner, [string]$vendorOwner, [StringComparison]::OrdinalIgnoreCase)))) {
+                throw (
+                    "root_squatted: $path is owned by $($entry.owner), not an administrator, " +
+                    "and holds content other than DefenseClaw that its owner did not create ($($child.FullName)); " +
+                    'an administrator must correct its ownership or remove it before DefenseClaw can install'
+                )
+            }
+        }
+        $quarantine = '{0}.untrusted-{1}-{2}' -f $path,
+            [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'),
+            [Guid]::NewGuid().ToString('N').Substring(0, 8)
+        try {
+            if ($item.PSIsContainer) {
+                [IO.Directory]::Move($path, $quarantine)
+            }
+            else {
+                [IO.File]::Move($path, $quarantine)
+            }
+        }
+        catch {
+            throw (
+                "root_squatted: $path is owned by $($entry.owner), not an administrator, and could not " +
+                "be moved aside ($($_.Exception.Message)); retry after the owning user signs out, or " +
+                'have an administrator remove it'
+            )
+        }
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+            throw "root_squatted: $path was re-created while DefenseClaw moved an untrusted copy aside"
+        }
+        $script:DefenseClawQuarantinedRoots += $quarantine
+    }
+}
+
+function Test-DefenseClawProfileDeploymentRecordTrusted {
+    <#
+        A deployment record counts only when an administrator could have
+        written it: no reparse point on its path, the file and every ancestor
+        below ProgramData owned by SYSTEM, Administrators, or TrustedInstaller,
+        no other principal able to write the file, and none able to replace an
+        ancestor. The default ProgramData ACL lets a standard user create the
+        other profile's vendor directory, so a record that fails this test was
+        not written by a DefenseClaw lifecycle and is ignored rather than
+        trusted to block an administrator lifecycle.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        Assert-DefenseClawNoReparsePath -Path $Path
+        Assert-DefenseClawTrustedAncestors `
+            -Path ([IO.Path]::GetDirectoryName($Path)) `
+            -RequiredBase $script:ProgramData
+        Assert-DefenseClawPathAcl `
+            -Path $Path `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -AllowInheritance
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-DefenseClawProfileDeploymentInstalled {
     <#
         Reports whether a profile's deployment metadata records an installed
         deployment. An uninstall tombstone (installed=false) is not a
         deployment; metadata that cannot be read or parsed is treated as one,
         so a damaged record never lets the other profile adopt the services.
+        An administrator (every mutation caller) honors only a record an
+        administrator could have written; a record a standard user planted is
+        reported as absent with untrusted=$true.
     #>
     param(
         [Parameter(Mandatory)]
@@ -21801,6 +22003,14 @@ function Test-DefenseClawProfileDeploymentInstalled {
             -LiteralPath $metadataPath `
             -PathType Leaf)) {
         return [pscustomobject]@{ installed = $false; path = $metadataPath }
+    }
+    if ((Test-DefenseClawAdministrator) -and
+        -not (Test-DefenseClawProfileDeploymentRecordTrusted -Path $metadataPath)) {
+        return [pscustomobject]@{
+            installed = $false
+            path = $metadataPath
+            untrusted = $true
+        }
     }
     $installed = $true
     try {
@@ -22206,6 +22416,29 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     if ($Action -ne 'Status') {
         Assert-DefenseClawAdministrator
+    }
+    $script:DefenseClawQuarantinedRoots = @()
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $GatewayServiceName -ceq 'DefenseClawGateway' -and
+        [string]::Equals($InstallRoot.TrimEnd('\'), [string]$entryProfileRoots.InstallRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($StateRoot.TrimEnd('\'), [string]$entryProfileRoots.StateRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        (Test-DefenseClawAdministrator)) {
+        # A root a standard user created first would otherwise fail every
+        # retry with a generic untrusted-owner error. Install moves such a
+        # tree aside; every other action names it with a stable code.
+        $squattedRoots = @(Get-DefenseClawStandaloneSquattedRoots)
+        if ($squattedRoots.Count -gt 0) {
+            if ($Action -ceq 'Install') {
+                Move-DefenseClawStandaloneSquattedRoots -Squatted $squattedRoots
+            }
+            else {
+                throw (
+                    "root_squatted: $($squattedRoots[0].path) is owned by $($squattedRoots[0].owner), not an " +
+                    'administrator; no DefenseClaw deployment can use it. Install (or ensure) moves it aside; ' +
+                    'otherwise an administrator must remove it'
+                )
+            }
+        }
     }
 
     $resolvedInstallRoot = Assert-DefenseClawSafeRoot `

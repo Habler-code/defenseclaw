@@ -129,6 +129,10 @@ type EnterpriseDeployment struct {
 	State          EnterpriseDeploymentState
 	MetadataPath   string
 	ProductVersion string
+	// Untrusted says why a record found at MetadataPath was ignored (State
+	// is then EnterpriseDeploymentAbsent): something other than an
+	// administrator could have written it.
+	Untrusted string
 }
 
 // classifyEnterpriseMetadata interprets deployment.json. Metadata without an

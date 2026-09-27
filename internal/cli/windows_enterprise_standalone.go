@@ -78,6 +78,11 @@ type windowsEnterpriseInstallerReport struct {
 	TrustMode                         string   `json:"trust_mode"`
 	Error                             string   `json:"error"`
 	Errors                            []string `json:"errors"`
+
+	// probeFailed marks a failure document that reports no deployment
+	// state at all (no installed or transaction_pending field): the
+	// installer refused before it could read the host.
+	probeFailed bool
 }
 
 var (
@@ -214,7 +219,7 @@ func runWindowsEnterpriseStandaloneAction(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
-	applyWindowsEnterpriseInstallerReport(result, report, run)
+	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
 
@@ -280,6 +285,12 @@ func parseWindowsEnterpriseInstallerReport(body []byte) (*windowsEnterpriseInsta
 		if report.SchemaVersion != 1 {
 			return nil, fmt.Errorf("installer report schema_version %d is not 1", report.SchemaVersion)
 		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(line, &fields); err == nil {
+			_, installed := fields["installed"]
+			_, pending := fields["transaction_pending"]
+			report.probeFailed = !report.OK && !installed && !pending
+		}
 		return &report, nil
 	}
 	return nil, errors.New("no JSON object in installer output")
@@ -301,17 +312,24 @@ func newWindowsEnterpriseStandaloneResult(action string, opts *windowsEnterprise
 	}
 	result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", version)
 	result.Inspection = enterprisestatus.Inspection{Local: "active", AIDefense: "disabled"}
+	for _, record := range opts.ignoredDeploymentRecords {
+		result.AddWarning("untrusted_deployment_record", "ignored a deployment record an administrator did not write: "+record)
+	}
 	return result
 }
 
 func applyWindowsEnterpriseInstallerReport(
 	result *enterprisestatus.Result,
+	opts *windowsEnterpriseLifecycleOptions,
 	report *windowsEnterpriseInstallerReport,
 	run windowsEnterpriseStandaloneRun,
 ) {
 	result.Installed = report.Installed
 	result.TransactionPending = report.TransactionPending
 	result.InstalledVersion = report.InstalledVersion
+	if opts != nil {
+		opts.deploymentTrustMode = windowsEnterpriseRecordedTrustMode(report.TrustMode)
+	}
 	for _, service := range []struct {
 		name, state, kind string
 	}{
@@ -418,6 +436,7 @@ var windowsEnterpriseKnownCodes = []string{
 	"unsupported_architecture",
 	"profile_conflict",
 	"downgrade_refused",
+	"root_squatted",
 }
 
 func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
@@ -514,7 +533,9 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 // windowsEnterpriseStandaloneFootprintPresent reports any standalone
 // metadata, root, or managed service. Only a host with none of them makes
 // uninstall a no-op; anything else goes through the authenticated
-// uninstall and exact-scope recovery.
+// uninstall and exact-scope recovery. A path a standard user created (not
+// owned by SYSTEM, Administrators, or TrustedInstaller) is not a DefenseClaw
+// footprint: no lifecycle ever wrote it.
 func windowsEnterpriseStandaloneFootprintPresent() (bool, error) {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil {
@@ -522,6 +543,9 @@ func windowsEnterpriseStandaloneFootprintPresent() (bool, error) {
 	}
 	for _, path := range []string{roots.MetadataPath, roots.InstallRoot, roots.StateRoot} {
 		if _, err := os.Lstat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
+			if windowsEnterpriseFootprintUserCreated(path) {
+				continue
+			}
 			return true, nil
 		}
 	}
@@ -545,6 +569,39 @@ func windowsEnterpriseStandaloneFootprintPresent() (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// windowsEnterpriseFootprintOwner reads a path's owner without following a
+// reparse point; tests replace it.
+var windowsEnterpriseFootprintOwner = func(path string) (*windows.SID, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return nil, err
+	}
+	pointer, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(pointer, windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.CloseHandle(handle)
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	owner, _, err := descriptor.Owner()
+	return owner, err
+}
+
+// windowsEnterpriseFootprintUserCreated reports a path whose owner is known
+// and is not an administrator. An unreadable owner counts as a footprint.
+func windowsEnterpriseFootprintUserCreated(path string) bool {
+	owner, err := windowsEnterpriseFootprintOwner(path)
+	return err == nil && owner != nil && !windowsEnterpriseAdminSID(owner)
 }
 
 // readWindowsEnterpriseStandaloneEnrollment summarizes the installed
@@ -641,34 +698,89 @@ func runWindowsEnterpriseStandaloneEnsure(
 	script string,
 ) error {
 	defaultWindowsEnterpriseEnsurePayload(opts, script)
-	statusOpts := *opts
-	statusOpts.jsonOutput = true
-	statusReport, statusRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", &statusOpts))
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	retry, err := runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, true)
+	if !retry {
+		return err
+	}
+	// The plan went stale while ensure waited for the lifecycle lock: a
+	// concurrent run installed the host. Re-plan once from a fresh status.
+	_, err = runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, false)
+	return err
+}
+
+// windowsEnterpriseEnsureProbeOptions builds ensure's read-only Status and
+// Verify probe options from scratch: only what selects the deployment
+// (profile, certification roots and service names) and its payload trust.
+// Mutation inputs such as --no-start, --mode/--connector, and sources are
+// refused by the installer for Status and Verify.
+func windowsEnterpriseEnsureProbeOptions(opts *windowsEnterpriseLifecycleOptions) *windowsEnterpriseLifecycleOptions {
+	return &windowsEnterpriseLifecycleOptions{
+		installRoot:            opts.installRoot,
+		stateRoot:              opts.stateRoot,
+		gatewayServiceName:     opts.gatewayServiceName,
+		guardianServiceName:    opts.guardianServiceName,
+		certificationCodexHome: opts.certificationCodexHome,
+		allowUnsigned:          opts.allowUnsigned,
+		jsonOutput:             true,
+		profile:                opts.profile,
+		resolvedProfile:        opts.resolvedProfile,
+		trustMode:              opts.trustMode,
+		payloadManifest:        opts.payloadManifest,
+		allowedSigners:         opts.allowedSigners,
+		productVersion:         opts.productVersion,
+	}
+}
+
+// windowsEnterpriseInstallLostRace reports an Install that found the host
+// already installed, which happens when a concurrent lifecycle finished
+// while this one waited for the lock.
+func windowsEnterpriseInstallLostRace(report *windowsEnterpriseInstallerReport) bool {
+	if report == nil || report.OK {
+		return false
+	}
+	for _, message := range append([]string{report.Error}, report.Errors...) {
+		if strings.Contains(message, "is already installed; use Upgrade or Repair") {
+			return true
+		}
+	}
+	return false
+}
+
+// runWindowsEnterpriseStandaloneEnsureOnce plans and runs one ensure pass.
+// With allowRetry it returns retry=true, without finishing the result, when
+// its Install lost a race with a concurrent install.
+func runWindowsEnterpriseStandaloneEnsureOnce(
+	ctx context.Context,
+	cmd *cobra.Command,
+	opts *windowsEnterpriseLifecycleOptions,
+	script string,
+	result *enterprisestatus.Result,
+	allowRetry bool,
+) (retry bool, returnErr error) {
+	statusReport, statusRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
-		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	plan, planErr := planWindowsEnterpriseEnsure(statusReport, opts, script)
 	if planErr != nil {
-		applyWindowsEnterpriseInstallerReport(result, statusReport, statusRun)
+		applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 		result.Errors = []enterprisestatus.Message{}
 		result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
-		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	if plan.Action == "" {
-		verifyOpts := *opts
-		verifyOpts.jsonOutput = true
-		verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("verify", &verifyOpts))
+		verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 		if err != nil {
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
-			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		if verifyReport.OK {
-			applyWindowsEnterpriseInstallerReport(result, verifyReport, verifyRun)
+			applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
 			result.Noop = true
 			result.NoopReason = plan.Reason
-			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed"}
 	}
@@ -687,7 +799,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 		manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, cmd, actionOpts.configPath)
 		if err != nil {
 			result.AddError("manifest_staging_failed", err.Error())
-			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		cleanupManifest = cleanup
 		actionOpts.manifestPath = manifestPath
@@ -698,7 +810,11 @@ func runWindowsEnterpriseStandaloneEnsure(
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
-		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+	}
+	if allowRetry && plan.Action == "install" && windowsEnterpriseInstallLostRace(report) {
+		result.AddWarning("concurrent_install", "another lifecycle installed this host while ensure waited for the lifecycle lock; ensure re-planned from a fresh status")
+		return true, nil
 	}
 	if plan.Action == "repair" && plan.Reason == "transaction_pending" && windowsEnterpriseRecoveredFailedInstall(report) {
 		// The pending transaction was a failed first install; repair rolled it
@@ -708,7 +824,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 		installPlan, planErr := planWindowsEnterpriseEnsure(&windowsEnterpriseInstallerReport{}, opts, script)
 		if planErr != nil {
 			result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
-			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		plan = installPlan
 		actionOpts = *opts
@@ -717,7 +833,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 			manifestPath, cleanup, err := stageWindowsEnterpriseEnsureManifest(ctx, cmd, actionOpts.configPath)
 			if err != nil {
 				result.AddError("manifest_staging_failed", err.Error())
-				return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 			}
 			defer cleanup()
 			actionOpts.manifestPath = manifestPath
@@ -725,7 +841,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 		report, run, err = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
 		if err != nil {
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
-			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
 	if plan.Action == "repair" && plan.Reason == "transaction_pending" &&
@@ -735,15 +851,15 @@ func runWindowsEnterpriseStandaloneEnsure(
 		// That is not convergence: re-plan from a fresh status exactly as
 		// ensure does on a host without a pending transaction, so the upgrade
 		// the MDM asked for still runs in this invocation.
-		followOpts := *opts
-		followOpts.jsonOutput = true
-		followStatus, _, statusErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", &followOpts))
-		if statusErr == nil {
+		followStatus, _, statusErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
+		// A follow-up probe that cannot read the host leaves the completed
+		// repair as the result, exactly like a probe that failed to launch.
+		if statusErr == nil && !followStatus.probeFailed {
 			followPlan, planErr := planWindowsEnterpriseEnsure(followStatus, opts, script)
 			if planErr != nil {
-				applyWindowsEnterpriseInstallerReport(result, report, run)
+				applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 				result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
-				return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 			}
 			if followPlan.Action == "upgrade" {
 				result.AddWarning("recovered_pending_transaction", "ensure finished a pending transaction with repair before it ran "+followPlan.Action+": "+followPlan.Reason)
@@ -753,14 +869,14 @@ func runWindowsEnterpriseStandaloneEnsure(
 				report, run, err = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
 				if err != nil {
 					result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
-					return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+					return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 				}
 			}
 		}
 	}
-	applyWindowsEnterpriseInstallerReport(result, report, run)
+	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
-	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
 
 // planWindowsEnterpriseEnsure chooses the converging action from the
@@ -770,6 +886,19 @@ func planWindowsEnterpriseEnsure(
 	opts *windowsEnterpriseLifecycleOptions,
 	script string,
 ) (windowsEnterpriseEnsurePlan, error) {
+	absentReason := "not_installed"
+	if status.probeFailed {
+		failure := windowsEnterpriseEnsureProbeFailure(status)
+		if windowsEnterpriseMessageCode(failure.Error(), "") != "root_squatted" {
+			// Planning from a document that carries no state would read an
+			// installed host as absent and install over it.
+			return windowsEnterpriseEnsurePlan{}, failure
+		}
+		// A standalone root a standard user created cannot hold a
+		// deployment; Install moves it aside and installs.
+		status = &windowsEnterpriseInstallerReport{OK: true}
+		absentReason = "root_squatted"
+	}
 	if status.TransactionPending {
 		return windowsEnterpriseEnsurePlan{Action: "repair", Reason: "transaction_pending"}, nil
 	}
@@ -780,7 +909,7 @@ func planWindowsEnterpriseEnsure(
 		if missing := missingWindowsEnterpriseSources(opts); len(missing) != 0 {
 			return windowsEnterpriseEnsurePlan{}, windowsEnterpriseInvalidArguments("ensure must install and requires %s", strings.Join(missing, ", "))
 		}
-		return windowsEnterpriseEnsurePlan{Action: "install", Reason: "not_installed"}, nil
+		return windowsEnterpriseEnsurePlan{Action: "install", Reason: absentReason}, nil
 	}
 	switch compareWindowsEnterpriseVersions(opts.productVersion, status.InstalledVersion) {
 	case 1:
@@ -802,6 +931,22 @@ func planWindowsEnterpriseEnsure(
 		return windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:" + drift}, nil
 	}
 	return windowsEnterpriseEnsurePlan{Reason: "compliant"}, nil
+}
+
+// windowsEnterpriseEnsureProbeFailure carries the failed status probe's own
+// diagnostic, keeping its stable code when it has one.
+func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerReport) error {
+	message := strings.TrimSpace(status.Error)
+	if message == "" && len(status.Errors) != 0 {
+		message = strings.TrimSpace(status.Errors[0])
+	}
+	if message == "" {
+		message = "the installer reported no detail"
+	}
+	if windowsEnterpriseMessageCode(message, "") != "" {
+		return errors.New(message)
+	}
+	return fmt.Errorf("status_failed: ensure could not read the deployment state: %s", message)
 }
 
 func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []string {

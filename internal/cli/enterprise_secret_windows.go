@@ -56,10 +56,11 @@ var (
 	// windowsSecretGatewayAccount is the service whose SID may read the
 	// credentials.
 	windowsSecretGatewayAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
-	// windowsSecretDeploymentInstalled reports whether a standalone
-	// deployment is recorded on this host.
+	// windowsSecretDeploymentInstalled reports whether an administrator
+	// recorded a standalone deployment on this host; a record a standard
+	// user planted does not count.
 	windowsSecretDeploymentInstalled = func() (bool, error) {
-		deployment, err := winpath.InspectEnterpriseDeployment(managed.ProfileStandalone)
+		deployment, err := inspectTrustedWindowsEnterpriseDeployment(managed.ProfileStandalone)
 		if err != nil {
 			return false, err
 		}

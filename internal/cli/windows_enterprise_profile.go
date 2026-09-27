@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -38,10 +39,54 @@ const (
 )
 
 var (
-	windowsEnterpriseDeploymentInspector = winpath.InspectEnterpriseDeployment
+	windowsEnterpriseDeploymentInspector = inspectTrustedWindowsEnterpriseDeployment
 	windowsEnterpriseSHA256Pattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	windowsEnterprisePayloadLeafPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+	// Seams for inspectTrustedWindowsEnterpriseDeployment.
+	windowsEnterpriseRecordRoots     = winpath.TrustedEnterpriseRoots
+	windowsEnterpriseRecordInspector = winpath.InspectEnterpriseDeployment
+	windowsEnterpriseRecordValidator = windowsEnterpriseRecordValidatorDefault
 )
+
+func windowsEnterpriseRecordValidatorDefault(path string) error {
+	return managed.ValidateTrustedFilePath(path, "enterprise deployment record")
+}
+
+// inspectTrustedWindowsEnterpriseDeployment reads one profile's deployment
+// record and honors it only when an administrator could have written it: the
+// file and every ancestor are owned by SYSTEM, Administrators, or
+// TrustedInstaller, no other principal can write the file, and none can
+// replace an ancestor. The default ProgramData ACL lets a standard user create
+// the other profile's vendor directory and plant a record there; such a record
+// is reported absent, with Untrusted set, so it can neither block nor redirect
+// an administrator's lifecycle. On a clean host, and for every record the
+// lifecycle wrote, the result is unchanged. A standard user cannot read the
+// protected record at all; for that caller an unverifiable record keeps its
+// historical presence meaning, unless it is visibly not administrator-owned.
+func inspectTrustedWindowsEnterpriseDeployment(profile string) (winpath.EnterpriseDeployment, error) {
+	roots, err := windowsEnterpriseRecordRoots(profile)
+	if err != nil {
+		return winpath.EnterpriseDeployment{}, err
+	}
+	deployment, inspectErr := windowsEnterpriseRecordInspector(profile)
+	if inspectErr == nil && deployment.State == winpath.EnterpriseDeploymentAbsent {
+		return deployment, nil
+	}
+	validateErr := windowsEnterpriseRecordValidator(roots.MetadataPath)
+	if validateErr == nil {
+		return deployment, inspectErr
+	}
+	if errors.Is(validateErr, os.ErrPermission) && !windowsEnterpriseIsElevated() {
+		return deployment, inspectErr
+	}
+	return winpath.EnterpriseDeployment{
+		Profile:      roots.Profile,
+		State:        winpath.EnterpriseDeploymentAbsent,
+		MetadataPath: roots.MetadataPath,
+		Untrusted:    validateErr.Error(),
+	}, nil
+}
 
 // errWindowsEnterpriseInvalidArguments marks a preflight failure caused by
 // the caller's arguments, which the standalone profile reports as 1639.
@@ -70,7 +115,7 @@ func windowsEnterpriseCertificationScope(opts *windowsEnterpriseLifecycleOptions
 
 // resolveWindowsEnterpriseLifecycleProfile selects the enterprise profile:
 // --profile, then the supplied config's enterprise.profile, then the
-// profile this host records, then Secure Client. A request that names one
+// profile this host records as installed, then Secure Client. A request that names one
 // profile while the other is installed is refused, because the profiles
 // share SCM service names. A host with no standalone footprint and no
 // request resolves to Secure Client with the historical arguments.
@@ -80,10 +125,12 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 		return windowsEnterpriseInvalidArguments("--profile must be %s or %s", managed.ProfileSecureClient, managed.ProfileStandalone)
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
-		configured, err := readWindowsEnterpriseConfigProfile(path)
+		document, err := readWindowsEnterpriseConfigProfile(path)
 		if err != nil {
 			return err
 		}
+		configured := document.profile
+		opts.configTrustMode, opts.configAllowedSigners = document.trustMode, document.allowedSigners
 		if configured != "" {
 			if requested != "" && requested != configured {
 				return windowsEnterpriseInvalidArguments("--profile %s conflicts with enterprise.profile %s in %s", requested, configured, path)
@@ -94,17 +141,24 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 
 	profile := requested
 	if !windowsEnterpriseCertificationScope(opts) {
-		var live, tombstones []string
+		// Only an installed (or unreadable) record selects or blocks a
+		// profile. An uninstall tombstone never does: the unmodified Secure
+		// Client Setup passes no --profile, so a leftover standalone
+		// tombstone must not turn its install, status, or uninstall into a
+		// standalone run. Standalone callers name --profile standalone.
+		var live []string
 		for _, candidate := range []string{managed.ProfileSecureClient, managed.ProfileStandalone} {
 			deployment, err := windowsEnterpriseDeploymentInspector(candidate)
 			if err != nil {
 				return err
 			}
+			if deployment.Untrusted != "" {
+				opts.ignoredDeploymentRecords = append(opts.ignoredDeploymentRecords,
+					deployment.MetadataPath+": "+deployment.Untrusted)
+			}
 			switch deployment.State {
 			case winpath.EnterpriseDeploymentInstalled, winpath.EnterpriseDeploymentUnknown:
 				live = append(live, candidate)
-			case winpath.EnterpriseDeploymentTombstone:
-				tombstones = append(tombstones, candidate)
 			}
 		}
 		switch {
@@ -117,8 +171,6 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 			)
 		case len(live) == 1:
 			profile = live[0]
-		case profile == "" && len(tombstones) == 1:
-			profile = tombstones[0]
 		}
 	}
 	if profile == "" {
@@ -144,6 +196,9 @@ func validateWindowsEnterpriseProfileOptions(action string, opts *windowsEnterpr
 	}
 	if strings.TrimSpace(opts.brokerBinary) != "" {
 		return windowsEnterpriseInvalidArguments("the %s profile has no CMID credential broker; omit --broker-binary", managed.ProfileStandalone)
+	}
+	if err := applyWindowsEnterpriseConfigTrust(opts); err != nil {
+		return err
 	}
 	switch mode := strings.ToLower(strings.TrimSpace(opts.trustMode)); mode {
 	case "", windowsEnterpriseTrustAuthenticode:
@@ -172,35 +227,108 @@ func validateWindowsEnterpriseProfileOptions(action string, opts *windowsEnterpr
 	return nil
 }
 
-// readWindowsEnterpriseConfigProfile reads enterprise.profile from an
-// administrator-supplied config. The lifecycle validates the whole file
-// later; this only chooses which lifecycle validates it.
-func readWindowsEnterpriseConfigProfile(path string) (string, error) {
+// windowsEnterpriseConfigProfile is what profile and trust resolution read
+// from an administrator-supplied config.
+type windowsEnterpriseConfigProfile struct {
+	profile        string
+	trustMode      string
+	allowedSigners []string
+}
+
+// readWindowsEnterpriseConfigProfile reads enterprise.profile and
+// enterprise.trust from an administrator-supplied config. The lifecycle
+// validates the whole file later; this only chooses which lifecycle
+// validates it and, for the standalone profile, its payload trust.
+func readWindowsEnterpriseConfigProfile(path string) (windowsEnterpriseConfigProfile, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("open managed config %s: %w", path, err)
+		return windowsEnterpriseConfigProfile{}, fmt.Errorf("open managed config %s: %w", path, err)
 	}
 	defer file.Close()
 	body, err := io.ReadAll(io.LimitReader(file, windowsEnterpriseConfigProfileLimit+1))
 	if err != nil {
-		return "", fmt.Errorf("read managed config %s: %w", path, err)
+		return windowsEnterpriseConfigProfile{}, fmt.Errorf("read managed config %s: %w", path, err)
 	}
 	if len(body) > windowsEnterpriseConfigProfileLimit {
-		return "", fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)
+		return windowsEnterpriseConfigProfile{}, fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)
 	}
 	var document struct {
 		Enterprise struct {
 			Profile string `yaml:"profile"`
+			Trust   struct {
+				Mode           string   `yaml:"mode"`
+				AllowedSigners []string `yaml:"allowed_signers"`
+			} `yaml:"trust"`
 		} `yaml:"enterprise"`
 	}
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
-		return "", fmt.Errorf("parse managed config %s: %w", path, err)
+		return windowsEnterpriseConfigProfile{}, fmt.Errorf("parse managed config %s: %w", path, err)
 	}
 	profile := managed.NormalizeEnterpriseProfile(document.Enterprise.Profile)
 	if profile != "" && profile != managed.ProfileSecureClient && profile != managed.ProfileStandalone {
-		return "", windowsEnterpriseInvalidArguments("enterprise.profile %q in %s is not %s or %s", document.Enterprise.Profile, path, managed.ProfileSecureClient, managed.ProfileStandalone)
+		return windowsEnterpriseConfigProfile{}, windowsEnterpriseInvalidArguments("enterprise.profile %q in %s is not %s or %s", document.Enterprise.Profile, path, managed.ProfileSecureClient, managed.ProfileStandalone)
 	}
-	return profile, nil
+	return windowsEnterpriseConfigProfile{
+		profile:        profile,
+		trustMode:      strings.ToLower(strings.TrimSpace(document.Enterprise.Trust.Mode)),
+		allowedSigners: document.Enterprise.Trust.AllowedSigners,
+	}, nil
+}
+
+// applyWindowsEnterpriseConfigTrust applies enterprise.trust from the
+// supplied --config to the standalone payload trust: a flag and the config
+// may agree, the config fills an unset flag, and a disagreement is refused
+// rather than silently resolved either way.
+func applyWindowsEnterpriseConfigTrust(opts *windowsEnterpriseLifecycleOptions) error {
+	path := strings.TrimSpace(opts.configPath)
+	if configured := opts.configTrustMode; configured != "" {
+		requested := strings.ToLower(strings.TrimSpace(opts.trustMode))
+		if requested != "" && requested != configured {
+			return windowsEnterpriseInvalidArguments("--trust-mode %s conflicts with enterprise.trust.mode %s in %s%s",
+				requested, configured, path, windowsEnterpriseTrustConflictHint(requested, configured))
+		}
+		opts.trustMode = configured
+	}
+	if len(opts.configAllowedSigners) == 0 {
+		return nil
+	}
+	normalize := func(values []string) []string {
+		set := map[string]bool{}
+		for _, value := range values {
+			if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
+				set[value] = true
+			}
+		}
+		out := make([]string, 0, len(set))
+		for value := range set {
+			out = append(out, value)
+		}
+		sort.Strings(out)
+		return out
+	}
+	configured := normalize(opts.configAllowedSigners)
+	if len(opts.allowedSigners) != 0 {
+		if strings.Join(normalize(opts.allowedSigners), ",") != strings.Join(configured, ",") {
+			return windowsEnterpriseInvalidArguments("--allowed-signer conflicts with enterprise.trust.allowed_signers in %s", path)
+		}
+		return nil
+	}
+	opts.allowedSigners = configured
+	return nil
+}
+
+// windowsEnterpriseTrustConflictHint tells the administrator how to resolve
+// a --trust-mode that disagrees with enterprise.trust.mode. The unsigned
+// standalone Setup always passes --trust-mode hash_pinned, so a config that
+// requires authenticode cannot install its payload.
+func windowsEnterpriseTrustConflictHint(requested, configured string) string {
+	switch {
+	case requested == windowsEnterpriseTrustHashPinned && configured == windowsEnterpriseTrustAuthenticode:
+		return "; this run installs an unsigned, hash-pinned payload (as the unsigned Setup does), which the config's authenticode requirement refuses: deploy the signed Setup, or set enterprise.trust.mode to hash_pinned or remove it"
+	case requested == windowsEnterpriseTrustAuthenticode && configured == windowsEnterpriseTrustHashPinned:
+		return "; the config requires a hash-pinned payload: pass --trust-mode hash_pinned with --payload-manifest (as the unsigned Setup does), or remove enterprise.trust.mode"
+	}
+	return ""
 }
 
 // windowsEnterpriseStandalonePowerShellArgs are the installer arguments only

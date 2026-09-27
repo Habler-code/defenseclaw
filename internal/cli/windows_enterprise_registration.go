@@ -124,6 +124,38 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 	return nil
 }
 
+// windowsEnterpriseRecordedTrustMode normalizes the installer report's
+// trust_mode, which the module reads back from deployment.json. Anything
+// but the two known modes is unknown ("").
+func windowsEnterpriseRecordedTrustMode(value string) string {
+	switch mode := strings.ToLower(strings.TrimSpace(value)); mode {
+	case windowsEnterpriseTrustAuthenticode, windowsEnterpriseTrustHashPinned:
+		return mode
+	}
+	return ""
+}
+
+// windowsEnterpriseMarkerTrustMode is the TrustMode the marker publishes.
+// The MDM detection, remediation and uninstall scripts demand a valid
+// Authenticode signature on the installed CLI when it reads authenticode,
+// so it must describe the deployment, not this run's request: the
+// installed CLI runs ensure and repair without --trust-mode, which
+// defaults to authenticode, and a hash-pinned deployment it manages stays
+// hash-pinned. The requested mode applies only when the report recorded
+// none.
+func windowsEnterpriseMarkerTrustMode(opts *windowsEnterpriseLifecycleOptions) string {
+	if opts == nil {
+		return windowsEnterpriseTrustAuthenticode
+	}
+	if recorded := windowsEnterpriseRecordedTrustMode(opts.deploymentTrustMode); recorded != "" {
+		return recorded
+	}
+	if strings.ToLower(strings.TrimSpace(opts.trustMode)) == windowsEnterpriseTrustHashPinned {
+		return windowsEnterpriseTrustHashPinned
+	}
+	return windowsEnterpriseTrustAuthenticode
+}
+
 func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil {
@@ -133,10 +165,7 @@ func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *w
 	if version == "" {
 		version = strings.TrimSpace(result.ProductVersion)
 	}
-	trustMode := windowsEnterpriseTrustAuthenticode
-	if opts != nil && strings.TrimSpace(opts.trustMode) != "" {
-		trustMode = opts.trustMode
-	}
+	trustMode := windowsEnterpriseMarkerTrustMode(opts)
 	disableSelfUpdate := uint32(1)
 	if !readWindowsEnterpriseSelfUpdateDisabled() {
 		disableSelfUpdate = 0

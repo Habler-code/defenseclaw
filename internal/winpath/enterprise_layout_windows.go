@@ -38,7 +38,10 @@ func TrustedEnterpriseRoots(profile string) (EnterpriseRoots, error) {
 	return EnterpriseRootsFor(profile, programFiles, programData)
 }
 
-// InspectEnterpriseDeployment reads one profile's deployment metadata.
+// InspectEnterpriseDeployment reads one profile's deployment metadata. It
+// does not check who wrote the record; lifecycle and guard decisions must go
+// through a caller that validates the record's owner and DACL first (see
+// internal/cli inspectTrustedWindowsEnterpriseDeployment).
 func InspectEnterpriseDeployment(profile string) (EnterpriseDeployment, error) {
 	roots, err := TrustedEnterpriseRoots(profile)
 	if err != nil {
@@ -73,36 +76,4 @@ func InspectEnterpriseDeployment(profile string) (EnterpriseDeployment, error) {
 	}
 	deployment.State, deployment.ProductVersion = classifyEnterpriseMetadata(body)
 	return deployment, nil
-}
-
-// ResolveInstalledEnterpriseProfile reports which profile this host carries.
-// An installed (or unreadable) record wins; with none, a single uninstall
-// tombstone names the profile whose preserved state remains. Both profiles
-// installed is a conflict, because they share SCM service names and a host
-// carries at most one enterprise deployment. found is false on a host with
-// no enterprise metadata at all.
-func ResolveInstalledEnterpriseProfile() (profile string, found bool, err error) {
-	var live, tombstones []string
-	for _, candidate := range []string{EnterpriseProfileSecureClient, EnterpriseProfileStandalone} {
-		deployment, err := InspectEnterpriseDeployment(candidate)
-		if err != nil {
-			return "", false, err
-		}
-		switch deployment.State {
-		case EnterpriseDeploymentInstalled, EnterpriseDeploymentUnknown:
-			live = append(live, candidate)
-		case EnterpriseDeploymentTombstone:
-			tombstones = append(tombstones, candidate)
-		}
-	}
-	switch {
-	case len(live) > 1:
-		return "", false, errors.New("profile_conflict: both Secure Client and standalone enterprise deployments are recorded on this host")
-	case len(live) == 1:
-		return live[0], true, nil
-	case len(tombstones) == 1:
-		return tombstones[0], true, nil
-	default:
-		return "", false, nil
-	}
 }

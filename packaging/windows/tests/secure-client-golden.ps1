@@ -423,6 +423,57 @@ foreach ($key in $renderCapture.Keys) {
     $golden[$key] = $renderCapture[$key]
 }
 
+# ---- Cross-profile deployment records ------------------------------------
+# A Secure Client Install/Upgrade/Repair refuses while a standalone
+# deployment is recorded. A record a standard user could plant under the
+# default ProgramData ACL must not block it. Evaluated in a disposable
+# ProgramData stand-in; the record's user-writable ancestors make it untrusted
+# whichever token runs the golden.
+$recordCapture = & $module {
+    param([string]$ScratchParent)
+    $capture = [ordered]@{}
+    $root = [IO.Path]::Combine($ScratchParent, ('dc-scgolden-record-' + [Guid]::NewGuid().ToString('N')))
+    [void][IO.Directory]::CreateDirectory($root)
+    $originalProgramData = $script:ProgramData
+    $originalProfile = Get-DefenseClawEnterpriseProfile
+    $originalAdministrator = ${function:Test-DefenseClawAdministrator}
+    try {
+        $script:ProgramData = $root
+        # Every mutation runs elevated; pin that so the capture does not
+        # depend on the token running the golden.
+        Microsoft.PowerShell.Management\Set-Item -Path 'function:script:Test-DefenseClawAdministrator' -Value { return $true }
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+        $decide = {
+            try {
+                Assert-DefenseClawNoOtherProfileDeployment
+                return 'allowed'
+            }
+            catch {
+                return 'refused: ' + $_.Exception.Message.Replace($root, '%ProgramData%')
+            }
+        }
+        $capture.no_standalone_record = & $decide
+        $standaloneRoots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+        $install = [IO.Path]::Combine([string]$standaloneRoots.StateRoot, 'install')
+        [void][IO.Directory]::CreateDirectory($install)
+        [IO.File]::WriteAllText([IO.Path]::Combine($install, 'deployment.json'), '{}', [Text.UTF8Encoding]::new($false))
+        $capture.planted_standalone_record = & $decide
+        $probe = Test-DefenseClawProfileDeploymentInstalled -EnterpriseProfile Standalone
+        $capture.planted_standalone_record_probe = [ordered]@{
+            installed = [bool]$probe.installed
+            untrusted = [bool]($null -ne $probe.PSObject.Properties['untrusted'] -and $probe.untrusted)
+        }
+    }
+    finally {
+        Microsoft.PowerShell.Management\Set-Item -Path 'function:script:Test-DefenseClawAdministrator' -Value $originalAdministrator
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile
+        $script:ProgramData = $originalProgramData
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $capture
+} ([IO.Path]::GetTempPath())
+$golden.cross_profile_records = $recordCapture
+
 # ---- Read-only Status on this (uninstalled) host -------------------------
 $status = Invoke-DefenseClawEnterpriseLifecycle `
     -Action Status `

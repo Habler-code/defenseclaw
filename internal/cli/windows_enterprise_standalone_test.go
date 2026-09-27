@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -73,7 +74,13 @@ func TestWindowsEnterpriseProfileResolution(t *testing.T) {
 		{name: "flag standalone", opts: windowsEnterpriseLifecycleOptions{profile: "Standalone"}, action: "install", want: "standalone"},
 		{name: "installed standalone", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled}, action: "status", want: "standalone"},
 		{name: "unreadable standalone", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentUnknown}, action: "status", want: "standalone"},
-		{name: "standalone tombstone", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentTombstone}, action: "uninstall", want: "standalone"},
+		{name: "standalone tombstone with profile", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentTombstone}, opts: windowsEnterpriseLifecycleOptions{profile: "standalone"}, action: "uninstall", want: "standalone"},
+		// A standalone uninstall tombstone never redirects the unmodified
+		// Secure Client Setup, which passes no --profile.
+		{name: "standalone tombstone keeps secure client install", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentTombstone}, opts: windowsEnterpriseLifecycleOptions{brokerBinary: `C:\stage\defenseclaw-cmid-broker.exe`}, action: "install", want: "secure_client"},
+		{name: "standalone tombstone keeps secure client status", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentTombstone}, action: "status", want: "secure_client"},
+		{name: "standalone tombstone keeps secure client uninstall", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentTombstone}, action: "uninstall", want: "secure_client"},
+		{name: "secure client install next to standalone tombstone", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentTombstone, "secure_client": winpath.EnterpriseDeploymentInstalled}, action: "upgrade", want: "secure_client"},
 		{name: "secure client tombstone allows standalone", states: map[string]winpath.EnterpriseDeploymentState{"secure_client": winpath.EnterpriseDeploymentTombstone}, opts: windowsEnterpriseLifecycleOptions{profile: "standalone"}, action: "install", want: "standalone"},
 		{name: "explicit secure client on standalone host", states: map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled}, opts: windowsEnterpriseLifecycleOptions{profile: "secure_client"}, action: "uninstall", wantErr: "profile_conflict"},
 		{name: "standalone on secure client host", states: map[string]winpath.EnterpriseDeploymentState{"secure_client": winpath.EnterpriseDeploymentInstalled}, opts: windowsEnterpriseLifecycleOptions{profile: "standalone"}, action: "install", wantErr: "profile_conflict"},
@@ -540,5 +547,511 @@ func TestWindowsEnterpriseRecoveredFailedInstallIsRecognizedOnlyAlone(t *testing
 		if windowsEnterpriseRecoveredFailedInstall(report) {
 			t.Fatalf("%s report was treated as a recovered first install", name)
 		}
+	}
+}
+
+// Secure Client preflight documents keep their historical text exactly; only
+// the standalone profile classifies --purge/--no-start misuse as invalid
+// arguments (1639) and accepts --no-start with ensure.
+func TestWindowsEnterpriseMisusePreflightKeepsSecureClientText(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, nil)
+	originalObserver := windowsEnterpriseStandaloneObserver
+	originalHost := windowsEnterpriseStandaloneHostValidator
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseStandaloneHostValidator = originalHost
+	})
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	windowsEnterpriseStandaloneHostValidator = func() error { return nil }
+
+	for _, tc := range []struct {
+		name string
+		opts windowsEnterpriseLifecycleOptions
+		want string
+	}{
+		{"purge", windowsEnterpriseLifecycleOptions{purge: true, jsonOutput: true}, "--purge is valid only with enterprise windows uninstall"},
+		{"no-start", windowsEnterpriseLifecycleOptions{noStart: true, jsonOutput: true}, "--no-start is valid only with install, upgrade, or repair"},
+	} {
+		t.Run("secure client "+tc.name, func(t *testing.T) {
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			opts := tc.opts
+			if err := runWindowsEnterpriseLifecycle(context.Background(), command, "status", &opts); err == nil {
+				t.Fatal("misuse accepted")
+			}
+			var report windowsEnterpriseLifecyclePreflightFailure
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatalf("decode %q: %v", stdout.String(), err)
+			}
+			if report.SchemaVersion != 1 || report.Error != tc.want || len(report.Errors) != 1 || report.Errors[0] != tc.want {
+				t.Fatalf("Secure Client preflight changed: %+v", report)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		action string
+		opts   windowsEnterpriseLifecycleOptions
+	}{
+		{"purge", "status", windowsEnterpriseLifecycleOptions{profile: "standalone", purge: true, jsonOutput: true}},
+		{"no-start", "status", windowsEnterpriseLifecycleOptions{profile: "standalone", noStart: true, jsonOutput: true}},
+	} {
+		t.Run("standalone "+tc.name, func(t *testing.T) {
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			opts := tc.opts
+			err := runWindowsEnterpriseLifecycle(context.Background(), command, tc.action, &opts)
+			if got := commandExitCode(err); got != 1639 {
+				t.Fatalf("exit %d (%v), want 1639", got, err)
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+				t.Fatalf("result %+v", result)
+			}
+		})
+	}
+}
+
+// ensureStub scripts the installer runs one ensure makes.
+type ensureStub struct {
+	t       *testing.T
+	replies []map[string]any
+	calls   [][]string
+}
+
+func (stub *ensureStub) install(t *testing.T) {
+	t.Helper()
+	originalRunner := windowsEnterpriseStandaloneRunner
+	originalObserver := windowsEnterpriseStandaloneObserver
+	originalDrift := windowsEnterpriseEnsureDriftDetector
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneRunner = originalRunner
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseEnsureDriftDetector = originalDrift
+	})
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
+	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+		stub.calls = append(stub.calls, args)
+		if len(stub.replies) == 0 {
+			stub.t.Fatalf("unexpected installer run %q", args)
+		}
+		reply := stub.replies[0]
+		stub.replies = stub.replies[1:]
+		body, _ := json.Marshal(reply)
+		run := windowsEnterpriseStandaloneRun{Output: body}
+		if ok, _ := reply["ok"].(bool); !ok {
+			run.ExitCode = 1
+		}
+		return run, nil
+	}
+}
+
+func ensureTestOptions() *windowsEnterpriseLifecycleOptions {
+	return &windowsEnterpriseLifecycleOptions{
+		profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0", trustMode: "authenticode",
+		gatewayBinary: `C:\stage\defenseclaw-gateway.exe`, acpBinary: `C:\stage\defenseclaw-acp.exe`,
+		hookBinary: `C:\stage\defenseclaw-hook.exe`, sensorHelperBinary: `C:\stage\defenseclaw-sensor-helper.exe`,
+		configPath: `C:\stage\config.yaml`, manifestPath: `C:\stage\targets.yaml`,
+		noStart: true, jsonOutput: true,
+	}
+}
+
+func installedStatus(action string) map[string]any {
+	return map[string]any{
+		"schema_version": 1, "ok": true, "action": action, "installed": true, "transaction_pending": false,
+		"installed_version": "1.4.0", "gateway_ready": true, "guardian_ready": true, "errors": []string{},
+	}
+}
+
+// ensure's Status and Verify probes carry no mutation inputs: the installer
+// refuses -NoStart, -Mode, and -Connector for them, and a refused probe must
+// not be read as "not installed".
+func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+	stub.install(t)
+	opts := ensureTestOptions()
+	opts.configPath, opts.manifestPath = "", ""
+	opts.mode, opts.connector = "action", "codex"
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure on a compliant host: %v\n%s", err, stdout.String())
+	}
+	if len(stub.calls) != 2 {
+		t.Fatalf("installer runs %q", stub.calls)
+	}
+	for _, args := range stub.calls {
+		for _, forbidden := range []string{"-NoStart", "-Mode", "-Connector", "-Config", "-Manifest", "-GatewayBinary", "-HookBinary"} {
+			if containsString(args, forbidden) {
+				t.Fatalf("probe %s carries %s: %q", args[1], forbidden, args)
+			}
+		}
+		if !containsString(args, "Standalone") || !containsString(args, "-ProductVersion") {
+			t.Fatalf("probe lost its profile or trust arguments: %q", args)
+		}
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.Noop || result.NoopReason != "compliant" {
+		t.Fatalf("result %+v", result)
+	}
+}
+
+func TestWindowsEnterpriseEnsureRefusesToPlanFromAFailedProbe(t *testing.T) {
+	refusal := "DefenseClaw enterprise installer rejected its module before import: Authenticode signature is not valid (NotSigned)"
+	stub := &ensureStub{t: t, replies: []map[string]any{
+		{"schema_version": 1, "ok": false, "action": "status", "error": refusal, "errors": []string{refusal}},
+	}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if got := commandExitCode(err); got != 1603 {
+		t.Fatalf("exit %d (%v), want 1603", got, err)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("ensure ran the installer after a failed probe: %q", stub.calls)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != "status_failed" || !strings.Contains(result.Errors[0].Message, "NotSigned") {
+		t.Fatalf("result %+v", result)
+	}
+}
+
+func TestParseWindowsEnterpriseInstallerReportMarksStatelessFailures(t *testing.T) {
+	failure, err := parseWindowsEnterpriseInstallerReport([]byte(`{"schema_version":1,"ok":false,"action":"status","error":"x","errors":["x"]}`))
+	if err != nil || !failure.probeFailed {
+		t.Fatalf("failure document %+v, %v", failure, err)
+	}
+	for _, body := range []string{
+		`{"schema_version":1,"ok":false,"action":"status","installed":false,"transaction_pending":false,"errors":[]}`,
+		`{"schema_version":1,"ok":true,"action":"status","installed":false,"transaction_pending":false,"errors":[]}`,
+	} {
+		report, err := parseWindowsEnterpriseInstallerReport([]byte(body))
+		if err != nil || report.probeFailed {
+			t.Fatalf("%s: %+v, %v", body, report, err)
+		}
+	}
+}
+
+// Two ensure runs overlap on a clean device: this one planned Install from a
+// stale status and the lifecycle then found the host installed. It re-plans
+// once instead of reporting a failed install on a healthy host.
+func TestWindowsEnterpriseEnsureReplansAfterLosingAnInstallRace(t *testing.T) {
+	absent := map[string]any{"schema_version": 1, "ok": true, "action": "status", "installed": false, "transaction_pending": false, "errors": []string{}}
+	already := "DefenseClaw enterprise mode is already installed; use Upgrade or Repair"
+	stub := &ensureStub{t: t, replies: []map[string]any{
+		absent,
+		{"schema_version": 1, "ok": false, "action": "install", "error": already, "errors": []string{already}},
+		installedStatus("status"),
+		installedStatus("verify"),
+	}}
+	stub.install(t)
+	opts := ensureTestOptions()
+	opts.noStart = false
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure after a lost install race: %v\n%s", err, stdout.String())
+	}
+	if len(stub.calls) != 4 || stub.calls[1][1] != "Install" || stub.calls[3][1] != "Verify" {
+		t.Fatalf("installer runs %q", stub.calls)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.Noop || len(result.Errors) != 0 {
+		t.Fatalf("result %+v", result)
+	}
+	found := false
+	for _, warning := range result.Warnings {
+		found = found || warning.Code == "concurrent_install"
+	}
+	if !found {
+		t.Fatalf("warnings %+v", result.Warnings)
+	}
+
+	// A second loss is reported, not retried forever.
+	stub = &ensureStub{t: t, replies: []map[string]any{
+		absent,
+		{"schema_version": 1, "ok": false, "action": "install", "error": already, "errors": []string{already}},
+		absent,
+		{"schema_version": 1, "ok": false, "action": "install", "error": already, "errors": []string{already}},
+	}}
+	stub.install(t)
+	stdout.Reset()
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 4 {
+		t.Fatalf("exit %d after %d runs (%v)", got, len(stub.calls), err)
+	}
+}
+
+// A standalone root a standard user created first cannot hold a deployment:
+// ensure plans Install (which moves the tree aside) instead of failing every
+// retry, and uninstall does not count the tree as a DefenseClaw footprint.
+func TestWindowsEnterpriseEnsurePlansInstallOverASquattedRoot(t *testing.T) {
+	original := windowsEnterpriseEnsureDriftDetector
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
+	t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = original })
+	squat := `root_squatted: C:\ProgramData\Cisco is owned by S-1-5-21-1-2-3-1001, not an administrator; no DefenseClaw deployment can use it.`
+	status, err := parseWindowsEnterpriseInstallerReport([]byte(`{"schema_version":1,"ok":false,"action":"status","error":` + strconvQuote(squat) + `,"errors":[` + strconvQuote(squat) + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ensureTestOptions()
+	plan, err := planWindowsEnterpriseEnsure(status, opts, `C:\stage\install-enterprise.ps1`)
+	if err != nil || plan.Action != "install" || plan.Reason != "root_squatted" {
+		t.Fatalf("plan %+v, %v", plan, err)
+	}
+	opts.configPath = ""
+	if _, err := planWindowsEnterpriseEnsure(status, opts, `C:\stage\install-enterprise.ps1`); err == nil || !strings.Contains(err.Error(), "requires --config") {
+		t.Fatalf("squatted host without a config: %v", err)
+	}
+	// Any other stateless failure is still refused.
+	other, _ := parseWindowsEnterpriseInstallerReport([]byte(`{"schema_version":1,"ok":false,"action":"status","error":"untrusted ancestor owner S-1-5-21-1-2-3-1001 can replace managed content through: C:\\ProgramData\\Cisco"}`))
+	if _, err := planWindowsEnterpriseEnsure(other, ensureTestOptions(), `C:\stage\install-enterprise.ps1`); err == nil {
+		t.Fatal("planned from a failed probe")
+	}
+}
+
+func TestWindowsEnterpriseFootprintIgnoresUserCreatedPaths(t *testing.T) {
+	original := windowsEnterpriseFootprintOwner
+	t.Cleanup(func() { windowsEnterpriseFootprintOwner = original })
+	user, _ := windows.StringToSid("S-1-5-21-1111111111-2222222222-3333333333-1001")
+	administrators, _ := windows.StringToSid("S-1-5-32-544")
+	system, _ := windows.StringToSid("S-1-5-18")
+	for _, tc := range []struct {
+		owner *windows.SID
+		err   error
+		want  bool
+	}{
+		{owner: user, want: true},
+		{owner: administrators, want: false},
+		{owner: system, want: false},
+		{err: windows.ERROR_ACCESS_DENIED, want: false},
+	} {
+		windowsEnterpriseFootprintOwner = func(string) (*windows.SID, error) { return tc.owner, tc.err }
+		if got := windowsEnterpriseFootprintUserCreated(`C:\ProgramData\Cisco\DefenseClaw`); got != tc.want {
+			t.Fatalf("owner %v err %v: user-created %t, want %t", tc.owner, tc.err, got, tc.want)
+		}
+	}
+	windowsEnterpriseFootprintOwner = original
+	path := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if owner, err := windowsEnterpriseFootprintOwner(path); err != nil || owner == nil || !owner.IsValid() {
+		t.Fatalf("read owner: %v, %v", owner, err)
+	}
+}
+
+func strconvQuote(value string) string {
+	body, _ := json.Marshal(value)
+	return string(body)
+}
+
+// enterprise.trust in the supplied config is enforced for the standalone
+// profile: it fills unset flags, and a disagreement with a flag is refused.
+func TestWindowsEnterpriseConfigTrustIsApplied(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, nil)
+	dir := t.TempDir()
+	signerA, signerB := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	write := func(name, trust string) string {
+		path := filepath.Join(dir, name)
+		body := "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" + trust
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	signers := write("signers.yaml", "  trust:\n    mode: authenticode\n    allowed_signers: ["+strings.ToUpper(signerA)+", "+signerB+"]\n")
+	pinned := write("pinned.yaml", "  trust:\n    mode: hash_pinned\n")
+	for _, tc := range []struct {
+		name        string
+		opts        windowsEnterpriseLifecycleOptions
+		wantErr     string
+		wantMode    string
+		wantSigners []string
+	}{
+		{name: "config signers pin authenticode", opts: windowsEnterpriseLifecycleOptions{configPath: signers}, wantMode: "authenticode", wantSigners: []string{signerA, signerB}},
+		{name: "matching flag signers", opts: windowsEnterpriseLifecycleOptions{configPath: signers, allowedSigners: []string{signerB, signerA}}, wantMode: "authenticode", wantSigners: []string{signerB, signerA}},
+		{name: "conflicting flag signers", opts: windowsEnterpriseLifecycleOptions{configPath: signers, allowedSigners: []string{signerA}}, wantErr: "conflicts with enterprise.trust.allowed_signers"},
+		{name: "conflicting trust mode", opts: windowsEnterpriseLifecycleOptions{configPath: signers, trustMode: "hash_pinned", payloadManifest: `C:\m.json`}, wantErr: "conflicts with enterprise.trust.mode"},
+		// The unsigned Setup always passes --trust-mode hash_pinned; a
+		// config that requires authenticode says how to resolve it.
+		{name: "unsigned Setup under an authenticode config", opts: windowsEnterpriseLifecycleOptions{configPath: signers, trustMode: "hash_pinned", payloadManifest: `C:\m.json`}, wantErr: "deploy the signed Setup, or set enterprise.trust.mode to hash_pinned or remove it"},
+		{name: "authenticode flag under a hash_pinned config", opts: windowsEnterpriseLifecycleOptions{configPath: pinned, trustMode: "authenticode"}, wantErr: "pass --trust-mode hash_pinned with --payload-manifest"},
+		{name: "config hash_pinned needs a manifest", opts: windowsEnterpriseLifecycleOptions{configPath: pinned}, wantErr: "requires --payload-manifest"},
+		{name: "config hash_pinned with a manifest", opts: windowsEnterpriseLifecycleOptions{configPath: pinned, payloadManifest: `C:\m.json`}, wantMode: "hash_pinned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := tc.opts
+			err := resolveWindowsEnterpriseLifecycleProfile("install", &opts)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !errors.Is(err, errWindowsEnterpriseInvalidArguments) {
+					t.Fatalf("err = %v, want invalid arguments %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.trustMode != tc.wantMode || (tc.wantSigners != nil && !reflect.DeepEqual(opts.allowedSigners, tc.wantSigners)) {
+				t.Fatalf("trust %q signers %q", opts.trustMode, opts.allowedSigners)
+			}
+			if tc.wantSigners != nil && !containsString(windowsEnterprisePowerShellArgs("install", &opts), "-AllowedSigners") {
+				t.Fatal("configured signers did not reach the installer")
+			}
+		})
+	}
+	// A Secure Client config is untouched by trust keys.
+	secureClient := filepath.Join(dir, "secure-client.yaml")
+	if err := os.WriteFile(secureClient, []byte("deployment_mode: managed_enterprise\nenterprise:\n  trust:\n    mode: hash_pinned\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := &windowsEnterpriseLifecycleOptions{configPath: secureClient}
+	before := windowsEnterprisePowerShellArgs("install", opts)
+	if err := resolveWindowsEnterpriseLifecycleProfile("install", opts); err != nil || opts.resolvedProfile != "secure_client" {
+		t.Fatalf("Secure Client config: %q, %v", opts.resolvedProfile, err)
+	}
+	if after := windowsEnterprisePowerShellArgs("install", opts); !reflect.DeepEqual(before, after) {
+		t.Fatalf("Secure Client arguments changed: %q -> %q", before, after)
+	}
+}
+
+// After a repair finished a pending transaction, a follow-up status probe
+// that cannot read the host leaves the completed repair as the result.
+func TestWindowsEnterpriseEnsureKeepsARepairWhenTheFollowUpProbeFails(t *testing.T) {
+	pending := installedStatus("status")
+	pending["transaction_pending"] = true
+	refusal := "DefenseClaw enterprise installer rejected its module before import: transient"
+	stub := &ensureStub{t: t, replies: []map[string]any{
+		pending,
+		installedStatus("repair"),
+		{"schema_version": 1, "ok": false, "action": "status", "error": refusal, "errors": []string{refusal}},
+	}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	opts := ensureTestOptions()
+	opts.noStart = false
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure: %v\n%s", err, stdout.String())
+	}
+	if len(stub.calls) != 3 || stub.calls[1][1] != "Repair" {
+		t.Fatalf("installer runs %q", stub.calls)
+	}
+}
+
+// The marker's TrustMode describes the deployment, not the run's request:
+// the MDM scripts demand an Authenticode signature on the installed CLI
+// when it reads authenticode.
+func TestWindowsEnterpriseMarkerTrustModeFollowsTheDeployment(t *testing.T) {
+	for _, tc := range []struct {
+		name, requested, recorded, want string
+	}{
+		{"recorded hash_pinned wins over the authenticode default", "authenticode", "hash_pinned", "hash_pinned"},
+		{"recorded authenticode wins over a hash_pinned request", "hash_pinned", "authenticode", "authenticode"},
+		{"recorded value is normalized", "authenticode", " Hash_Pinned ", "hash_pinned"},
+		{"no record falls back to the request", "hash_pinned", "", "hash_pinned"},
+		{"an unrecognized record falls back to the request", "hash_pinned", "signed", "hash_pinned"},
+		{"nothing known is authenticode", "", "", "authenticode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := &windowsEnterpriseLifecycleOptions{trustMode: tc.requested, deploymentTrustMode: tc.recorded}
+			if got := windowsEnterpriseMarkerTrustMode(opts); got != tc.want {
+				t.Fatalf("marker TrustMode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := windowsEnterpriseMarkerTrustMode(nil); got != "authenticode" {
+		t.Fatalf("nil options: %q", got)
+	}
+}
+
+// The installed CLI (Remediate-Fix, Add/Remove Programs, an administrator)
+// runs ensure and repair with no --trust-mode, which defaults to
+// authenticode. On a hash-pinned deployment the marker it rewrites after a
+// successful run must stay hash_pinned, or every later detect, remediation
+// and uninstall refuses the unsigned CLI with untrusted_install.
+func TestWindowsEnterpriseInstalledCLIKeepsAHashPinnedMarker(t *testing.T) {
+	pinned := func(action string) map[string]any {
+		reply := installedStatus(action)
+		reply["trust_mode"] = "hash_pinned"
+		return reply
+	}
+	failedVerify := pinned("verify")
+	failedVerify["ok"] = false
+	failedVerify["gateway_ready"] = false
+	failedVerify["errors"] = []string{"gateway is not ready"}
+	for _, tc := range []struct {
+		name     string
+		action   string
+		replies  []map[string]any
+		wantRuns []string
+	}{
+		{name: "compliant ensure", action: "ensure", replies: []map[string]any{pinned("status"), pinned("verify")}, wantRuns: []string{"Status", "Verify"}},
+		{name: "ensure repairs a failed verify", action: "ensure", replies: []map[string]any{pinned("status"), failedVerify, pinned("repair")}, wantRuns: []string{"Status", "Verify", "Repair"}},
+		{name: "repair", action: "repair", replies: []map[string]any{pinned("repair")}, wantRuns: []string{"Repair"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &ensureStub{t: t, replies: tc.replies}
+			stub.install(t)
+			markerTrust := ""
+			windowsEnterpriseStandaloneObserver = func(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) string {
+				if result.OK && result.Installed {
+					markerTrust = windowsEnterpriseMarkerTrustMode(opts)
+				}
+				return ""
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			opts := &windowsEnterpriseLifecycleOptions{
+				profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0",
+				trustMode: "authenticode", jsonOutput: true,
+			}
+			script := `C:\stage\install-enterprise.ps1`
+			var err error
+			if tc.action == "ensure" {
+				err = runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, script)
+			} else {
+				err = runWindowsEnterpriseStandaloneAction(context.Background(), command, tc.action, opts, script, windowsEnterprisePowerShellArgs(tc.action, opts))
+			}
+			if err != nil {
+				t.Fatalf("%s: %v\n%s", tc.action, err, stdout.String())
+			}
+			var runs []string
+			for _, call := range stub.calls {
+				runs = append(runs, call[1])
+			}
+			if !reflect.DeepEqual(runs, tc.wantRuns) {
+				t.Fatalf("installer runs %q, want %q", runs, tc.wantRuns)
+			}
+			if markerTrust != "hash_pinned" {
+				t.Fatalf("marker TrustMode after %s = %q, want hash_pinned", tc.name, markerTrust)
+			}
+		})
 	}
 }

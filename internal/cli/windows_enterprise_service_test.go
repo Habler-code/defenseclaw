@@ -579,6 +579,8 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 func TestRunWindowsEnterpriseLifecycleSelfUpgradeConflictStopsBeforeRunnerAndEmitsJSON(
 	t *testing.T,
 ) {
+	// Hermetic: the host running the test may carry a real deployment.
+	stubWindowsEnterpriseDeployments(t, nil)
 	originalRunner := windowsEnterpriseCommandRunner
 	originalScriptFinder := windowsEnterpriseScriptFinder
 	originalExecutableResolver := windowsEnterpriseExecutableResolver
@@ -671,6 +673,8 @@ func TestRunWindowsEnterpriseLifecycleSelfUpgradeConflictStopsBeforeRunnerAndEmi
 }
 
 func TestRunWindowsEnterpriseLifecycleResolutionErrorsFailClosedJSON(t *testing.T) {
+	// Hermetic: the host running the test may carry a real deployment.
+	stubWindowsEnterpriseDeployments(t, nil)
 	originalRunner := windowsEnterpriseCommandRunner
 	originalScriptFinder := windowsEnterpriseScriptFinder
 	originalExecutableResolver := windowsEnterpriseExecutableResolver
@@ -787,6 +791,8 @@ func TestRunWindowsEnterpriseLifecycleResolutionErrorsFailClosedJSON(t *testing.
 }
 
 func TestRunWindowsEnterpriseLifecyclePreflightAndRunnerJSONBoundaries(t *testing.T) {
+	// Hermetic: the host running the test may carry a real deployment.
+	stubWindowsEnterpriseDeployments(t, nil)
 	originalRunner := windowsEnterpriseCommandRunner
 	originalScriptFinder := windowsEnterpriseScriptFinder
 	originalExecutableResolver := windowsEnterpriseExecutableResolver

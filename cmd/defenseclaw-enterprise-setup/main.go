@@ -31,6 +31,7 @@ var embeddedPayload embed.FS
 const (
 	enterpriseSetupArtifactName     = "DefenseClawSetup-Enterprise-x64.exe"
 	enterpriseFailureExitCode       = 1603
+	enterpriseInvalidArgsExitCode   = 1639 // ERROR_INVALID_COMMAND_LINE
 	defaultLifecycleTimeout         = 30 * time.Minute
 	maximumLifecycleTimeout         = 2 * time.Hour
 	maximumPayloadFileBytes         = int64(512 << 20)
@@ -47,6 +48,17 @@ const (
 	// next to an unsigned standalone payload.
 	standalonePayloadTrustName = "payload-trust.json"
 )
+
+// enterpriseSetupPayloadLoader reads the embedded payload; tests replace it.
+var enterpriseSetupPayloadLoader = loadEmbeddedEnterprisePayload
+
+// enterpriseSetupInvalidArguments marks a command-line error without changing
+// its text. The standalone Setup reports it as 1639 so an MDM does not retry
+// a command line that can never succeed; the Secure Client Setup never
+// produces it and keeps its 0-or-1603 contract.
+type enterpriseSetupInvalidArguments struct{ error }
+
+func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -183,17 +195,32 @@ func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		writeEnterpriseSetupFailure(stdout, stderr, opts, err)
-		return enterpriseFailureExitCode
+		return enterpriseSetupArgumentFailureCode()
 	}
 	exitCode, err := executeEnterpriseSetup(context.Background(), opts, stdout, stderr)
 	if err != nil {
 		writeEnterpriseSetupFailure(stdout, stderr, opts, err)
+		var invalid enterpriseSetupInvalidArguments
+		if errors.As(err, &invalid) {
+			return enterpriseInvalidArgsExitCode
+		}
 		return enterpriseFailureExitCode
 	}
 	if exitCode != 0 {
 		return exitCode
 	}
 	return 0
+}
+
+// enterpriseSetupArgumentFailureCode is the exit code for a command line that
+// does not parse: 1639 when this Setup embeds the standalone payload, the
+// historical 1603 for the Secure Client Setup (and when no payload loads).
+func enterpriseSetupArgumentFailureCode() int {
+	payload, err := enterpriseSetupPayloadLoader()
+	if err == nil && payload.Standalone() {
+		return enterpriseInvalidArgsExitCode
+	}
+	return enterpriseFailureExitCode
 }
 
 func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bool, error) {
