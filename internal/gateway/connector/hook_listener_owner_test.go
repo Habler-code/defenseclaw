@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -535,5 +536,70 @@ s=socket.socket(); s.bind(("127.0.0.1",%d)); s.listen(1); print("up",flush=True)
 	}
 	if out, ok := check(""); ok || !strings.Contains(out, "held by "+service) {
 		t.Fatalf("per-user hook check of the service account listener = ok %v reason %q, want refusal", ok, out)
+	}
+}
+
+// TestHookListenerCheckBlockIsSelfContained guards the block that the notify
+// bridge and the plugin bridges embed: every helper function it calls must
+// be defined inside it, and the program must run under /bin/sh, which is
+// dash on Debian and Ubuntu.
+func TestHookListenerCheckBlockIsSelfContained(t *testing.T) {
+	block, err := hookListenerCheckBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_]*)\(\) \{`)
+	helperFuncs := map[string]bool{}
+	for _, m := range definition.FindAllStringSubmatch(string(helper), -1) {
+		helperFuncs[m[1]] = true
+	}
+	blockFuncs := map[string]bool{}
+	for _, m := range definition.FindAllStringSubmatch(block, -1) {
+		blockFuncs[m[1]] = true
+	}
+	if !blockFuncs["defenseclaw_verify_gateway_listener"] {
+		t.Fatal("listener check block does not define defenseclaw_verify_gateway_listener")
+	}
+	for _, name := range regexp.MustCompile(`\b_?defenseclaw_[a-z0-9_]+\b`).FindAllString(block, -1) {
+		if helperFuncs[name] && !blockFuncs[name] {
+			t.Fatalf("listener check block calls %s, which is defined outside it", name)
+		}
+	}
+
+	program, err := hookListenerCheckProgram()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("netstat"); err != nil {
+			t.Skip("netstat is required")
+		}
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	run := func(managed string) (string, bool) {
+		cmd := exec.Command("/bin/sh", "-c", program, "defenseclaw-listener-check", addr)
+		cmd.Env = []string{"PATH=" + hookListenerCheckPath, "DEFENSECLAW_MANAGED_HOOK=" + managed}
+		out, err := cmd.Output()
+		return string(out), err == nil
+	}
+	if out, ok := run(""); !ok {
+		t.Fatalf("/bin/sh check refused the test account's own listener: %q", out)
+	}
+	if os.Geteuid() != 0 {
+		if out, ok := run("1"); ok || !strings.Contains(out, "held by") {
+			t.Fatalf("/bin/sh managed check of the hook user's listener = ok %v reason %q", ok, out)
+		}
+	}
+	_ = listener.Close()
+	if out, ok := run(""); ok || out != "gateway unreachable" {
+		t.Fatalf("/bin/sh check of a closed port = ok %v reason %q", ok, out)
 	}
 }

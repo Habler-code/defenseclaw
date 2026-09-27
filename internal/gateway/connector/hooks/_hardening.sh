@@ -734,6 +734,11 @@ defenseclaw_response_failure_reason() {
   esac
 }
 
+# --- BEGIN defenseclaw gateway listener check ---
+# Everything up to the END marker is self-contained POSIX sh: the Codex
+# notify bridge and the OpenCode, Amp and OmniGent plugins, which do not
+# source this helper, embed these exact bytes (hook_listener_check.go).
+#
 # defenseclaw_verify_gateway_listener runs before a hook sends its bearer
 # token. On Linux and macOS every loopback or wildcard listener on the
 # gateway port must belong to an owner the hook trusts, so another local
@@ -1004,6 +1009,8 @@ _defenseclaw_listener_uids_darwin() {
     esac
   done
 }
+
+# --- END defenseclaw gateway listener check ---
 
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
 # connector's effective fail mode is closed, for guardian-installed managed
