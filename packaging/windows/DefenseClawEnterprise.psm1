@@ -9480,7 +9480,10 @@ function Restore-DefenseClawTransaction {
     # before generic file restoration can replace/delete the helper binary.
     # The cross-scope gate prevents cleanup of the shared user inode while a
     # production or another certification scope could still own it.
-    $snapshot = Invoke-DefenseClawTargetRuntimeRollbackCleanup `
+    # A standalone recovery whose staged gateway fails this cleanup may rerun
+    # it with the running Setup's verified gateway (see
+    # Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep).
+    $snapshot = Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep `
         -SnapshotPath $SnapshotPath `
         -Layout $Layout `
         -GatewayServiceName ([string]$snapshot.gateway_service) `
@@ -14926,6 +14929,115 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
     }
     $run.outcome = 'succeeded'
     return $report
+}
+
+function Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep {
+    <#
+        Runs the target-runtime rollback cleanup of a pending transaction's
+        recovery with the rule Invoke-DefenseClawManagedHooksLifecycleRecoveryStep
+        applies to managed-hook restore and retire: the transaction's staged
+        gateway runs it first, and Secure Client stops there. In the standalone
+        profile, when the staged gateway fails the cleanup (for example a
+        release whose cleanup refuses a targets.yaml the hook enumerator
+        republished after planning) and the running Setup's own gateway passes
+        Get-DefenseClawRecoveryGatewayAdmission, that verified gateway replaces
+        the staged one at <InstallRoot>\bin and the cleanup runs again. Generic
+        file rollback later restores the transaction's preimage of that path.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $invokeCleanup = {
+        Invoke-DefenseClawTargetRuntimeRollbackCleanup `
+            -SnapshotPath $SnapshotPath `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+    }
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return (& $invokeCleanup)
+    }
+    $stagedFailure = $null
+    try {
+        return (& $invokeCleanup)
+    }
+    catch {
+        $stagedFailure = $_
+    }
+    $action = 'target-runtime-cleanup'
+    $admission = Get-DefenseClawRecoveryGatewayAdmission -Layout $Layout
+    if (-not [bool]$admission.admitted) {
+        $script:DefenseClawRecoveryGatewayRefusal = [ordered]@{
+            action = $action
+            code = [string]$admission.code
+            message = [string]$admission.message
+        }
+        throw $stagedFailure
+    }
+    $source = [hashtable]$admission.source
+    $run = [ordered]@{
+        action = $action
+        binary = [string]$Layout.GatewayPath
+        source = [string]$source.path
+        sha256 = [string]$admission.sha256
+        trust = [string]$admission.trust
+        signer_thumbprint = [string]$source.signer_thumbprint
+        product_version = [string]$admission.product_version
+        identity = 'NT AUTHORITY\SYSTEM'
+        replaced_sha256 = [string]$admission.replaced_sha256
+        staged_version = [string]$admission.staged_version
+        reason = 'staged_gateway_failed'
+        staged_error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $stagedFailure.Exception.Message `
+            -MaxLength 1024
+        outcome = 'started'
+        error = ''
+    }
+    $script:DefenseClawRecoveryGatewayRuns = @(
+        @($script:DefenseClawRecoveryGatewayRuns) + @($run)
+    )
+    try {
+        Install-DefenseClawSourceDescriptor `
+            -Source $source `
+            -Destination $Layout.GatewayPath
+        $installedVersion = Get-DefenseClawRecoveryGatewayVersion `
+            -Path ([string]$Layout.GatewayPath)
+        if ($installedVersion -cne [string]$admission.product_version) {
+            throw (
+                "the staged copy is release '$installedVersion', not the " +
+                "admitted release '$($admission.product_version)'"
+            )
+        }
+    }
+    catch {
+        $run.outcome = 'failed'
+        $run.error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $_.Exception.Message `
+            -MaxLength 1024
+        throw (
+            'target runtime rollback cleanup failed with the staged gateway, ' +
+            'and the verified Setup gateway could not be staged for recovery: ' +
+            $_.Exception.Message
+        )
+    }
+    try {
+        $result = & $invokeCleanup
+    }
+    catch {
+        $run.outcome = 'failed'
+        $run.error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $_.Exception.Message `
+            -MaxLength 1024
+        throw (
+            'target runtime rollback cleanup failed with the staged gateway ' +
+            "and again with the verified Setup gateway: $($_.Exception.Message)"
+        )
+    }
+    $run.outcome = 'succeeded'
+    return $result
 }
 
 function Add-DefenseClawRecoveryEvidenceToError {

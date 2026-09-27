@@ -212,8 +212,10 @@ ensure` (or `repair`, `uninstall`) with the same `--profile`, trust and
 `--config` options, run as LocalSystem, works the same way.
 
 Recovery first uses the gateway the pending transaction staged. When that
-gateway cannot restore or retire the transaction's managed-hook state (for
-example a release whose defect caused the failure), the standalone lifecycle
+gateway cannot restore or retire the transaction's managed-hook state, or
+cannot remove the per-user runtime roots the transaction created (the
+target-runtime rollback cleanup), for example a release whose defect caused
+the failure, the standalone lifecycle
 retries that step once with the `defenseclaw-gateway.exe` that ships in the
 running Setup's payload (or beside the staged `defenseclaw.exe`), and only
 when all of these hold:

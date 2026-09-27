@@ -217,3 +217,34 @@ func TestWindowsEnterpriseStandaloneLifecycleActions(t *testing.T) {
 		}
 	}
 }
+
+// WIN-F25: recovery may also rerun the target-runtime rollback cleanup with
+// the running Setup's gateway; the warnings name that step, not a managed-hook
+// lifecycle action.
+func TestWindowsEnterpriseRecoveryGatewayWarningsNameTheTargetRuntimeCleanup(t *testing.T) {
+	runs := decodeWindowsEnterpriseRecoveryGatewayRuns(json.RawMessage(`[{
+		"action":"target-runtime-cleanup",
+		"binary":"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+		"source":"C:\\ProgramData\\DefenseClaw-Enterprise-Setup-0f\\defenseclaw-gateway.exe",
+		"sha256":"aa","trust":"hash_pinned","product_version":"1.0.48",
+		"identity":"NT AUTHORITY\\SYSTEM","staged_version":"1.0.46",
+		"staged_error":"target runtime rollback cleanup failed with exit 1",
+		"outcome":"succeeded","error":""}]`))
+	refusal := decodeWindowsEnterpriseRecoveryGatewayRefusal(json.RawMessage(`{"action":"target-runtime-cleanup","code":"same_binary","message":"this Setup's gateway is the one that failed"}`))
+	warnings := windowsEnterpriseRecoveryGatewayWarnings(runs, refusal)
+	if len(warnings) != 2 {
+		t.Fatalf("warnings = %+v", warnings)
+	}
+	if !strings.HasPrefix(warnings[0].Message, "recovery ran the target-runtime rollback cleanup with this Setup's verified gateway") ||
+		strings.Contains(warnings[0].Message, "managed-hook lifecycle") {
+		t.Fatalf("fallback warning %q", warnings[0].Message)
+	}
+	if !strings.HasPrefix(warnings[1].Message, "recovery kept the staged gateway for the target-runtime rollback cleanup (same_binary)") {
+		t.Fatalf("refusal warning %q", warnings[1].Message)
+	}
+	retire := windowsEnterpriseRecoveryGatewayWarnings(
+		decodeWindowsEnterpriseRecoveryGatewayRuns(json.RawMessage(`{"action":"retire","binary":"C:\\x\\bin\\defenseclaw-gateway.exe"}`)), nil)
+	if len(retire) != 1 || !strings.HasPrefix(retire[0].Message, "recovery ran the managed-hook lifecycle retire ") {
+		t.Fatalf("retire warning = %+v", retire)
+	}
+}

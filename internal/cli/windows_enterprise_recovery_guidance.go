@@ -91,6 +91,17 @@ func decodeWindowsEnterpriseRecoveryGatewayRefusal(raw json.RawMessage) *windows
 	return &refusal
 }
 
+// windowsEnterpriseRecoveryStepLabel names a recovery step for the
+// administrator: the target-runtime rollback cleanup, or a managed-hook
+// lifecycle action (restore, retire).
+func windowsEnterpriseRecoveryStepLabel(action string) string {
+	action = strings.TrimSpace(action)
+	if action == "target-runtime-cleanup" {
+		return "target-runtime rollback cleanup"
+	}
+	return "managed-hook lifecycle " + action
+}
+
 // windowsEnterpriseRecoveryGatewayWarnings records, for the result document
 // and the lifecycle log, which gateway each recovery step ran and why, and
 // why a recovery kept the staged gateway.
@@ -105,8 +116,8 @@ func windowsEnterpriseRecoveryGatewayWarnings(
 			staged = "no detail"
 		}
 		message := fmt.Sprintf(
-			"recovery ran the managed-hook lifecycle %s with this Setup's verified gateway because the staged gateway failed it (%s); binary %s (copied from %s), sha256 %s, trust %s",
-			run.Action, staged, run.Binary, run.Source, run.SHA256, run.Trust,
+			"recovery ran the %s with this Setup's verified gateway because the staged gateway failed it (%s); binary %s (copied from %s), sha256 %s, trust %s",
+			windowsEnterpriseRecoveryStepLabel(run.Action), staged, run.Binary, run.Source, run.SHA256, run.Trust,
 		)
 		if run.SignerThumbprint != "" {
 			message += ", signer " + run.SignerThumbprint
@@ -132,8 +143,8 @@ func windowsEnterpriseRecoveryGatewayWarnings(
 		warnings = append(warnings, enterprisestatus.Message{
 			Code: "recovery_gateway_not_used",
 			Message: fmt.Sprintf(
-				"recovery kept the staged gateway for the managed-hook lifecycle %s (%s): %s",
-				refusal.Action, refusal.Code, refusal.Message,
+				"recovery kept the staged gateway for the %s (%s): %s",
+				windowsEnterpriseRecoveryStepLabel(refusal.Action), refusal.Code, refusal.Message,
 			),
 		})
 	}

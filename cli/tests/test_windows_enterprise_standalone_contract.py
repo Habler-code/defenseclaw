@@ -286,6 +286,26 @@ def test_standalone_recovery_falls_back_only_to_a_verified_setup_gateway() -> No
     )
 
 
+def test_standalone_recovery_reruns_target_runtime_cleanup_only_with_a_verified_setup_gateway() -> None:
+    # WIN-F25: a failed install's rollback cleanup refused a targets.yaml the
+    # enumerator republished after planning, and every recovery reran that
+    # cleanup with the same staged gateway. Recovery now runs it through the
+    # same staged-first, admission-gated step as managed-hook restore/retire.
+    module = _text(MODULE)
+    restore = _function_body(module, "Restore-DefenseClawTransaction")
+    assert restore.count("Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep `") == 1
+    assert restore.count("Invoke-DefenseClawTargetRuntimeRollbackCleanup `") == 0
+    step = _function_body(module, "Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep")
+    secure_client = step.index("if (-not (Test-DefenseClawStandaloneProfile)) {")
+    first_try = step.index("try {")
+    assert secure_client < first_try
+    assert step.index("Get-DefenseClawRecoveryGatewayAdmission -Layout $Layout") < step.index(
+        "Install-DefenseClawSourceDescriptor `"
+    )
+    assert "throw $stagedFailure" in step
+    assert "$action = 'target-runtime-cleanup'" in step
+
+
 def test_standalone_runtime_cleanup_scope_owns_its_sensor_helper() -> None:
     module = _text(MODULE)
     body = module[
