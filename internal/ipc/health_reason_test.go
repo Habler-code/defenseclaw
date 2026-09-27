@@ -6,6 +6,7 @@ package ipc
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,6 +102,40 @@ func TestGetHealthStreamsReasonChanges(t *testing.T) {
 		second.AvailabilityReason != availabilityReasonInspectionUnavailableBlocking {
 		t.Fatalf("second snapshot = %v/%q, want DEGRADED/%s", second.Availability, second.AvailabilityReason,
 			availabilityReasonInspectionUnavailableBlocking)
+	}
+	cancel()
+	<-done
+}
+
+// TestGetHealthStreamsConfigurationStateChanges pins that a guardian
+// moving from waiting_for_targets to ready reaches a connected client
+// even though availability and its reason do not change.
+func TestGetHealthStreamsConfigurationStateChanges(t *testing.T) {
+	h := runningManagedHealth()
+	h.SetDaemonConfigLoaded(true)
+	var guardian atomic.Value
+	guardian.Store("waiting_for_targets")
+	h.SetGuardianStateReader(func() string { return guardian.Load().(string) })
+	svc := &service{health: h, version: "test", healthWait: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := &recordingHealthStream{ctx: ctx, sent: make(chan *pb.HealthSnapshot, 8)}
+	done := make(chan error, 1)
+	go func() { done <- svc.GetHealth(&pb.GetHealthRequest{}, stream) }()
+
+	first := receiveHealth(t, stream)
+	if first.ConfigurationState != pb.ConfigurationState_CONFIGURATION_STATE_WAITING_FOR_TARGETS {
+		t.Fatalf("first configuration state = %v", first.ConfigurationState)
+	}
+	guardian.Store("ready")
+	h.RefreshConfiguration()
+	second := receiveHealth(t, stream)
+	if second.ConfigurationState != pb.ConfigurationState_CONFIGURATION_STATE_READY {
+		t.Fatalf("second configuration state = %v, want READY", second.ConfigurationState)
+	}
+	if second.Availability != first.Availability || second.AvailabilityReason != first.AvailabilityReason {
+		t.Fatalf("availability changed too (%v/%q -> %v/%q); the test must isolate the configuration state",
+			first.Availability, first.AvailabilityReason, second.Availability, second.AvailabilityReason)
 	}
 	cancel()
 	<-done

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	pb "github.com/defenseclaw/defenseclaw/proto/defenseclaw/secureclient/v1"
@@ -78,7 +79,13 @@ func (s *service) GetHealth(req *pb.GetHealthRequest, stream grpc.ServerStreamin
 		case <-debounce.C:
 			pending = false
 			cur := s.currentHealth()
-			if cur.Availability != last.Availability || cur.AvailabilityReason != last.AvailabilityReason {
+			// Every HealthSnapshot field is shown by the Secure Client UI
+			// (availability, its reason, the configuration state, the
+			// version) and none is a timestamp, so any difference is a
+			// change worth sending. Comparing only availability left a
+			// connected client stuck on its first configuration state when
+			// the guardian moved between waiting_for_targets and ready.
+			if !proto.Equal(cur, last) {
 				if err := stream.Send(cur); err != nil {
 					return err
 				}
