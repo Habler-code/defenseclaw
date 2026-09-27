@@ -1284,12 +1284,15 @@ func TestTargetWorkerPassSharesOneBudgetAcrossAUsersWorkers(t *testing.T) {
 // The same with real worker processes.
 func TestTargetWorkerSubprocessPassBudgetStopsAPausingUser(t *testing.T) {
 	target := currentTestTarget(t)
-	stubTargetWorkerPassBudget(t, 1500*time.Millisecond)
+	// Each worker pauses for less than a fresh budget, but the three share
+	// one. The first worker has 1.5s of the budget left for its own start, so
+	// a slow runner (coverage builds) does not push it past the deadline.
+	stubTargetWorkerPassBudget(t, 4*time.Second)
 	pass := WithTargetWorkerPass(context.Background())
 	started := time.Now()
 	var errs []error
 	for i := 0; i < 3; i++ {
-		_, err := runTargetWorker(pass, target, testTargetOperationPause, json.RawMessage(`1000`))
+		_, err := runTargetWorker(pass, target, testTargetOperationPause, json.RawMessage(`2500`))
 		errs = append(errs, err)
 	}
 	elapsed := time.Since(started)
