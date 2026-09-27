@@ -68,8 +68,9 @@ func TestMain(m *testing.M) {
 	}
 	// Setup tests must not depend on whether this Windows host has the
 	// enterprise DefenseClawGateway service registered, as Secure Client test
-	// hosts do. Tests of the coexistence gate stub it themselves.
+	// hosts do. Tests of the coexistence gates stub them themselves.
 	refuseSetupBesideEnterprise = func() error { return nil }
+	refuseRuntimeRestoreBesideEnterprise = func() error { return nil }
 	os.Exit(m.Run())
 }
 
