@@ -129,6 +129,22 @@ type inspectCall struct {
 	payload        map[string]interface{}     // mutated on 400 retry (delete "config")
 	setAuth        func(req *http.Request)    // set auth header on each attempt
 	onUnauthorized func(context.Context) bool // nil: 401 is terminal (opensource default)
+	// requireVerdict rejects a 200 response that carries neither a
+	// boolean is_safe nor a non-empty string action: it holds no verdict,
+	// so doInspectHTTP returns nil instead of normalizing it into an
+	// alert. The managed path sets it; the opensource path keeps its
+	// historical normalization.
+	requireVerdict bool
+}
+
+// ciscoResponseHasVerdict reports whether a decoded AI Defense response
+// carries a decision: a boolean is_safe or a non-empty string action.
+func ciscoResponseHasVerdict(data map[string]interface{}) bool {
+	if _, ok := data["is_safe"].(bool); ok {
+		return true
+	}
+	action, ok := data["action"].(string)
+	return ok && strings.TrimSpace(action) != ""
 }
 
 // doInspectHTTP executes an AID inspection HTTP call, applying the shared
@@ -279,6 +295,16 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 				httpStatus:     resp.StatusCode,
 				responseBody:   respBody,
 				parseOffset:    ciscoInspectJSONErrorOffset(err),
+			})
+			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			return nil
+		}
+		if call.requireVerdict && !ciscoResponseHasVerdict(data) {
+			emitCiscoInspectFailure(ctx, gatewaylog.ErrCodeInvalidResponse, ciscoInspectFailureDiagnostic{
+				stage:          ciscoInspectStageResponseDecode,
+				classification: ciscoInspectClassResponseVerdictMissing,
+				httpStatus:     resp.StatusCode,
+				responseBody:   respBody,
 			})
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 			return nil

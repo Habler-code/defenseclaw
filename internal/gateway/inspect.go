@@ -220,7 +220,7 @@ func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content
 	failOpenReason := aidFailOpenUnavailable
 	if !managedAIDHookContentIsInspectable(toolName, content) {
 		failOpenReason = aidFailOpenNoContent
-	} else if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
+	} else if a == nil || a.currentCiscoInspector() == nil || a.scannerCfg == nil ||
 		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
 	}
@@ -366,7 +366,8 @@ func (a *APIServer) recordManagedAIDFailOpenForSelectedNativeHookResult(
 }
 
 func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
-	if a == nil || a.ciscoInspector == nil {
+	inspector := a.currentCiscoInspector()
+	if inspector == nil {
 		return nil
 	}
 	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
@@ -384,7 +385,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	if toolName != "" && toolName != "message" {
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
-	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
+	return inspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
 }
 
 // managedAIDHookContentIsInspectable applies text trimming only to the

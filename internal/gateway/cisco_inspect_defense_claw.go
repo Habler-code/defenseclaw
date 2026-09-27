@@ -171,6 +171,19 @@ func (c *CiscoDefenseClawInspectClient) notifyAvailability(err error) {
 	}
 }
 
+// notifyFailedInspection reports a failed call unless its caller cancelled
+// it. A cancelled request context (the agent killed its hook, a proxy
+// client disconnected) says nothing about AI Defense, so the last reported
+// availability stands. A caller deadline still counts as a failure: AI
+// Defense did not answer within the time the request allowed. The client's
+// own timeout never cancels ctx, so it always counts.
+func (c *CiscoDefenseClawInspectClient) notifyFailedInspection(ctx context.Context, err error) {
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	c.notifyAvailability(err)
+}
+
 // warnTokenUnavailable emits a rate-limited operator-visible stderr
 // warning when the managed cloud lane cannot mint a bearer token at
 // inspect time. Meant to make the fail-open condition visible to
@@ -273,7 +286,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		if err == nil {
 			err = errors.New("managed cloud token is empty")
 		}
-		c.notifyAvailability(err)
+		c.notifyFailedInspection(ctx, err)
 		return nil
 	}
 	// Body: messages[].content is the DefenseClaw MessageContent shape
@@ -309,6 +322,10 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		endpoint: c.endpoint,
 		urlPath:  "/api/v1/inspect/defense_claw",
 		payload:  payload,
+		// A 200 without is_safe or action is no verdict: the request
+		// then follows cisco_ai_defense.unavailable_action and health
+		// reports it, instead of passing as an alert.
+		requireVerdict: true,
 		setAuth: func(req *http.Request) {
 			req.Header.Set("Authorization", "Bearer "+currentToken)
 		},
@@ -328,16 +345,18 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	if verdict == nil {
 		// Any nil verdict from doInspectHTTP means the AID call did
 		// not produce an enforceable decision (marshal error, request
-		// build error, transport error, non-2xx, body read error, or
-		// JSON parse error — each of these already emit their own
+		// build error, transport error, non-2xx, body read error, JSON
+		// parse error, or a 200 with neither is_safe nor action — each
+		// of these already emit their own
 		// [cisco-ai-defense] line inside doInspectHTTP). A minted token
 		// does not make inspection available: /health and the Secure
 		// Client availability report the failed inspection until AI
 		// Defense returns a verdict again. Whether the request is then
 		// allowed or blocked is decided and logged by the caller, per
-		// cisco_ai_defense.unavailable_action.
+		// cisco_ai_defense.unavailable_action. A call its caller
+		// cancelled is not reported.
 		logManagedAIDNoVerdict("aid-http-no-verdict", "see the prior [cisco-ai-defense] error / structured event for the cause")
-		c.notifyAvailability(errManagedAIDNoVerdict)
+		c.notifyFailedInspection(ctx, errManagedAIDNoVerdict)
 		return nil
 	}
 	// A real verdict: publish healthy so a recovered lane (after a

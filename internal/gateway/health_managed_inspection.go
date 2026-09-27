@@ -13,18 +13,23 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 )
 
 // ManagedInspectionHealth is the managed_enterprise inspection state shown in
 // /health and mapped onto the Secure Client availability. Available is false
 // while Cisco AI Defense cannot be reached (no credential provider, no token,
 // no inspector); UnavailableAction says whether those requests are currently
-// being allowed or blocked: the configured cisco_ai_defense.unavailable_action,
-// or block on a build with no managed-cloud support.
+// being allowed or blocked: block when cisco_ai_defense.unavailable_action is
+// block (or the build has no managed-cloud support) and a connector the hook
+// handlers evaluate is in action mode to enforce it, otherwise allow (see
+// managedAIDUnavailablePosture).
 type ManagedInspectionHealth struct {
 	Available         bool      `json:"available"`
 	Error             string    `json:"error,omitempty"`
@@ -96,7 +101,7 @@ const (
 
 // managedInspectionUnwiredDetail explains an unavailable inspection whose
 // provider is healthy but whose hook lane never received an inspector.
-const managedInspectionUnwiredDetail = "no managed inspector is wired for agent hooks; check cisco_ai_defense.endpoint and managed-cloud enrollment, then reload the configuration"
+const managedInspectionUnwiredDetail = "no managed inspector is wired for agent hooks; check cisco_ai_defense.endpoint and managed-cloud enrollment (the gateway retries every 30 seconds)"
 
 const (
 	// managedInspectionProbeInterval bounds how often an unavailable
@@ -132,23 +137,39 @@ func (s *Sidecar) managedInspectionState() (bool, string) {
 	return available, detail
 }
 
+// managedInspectionPublishTestHook, when set by a test, runs between a
+// publisher's snapshot and its write into SidecarHealth. Production never
+// sets it.
+var managedInspectionPublishTestHook func()
+
 // publishManagedInspectionHealth mirrors the managed inspection state into
 // SidecarHealth, where /health and the Secure Client availability read it.
-// Outside managed_enterprise it does nothing.
+// Outside managed_enterprise it does nothing. Publishes are serialized and
+// each one reads the state it writes, so the last publish always carries
+// the latest state.
 func (s *Sidecar) publishManagedInspectionHealth() {
 	if s == nil || s.health == nil {
 		return
 	}
+	s.managedInspectionPublishMu.Lock()
+	defer s.managedInspectionPublishMu.Unlock()
 	cfg := s.currentConfig()
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return
 	}
 	available, detail := s.managedInspectionState()
-	s.health.SetManagedInspection(available, detail, managedAIDEffectiveUnavailableAction(cfg))
+	action := managedAIDUnavailablePosture(cfg, s.health)
+	if hook := managedInspectionPublishTestHook; hook != nil {
+		hook()
+	}
+	s.health.SetManagedInspection(available, detail, action)
 }
 
 // refreshManagedInspectionHealth applies a reload: republish in
-// managed_enterprise, otherwise drop the managed inspection state.
+// managed_enterprise, otherwise drop the managed inspection state. The
+// clear takes the publish lock, so a publish that read the managed config
+// before the reload finishes first and cannot write its snapshot after the
+// clear; publishes that start later see the new config and do nothing.
 func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 	if s == nil {
 		return
@@ -157,19 +178,67 @@ func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 		s.publishManagedInspectionHealth()
 		return
 	}
+	s.managedInspectionPublishMu.Lock()
+	defer s.managedInspectionPublishMu.Unlock()
 	s.managedHookInspector.Store(0)
 	if s.health != nil {
 		s.health.ClearManagedInspection()
 	}
 }
 
+// retryManagedHookInspector wires a managed inspector onto the API server's
+// hook lane when it was left without one: for example the provider build
+// failed when the API server started and succeeded later for the guardrail,
+// or failed on a condition that has since cleared. Without it the lane
+// stays unwired until a reload changes cisco_ai_defense, and with
+// unavailable_action=block every tool call that needs inspection is
+// blocked. Runs on the guardrail health ticker, at most once per
+// managedInspectionProbeInterval; an empty endpoint is left to the reload
+// that sets one. The build is quiet: a failure with the same cause as the
+// last one is not logged or recorded as a failed inspection again, since
+// no request is behind it.
+func (s *Sidecar) retryManagedHookInspector(ctx context.Context) {
+	if s == nil || s.managedHookInspector.Load() != managedHookInspectorUnwired {
+		return
+	}
+	cfg := s.currentConfig()
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cloudreg.Registered() ||
+		strings.TrimSpace(cfg.CiscoAIDefense.Endpoint) == "" {
+		return
+	}
+	// runAPI or a reload may be wiring right now; the next tick retries.
+	if !s.hookInspectorMu.TryLock() {
+		return
+	}
+	defer s.hookInspectorMu.Unlock()
+	now := time.Now()
+	if s.managedHookInspector.Load() != managedHookInspectorUnwired ||
+		now.Sub(s.hookInspectorLastRetry) < managedInspectionProbeInterval {
+		return
+	}
+	s.hookInspectorLastRetry = now
+	api := s.apiSnapshot()
+	if api == nil {
+		return
+	}
+	inspector := s.buildManagedInspector(ctx, "hook remote inspection still disabled", true)
+	if inspector == nil {
+		return
+	}
+	api.SetCiscoInspector(inspector)
+	s.setManagedHookInspectorWired(true)
+	fmt.Fprintln(os.Stderr, "[guardrail] managed_enterprise: hook-lane Cisco AI Defense inspector wired on retry")
+}
+
 // probeManagedInspection re-checks an unavailable managed provider by
 // minting a token, at most once per managedInspectionProbeInterval. Only a
 // provider that was already built is probed; a provider that failed to
-// build is left to the next reload, which also rebuilds the inspector. A
+// build is rebuilt by retryManagedHookInspector or the next reload. A
 // failure reported by an inspection that had a token (AI Defense returned
 // no verdict) is not probed: a token says nothing about whether AI Defense
-// answers, so only the next real verdict clears it.
+// answers, so only the next real verdict clears it. The same holds for an
+// outcome an inspection reports while the probe waits on its token: the
+// probe then discards its result.
 func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 	if s == nil {
 		return
@@ -182,6 +251,7 @@ func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 		return
 	}
 	s.inspectionLastProbe = now
+	generation := s.inspectionGeneration
 	s.inspectionMu.Unlock()
 
 	s.cmidProviderMu.Lock()
@@ -202,5 +272,15 @@ func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 	if err == nil && strings.TrimSpace(token) == "" {
 		err = errors.New("managed cloud token is empty")
 	}
-	s.setInspectionAvailability(err)
+	s.inspectionMu.Lock()
+	if s.inspectionGeneration != generation {
+		// An inspection reported while the probe waited; its outcome is
+		// newer than a token, and may be a no-verdict failure a token
+		// must not clear.
+		s.inspectionMu.Unlock()
+		return
+	}
+	s.recordInspectionAvailabilityLocked(err)
+	s.inspectionMu.Unlock()
+	s.publishManagedInspectionHealth()
 }

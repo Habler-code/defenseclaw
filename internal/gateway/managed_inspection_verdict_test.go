@@ -126,3 +126,185 @@ func TestManagedInspectionUnsupportedFollowsTheCredentialFactory(t *testing.T) {
 		t.Fatalf("effective configured action = %q, want block", got)
 	}
 }
+
+// A call its caller cancelled (the agent killed its hook, a proxy client
+// went away) says nothing about AI Defense and leaves the reported
+// availability alone. A caller deadline and the client's own timeout still
+// count as failures.
+func TestManagedInspectionIgnoresACallItsCallerCancelled(t *testing.T) {
+	var hang atomic.Bool
+	arrived := make(chan struct{}, 8)
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Consume the body so the server notices the client going away.
+		_, _ = io.Copy(io.Discard, r.Body)
+		if hang.Load() {
+			select {
+			case arrived <- struct{}{}:
+			default:
+			}
+			select {
+			case <-r.Context().Done():
+			case <-stop:
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(stop) })
+
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = srv.URL
+	s.cfg.CiscoAIDefense.TimeoutMs = 400
+	inspector := s.newManagedInspector(context.Background(), "test")
+	if inspector == nil {
+		t.Fatal("newManagedInspector returned nil")
+	}
+	messages := []ChatMessage{{Role: "user", Content: "hello"}}
+	restoreHealthy := func() {
+		t.Helper()
+		hang.Store(false)
+		if verdict := inspector.Inspect(context.Background(), messages); verdict == nil {
+			t.Fatal("inspect against a healthy endpoint returned no verdict")
+		}
+		if got := s.health.Snapshot().ManagedInspection; got == nil || !got.Available {
+			t.Fatalf("after a real verdict: %+v", got)
+		}
+		hang.Store(true)
+	}
+
+	restoreHealthy()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-arrived
+		cancel()
+	}()
+	if verdict := inspector.Inspect(ctx, messages); verdict != nil {
+		t.Fatalf("cancelled inspect returned %+v", verdict)
+	}
+	if got := s.health.Snapshot().ManagedInspection; got == nil || !got.Available {
+		t.Fatalf("a call its caller cancelled was reported as an AI Defense failure: %+v", got)
+	}
+
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelDeadline()
+	if verdict := inspector.Inspect(deadlineCtx, messages); verdict != nil {
+		t.Fatalf("inspect past its caller deadline returned %+v", verdict)
+	}
+	if got := s.health.Snapshot().ManagedInspection; got == nil || got.Available {
+		t.Fatalf("AI Defense missed the caller deadline but inspection stayed available: %+v", got)
+	}
+
+	restoreHealthy()
+	if verdict := inspector.Inspect(context.Background(), messages); verdict != nil {
+		t.Fatalf("inspect past the client timeout returned %+v", verdict)
+	}
+	if got := s.health.Snapshot().ManagedInspection; got == nil || got.Available {
+		t.Fatalf("the client timeout did not report inspection unavailable: %+v", got)
+	}
+}
+
+// ctxBoundCloudProvider fails Token with its context's error.
+type ctxBoundCloudProvider struct{}
+
+func (ctxBoundCloudProvider) Token(ctx context.Context) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+func (ctxBoundCloudProvider) Refresh(context.Context) error { return nil }
+func (ctxBoundCloudProvider) Invalidate()                   {}
+
+// The token branch follows the same rule: a token request its caller
+// cancelled is not reported, one that ran out of time is.
+func TestManagedInspectionTokenFailureIgnoresACancelledCaller(t *testing.T) {
+	client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  "https://aidefense.example.test",
+		TimeoutMs: 5000,
+	}, ctxBoundCloudProvider{})
+	if client == nil {
+		t.Fatal("NewCiscoDefenseClawInspectClient returned nil")
+	}
+	var reports []error
+	client.bindAvailabilityObserver(func(err error) { reports = append(reports, err) })
+	messages := []ChatMessage{{Role: "user", Content: "hello"}}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if verdict := client.Inspect(cancelled, messages); verdict != nil {
+		t.Fatalf("inspect without a token returned %+v", verdict)
+	}
+	if len(reports) != 0 {
+		t.Fatalf("a cancelled token request was reported: %v", reports)
+	}
+
+	expired, cancelExpired := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelExpired()
+	if verdict := client.Inspect(expired, messages); verdict != nil {
+		t.Fatalf("inspect without a token returned %+v", verdict)
+	}
+	if len(reports) != 1 || reports[0] == nil {
+		t.Fatalf("a token request that ran out of time was not reported: %v", reports)
+	}
+}
+
+// A 200 response with neither is_safe nor action carries no verdict. The
+// managed client returns nil and reports AI Defense unavailable, so the
+// hook lane applies unavailable_action=block instead of passing the call
+// as an alert, and Secure Client does not show READY.
+func TestManagedInspectionTreatsAVerdictlessResponseAsNoVerdict(t *testing.T) {
+	var body atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body.Load().(string))
+	}))
+	t.Cleanup(srv.Close)
+
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = srv.URL
+	inspector := s.newManagedInspector(context.Background(), "test")
+	if inspector == nil {
+		t.Fatal("newManagedInspector returned nil")
+	}
+	api := managedBlockingHookServer(inspector)
+	req := &ToolInspectRequest{Tool: "run_shell", Args: json.RawMessage(`{"command":"ls -la"}`)}
+	messages := []ChatMessage{{Role: "user", Content: "hello"}}
+
+	for _, tc := range []struct {
+		body    string
+		verdict bool
+	}{
+		{body: `{"is_safe":true,"action":"Allow"}`, verdict: true},
+		{body: `{}`},
+		{body: `null`},
+		{body: `{"status":"ok"}`},
+		{body: `{"message":"upstream error","classifications":["SECURITY_VIOLATION"]}`},
+		{body: `{"is_safe":"true","action":""}`},
+		{body: `{"is_safe":false}`, verdict: true},
+		{body: `{"action":"Block"}`, verdict: true},
+	} {
+		body.Store(tc.body)
+		verdict := inspector.Inspect(context.Background(), messages)
+		got := s.health.Snapshot().ManagedInspection
+		if tc.verdict {
+			if verdict == nil || got == nil || !got.Available {
+				t.Fatalf("body %s: verdict = %+v, health = %+v; want a verdict and available", tc.body, verdict, got)
+			}
+			continue
+		}
+		if verdict != nil {
+			t.Fatalf("body %s: a response without is_safe or action produced verdict %+v", tc.body, verdict)
+		}
+		if got == nil || got.Available || !strings.Contains(got.Error, "no verdict") {
+			t.Fatalf("body %s: health = %+v, want unavailable with no verdict", tc.body, got)
+		}
+		v := api.inspectToolPolicy(req)
+		if v == nil {
+			t.Fatalf("body %s: block posture returned no hook verdict", tc.body)
+		}
+		assertManagedAIDUnavailableBlock(t, v.Action, v.Severity, v.Reason, v.Findings)
+	}
+}

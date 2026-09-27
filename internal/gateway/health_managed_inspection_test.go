@@ -14,6 +14,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,6 +88,7 @@ func TestSetInspectionAvailabilityPublishesOnlyInManagedMode(t *testing.T) {
 		t.Fatalf("managed snapshot = %+v", got)
 	}
 
+	s.cfg.Guardrail.Mode = "action"
 	s.cfg.CiscoAIDefense.UnavailableAction = config.AIDUnavailableActionBlock
 	s.refreshManagedInspectionHealth(true)
 	if got := s.health.Snapshot().ManagedInspection; got.UnavailableAction != config.AIDUnavailableActionBlock {
@@ -208,5 +214,300 @@ func TestProbeManagedInspectionRecoversARateLimitedProvider(t *testing.T) {
 	empty.probeManagedInspection(context.Background())
 	if got := empty.health.Snapshot().ManagedInspection; got.Available {
 		t.Fatalf("probe without a provider reported available: %+v", got)
+	}
+}
+
+// blockingCloudProvider holds Token until released, so a test can land an
+// inspection outcome while a probe waits on its token.
+type blockingCloudProvider struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingCloudProvider) Token(context.Context) (string, error) {
+	close(p.entered)
+	<-p.release
+	return "token", nil
+}
+
+func (p *blockingCloudProvider) Refresh(context.Context) error { return nil }
+func (p *blockingCloudProvider) Invalidate()                   {}
+
+// A no-verdict failure an inspection reports while the probe waits on a
+// token is newer than the probe's result; the token must not clear it.
+func TestProbeManagedInspectionKeepsANewerNoVerdictFailure(t *testing.T) {
+	s := managedInspectionSidecar(t)
+	provider := &blockingCloudProvider{entered: make(chan struct{}), release: make(chan struct{})}
+	s.cmidProviderInst = provider
+	s.setInspectionAvailability(errors.New("cmid daemon not running"))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.probeManagedInspection(context.Background())
+	}()
+	select {
+	case <-provider.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe did not ask for a token")
+	}
+	s.setInspectionAvailability(errManagedAIDNoVerdict)
+	close(provider.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe did not finish")
+	}
+
+	got := s.health.Snapshot().ManagedInspection
+	if got == nil || got.Available || got.Error != errManagedAIDNoVerdict.Error() {
+		t.Fatalf("probe overwrote a newer no-verdict failure: %+v", got)
+	}
+	s.inspectionMu.RLock()
+	verdictFailure := s.inspectionVerdictFailure
+	s.inspectionMu.RUnlock()
+	if !verdictFailure {
+		t.Fatal("probe cleared the no-verdict flag, so later probes would clear the failure too")
+	}
+}
+
+// Publishes are serialized: a publisher that took its snapshot before a
+// newer outcome cannot write that older snapshot last.
+func TestPublishManagedInspectionHealthCannotWriteAnOlderSnapshotLast(t *testing.T) {
+	s := managedInspectionSidecar(t)
+	s.setInspectionAvailability(nil)
+
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	var first atomic.Bool
+	managedInspectionPublishTestHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(paused)
+			<-resume
+		}
+	}
+	t.Cleanup(func() { managedInspectionPublishTestHook = nil })
+
+	staleDone := make(chan struct{})
+	go func() {
+		defer close(staleDone)
+		s.publishManagedInspectionHealth() // snapshots "available"
+	}()
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale publisher did not reach its write")
+	}
+
+	newerDone := make(chan struct{})
+	go func() {
+		defer close(newerDone)
+		s.setInspectionAvailability(errManagedAIDNoVerdict)
+	}()
+	// Without serialization the newer publish completes here; with it,
+	// it waits for the stale publisher.
+	select {
+	case <-newerDone:
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(resume)
+	for _, ch := range []chan struct{}{staleDone, newerDone} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("publisher did not finish")
+		}
+	}
+
+	if got := s.health.Snapshot().ManagedInspection; got == nil || got.Available ||
+		got.Error != errManagedAIDNoVerdict.Error() {
+		t.Fatalf("an older snapshot was written last: %+v", got)
+	}
+}
+
+// A hook lane left without an inspector because the provider build failed
+// when the API server started is rewired from the guardrail health ticker
+// once the build succeeds, so unavailable_action=block stops blocking every
+// tool call. Retries are rate limited.
+func TestManagedHealthTickerRewiresAnUnwiredHookLane(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buildable atomic.Bool
+	var builds atomic.Int32
+	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
+		builds.Add(1)
+		if !buildable.Load() {
+			return nil, errors.New("managed cloud auth library not trusted yet")
+		}
+		return newFakeCloudProvider("token"), nil
+	})
+	t.Cleanup(func() { cloudreg.Register(nil) })
+
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = srv.URL
+	api := managedBlockingHookServer(nil)
+	s.apiServer = api
+	req := &ToolInspectRequest{Tool: "run_shell", Args: json.RawMessage(`{"command":"ls -la"}`)}
+
+	// runAPI's wiring with a provider that cannot be built yet.
+	if inspector := s.pickInspector(context.Background()); inspector != nil {
+		t.Fatalf("pickInspector with a failing build returned %T", inspector)
+	}
+	s.setManagedHookInspectorWired(false)
+	v := api.inspectToolPolicy(req)
+	if v == nil {
+		t.Fatal("unwired hook lane returned no verdict")
+	}
+	assertManagedAIDUnavailableBlock(t, v.Action, v.Severity, v.Reason, v.Findings)
+
+	// Still failing: one retry, then rate limited.
+	before := builds.Load()
+	s.addManagedInspectionHealth(context.Background(), map[string]interface{}{})
+	s.addManagedInspectionHealth(context.Background(), map[string]interface{}{})
+	if got := builds.Load() - before; got != 1 {
+		t.Fatalf("provider builds during two ticks = %d, want 1", got)
+	}
+	if api.currentCiscoInspector() != nil {
+		t.Fatal("a failed retry wired an inspector")
+	}
+
+	buildable.Store(true)
+	s.hookInspectorMu.Lock()
+	s.hookInspectorLastRetry = time.Now().Add(-managedInspectionProbeInterval)
+	s.hookInspectorMu.Unlock()
+	detail := map[string]interface{}{}
+	s.addManagedInspectionHealth(context.Background(), detail)
+	if api.currentCiscoInspector() == nil || s.managedHookInspector.Load() != managedHookInspectorWired {
+		t.Fatal("the health ticker did not rewire the hook lane after the provider became buildable")
+	}
+	if v := api.inspectToolPolicy(req); v == nil || v.Action != "allow" {
+		t.Fatalf("rewired hook lane verdict = %+v, want the AI Defense allow", v)
+	}
+	if got := s.health.Snapshot().ManagedInspection; got == nil || !got.Available {
+		t.Fatalf("after the rewired lane got a verdict: %+v", got)
+	}
+}
+
+// A reload that leaves managed_enterprise clears the managed inspection
+// state after any publish that read the managed config before the reload.
+// Nothing publishes outside managed_enterprise, so a snapshot that publish
+// wrote after the clear would stay, and the Secure Client availability would
+// keep reporting DEGRADED.
+func TestRefreshManagedInspectionHealthClearsAfterAnInFlightPublish(t *testing.T) {
+	s := managedInspectionSidecar(t)
+	s.setInspectionAvailability(errors.New("managed cloud token unavailable"))
+
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	var first atomic.Bool
+	managedInspectionPublishTestHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(paused)
+			<-resume
+		}
+	}
+	t.Cleanup(func() { managedInspectionPublishTestHook = nil })
+
+	staleDone := make(chan struct{})
+	go func() {
+		defer close(staleDone)
+		s.publishManagedInspectionHealth() // reads the managed config
+	}()
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publisher did not reach its write")
+	}
+
+	// The reload publishes a config outside managed_enterprise, then clears.
+	s.cfgCurrent.Store(&config.Config{
+		DataDir:        s.cfg.DataDir,
+		DeploymentMode: string(config.DeploymentModeUnmanagedBYOD),
+		Guardrail:      config.GuardrailConfig{Enabled: true},
+	})
+	clearDone := make(chan struct{})
+	go func() {
+		defer close(clearDone)
+		s.refreshManagedInspectionHealth(false)
+	}()
+	// Without the publish lock the clear completes here, before the
+	// publisher writes.
+	select {
+	case <-clearDone:
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(resume)
+	for _, ch := range []chan struct{}{staleDone, clearDone} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("publish or clear did not finish")
+		}
+	}
+
+	if got := s.health.Snapshot().ManagedInspection; got != nil {
+		t.Fatalf("managed inspection state left after leaving managed_enterprise: %+v", got)
+	}
+}
+
+// The hook-lane retry rebuilds a failing provider every
+// managedInspectionProbeInterval. A build that keeps failing the same way
+// is logged and recorded as a failed inspection once, not on every retry
+// with no request behind it; a new cause is reported again.
+func TestManagedHookInspectorRetryReportsARepeatedBuildFailureOnce(t *testing.T) {
+	var cause atomic.Value
+	cause.Store("managed cloud auth library not trusted yet")
+	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
+		return nil, errors.New(cause.Load().(string))
+	})
+	t.Cleanup(func() { cloudreg.Register(nil) })
+
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = "https://aid.example.invalid"
+	s.apiServer = managedBlockingHookServer(nil)
+	retry := func() {
+		// Run as if the retry interval and the build log cooldown
+		// had both elapsed.
+		s.hookInspectorMu.Lock()
+		s.hookInspectorLastRetry = time.Time{}
+		s.hookInspectorMu.Unlock()
+		s.cmidProviderMu.Lock()
+		s.cmidBuildLastLog = time.Time{}
+		s.cmidProviderMu.Unlock()
+		s.retryManagedHookInspector(context.Background())
+	}
+	lines := func(out string) (build, inspect int) {
+		return strings.Count(out, "CMID provider build failed"), strings.Count(out, "[gateway] error ")
+	}
+
+	var wired Inspector
+	out := captureStderr(t, func() {
+		// runAPI's wiring reports the failure.
+		wired = s.pickInspector(context.Background())
+		s.setManagedHookInspectorWired(wired != nil)
+		retry()
+		retry()
+	})
+	if wired != nil {
+		t.Fatalf("pickInspector with a failing build returned %T", wired)
+	}
+	if build, inspect := lines(out); build != 1 || inspect != 1 {
+		t.Fatalf("startup and two retries with one cause: %d build and %d error lines, want 1 and 1:\n%s", build, inspect, out)
+	}
+
+	cause.Store("managed cloud auth library missing")
+	out = captureStderr(t, func() {
+		retry()
+		retry()
+	})
+	if build, inspect := lines(out); build != 1 || inspect != 1 {
+		t.Fatalf("two retries with a new cause: %d build and %d error lines, want 1 and 1:\n%s", build, inspect, out)
+	}
+	if s.managedHookInspector.Load() != managedHookInspectorUnwired {
+		t.Fatal("a failed retry marked the hook lane wired")
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -89,6 +90,79 @@ func managedAIDEffectiveUnavailableAction(cfg *config.Config) string {
 		return config.AIDUnavailableActionBlock
 	}
 	return cfg.CiscoAIDefense.EffectiveUnavailableAction()
+}
+
+// managedAIDUnavailablePosture is what currently happens to a request AI
+// Defense could not inspect, as /health and the Secure Client availability
+// report it. Only a connector in action mode enforces the block; observe
+// mode records it as would-block and lets the call run uninspected. So
+// while no connector the hook handlers evaluate is in action mode the
+// posture is allow, whatever managedAIDEffectiveUnavailableAction says.
+// health supplies the connectors application protection registered; nil
+// means none.
+func managedAIDUnavailablePosture(cfg *config.Config, health *SidecarHealth) string {
+	action := managedAIDEffectiveUnavailableAction(cfg)
+	if action == config.AIDUnavailableActionBlock && !managedAIDHookLaneEnforces(cfg, health) {
+		return config.AIDUnavailableActionAllow
+	}
+	return action
+}
+
+// managedAIDHookLaneEnforces reports whether any connector the hook
+// handlers evaluate runs its hooks in action mode, with both resolved the
+// way the handlers resolve them (agentHookEnabled, codexEnabled,
+// claudeCodeEnabled and agentHookMode). A connector is evaluated when it is
+// active (guardrail.connectors, guardrail.connector or claw.mode), when
+// connector_hooks.<name>.enabled is set, or when application protection
+// registered it and is enabled for it; a manual connector that was disabled
+// is not. Its mode is connector_hooks.<name>.mode, then the connector's
+// guardrail mode. With no connector selected, the generic inspect routes
+// follow guardrail.mode.
+func managedAIDHookLaneEnforces(cfg *config.Config, health *SidecarHealth) bool {
+	if cfg == nil {
+		return false
+	}
+	active := cfg.ActiveConnectors()
+	if len(active) == 0 && inspectMode(cfg) == "action" {
+		return true
+	}
+	for _, name := range active {
+		if cfg.Guardrail.EffectiveEnabled(name) && managedAIDHookMode(cfg, name) == "action" {
+			return true
+		}
+	}
+	// Connectors the handlers evaluate outside the active list: an enabled
+	// connector_hooks entry (or the legacy claude_code / codex block), and
+	// connectors application protection registered.
+	extra := []string{"claudecode", "codex"}
+	for name := range cfg.ConnectorHooks {
+		extra = append(extra, name)
+	}
+	if health != nil {
+		extra = append(extra, health.ConnectorsWithSource("automatic")...)
+	}
+	for _, name := range extra {
+		if cfg.ManualConnectorConfigured(name) && !cfg.Guardrail.EffectiveEnabled(name) {
+			continue
+		}
+		evaluated := cfg.ConnectorHookConfig(name).Enabled ||
+			(health != nil && health.HasConnectorSource(name, "automatic") &&
+				cfg.ApplicationProtection.EffectiveEnabled(name))
+		if evaluated && managedAIDHookMode(cfg, name) == "action" {
+			return true
+		}
+	}
+	return false
+}
+
+// managedAIDHookMode resolves a connector's hook mode the way agentHookMode
+// does: connector_hooks.<name>.mode, then the connector's guardrail mode.
+func managedAIDHookMode(cfg *config.Config, name string) string {
+	mode := strings.TrimSpace(cfg.ConnectorHookConfig(name).Mode)
+	if mode == "" || strings.EqualFold(mode, "inherit") {
+		mode = cfg.EffectiveGuardrailModeForConnector(name)
+	}
+	return normalizeAgentHookMode(mode)
 }
 
 // managedAIDUnavailableReasonBlockable reports whether a managed fail-open
@@ -249,18 +323,21 @@ func (s *Sidecar) requireManagedInspectionSupport() error {
 
 // addManagedInspectionHealth adds the managed inspection state to a
 // guardrail health detail map: whether AI Defense can currently be reached,
-// the configured unavailable action, and, while it cannot, the cause and a
-// hint that says what happens to tool calls. It runs on the guardrail
-// health ticker, so it also re-probes an unavailable provider and refreshes
-// the Secure Client availability.
+// what happens to requests it cannot inspect (managedAIDUnavailablePosture),
+// and, while it cannot, the cause and a hint that says what happens to tool
+// calls. It runs on the guardrail health ticker, so it also rewires a hook
+// lane left without an inspector, re-probes an unavailable provider and
+// refreshes the Secure Client availability.
 func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[string]interface{}) {
 	if s == nil || detail == nil {
 		return
 	}
+	s.retryManagedHookInspector(ctx)
 	s.probeManagedInspection(ctx)
 	s.publishManagedInspectionHealth()
 	available, cause := s.managedInspectionState()
-	action := managedAIDEffectiveUnavailableAction(s.currentConfig())
+	cfg := s.currentConfig()
+	action := managedAIDUnavailablePosture(cfg, s.health)
 	detail["inspection_available"] = available
 	detail["inspection_unavailable_action"] = action
 	if available {
@@ -271,6 +348,10 @@ func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[str
 	// plainly what is happening behind it.
 	if action == config.AIDUnavailableActionBlock {
 		detail["hint"] = "remote inspection is unreachable; tool calls that need inspection are being blocked (cisco_ai_defense.unavailable_action=block)"
+		return
+	}
+	if managedAIDEffectiveUnavailableAction(cfg) == config.AIDUnavailableActionBlock {
+		detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected (no connector is in action mode, so cisco_ai_defense.unavailable_action=block only records them as would-block)"
 		return
 	}
 	detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected"
