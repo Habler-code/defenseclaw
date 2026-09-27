@@ -2939,6 +2939,13 @@ func rollbackSetupTransactionWithRuntime(
 		if transaction.PreviousState == nil && !restoreStoppedFreshRuntime {
 			return nil
 		}
+		// An enterprise deployment installed since the operation began owns
+		// the hook port now. Leave the restored per-user runtime stopped; its
+		// gateway start would be refused and hold the journal open.
+		if refusal := refuseRuntimeRestoreBesideEnterprise(); refusal != nil {
+			reportRuntimeRestoreSkipped(refusal)
+			return nil
+		}
 		gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 		_, err := startServices(gatewayPath, transaction.DataRoot, restoreServices)
 		return err
@@ -3610,6 +3617,17 @@ func convergeInstallRuntime(
 			hookErr = fmt.Errorf("disable stable hook runtime: %w", hookErr)
 		}
 		return errors.Join(hookErr, quiesceOwnedInstallRuntime(gatewayPath, dataRoot, ops))
+	}
+	// An enterprise deployment installed since the operation began owns the
+	// hook port now. This is reached when an uninstall recovers an install
+	// journal left in the published phase, and when the deployment arrives
+	// during an install. Leave the per-user runtime stopped with auto-start
+	// off; its gateway start would be refused and hold the journal open.
+	if wanted.Gateway || wanted.Watchdog {
+		if refusal := refuseRuntimeRestoreBesideEnterprise(); refusal != nil {
+			reportRuntimeRestoreSkipped(refusal)
+			return quiesceOwnedInstallRuntime(gatewayPath, dataRoot, ops)
+		}
 	}
 	if _, _, err := ops.configureAutoStart(gatewayPath, wanted.Gateway); err != nil {
 		return err

@@ -585,7 +585,12 @@ enrollment authority; and the guardian is the per-user repair authority.
    coexistence check refuse to run beside an enterprise deployment: while the
    `DefenseClawGateway` service exists, their `install.ps1`, their Setup
    install, upgrade, and repair actions, and their gateway `start`, `restart`,
-   and foreground run all refuse. A production deployment also owns
+   and foreground run all refuse. A per-user gateway from such a release that
+   is already running when the service is registered checks every 5 seconds
+   and stops itself. When Setup rolls back or completes an interrupted
+   per-user operation after that point, it leaves the per-user gateway
+   stopped. A production
+   deployment also owns
    `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1`. It never
    changes a value that Group Policy or another administrator already set, and
    Uninstall removes the value only if it still carries the deployment's owner
@@ -595,10 +600,13 @@ enrollment authority; and the guardian is the per-user repair authority.
    `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) and its hook
    cold-start recovery still start a per-user gateway, which can take the port
    while the SCM gateway restarts. The enterprise lifecycle does not detect,
-   report, or remove such an install, and the owned self-update policy keeps it
-   on its release. Administrators must uninstall pre-existing per-user copies
-   for every user before or after deploying; while one holds the port, managed
-   hooks fail closed with `enterprise_managed_gateway_peer_unverified`. A
+   report, or remove such an install, and self-update does not move it to a
+   release with the check: native installs honor the owned `DisableSelfUpdate`
+   policy, and legacy script installs (0.8.3 and earlier) have no published
+   Windows upgrade path to one. Administrators must uninstall pre-existing
+   per-user copies for every user before or after deploying; while one holds
+   the port, managed hooks fail closed with
+   `enterprise_managed_gateway_peer_unverified`. A
    deliberate listener from any other standard-user program also remains an
    availability residual. Target-owned file reads and comparisons are bounded, and an
    authorized oversized runtime leaf is quarantined for repair, but disk-full,
