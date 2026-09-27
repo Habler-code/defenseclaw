@@ -18,7 +18,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -126,11 +125,11 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 //     an override that points at a shared directory's existing file.
 //  3. Parent directory basename is "ipc" — cheap shape check.
 //  4. Cleaned parent equals `<TrustedProgramData>\<managed-IPC-relative>`
-//     (case-insensitive on Windows). Refuses an override that lives
-//     under a user-writable ancestor like `C:\Users\<user>\ipc\` —
-//     otherwise a local user could plant the socket file (or a
-//     junction) there before the daemon starts and have the DACL
-//     rewritten under their control.
+//     (ASCII case-insensitive, see sameWindowsPath). Refuses an
+//     override that lives under a user-writable ancestor like
+//     `C:\Users\<user>\ipc\` — otherwise a local user could plant the
+//     socket file (or a junction) there before the daemon starts and
+//     have the DACL rewritten under their control.
 //
 // Tests in this package that legitimately need to scratch-dir the
 // IPC surface can set allowUnsafeSocketOverrideForTest to true for
@@ -159,7 +158,7 @@ func validateWindowsSocketPathFor(socketPath, baseName string) error {
 	parent := filepath.Clean(filepath.Dir(clean))
 	// Shape anchor: the socket must live under an "ipc" directory. In
 	// production this is fully subsumed by the trusted-root check below,
-	// which requires an exact case-insensitive match against
+	// which requires an exact ASCII case-insensitive match against
 	// TrustedProgramFiles/…/ipc — check 3 can only fire for inputs check 4
 	// would also reject. It IS load-bearing under the test hook
 	// (allowUnsafeSocketOverrideForTest) which short-circuits check 4:
@@ -186,7 +185,9 @@ func validateWindowsSocketPathFor(socketPath, baseName string) error {
 		return fmt.Errorf("ipc: trusted program files root is empty; refusing to bind IPC surface")
 	}
 	trustedParent := filepath.Clean(filepath.Join(programFiles, windowsManagedIPCRelativeDir))
-	if !strings.EqualFold(parent, trustedParent) {
+	// sameWindowsPath, not strings.EqualFold: Unicode folding would
+	// accept a user-created look-alike of the Program Files root.
+	if !sameWindowsPath(parent, trustedParent) {
 		return fmt.Errorf(
 			"ipc: socket path override must live under the trusted managed root %q (got parent %q)",
 			trustedParent, parent,

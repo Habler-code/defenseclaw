@@ -24,6 +24,31 @@ package ipc
 // machine-wide health, stats and notification stream, as on macOS.
 // Scoping records to one session would need the originating session on
 // block events, which the gateway does not record today.
+//
+// Admission also authenticates the executable, not the code running in
+// the process, and this is weaker than macOS. The check binds a
+// connection to the image its peer process was created from, once, when
+// the connection is accepted. Windows does not isolate processes of one
+// user from each other and csc_ui.exe is not a protected process, so a
+// process of the same user can start csc_ui.exe itself and control it,
+// or duplicate a socket the GUI already had admitted, and then read the
+// same stream. On macOS the hardened runtime prevents that. The exposure
+// is bounded: the service is read-only (GetHealth, GetStatsSnapshot,
+// WatchNotifications), notification bodies carry no secrets, raw
+// prompts or policy bodies by contract (secureclient.proto), and every
+// signed-in user's GUI receives the same stream anyway. Binding a
+// connection to the GUI's own code needs a credential the GUI proves
+// after connecting, such as one issued through the Secure Client agent
+// service.
+//
+// The kernel records the image name as the process was launched, so a
+// GUI started through an 8.3 short path (C:\PROGRA~2\...) reports short
+// path elements. Such a name is admitted only when each element is the
+// allowed long name or the short name NTFS holds for that element of the
+// allowed path when the peer connects (matchKernelImage). The short
+// names are looked up in the policy's own administrator-owned paths,
+// never in a path the peer reported. Any other name containing "~" is
+// refused, and the refusal reason says why (shortNameLaunchHint).
 
 import (
 	"errors"
@@ -33,6 +58,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -87,6 +114,13 @@ type windowsPeerResolvers struct {
 	// openImage opens one of the policy's allowed drive paths. It is
 	// never called with a path reported by, or chosen by, the peer.
 	openImage func(drivePath string) (windowsPeerImage, error)
+	// shortName returns the 8.3 short name NTFS currently holds for the
+	// last element of drivePath, or "" when that element has none. Like
+	// openImage it is only called with the policy's own paths: an
+	// allowed executable or one of the directories above it, up to and
+	// including the trusted root. Nil turns short-name matching off, so
+	// only long image names are admitted.
+	shortName func(drivePath string) (string, error)
 }
 
 func (r windowsPeerResolvers) complete() bool {
@@ -96,10 +130,12 @@ func (r windowsPeerResolvers) complete() bool {
 // windowsPeerAllowedImage is one executable the policy admits, in the
 // two forms the listener compares: the drive-letter path the opened
 // file must resolve to, and the NT device path the kernel records as a
-// process image name.
+// process image name. device is the NT device the drive letter maps
+// to, the prefix of kernelPath.
 type windowsPeerAllowedImage struct {
 	drivePath  string
 	kernelPath string
+	device     string
 }
 
 // windowsPeerPolicy is the resolved admission policy: the exact
@@ -157,7 +193,7 @@ func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string, d
 				return windowsPeerPolicy{}, fmt.Errorf("ipc: windows peer auth: image %q: %w", rel, err)
 			}
 			full := root + `\` + secureClientWindowsInstallRelativeDir + `\` + rel
-			key := strings.ToLower(full)
+			key := windowsPathKey(full)
 			if _, dup := seen[key]; dup {
 				continue
 			}
@@ -165,6 +201,7 @@ func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string, d
 			policy.images = append(policy.images, windowsPeerAllowedImage{
 				drivePath:  full,
 				kernelPath: device + full[2:],
+				device:     device,
 			})
 		}
 	}
@@ -179,34 +216,168 @@ func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string, d
 }
 
 // allowsImage reports whether finalPath is exactly one of the allowed
-// executables. NTFS names are case-insensitive, so the comparison is
-// too; anything that is not already canonical is refused rather than
-// normalized here, because the production path comes from
-// GetFinalPathNameByHandle and a non-canonical value means something
-// upstream is wrong.
+// executables, compared with sameWindowsPath. Anything that is not
+// already canonical is refused rather than normalized here, because
+// the production path comes from GetFinalPathNameByHandle and a
+// non-canonical value means something upstream is wrong.
 func (p windowsPeerPolicy) allowsImage(finalPath string) bool {
 	if !isCanonicalWindowsDrivePath(finalPath) {
 		return false
 	}
 	for _, image := range p.images {
-		if strings.EqualFold(finalPath, image.drivePath) {
+		if sameWindowsPath(finalPath, image.drivePath) {
 			return true
 		}
 	}
 	return false
 }
 
-// matchKernelImage returns the allowed drive path whose NT form is
-// exactly kernelPath (case-insensitively), or false. It is a string
-// comparison only: nothing is opened for a process whose image name
-// is not already one of the allowed executables.
-func (p windowsPeerPolicy) matchKernelImage(kernelPath string) (string, bool) {
+// matchKernelImage returns the allowed drive path that kernelPath
+// names, or false. The name matches when it equals an allowed NT path,
+// compared with sameWindowsPath, or, for a name containing "~", when it
+// is that path with one or more elements replaced by their current 8.3
+// short names (matchesShortNames). No file the peer names is opened:
+// the only lookups are the short names of the policy's own paths,
+// through shortName, which may be nil to admit long names only. The
+// file opened afterwards is the policy's own path, so this match is
+// what ties the peer process to the file whose signature is checked;
+// it must never report a match for a name that NTFS resolves to
+// another file.
+func (p windowsPeerPolicy) matchKernelImage(kernelPath string, shortName func(string) (string, error)) (string, bool) {
 	for _, image := range p.images {
-		if strings.EqualFold(kernelPath, image.kernelPath) {
+		if sameWindowsPath(kernelPath, image.kernelPath) {
+			return image.drivePath, true
+		}
+	}
+	if shortName == nil || !strings.Contains(kernelPath, "~") {
+		return "", false
+	}
+	for _, image := range p.images {
+		if image.matchesShortNames(kernelPath, shortName) {
 			return image.drivePath, true
 		}
 	}
 	return "", false
+}
+
+// matchesShortNames reports whether kernelPath is this image's NT path
+// element by element, where each element is either the allowed long
+// name (sameWindowsPath) or, if it contains "~", the short name
+// shortName reports for the allowed path up to that element. NTFS keeps
+// every long and short name in a directory unique across both kinds,
+// so an element equal to the short name the allowed element holds names
+// that element, and by induction the whole name names the allowed file.
+//
+// The short names are read when the peer connects, not cached when the
+// policy is built: a short name can go away later (fsutil 8dot3name
+// strip), after which a standard user could create a directory in the
+// drive root under the old short name, and a cached name would then
+// admit a process started from that directory.
+func (image windowsPeerAllowedImage) matchesShortNames(kernelPath string, shortName func(string) (string, error)) bool {
+	prefix := image.device + `\`
+	if image.device == "" || !plainWindowsPathText(kernelPath) || len(kernelPath) <= len(prefix) ||
+		!sameWindowsPath(kernelPath[:len(prefix)], prefix) {
+		return false
+	}
+	got := strings.Split(kernelPath[len(prefix):], `\`)
+	want := strings.Split(image.drivePath[3:], `\`)
+	if len(got) != len(want) {
+		return false
+	}
+	allowed := image.drivePath[:2]
+	for i, element := range want {
+		allowed += `\` + element
+		if sameWindowsPath(got[i], element) {
+			continue
+		}
+		if !strings.Contains(got[i], "~") {
+			return false
+		}
+		short, err := shortName(allowed)
+		if err != nil || short == "" || !sameWindowsPath(got[i], short) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameWindowsPath reports whether two paths are the same string under
+// the one case rule the peer check relies on: ASCII letters match in
+// either case, and every other character must be identical.
+//
+// strings.EqualFold must not be used for this. Its Unicode simple
+// folding equates characters that NTFS and the object manager keep
+// apart, for example U+017F (LATIN SMALL LETTER LONG S) with "s" and
+// U+212A (KELVIN SIGN) with "k". A standard user can create a
+// directory at the root of the system drive, so a look-alike of
+// "Program Files (x86)" would otherwise pass as the allowed path while
+// naming a different file. Non-ASCII letters that NTFS does treat as
+// one name in either case are compared exactly, so this comparison
+// can only refuse a name NTFS would accept, never the reverse. A
+// U+FFFD replacement character (what an unpaired UTF-16 surrogate
+// decodes to) or invalid UTF-8 never matches, so two different raw
+// names cannot collapse into one string.
+func sameWindowsPath(a, b string) bool {
+	if len(a) != len(b) || !plainWindowsPathText(a) || !plainWindowsPathText(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if asciiLower(a[i]) != asciiLower(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func plainWindowsPathText(path string) bool {
+	return utf8.ValidString(path) && !strings.ContainsRune(path, utf8.RuneError)
+}
+
+// windowsPathKey is the map key form of sameWindowsPath: ASCII letters
+// lowered, every other byte kept.
+func windowsPathKey(path string) string {
+	key := []byte(path)
+	for i := range key {
+		key[i] = asciiLower(key[i])
+	}
+	return string(key)
+}
+
+func asciiLower(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
+// kernelImageName converts the counted UTF-16 image name the kernel
+// reports into a string. It refuses input that a lossy conversion
+// would turn into another name: a NUL inside the name, where a
+// NUL-terminated conversion would cut it short, and an unpaired
+// surrogate, which would decode to U+FFFD. Terminating NULs counted in
+// the length are dropped; they end the name rather than change it.
+func kernelImageName(units []uint16) (string, error) {
+	for len(units) > 0 && units[len(units)-1] == 0 {
+		units = units[:len(units)-1]
+	}
+	if len(units) == 0 {
+		return "", errors.New("image name is empty")
+	}
+	for i := 0; i < len(units); i++ {
+		unit := units[i]
+		switch {
+		case unit == 0:
+			return "", errors.New("image name contains NUL")
+		case unit >= 0xd800 && unit <= 0xdbff:
+			if i+1 >= len(units) || units[i+1] < 0xdc00 || units[i+1] > 0xdfff {
+				return "", errors.New("image name contains an unpaired surrogate")
+			}
+			i++
+		case unit >= 0xdc00 && unit <= 0xdfff:
+			return "", errors.New("image name contains an unpaired surrogate")
+		}
+	}
+	return string(utf16.Decode(units)), nil
 }
 
 // isLocalNTDeviceName accepts a single-segment NT device name such as
@@ -463,9 +634,10 @@ func (l *windowsPeerAuthListener) reject(id windowsPeerIdentity, reason string) 
 }
 
 // authenticate runs the checks in order. The process image name the
-// kernel reports must already equal an allowed executable, by string
-// comparison, before anything is opened; the file that is then opened
-// is the policy's own path, never one supplied by the peer.
+// kernel reports must already name an allowed executable, by string
+// comparison with its long name or its current 8.3 short names, before
+// anything is opened; the file that is then opened is the policy's own
+// path, never one supplied by the peer.
 func (l *windowsPeerAuthListener) authenticate(c net.Conn) (windowsPeerIdentity, string) {
 	var id windowsPeerIdentity
 	pid, err := l.resolve.peerPID(c)
@@ -487,9 +659,9 @@ func (l *windowsPeerAuthListener) authenticate(c net.Conn) (windowsPeerIdentity,
 	if process.CreatedAt.IsZero() {
 		return id, "peer process creation time unavailable"
 	}
-	drivePath, ok := l.policy.matchKernelImage(process.ImagePath)
+	drivePath, ok := l.policy.matchKernelImage(process.ImagePath, l.resolve.shortName)
 	if !ok {
-		return id, "peer image is not an allowed Secure Client GUI executable"
+		return id, "peer image is not an allowed Secure Client GUI executable" + shortNameLaunchHint(process.ImagePath)
 	}
 	image, err := l.resolve.openImage(drivePath)
 	if err != nil {
@@ -498,7 +670,7 @@ func (l *windowsPeerAuthListener) authenticate(c net.Conn) (windowsPeerIdentity,
 	defer image.Close()
 	finalPath := image.FinalPath()
 	id.ImagePath = finalPath
-	if !l.policy.allowsImage(finalPath) || !strings.EqualFold(finalPath, drivePath) {
+	if !l.policy.allowsImage(finalPath) || !sameWindowsPath(finalPath, drivePath) {
 		return id, "peer image is not an allowed Secure Client GUI executable"
 	}
 	signer, err := image.VerifySigner()
@@ -510,6 +682,22 @@ func (l *windowsPeerAuthListener) authenticate(c net.Conn) (windowsPeerIdentity,
 		return id, reason
 	}
 	return id, ""
+}
+
+// shortNameLaunchHint explains the refusal of a process whose image
+// name contains "~", which is most often a process started through an
+// 8.3 short path such as C:\PROGRA~2\... matchKernelImage admits such a
+// name only when every short element is the current short name of the
+// matching element of an allowed path; the short names are never
+// expanded from the peer's own path, because that would mean reading
+// directories named by the peer. Without the hint the log shows only a
+// generic refusal, which could hide a short-name lookup that failed for
+// the genuine, signed GUI.
+func shortNameLaunchHint(kernelPath string) string {
+	if !strings.Contains(kernelPath, "~") {
+		return ""
+	}
+	return " (the launch path contains '~' but is not an allowed path written with its current 8.3 short names; start the GUI through its full path)"
 }
 
 // Close stops accepting. Checks still in flight finish on their own

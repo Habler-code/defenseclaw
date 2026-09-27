@@ -7,11 +7,15 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -84,9 +88,15 @@ type fakeWindowsPeer struct {
 	processErr error
 	image      *fakeWindowsPeerImage
 	imageErr   error
+	// shortNames, when non-nil, turns on the fake shortName resolver:
+	// the 8.3 name each path holds, keyed by windowsPathKey, with ""
+	// for paths that have none. shortNameErr makes every lookup fail.
+	shortNames   map[string]string
+	shortNameErr error
 
-	mu         sync.Mutex
-	openedPath []string
+	mu           sync.Mutex
+	openedPath   []string
+	shortLookups []string
 }
 
 func (f *fakeWindowsPeer) opened() []string {
@@ -115,8 +125,22 @@ func genuineWindowsPeer() *fakeWindowsPeer {
 	}
 }
 
+// setShortNames replaces the names the fake shortName resolver reports,
+// as if the volume's 8.3 names changed between two connections.
+func (f *fakeWindowsPeer) setShortNames(names map[string]string, err error) {
+	f.mu.Lock()
+	f.shortNames, f.shortNameErr = names, err
+	f.mu.Unlock()
+}
+
+func (f *fakeWindowsPeer) lookedUp() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.shortLookups...)
+}
+
 func (f *fakeWindowsPeer) resolvers() windowsPeerResolvers {
-	return windowsPeerResolvers{
+	resolvers := windowsPeerResolvers{
 		peerPID: func(net.Conn) (uint32, error) { return f.pid, f.pidErr },
 		process: func(pid uint32) (windowsPeerProcess, error) {
 			if pid != f.pid {
@@ -134,6 +158,21 @@ func (f *fakeWindowsPeer) resolvers() windowsPeerResolvers {
 			return f.image, nil
 		},
 	}
+	f.mu.Lock()
+	enabled := f.shortNames != nil || f.shortNameErr != nil
+	f.mu.Unlock()
+	if enabled {
+		resolvers.shortName = func(path string) (string, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.shortLookups = append(f.shortLookups, path)
+			if f.shortNameErr != nil {
+				return "", f.shortNameErr
+			}
+			return f.shortNames[windowsPathKey(path)], nil
+		}
+	}
+	return resolvers
 }
 
 func authenticateFake(t *testing.T, peer *fakeWindowsPeer) (windowsPeerIdentity, string) {
@@ -226,6 +265,378 @@ func TestWindowsPeerAuthDoesNotOpenImagesOutsideThePolicy(t *testing.T) {
 		}
 		if opened := peer.opened(); len(opened) != 0 {
 			t.Errorf("%q: gateway opened %q", kernelPath, opened)
+		}
+	}
+}
+
+// testGUIShortKernelImage is testGUIKernelImage written with the 8.3
+// names genuineShortNames reports, as the kernel records it when the
+// GUI is started through C:\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe.
+const testGUIShortKernelImage = `\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`
+
+// genuineShortNames is the fake volume's 8.3 names for the allowed
+// paths. Paths it does not list have no short name.
+func genuineShortNames() map[string]string {
+	return map[string]string{
+		windowsPathKey(testProgramFilesX86):                                              "PROGRA~2",
+		windowsPathKey(testProgramFiles):                                                 "PROGRA~1",
+		windowsPathKey(testProgramFilesX86 + `\Cisco\Cisco Secure Client`):               "CISCOS~1",
+		windowsPathKey(testProgramFiles + `\Cisco\Cisco Secure Client`):                  "CISCOS~1",
+		windowsPathKey(testProgramFilesX86 + `\Cisco\Cisco Secure Client\UI\csc_ui.exe`): "CSC_UI~1.EXE",
+	}
+}
+
+// requireLookupsOfPolicyPaths fails the test unless every short-name
+// lookup named the policy's own paths: an allowed executable or a
+// directory above it, never a path taken from the peer.
+func requireLookupsOfPolicyPaths(t *testing.T, label string, policy windowsPeerPolicy, lookups []string) {
+	t.Helper()
+	allowed := make(map[string]struct{})
+	for _, image := range policy.images {
+		path := image.drivePath
+		for len(path) > len(`C:\`) {
+			allowed[windowsPathKey(path)] = struct{}{}
+			path = path[:strings.LastIndexByte(path, '\\')]
+		}
+	}
+	for _, lookup := range lookups {
+		if _, ok := allowed[windowsPathKey(lookup)]; !ok {
+			t.Errorf("%s: short name looked up for %q, which is not a policy path", label, lookup)
+		}
+	}
+}
+
+// TestWindowsPeerAuthAdmitsGUILaunchedThroughCurrentShortNames covers a
+// GUI started through an 8.3 short path. The kernel records the short
+// elements; each must be the short name the allowed element holds, and
+// the file opened is still the policy's long path.
+func TestWindowsPeerAuthAdmitsGUILaunchedThroughCurrentShortNames(t *testing.T) {
+	x64GUI := testProgramFiles + `\Cisco\Cisco Secure Client\UI\csc_ui.exe`
+	for _, tc := range []struct{ kernel, drive string }{
+		{testGUIShortKernelImage, testGUIImage},
+		{`\device\harddiskvolume3\progra~2\cisco\ciscos~1\ui\csc_ui.exe`, testGUIImage},
+		{`\Device\HarddiskVolume3\Program Files (x86)\Cisco\CISCOS~1\UI\csc_ui.exe`, testGUIImage},
+		{`\Device\HarddiskVolume3\PROGRA~2\Cisco\Cisco Secure Client\UI\csc_ui.exe`, testGUIImage},
+		{`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\CSC_UI~1.EXE`, testGUIImage},
+		{`\Device\HarddiskVolume3\PROGRA~1\Cisco\CISCOS~1\UI\csc_ui.exe`, x64GUI},
+	} {
+		peer := genuineWindowsPeer()
+		peer.process.ImagePath = tc.kernel
+		peer.image.finalPath = tc.drive
+		peer.shortNames = genuineShortNames()
+		id, reason := authenticateFake(t, peer)
+		if reason != "" {
+			t.Errorf("%q rejected: %s", tc.kernel, reason)
+			continue
+		}
+		if opened := peer.opened(); len(opened) != 1 || opened[0] != tc.drive {
+			t.Errorf("%q: opened = %q, want [%q]", tc.kernel, opened, tc.drive)
+		}
+		if id.ImagePath != tc.drive || !peer.image.verified {
+			t.Errorf("%q: identity %+v, verified=%v", tc.kernel, id, peer.image.verified)
+		}
+		requireLookupsOfPolicyPaths(t, tc.kernel, testWindowsPeerPolicy(t), peer.lookedUp())
+	}
+}
+
+// TestWindowsPeerAuthRefusesTildeNamesThatAreNotTheAllowedPath checks
+// that a "~" element is accepted only as the current short name of the
+// allowed element in the same place, and that the gateway opens nothing
+// for any other name.
+func TestWindowsPeerAuthRefusesTildeNamesThatAreNotTheAllowedPath(t *testing.T) {
+	kernelPaths := []string{
+		// A short name the allowed directory does not hold, such as a
+		// standard user's own C:\Program Files (x87) (PROGRA~3).
+		`\Device\HarddiskVolume3\PROGRA~3\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~2\UI\csc_ui.exe`,
+		// The 64-bit GUI has no short name on this volume.
+		`\Device\HarddiskVolume3\PROGRA~1\Cisco\CISCOS~1\UI\CSC_UI~1.EXE`,
+		// Real short names, but of other elements.
+		`\Device\HarddiskVolume3\CISCOS~1\Cisco\PROGRA~2\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\PROGRA~2\UI\csc_ui.exe`,
+		// Element counts, devices and suffixes that differ.
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\..\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2\\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\Users\alice\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume4\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume33\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\\?\GLOBALROOT\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2 \Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe:x`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe\`,
+		`\Device\HarddiskVolume3\PROGRA~2`,
+		`\Device\HarddiskVolume3\~`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui` + "\ufffd" + `.exe`,
+		"\\Device\\HarddiskVolume3\\PROGRA~2\\Cisco\\CISCOS~1\\UI\\csc_ui\xff.exe",
+		`C:\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`,
+	}
+	// Unicode-fold look-alikes of the short form, like those of the long
+	// form in TestWindowsPeerAuthRejectsUnicodeFoldLookAlikes.
+	kernelPaths = append(kernelPaths, unicodeFoldVariants(t, testGUIShortKernelImage)...)
+	policy := testWindowsPeerPolicy(t)
+	for _, kernelPath := range kernelPaths {
+		peer := genuineWindowsPeer()
+		peer.process.ImagePath = kernelPath
+		peer.shortNames = genuineShortNames()
+		_, reason := authenticateFake(t, peer)
+		if !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
+			t.Errorf("%q: reason = %q", kernelPath, reason)
+		}
+		if opened := peer.opened(); len(opened) != 0 {
+			t.Errorf("%q: gateway opened %q", kernelPath, opened)
+		}
+		requireLookupsOfPolicyPaths(t, kernelPath, policy, peer.lookedUp())
+	}
+}
+
+// TestWindowsPeerAuthReadsShortNamesWhenThePeerConnects checks that the
+// short names come from the volume at each connection, not from when
+// the listener was built. After fsutil 8dot3name strip removes
+// PROGRA~2, a standard user may create C:\PROGRA~2 in the drive root,
+// so a remembered short name would admit a process started from there.
+func TestWindowsPeerAuthReadsShortNamesWhenThePeerConnects(t *testing.T) {
+	peer := genuineWindowsPeer()
+	peer.process.ImagePath = testGUIShortKernelImage
+	peer.shortNames = genuineShortNames()
+	listener, err := newWindowsPeerAuthListener(stubListener{}, testWindowsPeerPolicy(t), peer.resolvers(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := listener.authenticate(nil); reason != "" {
+		t.Fatalf("GUI started through current short names rejected: %s", reason)
+	}
+
+	stripped := genuineShortNames()
+	delete(stripped, windowsPathKey(testProgramFilesX86))
+	peer.setShortNames(stripped, nil)
+	if _, reason := listener.authenticate(nil); !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
+		t.Fatalf("name with a removed short name: reason = %q", reason)
+	}
+
+	peer.setShortNames(nil, errors.New("access denied"))
+	if _, reason := listener.authenticate(nil); !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
+		t.Fatalf("short-name lookup failure: reason = %q", reason)
+	}
+	if opened := peer.opened(); len(opened) != 1 {
+		t.Fatalf("opened = %q, want only the first, admitted connection", opened)
+	}
+}
+
+// TestWindowsPeerAuthLooksUpShortNamesOnlyForTildeElements checks that
+// an image name without "~" costs no filesystem lookup, and that a
+// "~" name looks up only the allowed elements it differs from.
+func TestWindowsPeerAuthLooksUpShortNamesOnlyForTildeElements(t *testing.T) {
+	for _, kernelPath := range []string{
+		`\Device\HarddiskVolume3\Users\alice\Downloads\csc_ui.exe`,
+		`\Device\HarddiskVolume3\Program File` + "\u017f" + ` (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+		testGUIKernelImage,
+		`\Device\HarddiskVolume4\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\Programs\Cisco\CISCOS~1\UI\csc_ui.exe`,
+	} {
+		peer := genuineWindowsPeer()
+		peer.process.ImagePath = kernelPath
+		peer.shortNames = genuineShortNames()
+		_, _ = authenticateFake(t, peer)
+		if lookups := peer.lookedUp(); len(lookups) != 0 {
+			t.Errorf("%q: looked up %q", kernelPath, lookups)
+		}
+	}
+
+	peer := genuineWindowsPeer()
+	peer.process.ImagePath = `\Device\HarddiskVolume3\Program Files (x86)\Cisco\CISCOS~1\UI\csc_ui.exe`
+	peer.shortNames = genuineShortNames()
+	if _, reason := authenticateFake(t, peer); reason != "" {
+		t.Fatalf("rejected: %s", reason)
+	}
+	want := testProgramFilesX86 + `\Cisco\Cisco Secure Client`
+	if lookups := peer.lookedUp(); len(lookups) != 1 || lookups[0] != want {
+		t.Fatalf("lookups = %q, want [%q]", lookups, want)
+	}
+}
+
+// TestWindowsPeerAuthExplainsShortNameLaunchRefusal covers a "~" image
+// name that is refused: short-name matching is off, a short name is no
+// longer current, or the lookup failed. The comparison refuses it
+// without opening anything, and the logged reason must say why, since
+// the refused process may be the genuine GUI.
+func TestWindowsPeerAuthExplainsShortNameLaunchRefusal(t *testing.T) {
+	stale := genuineShortNames()
+	stale[windowsPathKey(testProgramFilesX86)] = "PROGRA~3"
+	for _, tc := range []struct {
+		kernelPath string
+		names      map[string]string
+		err        error
+	}{
+		{testGUIShortKernelImage, nil, nil},
+		{`\Device\HarddiskVolume3\Program Files (x86)\Cisco\CISCOS~1\UI\csc_ui.exe`, nil, nil},
+		{testGUIShortKernelImage, stale, nil},
+		{testGUIShortKernelImage, nil, errors.New("access denied")},
+	} {
+		peer := genuineWindowsPeer()
+		peer.process.ImagePath = tc.kernelPath
+		peer.shortNames, peer.shortNameErr = tc.names, tc.err
+		_, reason := authenticateFake(t, peer)
+		if !strings.Contains(reason, "not an allowed Secure Client GUI executable") ||
+			!strings.Contains(reason, "8.3 short name") {
+			t.Errorf("%q: reason = %q, want a refusal naming the 8.3 short path", tc.kernelPath, reason)
+		}
+		if opened := peer.opened(); len(opened) != 0 {
+			t.Errorf("%q: gateway opened %q", tc.kernelPath, opened)
+		}
+	}
+	peer := genuineWindowsPeer()
+	peer.process.ImagePath = `\Device\HarddiskVolume3\Users\alice\Downloads\csc_ui.exe`
+	if _, reason := authenticateFake(t, peer); strings.Contains(reason, "8.3") {
+		t.Fatalf("reason for a path without '~' = %q", reason)
+	}
+}
+
+// unicodeFoldVariants returns every copy of path with one ASCII letter
+// replaced by a non-ASCII rune that Unicode simple folding (and so
+// strings.EqualFold) treats as the same letter, such as U+017F for "s"
+// and U+212A for "k". NTFS keeps each of these a different name.
+func unicodeFoldVariants(t *testing.T, path string) []string {
+	t.Helper()
+	var variants []string
+	for i, r := range path {
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < utf8.RuneSelf {
+				continue
+			}
+			variant := path[:i] + string(f) + path[i+utf8.RuneLen(r):]
+			if !strings.EqualFold(variant, path) {
+				t.Fatalf("premise: EqualFold(%q, %q) = false", variant, path)
+			}
+			variants = append(variants, variant)
+		}
+	}
+	return variants
+}
+
+// TestWindowsPeerAuthRejectsUnicodeFoldLookAlikes is the regression for
+// the look-alike image path: a standard user can create a directory at
+// the root of the system drive whose name differs from Program Files
+// only by a character that Unicode folding equates with an ASCII
+// letter. The gateway must refuse a process started from it without
+// opening anything, because the file it would open and verify is the
+// genuine GUI, not the one the peer runs.
+func TestWindowsPeerAuthRejectsUnicodeFoldLookAlikes(t *testing.T) {
+	kernelVariants := unicodeFoldVariants(t, testGUIKernelImage)
+	longS := `\Device\HarddiskVolume3\Program File` + "\u017f" + ` (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`
+	kelvin := `\Device\Harddis` + "\u212a" + `Volume3\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`
+	for _, want := range []string{longS, kelvin} {
+		if !slices.Contains(kernelVariants, want) {
+			t.Fatalf("fold variants miss %q", want)
+		}
+	}
+	for _, kernelPath := range kernelVariants {
+		peer := genuineWindowsPeer()
+		peer.process.ImagePath = kernelPath
+		_, reason := authenticateFake(t, peer)
+		if !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
+			t.Errorf("%q: reason = %q", kernelPath, reason)
+		}
+		if opened := peer.opened(); len(opened) != 0 {
+			t.Errorf("%q: gateway opened %q", kernelPath, opened)
+		}
+	}
+
+	// The drive-letter side: the opened file's final path must match the
+	// allowed path by the same rule before WinVerifyTrust runs.
+	policy := testWindowsPeerPolicy(t)
+	finalVariants := unicodeFoldVariants(t, testGUIImage)
+	if len(finalVariants) == 0 {
+		t.Fatal("no fold variants of the allowed drive path")
+	}
+	for _, finalPath := range finalVariants {
+		if policy.allowsImage(finalPath) {
+			t.Errorf("allowsImage(%q) = true", finalPath)
+		}
+		peer := genuineWindowsPeer()
+		peer.image.finalPath = finalPath
+		_, reason := authenticateFake(t, peer)
+		if !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
+			t.Errorf("final path %q: reason = %q", finalPath, reason)
+		}
+		if peer.image.verified {
+			t.Errorf("final path %q: WinVerifyTrust ran", finalPath)
+		}
+	}
+}
+
+func TestSameWindowsPathFoldsASCIIOnly(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{testGUIImage, testGUIImage, true},
+		{testGUIImage, strings.ToUpper(testGUIImage), true},
+		{testGUIKernelImage, strings.ToLower(testGUIKernelImage), true},
+		{`C:\Files`, `C:\File` + "\u017f", false},
+		{`C:\Files`, `C:\FILE` + "\u017f", false},
+		{`C:\Kit`, `C:\` + "\u212a" + `it`, false},
+		{`C:\Kit`, `C:\` + "\u212a" + `IT`, false},
+		// Non-ASCII letters are compared exactly, even where NTFS would
+		// treat the two cases as one name: refusing is the safe side.
+		{`C:\` + "\u00c9", `C:\` + "\u00e9", false},
+		{`C:\` + "\u00e9", `C:\` + "\u00e9", true},
+		{`C:\a` + "\ufffd", `C:\a` + "\ufffd", false},
+		{"C:\\a\xff", "C:\\a\xff", false},
+		{`C:\a`, `C:\a\`, false},
+		{`C:\a`, `C:\b`, false},
+		{`C:\[`, `C:\{`, false},
+		{`C:\@`, `C:\` + "`", false},
+	} {
+		if got := sameWindowsPath(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameWindowsPath(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+		if tc.want && windowsPathKey(tc.a) != windowsPathKey(tc.b) {
+			t.Errorf("windowsPathKey(%q) != windowsPathKey(%q)", tc.a, tc.b)
+		}
+	}
+	if windowsPathKey(`C:\Files`) == windowsPathKey(`C:\File`+"\u017f") {
+		t.Fatal("windowsPathKey folded U+017F")
+	}
+}
+
+// TestKernelImageNameRefusesLossyNames checks the UTF-16 conversion of
+// the kernel image name: nothing that a lossy conversion would turn
+// into a different, possibly allowed, name is accepted.
+func TestKernelImageNameRefusesLossyNames(t *testing.T) {
+	encode := func(s string) []uint16 { return utf16.Encode([]rune(s)) }
+	name, err := kernelImageName(encode(testGUIKernelImage))
+	if err != nil || name != testGUIKernelImage {
+		t.Fatalf("kernelImageName = (%q, %v)", name, err)
+	}
+	pair := `\Device\HarddiskVolume3\` + "\U0001F600" + `\csc_ui.exe`
+	if name, err := kernelImageName(encode(pair)); err != nil || name != pair {
+		t.Fatalf("surrogate pair: (%q, %v)", name, err)
+	}
+	// A terminator counted in the length ends the name; it does not
+	// change it.
+	if name, err := kernelImageName(append(encode(testGUIKernelImage), 0, 0)); err != nil || name != testGUIKernelImage {
+		t.Fatalf("counted terminator: (%q, %v)", name, err)
+	}
+	withNUL := append(encode(testGUIKernelImage), 0)
+	withNUL = append(withNUL, encode(`\x.exe`)...)
+	for label, units := range map[string][]uint16{
+		"embedded NUL":       withNUL,
+		"only NULs":          {0, 0},
+		"empty":              {},
+		"lone high":          append(encode(`\Device\a`), 0xd800),
+		"lone high then NUL": append(encode(`\Device\a`), 0xd800, 0),
+		"high then ASCII":    append(append(encode(`\Device\a`), 0xd83d), encode("b")...),
+		"lone low":           append(encode(`\Device\a`), 0xdc00),
+		"low then high":      append(encode(`\Device\a`), 0xde00, 0xd83d),
+		"high then high":     append(encode(`\Device\a`), 0xd83d, 0xd83d, 0xde00),
+		"leading NUL":        append([]uint16{0}, encode(testGUIKernelImage)...),
+		"high at very start": append([]uint16{0xd800}, encode(`\x`)...),
+	} {
+		if name, err := kernelImageName(units); err == nil {
+			t.Errorf("%s: accepted as %q", label, name)
 		}
 	}
 }
@@ -785,14 +1196,16 @@ func TestNewWindowsPeerPolicyJoinsRootsAndImages(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []windowsPeerAllowedImage{
-		{testGUIImage, testGUIKernelImage},
+		{testGUIImage, testGUIKernelImage, `\Device\HarddiskVolume3`},
 		{
 			`C:\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
 			`\Device\HarddiskVolume3\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+			`\Device\HarddiskVolume3`,
 		},
 		{
 			`d:\Apps\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
 			`\Device\HarddiskVolume4\Apps\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+			`\Device\HarddiskVolume4`,
 		},
 	}
 	if len(policy.images) != len(want) {

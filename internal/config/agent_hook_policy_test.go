@@ -131,8 +131,13 @@ connector_hooks:
 		}
 	}
 	locked := &Config{
-		ClaudeCode:     AgentHookConfig{Enabled: true},
-		ConnectorHooks: map[string]AgentHookConfig{"claudecode": {Enabled: true}, "cursor": {AllowUnmanagedHooks: true}},
+		ClaudeCode: AgentHookConfig{Enabled: true},
+		Codex:      AgentHookConfig{AllowUnmanagedHooks: true},
+		ConnectorHooks: map[string]AgentHookConfig{
+			"claudecode": {Enabled: true},
+			"cursor":     {AllowUnmanagedHooks: true},
+			"codex":      {AllowUnmanagedHooks: true},
+		},
 	}
 	if locked.ClaudeCodeAllowUnmanagedHooks() {
 		t.Fatal("an opt-out on another connector unlocked Claude Code")

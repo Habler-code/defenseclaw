@@ -69,6 +69,7 @@ func productionWindowsPeerResolvers() windowsPeerResolvers {
 		peerPID:   afUnixPeerPID,
 		process:   queryWindowsPeerProcess,
 		openImage: openWindowsPeerImage,
+		shortName: windowsShortName,
 	}
 }
 
@@ -236,7 +237,14 @@ func systemProcessImageName(pid uint32) (string, error) {
 	if length == 0 || length > len(buffer) {
 		return "", fmt.Errorf("pid %d has no image name", pid)
 	}
-	return windows.UTF16ToString(buffer[:length]), nil
+	// The name is compared exactly against the policy, so convert it
+	// without the NUL truncation and U+FFFD substitution of
+	// windows.UTF16ToString.
+	name, err := kernelImageName(buffer[:length])
+	if err != nil {
+		return "", fmt.Errorf("pid %d: %w", pid, err)
+	}
+	return name, nil
 }
 
 type systemProcessSnapshotEntry struct {
@@ -365,6 +373,41 @@ func win32OpenPathForImage(drivePath string) (string, error) {
 		return "", fmt.Errorf("image path %q is not a canonical drive path", drivePath)
 	}
 	return winpath.Extended(drivePath)
+}
+
+// windowsShortName returns the 8.3 short name NTFS holds for the file
+// or directory drivePath names, or "" when it has none (its long name
+// is already a valid short name, or short-name creation was off when
+// it was created). FindFirstFile reports both names of one directory
+// entry; drivePath is canonical, so it holds no wildcard and names that
+// entry only. The entry found must carry drivePath's own last element
+// as its long name. The listener calls this only with paths from the
+// admission policy, each time a peer's image name needs it, so a short
+// name removed after startup is no longer accepted.
+func windowsShortName(drivePath string) (string, error) {
+	separator := strings.LastIndexByte(drivePath, '\\')
+	if !isCanonicalWindowsDrivePath(drivePath) || separator < 2 || separator == len(drivePath)-1 {
+		return "", fmt.Errorf("path %q is not a canonical drive path below a drive root", drivePath)
+	}
+	element := drivePath[separator+1:]
+	lookupPath, err := winpath.Extended(drivePath)
+	if err != nil {
+		return "", err
+	}
+	pathPtr, err := windows.UTF16PtrFromString(lookupPath)
+	if err != nil {
+		return "", fmt.Errorf("encode path: %w", err)
+	}
+	var entry windows.Win32finddata
+	handle, err := windows.FindFirstFile(pathPtr, &entry)
+	if err != nil {
+		return "", fmt.Errorf("find %s: %w", drivePath, err)
+	}
+	_ = windows.FindClose(handle)
+	if found := windows.UTF16ToString(entry.FileName[:]); !sameWindowsPath(found, element) {
+		return "", fmt.Errorf("lookup of %s found entry %q", drivePath, found)
+	}
+	return windows.UTF16ToString(entry.AlternateFileName[:]), nil
 }
 
 // finalDrivePathForHandle returns the normalized drive-letter path of
