@@ -21,7 +21,7 @@ import (
 )
 
 // ExportFormats lists every export format.
-var ExportFormats = []string{"toml", "json", "claude-hklm-json", "reg", "plist", "intune-settings-catalog"}
+var ExportFormats = []string{"toml", "json", "claude-hklm-json", "reg", "plist", "intune-settings-catalog", "version-floor"}
 
 // Export renders connector's DefenseClaw entries in format.
 func Export(opts Options, connectorName, format string) ([]byte, error) {

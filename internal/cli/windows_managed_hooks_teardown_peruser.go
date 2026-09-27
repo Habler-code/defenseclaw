@@ -113,7 +113,14 @@ func removeWindowsManagedHooksStandalonePerUserWiring(identity windowsManagedHoo
 	if err != nil {
 		return err
 	}
-	_, err = enterprisepolicy.RemoveWindowsGoOwned(enterprisepolicy.LayoutOptions(layout, programFiles, programData))
+	opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
+	if _, err := enterprisepolicy.RemoveWindowsGoOwned(opts); err != nil {
+		return err
+	}
+	// The Claude Code version floor drop-in goes with the rest of the
+	// standalone machine policy. A rollback does not put it back: the
+	// guardian's next reconcile does, once the rolled-back services start.
+	_, err = enterprisepolicy.RemoveWindowsClaudeVersionFloor(opts)
 	return err
 }
 
@@ -145,6 +152,20 @@ func verifyWindowsManagedHooksStandalonePerUserClean(targets []windowsManagedHoo
 		if exists {
 			return fmt.Errorf("%s machine enrollment survived managed-hook teardown", connectorName)
 		}
+	}
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return nil
+	}
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return err
+	}
+	recorded, err := enterprisepolicy.ClaudeVersionFloorRecorded(enterprisepolicy.LayoutOptions(layout, programFiles, programData))
+	if err != nil {
+		return err
+	}
+	if recorded {
+		return errors.New("the Claude Code version floor drop-in survived managed-hook teardown")
 	}
 	return nil
 }

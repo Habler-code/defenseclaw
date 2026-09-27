@@ -3892,6 +3892,20 @@
               "additionalProperties": {
                 "$ref": "#/$defs/enterpriseConnectorPolicy"
               }
+            },
+            "claudecode": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version_floor": {
+                  "type": "string",
+                  "enum": [
+                    "enforce",
+                    "report",
+                    "off"
+                  ]
+                }
+              }
             }
           }
         },

@@ -105,6 +105,12 @@ const (
 
 	HigherPrecedenceFail = "fail"
 	HigherPrecedenceWarn = "warn"
+
+	// Claude Code version floor modes
+	// (enterprise.machine_policy.claudecode.version_floor).
+	ClaudeVersionFloorEnforce = "enforce"
+	ClaudeVersionFloorReport  = "report"
+	ClaudeVersionFloorOff     = "off"
 )
 
 // EnterpriseConnectorPolicy is one connector's machine policy settings. An
@@ -123,6 +129,26 @@ type EnterpriseConnectorPolicy struct {
 type EnterpriseMachinePolicyConfig struct {
 	Default    EnterpriseConnectorPolicy            `mapstructure:"default"    yaml:"default,omitempty"`
 	Connectors map[string]EnterpriseConnectorPolicy `mapstructure:"connectors" yaml:"connectors,omitempty"`
+	ClaudeCode EnterpriseClaudeCodePolicyConfig     `mapstructure:"claudecode" yaml:"claudecode,omitempty"`
+}
+
+// EnterpriseClaudeCodePolicyConfig holds the machine policy settings only
+// Claude Code has.
+type EnterpriseClaudeCodePolicyConfig struct {
+	// VersionFloor controls DefenseClaw's requiredMinimumVersion drop-in
+	// (managed-settings.d/00-defenseclaw-version-floor.json), which makes
+	// Claude Code builds older than the lowest verified hook contract refuse
+	// to start. enforce (default) writes it while no administrator source
+	// sets requiredMinimumVersion; report only reports; off does neither.
+	VersionFloor string `mapstructure:"version_floor" yaml:"version_floor,omitempty"`
+}
+
+// ClaudeVersionFloor returns the effective Claude Code version floor mode.
+func (m EnterpriseMachinePolicyConfig) ClaudeVersionFloor() string {
+	if value := strings.ToLower(strings.TrimSpace(m.ClaudeCode.VersionFloor)); value != "" {
+		return value
+	}
+	return ClaudeVersionFloorEnforce
 }
 
 // Trust modes for Windows standalone payload verification.
@@ -353,7 +379,8 @@ func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
 }
 
 func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
-	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0
+	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0 &&
+		strings.TrimSpace(m.ClaudeCode.VersionFloor) == ""
 }
 
 func connectorPolicyEmpty(p EnterpriseConnectorPolicy) bool {
@@ -442,6 +469,9 @@ func validateEnterpriseConfig(cfg *Config) error {
 		if err := validateConnectorPolicy("enterprise.machine_policy.connectors."+name, policy); err != nil {
 			return err
 		}
+	}
+	if err := oneOf("enterprise.machine_policy.claudecode.version_floor", e.MachinePolicy.ClaudeCode.VersionFloor, ClaudeVersionFloorEnforce, ClaudeVersionFloorReport, ClaudeVersionFloorOff); err != nil {
+		return err
 	}
 	if err := oneOf("enterprise.trust.mode", e.Trust.Mode, EnterpriseTrustAuthenticode, EnterpriseTrustHashPinned); err != nil {
 		return err

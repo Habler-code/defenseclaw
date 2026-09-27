@@ -79,3 +79,34 @@ func TestWindowsOpenCodeMachinePolicyCheckNamesTheManagedConfig(t *testing.T) {
 		t.Fatal("OpenCode machine policy reported in force without the managed plugin")
 	}
 }
+
+// Every guardian reconcile re-checks the Claude Code version floor, even
+// when the Go-owned policy fails, and only in the standalone profile.
+func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
+	previousOptions, previousFloor := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor
+	t.Cleanup(func() {
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor = previousOptions, previousFloor
+	})
+	standalone := false
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{}, []string{"claudecode"}, standalone, nil
+	}
+	var calls [][]string
+	enterpriseHookWindowsClaudeVersionFloor = func(_ enterprisepolicy.Options, connectors []string) (enterprisepolicy.State, error) {
+		calls = append(calls, connectors)
+		return enterprisepolicy.State{}, errors.New("lock timeout")
+	}
+	var log bytes.Buffer
+	enterpriseHookStandalonePlatformPrepare(&log)
+	if len(calls) != 0 || log.Len() != 0 {
+		t.Fatalf("a Secure Client guardian must not touch the floor: %v %q", calls, log.String())
+	}
+	standalone = true
+	enterpriseHookStandalonePlatformPrepare(&log)
+	if len(calls) != 1 || strings.Join(calls[0], ",") != "claudecode" {
+		t.Fatalf("the floor must be re-checked every reconcile: %v", calls)
+	}
+	if !strings.Contains(log.String(), "Claude Code version floor: lock timeout") {
+		t.Fatalf("a floor failure must be reported: %q", log.String())
+	}
+}

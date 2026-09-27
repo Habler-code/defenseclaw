@@ -70,6 +70,7 @@ func StandaloneOptions(layout managed.StandaloneLayout, programFiles, programDat
 	for _, name := range StandaloneConnectors(cfg) {
 		opts.Policies[name] = cfg.Enterprise.MachinePolicy.PolicyFor(name)
 	}
+	opts.ClaudeVersionFloor = cfg.Enterprise.MachinePolicy.ClaudeVersionFloor()
 	return opts, opts.Validate()
 }
 

@@ -67,20 +67,29 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 }
 
 // enterpriseHookStandalonePlatformPrepare publishes the Go-owned Windows
-// machine policy and summary. Failure is reported, not fatal: rows that
-// depend on the policy (Copilot) fail their own verification.
+// machine policy and summary, and re-checks the Claude Code version floor
+// drop-in (inside the lifecycle's Claude Code policy lock). Failure is
+// reported, not fatal: rows that depend on the policy (Copilot) fail their
+// own verification, and `enterprise policy verify` reports a missing floor.
 func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
-	opts, connectors, standalone, err := windowsStandaloneGuardianOptions()
+	opts, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone {
 		return
 	}
-	if err == nil {
-		_, err = enterprisepolicy.PublishWindowsGoOwned(opts, connectors)
-	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
+		return
+	}
+	if _, err := enterprisepolicy.PublishWindowsGoOwned(opts, connectors); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
+	}
+	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
 	}
 }
+
+// enterpriseHookWindowsClaudeVersionFloor is replaceable in tests.
+var enterpriseHookWindowsClaudeVersionFloor = enterprisepolicy.PublishWindowsClaudeVersionFloor
 
 // windowsStandalonePerUserEnrollmentKeep builds the manifest predicate the
 // per-user enrollment pruning uses.

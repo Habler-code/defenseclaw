@@ -71,7 +71,8 @@ administrator can deploy through their own policy source:
 
   codex       toml (merged requirements.toml), plist (MDM requirements_toml_base64)
   claudecode  json (managed-settings.d drop-in), claude-hklm-json, reg, plist,
-              intune-settings-catalog
+              intune-settings-catalog, version-floor (the separate
+              requiredMinimumVersion drop-in, 00-defenseclaw-version-floor.json)
   cursor      json (enterprise hooks.json)
   copilot     json (policy.d drop-in)
   opencode    json (managed config)`,
@@ -326,6 +327,9 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 			state.Connector, state.Route, status, lock, dashIfEmpty(state.ForeignHooks), state.OwnedEntries, state.ForeignEntries)
 		for _, path := range state.Paths {
 			fmt.Fprintf(out, "    file:      %s\n", path)
+		}
+		if state.VersionFloor != nil {
+			fmt.Fprintf(out, "    floor:     %s\n", state.VersionFloor.Summary())
 		}
 		for _, conflict := range state.Conflicts {
 			fmt.Fprintf(out, "    conflict:  %s\n", conflict)

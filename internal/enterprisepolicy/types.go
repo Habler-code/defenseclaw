@@ -89,6 +89,9 @@ type Options struct {
 	// Policies are the resolved per-connector enterprise.machine_policy
 	// settings; a connector missing from the map uses the secure defaults.
 	Policies map[string]config.ResolvedConnectorPolicy
+	// ClaudeVersionFloor is enterprise.machine_policy.claudecode.version_floor
+	// (enforce, report or off); "" means the default, enforce.
+	ClaudeVersionFloor string
 	// Now is injectable for tests.
 	Now func() time.Time
 	// OpenCodePluginPath is the absolute path of the administrator-owned
@@ -184,6 +187,9 @@ type State struct {
 	Changed          bool     `json:"changed"`
 	Covered          bool     `json:"covered"`
 	LiveVerifiedAt   string   `json:"live_verified_at,omitempty"`
+	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
+	// only).
+	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`
 }
 
 // ToStatus maps the report onto the shared lifecycle result schema.

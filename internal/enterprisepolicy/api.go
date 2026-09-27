@@ -153,6 +153,9 @@ func hasOwnershipRecord(opts Options, connector string) (bool, error) {
 	if connector == ConnectorCursor && opts.goos() == "windows" {
 		names = append(names, cursorAdapterRecord)
 	}
+	if connector == ConnectorClaudeCode {
+		names = append(names, claudeVersionFloorRecord)
+	}
 	for _, name := range names {
 		path, err := recordPath(opts, name)
 		if err != nil {

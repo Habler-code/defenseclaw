@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -180,5 +181,70 @@ func TestForeignHookCleanupIsInertOutsideStandalone(t *testing.T) {
 	reconcileEnterpriseForeignHooks(enterprisehooks.InstallOptions{ConnectorName: "devin", UserHome: home, DataDir: "/data"})
 	if len(calls) != 1 || calls[0] != home+"|devin|/data" {
 		t.Fatalf("reconcile seam: %v", calls)
+	}
+}
+
+func TestEnterprisePolicyShowsTheClaudeVersionFloor(t *testing.T) {
+	ctx := withEnterprisePolicyTree(t)
+	// Publish writes the summary under the host path; create its parent so
+	// the linux-rooted tree also works on a Windows host.
+	if err := os.MkdirAll(filepath.Dir(ctx.opts.PublicPolicyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enterprisepolicy.Publish(ctx.opts, ctx.connectors); err != nil {
+		t.Fatal(err)
+	}
+	floorPath, err := enterprisepolicy.ClaudeVersionFloorPath(ctx.opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enterprisePolicyConnector = "claudecode"
+	out, err := runPolicyCommand(t, runEnterprisePolicyShow)
+	if err != nil || !strings.Contains(out, "floor:     requiredMinimumVersion 2.1.154 set by DefenseClaw ("+floorPath+"), version_floor=enforce") {
+		t.Fatalf("show must name who owns the floor: %v\n%s", err, out)
+	}
+
+	// An administrator value is kept and shown as theirs.
+	dir, _ := enterprisepolicy.ClaudeManagedDir(ctx.opts)
+	base := path.Join(dir, "managed-settings.json") // the rooted tree's own join
+	if err := os.WriteFile(base, []byte(`{"requiredMinimumVersion": "2.1.100"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enterprisepolicy.Publish(ctx.opts, ctx.connectors); err != nil {
+		t.Fatal(err)
+	}
+	enterprisePolicyJSON = true
+	out, err = runPolicyCommand(t, runEnterprisePolicyVerify)
+	if err != nil {
+		t.Fatalf("an administrator floor must still verify: %v\n%s", err, out)
+	}
+	var report enterprisePolicyReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	floor := report.Result.States[0].VersionFloor
+	if floor == nil || floor.Owner != "administrator" || floor.Source != base || floor.Value != "2.1.100" || !floor.BelowFloor {
+		t.Fatalf("verify --json floor: %+v", floor)
+	}
+	if _, err := os.Stat(floorPath); !os.IsNotExist(err) {
+		t.Fatalf("DefenseClaw's floor must be withdrawn: %v", err)
+	}
+
+	enterprisePolicyJSON = false
+	enterprisePolicyFormat = "version-floor"
+	out, err = runPolicyCommand(t, runEnterprisePolicyExport)
+	if err != nil || out != "{\n  \"requiredMinimumVersion\": \"2.1.154\"\n}\n" {
+		t.Fatalf("version-floor export: %v\n%q", err, out)
+	}
+
+	// Under enforce, a floor that should be DefenseClaw's and is missing
+	// fails verify.
+	enterprisePolicyFormat = ""
+	if err := os.Remove(base); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runPolicyCommand(t, runEnterprisePolicyVerify)
+	if err == nil || !strings.Contains(out, "requiredMinimumVersion not set") || !strings.Contains(out, "DefenseClaw's "+floorPath+" is missing") {
+		t.Fatalf("a missing floor must fail verify: %v\n%s", err, out)
 	}
 }

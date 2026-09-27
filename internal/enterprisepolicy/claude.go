@@ -350,6 +350,9 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 			}
 		}
 	}
+	if err := inspectClaudeVersionFloor(opts, policy, sources, higher, state); err != nil {
+		state.conflict("Claude Code version floor: %v", err)
+	}
 	state.detail("server-managed settings from the claude.ai console are not visible locally; `enterprise policy verify --live --connector claudecode --user <user>` proves the effective hooks")
 	state.detail("residual: `claude --bare` and CLAUDE_CODE_SIMPLE=1 skip managed SessionStart and UserPromptSubmit hooks (PreToolUse and later tool hooks still run); Claude Code offers no managed control for this")
 	return nil
@@ -400,6 +403,11 @@ func (t claudeTarget) Reconcile(opts Options) (State, error) {
 			return state, err
 		}
 		state.Changed = changed
+		// The version floor is a separate drop-in: a failure to place it is
+		// reported, and never keeps the hooks from counting as published.
+		if err := applyClaudeVersionFloor(opts, policy, &state); err != nil {
+			state.conflict("Claude Code version floor: %v", err)
+		}
 	}
 	if err := inspectClaude(opts, policy, &state); err != nil {
 		return state, err
@@ -438,8 +446,12 @@ func (t claudeTarget) RemoveOwned(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := State{Connector: claudeConnector, Route: RouteMachinePolicy, Paths: []string{path}}
+	// The version floor goes first: the hook drop-in's record holds the
+	// directories DefenseClaw created, which are empty only once both files
+	// are gone.
+	floorErr := removeClaudeVersionFloor(opts, &state)
 	err = restoreOrStrip(opts, claudeConnector, path, claudeStrip(opts), true, &state)
-	return state, err
+	return state, errors.Join(floorErr, err)
 }
 
 // claudeStrip treats a drop-in carrying DefenseClaw's hooks as DefenseClaw's
@@ -459,6 +471,9 @@ func claudeStrip(opts Options) stripFunc {
 func (claudeTarget) Export(opts Options, format string) ([]byte, error) {
 	if err := opts.Validate(); err != nil {
 		return nil, err
+	}
+	if format == "version-floor" {
+		return exportClaudeVersionFloor(opts)
 	}
 	policy := opts.PolicyFor(claudeConnector)
 	rendered, err := renderClaudeDropIn(opts, policy)
@@ -505,7 +520,7 @@ func (claudeTarget) Export(opts Options, format string) ([]byte, error) {
 		}
 		return append(out, '\n'), nil
 	default:
-		return nil, fmt.Errorf("claudecode policy export supports json, claude-hklm-json, reg, plist and intune-settings-catalog, not %q", format)
+		return nil, fmt.Errorf("claudecode policy export supports json, claude-hklm-json, reg, plist, intune-settings-catalog and version-floor, not %q", format)
 	}
 }
 

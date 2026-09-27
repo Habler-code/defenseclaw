@@ -169,6 +169,7 @@ default shown. "Linux and macOS" means the key has no effect on Windows.
 | `machine_policy.default.higher_precedence_sources` | `fail`, `warn` | `fail` | macOS (Codex, Claude Code); Windows (Claude Code, in `policy show` and `verify` only) | Whether a policy source that outranks DefenseClaw's file counts as a coverage failure or only a warning. |
 | `machine_policy.default.allowed_hooks` | List of SHA-256 digests, 64 hex characters, with or without `sha256:` | Empty | All | Hooks the foreign-hook guard approves. |
 | `machine_policy.connectors.<name>.*` | The same five keys | Inherit | As above | Overrides for one connector. Each key falls back to `default`, then to the built-in value. `allowed_hooks` lists are merged. |
+| `machine_policy.claudecode.version_floor` | `enforce`, `report`, `off` | `enforce` | All | Whether DefenseClaw sets Claude Code's `requiredMinimumVersion` to its lowest verified hook contract while no other source sets it. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor). |
 | `trust.mode` | `authenticode`, `hash_pinned` | None | Windows | `authenticode` refuses any hash-pinned (unsigned) payload. `hash_pinned` or unset admits both. See [Payload trust](#payload-trust). |
 | `trust.allowed_signers` | List of SHA-256 certificate thumbprints | Empty | Windows | Accept only payloads signed by these certificates, like `--allowed-signer`. |
 | `coexistence.per_user_install` | `migrate`, `block`, `ignore` | None | Reserved | Reserved: accepted and validated, no effect in this release. |

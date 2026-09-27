@@ -245,6 +245,48 @@ file. Export
 DefenseClaw's entries (below) and add them to the MDM's template. On
 Windows, `ownership` applies to Copilot and OpenCode only.
 
+## Claude Code version floor
+
+Claude Code refuses to start when its version is below the managed
+`requiredMinimumVersion`. DefenseClaw sets it to the lowest Claude Code
+version it has a verified hook contract for (2.1.154), so a build whose
+hooks DefenseClaw cannot govern does not start. The value is in its own
+drop-in, `00-defenseclaw-version-floor.json`, next to `90-defenseclaw.json`;
+the hook drop-in does not change.
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  machine_policy:
+    claudecode:
+      version_floor: enforce   # enforce (default), report or "off"
+```
+
+| `version_floor` | What DefenseClaw does |
+| --- | --- |
+| `enforce` (default) | Writes the floor drop-in while no other source sets `requiredMinimumVersion`, and removes it once one does |
+| `report` | Writes nothing; `policy show` reports that older builds can start |
+| `off` | Writes nothing and does not manage the setting |
+
+- **Your value wins.** When `managed-settings.json`, another drop-in,
+  `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` or the macOS managed
+  preferences set `requiredMinimumVersion`, DefenseClaw leaves that file
+  alone and removes its own drop-in at the next reconcile. `policy show`
+  names the source, and says so when the value is below 2.1.154 or is not
+  a version.
+- **When it applies.** The drop-in is written only in the standalone
+  profile, while `claudecode` is enabled with `ownership: merge`. Linux and
+  macOS write it at install and every reconcile; on Windows the guardian
+  writes it every cycle, under the same lock the lifecycle uses for
+  `90-defenseclaw.json`. Uninstall removes it. With `ownership: verify_only`,
+  deploy `policy export --connector claudecode --format version-floor`
+  yourself.
+- **Limits.** The check runs when a session starts; running sessions go
+  on. Claude Code ignores an invalid value, and builds that predate the
+  setting ignore it. While a higher-precedence source without
+  `"managedSourcesBehavior": "merge"` is in force, Claude Code ignores the
+  managed settings files, the floor drop-in included; set the key in that
+  source instead.
+
 ## Higher-precedence sources
 
 Some policy sources outrank the files DefenseClaw writes.
@@ -312,7 +354,7 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 | `--connector` | `--format` |
 | --- | --- |
 | `codex` | `toml` (default): the complete merged `requirements.toml`. `plist`: a macOS profile payload with `requirements_toml_base64`. |
-| `claudecode` | `json` (default): the drop-in. `claude-hklm-json`, `reg`, `intune-settings-catalog`: the same content as a `HKLM\SOFTWARE\Policies\ClaudeCode` `Settings` value. `plist`: a macOS managed-preferences payload. |
+| `claudecode` | `json` (default): the drop-in. `claude-hklm-json`, `reg`, `intune-settings-catalog`: the same content as a `HKLM\SOFTWARE\Policies\ClaudeCode` `Settings` value. `plist`: a macOS managed-preferences payload. `version-floor`: the [version floor](#claude-code-version-floor) drop-in. |
 | `cursor` | `json`: the enterprise `hooks.json` |
 | `copilot` | `json`: the `policy.d` drop-in |
 | `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/defenseclaw.js`. Deploy it only where that plugin is installed. |
