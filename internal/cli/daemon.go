@@ -1731,8 +1731,6 @@ func verifyRotationConnectorOTLPAuthentication(
 		switch scope {
 		case connector.OTLPScopeCodex, connector.OTLPScopeClaude:
 			probeURL.Path = "/v1/logs"
-		case connector.OTLPScopeGeminiCLI:
-			probeURL.Path = "/otlp/" + string(scope) + "/" + url.PathEscape(token) + "/v1/logs"
 		default:
 			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
 		}
