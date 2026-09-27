@@ -1291,14 +1291,26 @@ reported.
 
 Cursor has no equivalent setting. On Windows managed endpoints the DefenseClaw
 `preToolUse` hook denies the tool call while a user-level
-(`%USERPROFILE%\.cursor\hooks.json`, `%USERPROFILE%\.claude\settings*.json`) or
-workspace-level (`.cursor\hooks.json`, `.claude\settings*.json`) `preToolUse`
-hook is registered that the administrator has not approved. The denial names
+(`%USERPROFILE%\.cursor\hooks.json`, `%USERPROFILE%\.claude\settings*.json`),
+plugin-level, or workspace-level (`.cursor\hooks.json`, `.claude\settings*.json`)
+`preToolUse` or `workspaceOpen` hook is registered that the administrator has
+not approved. `workspaceOpen` is included because its `pluginPaths` output
+loads plugins, and their hooks, from any folder. Plugin-level hooks are those
+of every plugin under `%USERPROFILE%\.cursor\plugins` (local plugins and
+marketplace installs alike): the file or inline config named by the `hooks`
+field of `.cursor-plugin\plugin.json`, and `hooks\hooks.json`. The denial names
 the file and the handler's `sha256` digest. Files that cannot be verified
 (links and other reparse points, files over 1 MiB, invalid JSON) also deny, and
 so does a workspace whose folders cannot all be checked: more than 32 distinct
 folders, or a folder that Cursor reports as a remote or relative path rather
-than a local one. To approve a handler, add its
+than a local one. Under the plugin folder, links, junctions and other reparse
+points, folders nested more than 8 levels deep, and more than 4096 folders in
+total also deny. The guard does not scan the enterprise hooks file or team
+hooks from the Cursor dashboard, which administrators control, and it cannot
+see plugins that Cursor keeps outside `%USERPROFILE%\.cursor\plugins` or
+Claude Code plugins imported through Cursor's third-party settings. On Cursor
+Teams and Enterprise, keep **Allow Local Plugin Imports** off and limit the
+plugin marketplace as a complementary control. To approve a handler, add its
 digest to `connector_hooks.cursor.approved_foreign_hooks` and let the guardian
 reconcile; the allowlist is published in the protected Cursor machine state.
 The digest covers the handler registration (in Claude-format files, together
