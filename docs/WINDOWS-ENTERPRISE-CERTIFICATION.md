@@ -10,6 +10,12 @@ Run the host-mutating procedure only on a disposable Windows endpoint or
 ephemeral CI runner with an independent administrator recovery channel. Do not
 run it on a production workstation.
 
+**Scope.** This runbook certifies the Cisco Secure Client profile. The
+harness, `scripts/test-windows-enterprise-hardening.ps1`, has no standalone
+profile yet, so a run does not certify a standalone deployment. The standalone
+profile's certification status is recorded in the Certification section of the
+[enterprise threat model](ENTERPRISE-THREAT-MODEL.md#certification).
+
 ## Acceptance boundary
 
 The deployed endpoint passes only when all of these statements have direct

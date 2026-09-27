@@ -2,15 +2,23 @@
   "title": "Enterprise",
   "pages": [
     "index",
+    "concepts",
+    "rollout",
+    "threat-model",
+    "---Install---",
     "windows",
     "linux",
     "macos",
+    "mdm",
+    "---Configure---",
+    "configuration",
     "enrollment",
     "machine-policy",
     "foreign-hook-guard",
-    "intune",
-    "generic-scripts",
+    "ai-defense-key",
+    "---Operate---",
     "operations",
-    "threat-model"
+    "lifecycle",
+    "troubleshooting"
   ]
 }

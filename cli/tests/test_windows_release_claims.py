@@ -197,7 +197,7 @@ def test_canonical_docs_keep_cli_taxonomy_and_claude_optional_git_boundary() -> 
     assert "Native Windows supports Amp plus Codex, Claude Code, Cursor" in cli_reference
     assert "remain previews or not-certified choices" not in cli_reference
     assert "Preview user-hook alias for Cursor" not in cli_reference
-    assert "Gemini CLI setup is deprecated on every platform" in cli_reference
+    assert "Gemini CLI" not in cli_reference
     assert "use `defenseclaw setup antigravity`" in cli_reference
     assert (
         "Native Windows x64 release certification currently covers Claude Code"

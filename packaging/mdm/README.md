@@ -11,43 +11,55 @@ Every lifecycle action is a transaction that rolls back on failure. `ensure`
 installs, upgrades or repairs as needed, and does nothing when the host
 already matches, so an MDM can run it on every check-in.
 
+The user documentation, including the generic MDM contract and step-by-step
+recipes, is published at
+<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/>. What goes
+in the config, including which agents to protect, is in
+<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/configuration/>.
+
 ## What is here
 
 | Path | Use |
 | --- | --- |
-| `contract/lifecycle-result.schema.json` | The JSON document every lifecycle action and every script in this kit prints (schema version 2). |
+| `contract/lifecycle-result.schema.json` | The JSON document every lifecycle action, wrapper and removal script prints (schema version 2). |
 | `contract/exit-codes.md` | Exit codes per OS, what they mean, and which ones an MDM should retry. |
 | `contract/detection.md` | How to tell an MDM that DefenseClaw is installed, current and healthy. |
-| `windows/Invoke-DefenseClawEnterprise.ps1` | Generic Windows wrapper (PowerShell 7). Verifies and runs `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure`. |
+| `windows/Invoke-DefenseClawEnterprise.ps1` | Generic Windows wrapper (PowerShell 7.4 or later). Verifies and runs `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure`. |
 | `windows/detect.ps1`, `windows/uninstall.ps1` | Windows detection and removal. These run in Windows PowerShell 5.1 (32- or 64-bit) and PowerShell 7. |
 | `linux/*.sh`, `macos/*.sh` | Generic wrapper (`defenseclaw-enterprise.sh`), `detect.sh` and `uninstall.sh`. The Linux and macOS copies differ only in the line `DC_SCRIPT_OS`. |
-| `intune/` | Microsoft Intune guide for Windows (Win32 app and Remediations), macOS (shell script or PKG) and Linux (platform script). |
+| `intune/` | Microsoft Intune guide for Windows (Win32 app and Remediations), macOS (shell script, or PKG app) and Linux (platform script). |
 | `signing/` | Signing channels, and `authenticode-sign.sh` for release signing or re-signing with your own certificate. |
 
 ## Quick start
 
 1. **Get a release and pin it.** Download the release's `checksums.txt` and
-   `checksums.txt.bundle`, then verify them with cosign:
+   `checksums.txt.bundle` with the artifact, verify them with cosign, and
+   check the artifact:
 
    ```sh
    cosign verify-blob --bundle checksums.txt.bundle \
      --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+   sha256sum --check --ignore-missing checksums.txt
    ```
 
-   Then read the SHA-256 of the artifact you deploy:
+   Then read the SHA-256 of the artifact you deploy from `checksums.txt`:
 
    | OS | Artifact |
    | --- | --- |
-   | Windows | `DefenseClawSetup-Enterprise-Standalone-x64.exe` |
-   | Linux | `defenseclaw-enterprise-<version>-linux-<arch>.deb` / `.rpm`, or the `.tar.gz` payload |
-   | macOS | `defenseclaw-enterprise-<version>-darwin-arm64.pkg` |
+   | Windows x64 | `DefenseClawSetup-Enterprise-Standalone-x64.exe` |
+   | Linux | `defenseclaw-enterprise-<version>-linux-<arch>.deb` / `.rpm`, or the `defenseclaw-enterprise-<version>-linux-<arch>.tar.gz` payload |
+   | macOS (Apple silicon, 13.0 or later) | `defenseclaw-enterprise-<version>-darwin-arm64.pkg`, or the payload archive |
 
    That SHA-256 is the pin for hash-pinned trust, the default. See
    `signing/README.md` for signature-based trust instead.
-2. **Write the administrator config.** Start from `enterprise.profile:
-   standalone` (see the enterprise documentation). Never put credentials in
-   it: the standalone profile rejects an inline `cisco_ai_defense.api_key`.
+2. **Write the administrator config.** It needs `config_version: 8`,
+   `deployment_mode: managed_enterprise` and `enterprise.profile:
+   standalone`, and it chooses the agents to protect. On Linux and macOS a
+   host installed without a config gets a default that protects no agents;
+   on Windows the first install refuses to run without one (`1639`). Never put
+   credentials in it: the standalone profile rejects an inline
+   `cisco_ai_defense.api_key`.
 3. **Run the wrapper as SYSTEM or root** from your MDM. Stage the config
    (and any credential file) in a folder that only administrators can
    change: the wrappers refuse a file when the file or any folder above it
@@ -71,16 +83,19 @@ already matches, so an MDM can run it on every check-in.
    together with `-SetupPath`.
 
    ```sh
-   # Linux (deb or rpm) and macOS (pkg)
+   # Linux (deb, rpm or payload) and macOS (pkg or payload)
    sudo ./defenseclaw-enterprise.sh --source /var/cache/mdm/defenseclaw-enterprise-1.4.0-linux-amd64.deb \
      --sha256 <pin> --config-file /etc/mdm/defenseclaw/config.yaml
    ```
 
-4. **Deliver the optional Cisco AI Defense key** on standard input or from
-   an administrator-only file, never as an argument:
+   Script-only MDMs that cannot pass arguments set the same values in the
+   settings block at the top of `defenseclaw-enterprise.sh`.
+4. **Deliver the optional Cisco AI Defense key** after the deployment is
+   installed, on standard input or from an administrator-only file, never as
+   an argument or in a script body:
 
    ```sh
-   sudo ./defenseclaw-enterprise.sh --secret-name ai-defense-api-key --secret-stdin </secure/key
+   sudo ./defenseclaw-enterprise.sh --secret-name ai-defense-api-key --secret-file /secure/key
    ```
 
 5. **Detect** with `detect.ps1` / `detect.sh`, or the registry and package
@@ -95,7 +110,9 @@ already matches, so an MDM can run it on every check-in.
   changing the original afterwards has no effect.
 - **No secrets in argv, logs or MDM script bodies.** Config and credentials
   come from standard input, or from files that other accounts cannot write.
-  Credential files are overwritten and deleted after use.
+  The wrapper deletes its staging copy of a credential after use (on Windows
+  it overwrites it first). It leaves your source file alone: delete it
+  yourself.
 - **No trust in the caller's environment.**
   - Unix scripts set their own `PATH` and locale, and work under `env -i`
     with no TTY.
@@ -105,32 +122,26 @@ already matches, so an MDM can run it on every check-in.
     - an untrusted or emulated engine;
     - Constrained Language Mode;
     - .NET loader-injection variables.
-- **One result document on stdout.** Every run prints exactly one
-  lifecycle-result document (`contract/lifecycle-result.schema.json`),
-  including failures the wrapper detects itself. Those failures use error
-  codes that start with `mdm_`.
+- **One result document on stdout.** Every wrapper and removal-script run
+  prints exactly one lifecycle-result document
+  (`contract/lifecycle-result.schema.json`), including failures the wrapper
+  detects itself. Those failures use error codes that start with `mdm_`. The
+  detection and Remediations scripts print one line instead.
 - **Idempotent.** `ensure` does nothing when the host already matches.
   `uninstall` succeeds on a host that has nothing installed.
 
-## Tested
+## Validation status
 
-Windows (Server 2025) and Linux / macOS (RHEL 9 and macOS 15 EC2 hosts):
+`cli/tests/test_mdm_kit.py` checks the kit on every change: the scripts are
+ASCII, the Linux and macOS copies and the shared Windows helpers stay
+identical, the Unix scripts parse and pin their environment, credentials never
+reach a command line, wrapper failures are schema-conformant result
+documents, the Intune-facing Windows scripts stay Windows PowerShell 5.1
+compatible, and the release workflow signs artifacts only when its signing
+secrets exist.
 
-- **Every script** runs on each engine or shell it supports:
-  - Windows PowerShell 5.1 in 32- and 64-bit processes, and PowerShell 7.6;
-  - `sh`/`dash` on RHEL 9 and macOS 15, run as root under `env -i`.
-- **Refusal drills:**
-  - bad arguments, hash mismatch, unapproved signer, loader-injection
-    variables;
-  - config files that other accounts can write, in a user-writable folder,
-    in sticky `/tmp`, or owned by another account;
-  - payloads containing symlinks, hard links, `../` or absolute members.
-- **Authenticode:** a Valid signature from an allowed signer passes, and
-  any other signer is refused, using a disposable test CA that was removed
-  afterwards.
-- **Schema:** every result document the scripts printed validates against
-  the schema.
-
-Real Intune tenants were not available; the Intune guide follows
-Microsoft's documentation and the drills above, which simulate Intune's
-execution contexts.
+No recipe has been run in a live Intune tenant or any other live MDM service
+against this release. The recipes are templates that follow each vendor's
+documentation and are checked by simulating the MDM's execution context (root
+under `env -i` with no TTY; SYSTEM from 32- and 64-bit Windows PowerShell). Run
+a pilot group first.

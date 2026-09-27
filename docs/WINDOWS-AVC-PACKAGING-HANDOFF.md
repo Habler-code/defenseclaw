@@ -5,6 +5,12 @@ Cisco Secure Client AVC packaging pipeline for the signed Windows
 managed-enterprise Setup. DefenseClaw produces an unsigned build kit; AVC owns
 both Authenticode signing rounds and returns the finalized release artifacts.
 
+This handoff covers only the Secure Client Setup,
+`DefenseClawSetup-Enterprise-x64.exe`. The standalone Setup,
+`DefenseClawSetup-Enterprise-Standalone-x64.exe`, has no AVC kit; it is built
+and signed as described in
+[Windows enterprise Setup](WINDOWS-ENTERPRISE-SETUP.md#standalone-setup).
+
 Do not use the retired on-host Windows builder. Use
 `make packaging-windows-avc-buildkit VERSION=<version>` for a signed release
 handoff, or `make packaging-windows-enterprise-installer VERSION=<version>` only
@@ -19,9 +25,11 @@ The build-kit directory is
 windows-enterprise-buildkit-<version>/
 ├── payload/
 │   ├── DefenseClawEnterprise.psm1
+│   ├── defenseclaw-acp.exe
 │   ├── defenseclaw-cmid-broker.exe
 │   ├── defenseclaw-gateway.exe
 │   ├── defenseclaw-hook.exe
+│   ├── defenseclaw-sensor-helper.exe
 │   ├── defenseclaw.exe
 │   └── install-enterprise.ps1
 ├── source/                         # trimmed, vendored, offline Go build
@@ -70,7 +78,7 @@ Bash-hosted kit:
 ```bash
 export SOURCE_COMMIT=0123456789abcdef0123456789abcdef01234567
 export SOURCE_DATE_EPOCH=1787097600
-export RELEASE_VERSION=<version>
+export RELEASE_VERSION=X.Y.Z
 export CMID_PSEUDO_VERSION=v0.0.0-20260819000000-0123456789ab
 ./assemble.sh \
   --source-commit "$SOURCE_COMMIT" \
@@ -86,7 +94,7 @@ PowerShell-hosted kit:
 
 ```powershell
 $SourceCommit = '0123456789abcdef0123456789abcdef01234567'
-$Version = '<version>'
+$Version = 'X.Y.Z'
 $CmidPseudoVersion = 'v0.0.0-20260819000000-0123456789ab'
 $env:SOURCE_DATE_EPOCH = '1787097600'
 pwsh -File .\assemble.ps1 `

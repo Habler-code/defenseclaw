@@ -17,8 +17,6 @@ macOS runs either profile:
 The rows below cover the standalone profile. They are numbered `M-01`…; the
 second column names the matching Windows row.
 
-<!-- verify-after-merge: M2 M4 M5 — this model describes the macOS standalone lifecycle, LaunchDaemons, enrollment worker and machine policy being merged (the hook transport and peer checks are merged) into the enterprise-hardening branch. Re-check every path and plist key against the merged tree before removing this comment. -->
-
 ## Review scope
 
 - Primary paths:
@@ -41,15 +39,21 @@ second column names the matching Windows row.
    descriptor.
 2. The gateway runs as the hidden `_defenseclaw` user and can write only its
    runtime state and its log directory.
-3. A hook sends no request byte until `LOCAL_PEERCRED` proves the hook
-   socket's listener is root or `_defenseclaw`.
+3. `defenseclaw-hook` sends no request byte until `LOCAL_PEERCRED` proves the
+   hook socket's listener is root or `_defenseclaw`. DefenseClaw's in-agent
+   plugins (OpenCode, Amp) and the Codex notify bridge use the same socket
+   and check; there is no TCP fallback. The agents' own telemetry exporters
+   do not verify the listener (residual 6).
 4. The gateway authorizes every hook caller by kernel uid against the root
    guardian's ledger.
 5. The root guardian never touches a user home itself; a per-user worker does
    it as that user.
 6. Vendor machine policy is merged, never replaced.
 7. A normal user cannot disable DefenseClaw's hooks through vendor settings,
-   and a foreign hook cannot rewrite a tool call DefenseClaw inspected.
+   and a foreign hook cannot rewrite a tool call DefenseClaw inspected for a
+   connector with a vendor lock or the foreign-hook guard, within the bounds
+   of enterprise residuals R3, R4, R13 and R14. Antigravity, Hermes,
+   OpenHands and OmniGent have neither (R24).
 
 ## Zones on macOS (standalone)
 
@@ -60,7 +64,7 @@ second column names the matching Windows row.
 | Z1 | `com.cisco.defenseclaw.hook-enumerator` (five-minute cycle) | root | Same |
 | Z1 | Per-user `enterprise hooks apply-target` worker | the target's uid and primary gid | New session; the guardian's timeout kills its process group; cross-user task ports are denied by the OS |
 | Z1 | `com.cisco.defenseclaw.sensor-helper` | root | Fixed request protocol; homes from the manifest |
-| Z1 | `com.cisco.defenseclaw.apply` (`WatchPaths` on config, secrets, policies → `ensure`), `com.cisco.defenseclaw.verify` (daily) | root | Root-owned plists |
+| Z0 | `com.cisco.defenseclaw.apply` (`WatchPaths` on config, secrets, policies → `ensure`), `com.cisco.defenseclaw.verify` (daily); they run the lifecycle | root | Root-owned plists |
 | Z2 | `com.cisco.defenseclaw.gateway` | `_defenseclaw` (`UserName`/`GroupName`), `Umask` 077 | Read-only config, policy and ledger; writes `/opt/cisco/defenseclaw/runtime` and `/Library/Logs/Cisco/DefenseClaw/gateway` |
 | Z2 endpoints | `127.0.0.1:18970` and `/opt/cisco/defenseclaw/run/hook.sock`, bound by the gateway | `_defenseclaw` | The lifecycle creates `/opt/cisco/defenseclaw/run` for `_defenseclaw` inside the root-owned install tree; it survives reboot and no other user can create a file there |
 | Z3 | `/opt/cisco/defenseclaw/{bin,etc,etc/policies,etc/secrets,etc/hook-guardian,lifecycle,hook-guardian-state}` (the `run/` socket directory belongs to `_defenseclaw`), `/Library/Application Support/{ClaudeCode,Cursor,opencode}`, `/etc/codex`, `/etc/github-copilot/policy.d` | root (secrets `root:_defenseclaw 0640`) | Administrator-only write |
@@ -69,9 +73,10 @@ second column names the matching Windows row.
 launchd hands sockets to a daemon only through `launch_activate_socket(3)`,
 which needs cgo; release builds are `CGO_ENABLED=0`, so the macOS gateway
 binds its own listeners. The protected socket directory, not socket
-activation, is what prevents squatting on the hook socket. `/var/run` is
-not used: macOS clears it at boot and `_defenseclaw` cannot write it.
-<!-- verify-after-merge: M2 — the lifecycle creates /opt/cisco/defenseclaw/run and no longer ships a boot-time prepare daemon -->
+activation, is what prevents squatting on the hook socket. The hook socket
+does not use `/var/run`: macOS clears it at boot and `_defenseclaw` cannot write it. The
+lifecycle creates `/opt/cisco/defenseclaw/run` (`0755`, owned by
+`_defenseclaw`); no boot-time prepare daemon is needed.
 
 ## Data flows
 
@@ -109,7 +114,11 @@ Accounts resolve through `os/user`, which on macOS goes through libSystem
 and Open Directory, so directory-bound and mobile accounts resolve; `dscl .
 -list /Users` lists local accounts. Directory accounts are found through
 logged-in sessions, home owners under `/Users` and
-`enrollment.include_users`. As on Linux, a lookup error is never a deletion.
+`enrollment.include_users`. Candidates need a uid of 501 or more
+(`enrollment.uid_min` raises the floor) and a login shell, unless they are
+listed in `enrollment.include_users`. As on Linux, a lookup error is never a
+deletion, and a row is revoked only after three consecutive definitive
+not-found answers.
 
 ## Threat analysis
 
@@ -117,25 +126,28 @@ logged-in sessions, home owners under `/Users` and
 | --- | --- | --- | --- | --- |
 | M-01 | W-01 | A user unloads, disables or edits a LaunchDaemon (`launchctl bootout`, `disable`, plist edit) | System-domain daemons require root; plists are `root:wheel 0644`; `KeepAlive` restarts a killed daemon | `launchctl` attempts as each test user |
 | M-02 | W-02 | A user replaces a binary, config, policy, secret, manifest, ledger or descriptor | Root ownership of every file and ancestor under `/opt/cisco/defenseclaw`; trusted-path checks on read | Write and swap attempts; `verify` |
-| M-03 | W-04 | A user downgrades the mode or profile | Mode and profile pinned in each plist's `EnvironmentVariables`; config must agree | Config and profile tests |
+| M-03 | W-04 | A user downgrades the mode or profile | Mode and profile pinned in the `EnvironmentVariables` of the gateway, guardian, enumerator and sensor-helper plists; config must agree | Config and profile tests |
 | M-04 | W-05 | A compromised gateway edits policy or the ledger | `_defenseclaw` has no write access to `etc/`, `hook-guardian-state/` or `bin/` | File-mode verification |
 | M-05 | W-25 | A user wins the gateway's endpoint during a restart | Hooks, in-agent plugins and the Codex notify bridge use only the socket, in a directory no other user can write, and verify the peer uid before sending; the gateway serves the socket even while another process holds the TCP port. The TCP telemetry exporters do not verify the listener (residual 6) | `managed_standalone_transport_test.go`, `api_uds_unix_test.go`, `api_run_hook_socket_unix_test.go`; squat-and-restart race on a host |
 | M-06 | — | A user pre-creates the socket or its directory, or the directory disappears at boot | The directory is `/opt/cisco/defenseclaw/run`, created by the lifecycle for `_defenseclaw` inside the root-owned install tree, so it persists across reboot and no other user can create entries; the gateway refuses a directory with any other owner or a group/other write bit and replaces only a stale socket it owns | `internal/gateway/api_uds_unix_test.go`; reboot test on a host |
 | M-07 | W-28 | An unenrolled uid uses a per-user connector's hook, or one user's TCP credential posts events attributed to another | Hook-socket authorization against the ledger; per-user TCP credentials bound to the uid (as L-08). A telemetry credential an exporter sent to a process holding the port stays usable by that process (residual 6) | `managed_hook_peer_test.go`, `user_scoped_credentials_test.go` |
 | M-08 | W-06 | Root follows a user symlink inside a home | The root guardian refuses in-process home access; the worker acts as the user | Worker and standalone tests |
-| M-09 | — | TCC blocks the worker from reading the agent's configuration | Agent configs live in dotdirs in the home, which TCC does not protect; an optional PPPC profile granting Full Disk Access to the hook guardian is documented for sites that relocate them | Host run with each connector <!-- verify-after-merge: M10 --> |
-| M-10 | W-26, W-49 | A user disables Codex or Claude Code hooks | `/etc/codex/requirements.toml` with `allow_managed_hooks_only` and `[features] hooks = true`; `/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json` with `allowManagedHooksOnly` | Machine-policy tests; `enterprise policy verify --live` |
-| M-11 | W-51 | A higher-precedence source shadows DefenseClaw's policy: the Codex MDM preference `com.openai.codex` `requirements_toml_base64` outranks `/etc/codex`, and Claude Code managed preferences outrank the file drop-in | Detect the preference; report it as higher precedence; `enterprise policy export` produces the plist or TOML block the MDM should carry; `higher_precedence_sources: fail` (default) or `warn` | `codex_sources_darwin.go`, `claude_sources_darwin.go` tests |
+| M-09 | — | TCC blocks the worker from reading the agent's configuration | Agent configs live in dotdirs in the home, which TCC does not protect. For sites that relocate them into TCC-protected folders, a PPPC profile can grant Full Disk Access to `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`, the binary that runs the guardian (`enterprise hooks watch`) and its per-user worker. This has not yet been checked on a real host | Host run with each connector |
+| M-10 | W-26, W-49 | A user disables Codex or Claude Code hooks | `/etc/codex/requirements.toml` with `allow_managed_hooks_only` and `[features] hooks = true`; `/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json` with `allowManagedHooksOnly` (default `managed_hooks_only: enforce`) | Machine-policy tests; `sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --live --user <user> --connector <codex or claudecode> --agent-binary <absolute path>` |
+| M-11 | W-51 | A higher-precedence source shadows DefenseClaw's policy: the Codex MDM preference `com.openai.codex` `requirements_toml_base64` outranks `/etc/codex`, and Claude Code managed preferences outrank the file drop-in | Detect the preference and accept it when it carries DefenseClaw's hooks (or, for Claude Code 2.1.242 or later, sets `managedSourcesBehavior: merge`); `enterprise policy export` produces the plist block the MDM should carry (`--format plist` for both connectors). For Codex and Claude Code alike, `higher_precedence_sources: fail` (default) records a conflict and reports the connector as not covered, and `warn` only reports it. On this code the policy commands read the config named by `DEFENSECLAW_CONFIG`, so run them with `DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml` | `codex_sources_darwin.go`, `claude_sources_darwin.go`, `codex.go`, `claude.go` tests |
 | M-12 | W-50 | A user or project hook rewrites a tool call (Cursor, Copilot, Devin, OpenCode, Amp) | Foreign-hook guard | `guard_test.go` |
 | M-13 | W-48 | A user reads the AI Defense key | `root:_defenseclaw 0640` in a `0750` directory; the reader requires root ownership, a single link and no access for others | Credential tests |
-| M-14 | W-52 | A per-user install competes with the managed deployment | `scripts/install.sh` and the per-user gateway refuse while the descriptor exists | Refusal tests |
+| M-14 | W-52 | A per-user install competes with the managed deployment | `scripts/install.sh`, `defenseclaw upgrade` and the per-user gateway refuse while the descriptor exists | Refusal tests |
 | M-15 | W-15 | A failed upgrade leaves mixed state | Transaction snapshot and rollback | Lifecycle tests |
 | M-16 | — | The standalone and Secure Client profiles are installed together | The standalone lifecycle refuses when a Secure Client deployment is present | `secureClientPresent` tests |
+| M-17 | W-27 | An old, copied or self-built agent client ignores `/etc/codex/requirements.toml` or the Claude Code managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and Santa (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15) | Application-control profile on a host |
 
 ## Residual risks
 
 1. Per-user registrations are user-owned and repaired within one reconcile
-   interval, as on the other platforms.
+   interval, as on the other platforms, and a per-user agent started with
+   another config root never loads them
+   ([R1](ENTERPRISE-THREAT-MODEL.md#residual-risks)).
 2. Without socket activation, a hook that runs while the gateway restarts
    fails closed rather than queuing.
 3. The Codex and Claude Code MDM preference layers can override local files;
@@ -157,3 +169,8 @@ logged-in sessions, home owners under `/Users` and
    rotate, and a telemetry credential never authenticates hook, inspect or
    management routes or another connector
    ([R7](ENTERPRISE-THREAT-MODEL.md#residual-risks)).
+7. An old, copied or self-built agent client can ignore machine policy
+   (M-17); only application control closes it.
+8. `defenseclaw-hook` runs as the user, who can terminate, suspend or starve
+   it; agents that block only on an explicit deny then run the call
+   ([R18](ENTERPRISE-THREAT-MODEL.md#residual-risks)).

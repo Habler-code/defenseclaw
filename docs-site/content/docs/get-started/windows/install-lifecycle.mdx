@@ -86,9 +86,10 @@ defenseclaw setup omnigent --mode observe
 defenseclaw setup opencode --mode observe
 defenseclaw setup copilot --mode observe
 defenseclaw setup antigravity --mode observe
+defenseclaw setup kiro --mode observe
 ```
 
-One local gateway can host all ten native lifecycle connectors. Add connectors without removing the
+One local gateway can host all eleven native lifecycle connectors. Add connectors without removing the
 first:
 
 ```powershell
@@ -103,6 +104,7 @@ defenseclaw setup `
   --connector opencode `
   --connector copilot `
   --connector antigravity `
+  --connector kiro `
   --mode observe `
   --restart `
   --yes
@@ -113,8 +115,9 @@ Setup records validated `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`,
 plus `HERMES_HOME` when Hermes is selected. Antigravity uses the
 `%USERPROFILE%\.gemini\config` home. A predecessor custom path is retained only as
 internal custody long enough to restore its exact file and migrate the managed
-registration to the official path. Setup records the two `.gemini` ownership
-boundaries independently so repair, rollback, and teardown cannot cross them.
+registration to the official path. Setup writes only
+`%USERPROFILE%\.gemini\config\hooks.json` and records that home as its own
+ownership boundary for repair, rollback, and teardown.
 Cursor publishes no configuration-home
 environment variable, so Setup records its exact configuration home
 internally. Devin setup records `%APPDATA%\devin` and the exact admitted CLI
@@ -163,7 +166,13 @@ See [Upgrade DefenseClaw](/docs/get-started/upgrade) for every option.
 When an administrator sets the `DisableSelfUpdate` policy (a nonzero DWORD
 under `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw`), `install.ps1`,
 `defenseclaw upgrade` and `defenseclaw rollback` refuse and change nothing, and
-the update notice is off. Update through your managed deployment instead.
+the update notice is off. Update through your managed deployment instead. A
+standalone [enterprise deployment](/docs/enterprise) sets this policy when the
+value is absent, unless its config sets
+`enterprise.coexistence.disable_self_update: false`. On such a computer
+`install.ps1`, `defenseclaw upgrade` and `defenseclaw rollback` refuse in any
+case, because the
+deployment's registration marks the computer as managed.
 
 ### Moving from the 0.8.x Setup package
 
@@ -187,6 +196,8 @@ defenseclaw uninstall --binaries   # also remove the programs in %USERPROFILE%\.
 defenseclaw uninstall --all --binaries --yes   # remove everything, including %USERPROFILE%\.defenseclaw
 ```
 
-Enterprise deployments use the managed Setup package; see
+For a machine-wide deployment managed by Intune or another MDM, see
+[enterprise deployment](/docs/enterprise). The Cisco Secure Client profile is
+described in
 [Enterprise hardening and deployment](/docs/setup/enterprise-deployment).
 
