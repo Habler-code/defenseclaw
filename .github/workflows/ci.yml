@@ -973,6 +973,13 @@ jobs:
           netstat -anv -p tcp | sed -n 2p
           go test -count=1 ./internal/gateway/connector -run 'TestHookListenerCheck'
           go test -count=1 ./internal/gateway/connector/hookexec -run 'Darwin|Managed'
+      # The root guardian watches users' directories through its own kqueue
+      # watcher on macOS (fsnotify's opens every entry, following links and
+      # waiting on named pipes); no other job builds it.
+      - name: Test the guardian's macOS directory watcher
+        if: runner.os == 'macOS' && matrix.connector == 'codex'
+        shell: bash
+        run: go test -count=1 ./internal/enterprisehooks/guardianwatch
       - name: Test root boundary and connector repair
         shell: bash
         run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" "${{ matrix.connector }}"

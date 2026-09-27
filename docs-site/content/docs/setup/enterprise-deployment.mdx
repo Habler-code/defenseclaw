@@ -1434,20 +1434,23 @@ worker permanently switches to the target user's UID, primary GID, and no other
 groups before it opens any path in that user's home, then validates, installs,
 or repairs the target and exits. The worker also works out which of the user's
 directories and files the guardian watches for changes, so the guardian never
-reads the user's files itself. Each worker has a two-minute deadline. If a
-user's worker does not finish in time, the guardian stops it, reports that
-target as failed, and starts no more workers for that user in the same
-reconcile pass, so one user cannot hold up repairs for the others; the next
-pass tries that user again. Every file change is therefore checked by the
-kernel against the user's own permissions, and connector files keep the user's
-ownership. The worker needs only `CAP_SETUID` and `CAP_SETGID` for that switch;
-it does not depend on the units' `NoNewPrivileges=false`. On macOS the root
-guardian starts a worker only from an executable that no other user can
-replace, such as the packaged `/opt/cisco/secureclient/defenseclaw/bin` binary.
-The units limit capabilities to `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`,
-`CAP_SETGID`, and `CAP_SETUID`, retain the `@system-service` syscall filter,
-deny SUID/SGID creation, and restrict writable paths to user homes and the two
-guardian state directories.
+reads the user's files itself; it only asks the kernel to report changes to
+them. On macOS it opens just those directories and the files DefenseClaw manages
+in them, for change notification only, without following symbolic links or
+waiting on named pipes, and never opens their other entries. Each worker has a
+two-minute deadline. If a user's worker does not finish in time, the guardian
+stops it, reports that target as failed, and starts no more workers for that
+user in the same reconcile pass, so one user cannot hold up repairs for the
+others; the next pass tries that user again. Every file change is therefore
+checked by the kernel against the user's own permissions, and connector files
+keep the user's ownership. The worker needs only `CAP_SETUID` and `CAP_SETGID`
+for that switch; it does not depend on the units' `NoNewPrivileges=false`. On
+macOS the root guardian starts a worker only from an executable that no other
+user can replace, such as the packaged `/opt/cisco/secureclient/defenseclaw/bin`
+binary. The units limit capabilities to `CAP_CHOWN`, `CAP_DAC_OVERRIDE`,
+`CAP_FOWNER`, `CAP_SETGID`, and `CAP_SETUID`, retain the `@system-service`
+syscall filter, deny SUID/SGID creation, and restrict writable paths to user
+homes and the two guardian state directories.
 
 For scheduled repair, create `/etc/defenseclaw/hook-guardian/<user>.env`:
 

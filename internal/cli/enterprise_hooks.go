@@ -40,6 +40,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianwatch"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -519,6 +520,8 @@ var (
 	// A root guardian on Unix resolves each target's watch paths in the
 	// per-target worker, never with its own credentials.
 	enterpriseHookReconcileWatchPaths = enterprisehooks.ResolveWatchPaths
+	// newEnterpriseHookWatcher creates the watch loop's filesystem watcher.
+	newEnterpriseHookWatcher = guardianwatch.New
 	// Reconcile-level seams for the enrollment publication gate (#894).
 	enterpriseHookReconcileAwaitingFirstSignIn = enterpriseHookTargetAwaitingFirstSignIn
 	enterpriseHookReconcileStageDeferred       = stageEnterpriseHookDeferredManagedPolicies
@@ -1893,7 +1896,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	publishReadiness(guardianstate.StateWaitingForTargets)
 	defer writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateWaitingForTargets)
-	fsw, err := fsnotify.NewWatcher()
+	// guardianwatch, not fsnotify directly: on macOS fsnotify opens every
+	// entry of a watched user directory as root, following links and
+	// waiting on named pipes.
+	fsw, err := newEnterpriseHookWatcher()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
 	}
@@ -1955,6 +1961,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			publishReadiness(guardianReadinessAfterReconcile(run, err))
 			return false, err
 		}
+		fsw.SetFiles(enterpriseHookWatchFiles(run))
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
 		if err := syncEnterpriseHookWatchDirs(fsw, watched, dirs); err != nil {
 			// Match the runEnterpriseHookReconcileOnce error path: mark
@@ -2126,7 +2133,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		select {
 		case <-cmd.Context().Done():
 			return cmd.Context().Err()
-		case event, ok := <-fsw.Events:
+		case event, ok := <-fsw.Events():
 			if !ok {
 				if err := cmd.Context().Err(); err != nil {
 					return err
@@ -2193,7 +2200,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
 			debouncePending = true
 			debounceReason = "fsnotify"
-		case err, ok := <-fsw.Errors:
+		case err, ok := <-fsw.Errors():
 			if !ok {
 				if contextErr := cmd.Context().Err(); contextErr != nil {
 					return contextErr
@@ -2316,13 +2323,14 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 // symlink) is treated as fatal: we did our one bounded wait, an
 // operator now dropped a bad file, further recovery belongs to a
 // human triage rather than an unbounded wait loop.
-func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw *fsnotify.Watcher) error {
+func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw guardianwatch.Watcher) error {
 	manifestPath := filepath.Clean(enterpriseHookManifest)
 	parentDir := filepath.Dir(manifestPath)
 
 	fmt.Fprintf(w, "[hook-guardian] managed-enterprise: targets.yaml missing at %s, waiting on fsnotify (parent=%s)\n", manifestPath, parentDir)
 	writeGuardianStateOrLog(w, guardianstate.StateWaitingForTargets)
 
+	fsw.SetFiles([]string{manifestPath})
 	if err := fsw.Add(parentDir); err != nil {
 		return fmt.Errorf("enterprise hooks watch: add wait dir %s: %w", parentDir, err)
 	}
@@ -2381,7 +2389,7 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 				return fmt.Errorf("enterprise hooks watch: targets.yaml wait timeout after %s at %s — exiting for SCM restart", enterpriseHookTargetsWaitTimeout, manifestPath)
 			}
 			return deadline.Err()
-		case event := <-fsw.Events:
+		case event := <-fsw.Events():
 			// Only react to writes/creates for the target file; ignore
 			// noise for siblings (a stray temp file, chmod on the
 			// dir itself).
@@ -2394,7 +2402,7 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), fmt.Sprintf("appeared (%s)", event.Op)); done {
 				return err
 			}
-		case fswErr := <-fsw.Errors:
+		case fswErr := <-fsw.Errors():
 			// fsnotify.Errors is documented to deliver only
 			// recoverable errors (queue overflow, watcher-internal
 			// signals). Log and keep waiting; the ticker will retry.
@@ -2575,7 +2583,7 @@ func enterpriseHookWatchOwnedEventActionable(event fsnotify.Event, exclusiveOwne
 	return event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
 }
 
-func syncEnterpriseHookWatchDirs(fsw *fsnotify.Watcher, watched map[string]struct{}, dirs []string) error {
+func syncEnterpriseHookWatchDirs(fsw guardianwatch.Watcher, watched map[string]struct{}, dirs []string) error {
 	next := map[string]struct{}{}
 	var addErrors []error
 	for _, dir := range sortedEnterpriseHookStrings(dirs) {
@@ -2611,6 +2619,20 @@ func syncEnterpriseHookWatchDirs(fsw *fsnotify.Watcher, watched map[string]struc
 		watched[dir] = struct{}{}
 	}
 	return errors.Join(addErrors...)
+}
+
+// enterpriseHookWatchFiles lists the files whose changes the watch loop acts
+// on after run: the manifest and every owned file. A watcher that opens
+// only named files (guardianwatch on macOS) watches just these.
+func enterpriseHookWatchFiles(run enterpriseHookReconcileRun) []string {
+	files := []string{filepath.Clean(enterpriseHookManifest)}
+	for _, f := range run.WatchExclusiveFiles {
+		files = append(files, filepath.Clean(f))
+	}
+	for _, f := range run.WatchSharedFiles {
+		files = append(files, filepath.Clean(f))
+	}
+	return sortedEnterpriseHookStrings(files)
 }
 
 func resetEnterpriseHookWatchTimer(timer *time.Timer, d time.Duration) {
