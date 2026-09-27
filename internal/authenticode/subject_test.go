@@ -58,6 +58,30 @@ func wrapSubject(t *testing.T, attributes ...[]byte) []byte {
 	return name
 }
 
+// attributeWithExtra encodes an AttributeTypeAndValue with a third element.
+func attributeWithExtra(t *testing.T, oid asn1.ObjectIdentifier, value, extra string) []byte {
+	t.Helper()
+	var elements []byte
+	for _, element := range []interface{}{
+		oid,
+		asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagPrintableString, Bytes: []byte(value)},
+		asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagPrintableString, Bytes: []byte(extra)},
+	} {
+		encoded, err := asn1.Marshal(element)
+		if err != nil {
+			t.Fatal(err)
+		}
+		elements = append(elements, encoded...)
+	}
+	encoded, err := asn1.Marshal(asn1.RawValue{
+		Class: asn1.ClassUniversal, Tag: asn1.TagSequence, IsCompound: true, Bytes: elements,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func bmp(value string) []byte {
 	var out []byte
 	for _, r := range value {
@@ -141,6 +165,30 @@ func TestSubjectCommonNameReadsOnlyTheCommonNameAttribute(t *testing.T) {
 			}(),
 		},
 		"empty": {},
+		// The PowerShell reader refuses these subjects; the Go parser
+		// refuses them too.
+		"extra element in the common name attribute": {
+			subject: wrapSubject(t, attributeWithExtra(t, oidCommonName, cisco, "Example")),
+		},
+		"extra element in another attribute": {
+			subject: wrapSubject(t,
+				attributeWithExtra(t, oidOrganization, "Example", "Example"),
+				rawAttribute(t, oidCommonName, asn1.TagPrintableString, []byte(cisco)),
+			),
+		},
+		"BMPString common name ending in a high surrogate": {
+			subject: wrapSubject(t, rawAttribute(t, oidCommonName, asn1.TagBMPString, append(bmp(cisco), 0xd8, 0x3d))),
+		},
+		"BMPString common name with a lone low surrogate": {
+			subject: wrapSubject(t, rawAttribute(t, oidCommonName, asn1.TagBMPString, append(append(bmp("Cisco"), 0xde, 0x00), bmp(" Systems, Inc.")...))),
+		},
+		"BMPString common name with a high surrogate before another character": {
+			subject: wrapSubject(t, rawAttribute(t, oidCommonName, asn1.TagBMPString, append(append(bmp("Cisco"), 0xd8, 0x3d), bmp(" Systems, Inc.")...))),
+		},
+		"BMPString common name with a surrogate pair": {
+			subject: wrapSubject(t, rawAttribute(t, oidCommonName, asn1.TagBMPString, append(bmp(cisco), 0xd8, 0x3d, 0xde, 0x00))),
+			want:    cisco + "\U0001F600",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := SubjectCommonName(test.subject); got != test.want {
