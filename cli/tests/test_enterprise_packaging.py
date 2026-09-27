@@ -136,7 +136,7 @@ def test_systemd_apply_path_and_verify_timer():
         "Unit=defenseclaw-enterprise-apply.service",
     ):
         assert line in path
-    assert any("enterprise linux ensure --reason path --json" in line for line in _unit("defenseclaw-enterprise-apply.service"))
+    assert any("enterprise linux ensure --reason path --lock-wait 10m --json" in line for line in _unit("defenseclaw-enterprise-apply.service"))
     assert "OnCalendar=daily" in _unit("defenseclaw-enterprise-verify.timer")
     assert any("enterprise linux verify --json" in line for line in _unit("defenseclaw-enterprise-verify.service"))
 

@@ -98,6 +98,31 @@ func exists(path string) bool {
 // ensureDir creates path (and missing parents with 0755 root-style modes)
 // and forces its exact mode and owner. An existing symlink or non-directory
 // is refused rather than replaced.
+// mkdirAllExact creates path and every missing ancestor with exactly mode.
+// os.MkdirAll applies the process umask, and the package scripts run the
+// lifecycle under umask 077: the vendor policy tree then came out 0700 and
+// the gateway service could not read its rule pack.
+func mkdirAllExact(path string, mode os.FileMode) error {
+	path = filepath.Clean(path)
+	if info, err := os.Lstat(path); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%s exists and is not a directory", path)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if parent := filepath.Dir(path); parent != path {
+		if err := mkdirAllExact(parent, mode); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(path, mode); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return os.Chmod(path, mode)
+}
+
 func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 	info, err := os.Lstat(path)
 	switch {
@@ -109,7 +134,7 @@ func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 			return fmt.Errorf("%s exists and is not a directory", path)
 		}
 	case errors.Is(err, os.ErrNotExist):
-		if err := os.MkdirAll(path, mode); err != nil {
+		if err := mkdirAllExact(path, mode); err != nil {
 			return fmt.Errorf("create %s: %w", path, err)
 		}
 	default:

@@ -28,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // Static inspection cannot prove what a client actually loads: a
@@ -222,10 +224,15 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 		result.problem("hooks/list is unavailable (Codex before 0.129 has no trust introspection): %v", err)
 		return nil
 	}
-	command := codexHookCommand(opts)
+	groups, err := connector.ManagedHookGroupsForOS(codexConnector, opts.agentVersion(codexConnector), opts.goos())
+	if err != nil {
+		result.problem("resolve the managed Codex hook groups: %v", err)
+		return nil
+	}
+	commands := codexOwnedCommands(opts, groups)
 	enabled, disabled := 0, 0
 	walkJSON(hooks, func(node map[string]any) {
-		if node["command"] != command {
+		if command, _ := node["command"].(string); !commands[command] {
 			return
 		}
 		if node["enabled"] == false || node["trusted"] == false {

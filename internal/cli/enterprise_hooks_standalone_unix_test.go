@@ -1054,3 +1054,78 @@ func TestStandaloneWorkerSymlinkSwapCannotReachRootFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// With unenrolled_users: deny the enumerator writes rows for connectors the
+// lifecycle published through machine policy. Those rows only mark the uid
+// as enrolled: running the per-user installer for them failed live on RHEL
+// (Codex refuses user hooks under allow_managed_hooks_only, Claude Code
+// verification trips over the managed settings). They succeed when the
+// machine policy is in place and never reach a worker.
+func TestStandaloneReconcileMachinePolicyRowsOnlyRecordEnrollment(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"},
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "claudecode"},
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "amp"},
+	)
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} {
+		return map[string]struct{}{"codex": {}, "claudecode": {}}
+	}
+	covered := map[string]bool{"codex": true, "claudecode": false}
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return covered[name], nil }
+
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	byConnector := map[string]enterpriseHookReconcileRow{}
+	for _, row := range run.Rows {
+		byConnector[row.Connector] = row
+	}
+	if row := byConnector["codex"]; !row.OK || row.UID != uid || row.HomeInode == 0 {
+		t.Fatalf("a covered machine-policy row must be an enrolled target: %+v", row)
+	}
+	if row := byConnector["claudecode"]; row.OK || !strings.Contains(row.Error, "machine policy is not in place") {
+		t.Fatalf("an uncovered machine-policy row must fail: %+v", row)
+	}
+	if row := byConnector["amp"]; !row.OK {
+		t.Fatalf("the per-user connector must still be installed: %+v", row)
+	}
+	for _, request := range f.requests {
+		for _, target := range request.Targets {
+			if target.Options.ConnectorName == "codex" || target.Options.ConnectorName == "claudecode" {
+				t.Fatalf("a machine-policy row reached the per-user worker: %+v", target)
+			}
+		}
+	}
+}
+
+// OmniGent setup looks itself up on PATH; with only /usr/bin:/bin the
+// worker could not find an agent discovery had just found in ~/.local/bin.
+// System directories stay first.
+func TestEnterpriseHookWorkerPathIncludesDiscoveryDirsAfterSystemDirs(t *testing.T) {
+	path := enterpriseHookWorkerPath("/home/alice")
+	parts := strings.Split(path, ":")
+	if len(parts) < 3 || parts[0] != "/usr/bin" || parts[1] != "/bin" {
+		t.Fatalf("worker PATH = %q", path)
+	}
+	if !strings.Contains(path, ":/home/alice/.local/bin") {
+		t.Fatalf("worker PATH lacks the per-user bin dir: %q", path)
+	}
+	seen := map[string]bool{}
+	for _, part := range parts {
+		if seen[part] {
+			t.Fatalf("worker PATH repeats %q: %q", part, path)
+		}
+		seen[part] = true
+	}
+}

@@ -19,10 +19,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
+	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
 
 func TestLinuxInstallCreatesTheStandaloneDeployment(t *testing.T) {
@@ -55,6 +59,10 @@ func TestLinuxInstallCreatesTheStandaloneDeployment(t *testing.T) {
 	if owner := h.owners[h.env.P(l.DataDir)]; owner != [2]int{account.UID, account.GID} {
 		t.Fatalf("data dir owner %v, want service account", owner)
 	}
+	// The gateway refuses to create its device key in a non-private dir.
+	if got := h.mode(l.DataDir); got != 0o700 {
+		t.Fatalf("data dir mode %04o, want 0700", got)
+	}
 	if owner := h.owners[h.env.P(l.ConfigPath)]; owner != [2]int{0, account.GID} {
 		t.Fatalf("config owner %v, want root:defenseclaw", owner)
 	}
@@ -80,6 +88,22 @@ func TestLinuxInstallCreatesTheStandaloneDeployment(t *testing.T) {
 	}
 	if !exists(h.env.P(l.ManifestPath)) {
 		t.Fatal("initial manifest not seeded")
+	}
+	// The gateway refuses to start without a rule pack, so the vendor
+	// defaults ship read-only and the default config points at them.
+	for _, rel := range []string{"guardrail/default/rules/secrets.yaml", "guardrail/strict", "rego/guardrail.rego", "rego/data.json", "default.yaml"} {
+		if !exists(h.env.P(filepath.Join(l.VendorPolicyDir, rel))) {
+			t.Fatalf("vendor policy %s not installed", rel)
+		}
+	}
+	if exists(h.env.P(filepath.Join(l.VendorPolicyDir, "rego", "guardrail_test.rego"))) {
+		t.Fatal("rego unit tests were installed")
+	}
+	if got := h.mode(filepath.Join(l.VendorPolicyDir, "rego", "guardrail.rego")); got != 0o644 {
+		t.Fatalf("vendor policy mode %04o", got)
+	}
+	if !strings.Contains(h.read(l.ConfigPath), "rule_pack_dir: "+filepath.Join(l.VendorPolicyDir, "guardrail", "default")) {
+		t.Fatal("default config does not name the vendor rule pack")
 	}
 
 	order := h.services.startOrder()
@@ -195,6 +219,28 @@ func TestFailedActivationRollsBack(t *testing.T) {
 	}
 }
 
+// A failed first install removes what it created, including state the
+// gateway wrote while it briefly ran, so a plain retry succeeds.
+func TestFailedFirstInstallCanBeRetried(t *testing.T) {
+	h := newTestHost(t, "linux")
+	h.healthy = false
+	health := h.env.HealthGet
+	h.env.HealthGet = func(ctx context.Context) (int, []byte, error) {
+		// The gateway ran long enough to create its audit database.
+		_ = os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, "audit.db")), []byte("x"), 0o600)
+		return health(ctx)
+	}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	requireError(t, r, codeActivate)
+	for _, dir := range []string{h.env.Layout.DataDir, h.env.Layout.VendorPolicyDir, h.env.Layout.BinDir} {
+		if exists(h.env.P(dir)) {
+			t.Fatalf("rollback left %s", dir)
+		}
+	}
+	h.healthy = true
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+}
+
 func TestInterruptedTransactionIsRecovered(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -292,6 +338,46 @@ func TestInvalidConfigIsRefusedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// A rule pack the gateway cannot load, or one inside the service-writable
+// data_dir, is refused before any change instead of failing activation.
+func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
+	cases := map[string]struct {
+		replace, with, want string
+	}{
+		"missing admin pack":                      {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist"},
+		"service-writable":                        {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir"},
+		"unknown vendor pack":                     {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships"},
+		"implicit follows empty admin policy_dir": {"policy_dir: /opt/defenseclaw/share/policies\n", "policy_dir: /etc/defenseclaw/policies\n", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			cfg := filepath.Join(t.TempDir(), "config.yaml")
+			raw := strings.Replace(string(DefaultConfig(h.env.Layout)), tc.replace, tc.with, 1)
+			if tc.want == "" {
+				// Without rule_pack_dir the pack follows policy_dir, which is
+				// empty here.
+				raw = strings.Replace(raw, "  rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default\n", "", 1)
+			}
+			if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
+			requireError(t, r, codeConfig)
+			want := tc.want
+			if want == "" {
+				want = "does not exist"
+			}
+			if len(r.Errors) == 0 || !strings.Contains(r.Errors[0].Message, want) {
+				t.Fatalf("errors = %+v, want %q", r.Errors, want)
+			}
+			if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+				t.Fatal("binaries installed despite an unusable rule pack")
+			}
+		})
+	}
+}
+
 func TestUninstallKeepsConfigAndPurgeRemovesEverything(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -305,8 +391,18 @@ func TestUninstallKeepsConfigAndPurgeRemovesEverything(t *testing.T) {
 	if !exists(h.env.P(l.ConfigPath)) {
 		t.Fatal("uninstall removed the administrator config")
 	}
+	if exists(h.env.P(l.VendorPolicyDir)) {
+		t.Fatal("uninstall left the vendor policies behind")
+	}
 	if h.services.isActive(unitGateway) || h.services.isActive(unitAPISocket) {
 		t.Fatal("uninstall left services running")
+	}
+	reset := false
+	for _, call := range h.runner.calls {
+		reset = reset || strings.HasPrefix(call, "systemctl reset-failed ") && strings.Contains(call, unitVerifyService)
+	}
+	if !reset {
+		t.Fatal("uninstall did not clear failed unit state")
 	}
 	again := h.run(Options{Action: ActionUninstall})
 	requireOK(t, again)
@@ -559,5 +655,213 @@ func TestReadSecretValue(t *testing.T) {
 	}
 	if err := (&Env{}).RemoveSecret("../x"); err == nil {
 		t.Fatal("accepted a traversal name")
+	}
+}
+
+// The config-apply unit runs ensure itself. Stopping, restarting or
+// kickstarting that unit would kill the running transaction (seen live on
+// RHEL: SIGTERM mid-apply, pending transaction left behind), so the
+// lifecycle leaves the unit it runs inside alone.
+func TestConfigApplyTriggerNeverStopsItself(t *testing.T) {
+	for goos, self := range map[string]string{"linux": unitApplyService, "darwin": labelApply} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			payload := h.payload("1.0.0")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: payload}))
+			if got := selfUnitFromEnv(h.services, self); got != self {
+				t.Fatalf("selfUnitFromEnv(%q) = %q", self, got)
+			}
+			h.env.SelfUnit = self
+			if goos == "darwin" {
+				// launchd runs the apply job while it applies.
+				h.services.active[self] = true
+			}
+			cfg := filepath.Join(t.TempDir(), "config.yaml")
+			changed := strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1)
+			if err := os.WriteFile(cfg, []byte(changed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := len(h.services.calls)
+			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: cfg, Reason: "path"}))
+			for _, call := range h.services.calls[before:] {
+				if call == "stop "+self || call == "start "+self {
+					t.Fatalf("the trigger unit was touched: %v", h.services.calls[before:])
+				}
+			}
+			if !strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
+				t.Fatal("config change not applied")
+			}
+		})
+	}
+}
+
+// Only the config-apply entry point can be exempted; any other value,
+// including a real service, is ignored.
+func TestSelfUnitAcceptsOnlyTheApplyEntryPoint(t *testing.T) {
+	h := newTestHost(t, "linux")
+	for _, value := range []string{"", unitGateway, unitGuardian, "sshd.service", labelApply} {
+		if got := selfUnitFromEnv(h.services, value); got != "" {
+			t.Fatalf("selfUnitFromEnv(%q) = %q, want empty", value, got)
+		}
+	}
+}
+
+// Agents installed under an administrator prefix the discovery does not
+// know are enrolled once the prefix is configured: the lifecycle hands it
+// to the enumerator and guardian (systemd drop-in, launchd environment).
+func TestAgentPrefixesReachDiscovery(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			cfg := filepath.Join(t.TempDir(), "config.yaml")
+			raw := strings.Replace(string(DefaultConfig(h.env.Layout)), "  profile: standalone\n", "  profile: standalone\n  enrollment:\n    agent_prefixes: [/opt/tools, /opt/agents]\n", 1)
+			if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
+			want := "DEFENSECLAW_TRUSTED_BIN_PREFIXES"
+			if goos == "linux" {
+				for _, unit := range []string{unitGuardian, unitGuardianOneshot, unitEnumerator} {
+					data := h.read(filepath.Join("/etc/systemd/system", unit+".d", dropinAgents))
+					if !strings.Contains(data, want+"=/opt/agents:/opt/tools") {
+						t.Fatalf("%s drop-in: %q", unit, data)
+					}
+				}
+				if exists(h.env.P(filepath.Join("/etc/systemd/system", unitGateway+".d", dropinAgents))) {
+					t.Fatal("the gateway got the discovery prefixes")
+				}
+				return
+			}
+			for _, label := range []string{labelGuardian, labelEnumerator} {
+				data := h.read(h.services.DefinitionPath(Unit{Name: label}, ChannelPayload))
+				if !strings.Contains(data, want) || !strings.Contains(data, "/opt/agents:/opt/tools") {
+					t.Fatalf("%s plist lacks the prefixes", label)
+				}
+			}
+		})
+	}
+}
+
+// A guardian target refused for an agent version without a verified hook
+// contract runs with no DefenseClaw hooks. Status names it and reports the
+// deployment security-incomplete; verify fails.
+func TestUnverifiedHookContractIsVisible(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
+	data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": false, "target_count": 2, "success_count": 1, "failure_count": 1})
+	if err := os.WriteFile(ledger, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
+		{"user": "alice", "connector": "codex", "ok": true},
+		{"user": "bob", "connector": "devin", "ok": false, "error": `enterprise hooks: connector devin agent version "3999.0.0" is not verified against a known hook contract: no hook contract matches normalized agent version`},
+		{"user": "carol", "connector": "omnigent", "ok": false, "error": "enterprise hooks: connector omnigent setup failed: interpreter is not in a trusted install prefix"},
+	}})
+	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	requireOK(t, status)
+	if status.SecurityComplete {
+		t.Fatal("status reports security_complete with an unprotected agent")
+	}
+	found := false
+	for _, w := range status.Warnings {
+		if w.Code == codeHookContractUnverified && strings.Contains(w.Message, "devin 3999.0.0 for user bob") && strings.Contains(w.Message, "pin a verified agent version") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("status warnings do not name the unverified contract: %+v", status.Warnings)
+	}
+	failedTarget := false
+	for _, w := range status.Warnings {
+		if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "omnigent for user carol is not protected: connector omnigent setup failed") {
+			failedTarget = true
+		}
+	}
+	if !failedTarget {
+		t.Fatalf("status warnings do not name the failed target: %+v", status.Warnings)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if verify.SecurityComplete {
+		t.Fatal("verify reports security_complete with an unprotected agent")
+	}
+}
+
+// A second lifecycle run reports busy (75) within seconds so an MDM retries
+// later, while the config-apply trigger waits for the running transaction
+// so a change made during it is still applied afterwards.
+func TestLockWaitIsShortExceptForTheApplyTrigger(t *testing.T) {
+	env := &Env{GOOS: "linux", Layout: mustLayout(t, "linux")}
+	env.fillDefaults()
+	if env.LockTimeout != DefaultLockWait || DefaultLockWait > 10*time.Second {
+		t.Fatalf("default lock wait = %s", env.LockTimeout)
+	}
+	unit, err := systemdunits.ReadFile(unitApplyService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), "--lock-wait 10m") {
+		t.Fatalf("apply unit does not wait for a running transaction:\n%s", unit)
+	}
+	plist, err := launchdstandalone.ReadPlist(labelApply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(plist), "<string>--lock-wait</string>") {
+		t.Fatal("apply daemon does not wait for a running transaction")
+	}
+}
+
+func mustLayout(t *testing.T, goos string) managed.StandaloneLayout {
+	t.Helper()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return layout
+}
+
+// Units whose per-user workers run agent CLIs cannot deny writable-executable
+// memory: Node (V8) aborted every cursor-agent --version under it on RHEL,
+// so Cursor was never enrolled. The gateway and sensor helper keep it.
+func TestAgentRunningUnitsAllowJITRuntimes(t *testing.T) {
+	for unit, want := range map[string]bool{
+		unitEnumerator: false, unitGuardian: false, unitGuardianOneshot: false,
+		unitGateway: true, unitSensorHelper: true,
+	} {
+		data, err := systemdunits.ReadFile(unit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(string(data), "\nMemoryDenyWriteExecute=true"); got != want {
+			t.Fatalf("%s MemoryDenyWriteExecute=true present=%v, want %v", unit, got, want)
+		}
+	}
+}
+
+// The package scripts run the lifecycle under umask 077. Directories the
+// install creates must still get their exact modes, or the gateway service
+// cannot read the vendor rule pack (seen live on RHEL with the rpm).
+func TestInstallUnderRestrictiveUmaskKeepsDirectoryModes(t *testing.T) {
+	previous := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(previous) })
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	l := h.env.Layout
+	for _, dir := range []string{
+		filepath.Dir(l.VendorPolicyDir), l.VendorPolicyDir,
+		filepath.Join(l.VendorPolicyDir, "guardrail"), filepath.Join(l.VendorPolicyDir, "guardrail", "default"),
+		filepath.Join(l.VendorPolicyDir, "guardrail", "default", "rules"), filepath.Join(l.VendorPolicyDir, "rego"),
+	} {
+		if got := h.mode(dir); got != 0o755 {
+			t.Fatalf("%s mode %04o under umask 077, want 0755", dir, got)
+		}
+	}
+	if got := h.mode(filepath.Join(l.VendorPolicyDir, "guardrail", "default", "rules", "secrets.yaml")); got != 0o644 {
+		t.Fatalf("vendor rule mode %04o under umask 077", got)
 	}
 }

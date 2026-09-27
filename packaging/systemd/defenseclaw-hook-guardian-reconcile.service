@@ -40,7 +40,8 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# No MemoryDenyWriteExecute: the per-user workers run agent CLIs, and JIT
+# runtimes such as Node (V8) die under it.
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap

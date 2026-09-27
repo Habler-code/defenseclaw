@@ -1590,3 +1590,60 @@ func sliceContains(values []string, want string) bool {
 	}
 	return false
 }
+
+// agy never creates ~/.gemini/config/hooks.json; a first install creates
+// it as the user and registers the DefenseClaw hooks there.
+func TestInstallBootstrapsMissingAntigravityHooksFile(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	cfgPath := filepath.Join(home, ".gemini", "config", "hooks.json")
+	if _, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "antigravity",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "1.2.11",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	}); err != nil {
+		t.Fatalf("Install with missing Antigravity hooks file: %v", err)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "antigravity-hook") && !strings.Contains(string(data), "defenseclaw") {
+		t.Fatalf("hooks file lacks the DefenseClaw hook:\n%s", data)
+	}
+}
+
+// OpenHands only creates ~/.openhands/hooks.json when the user writes
+// hooks; a first install creates it as the user and registers DefenseClaw.
+func TestInstallBootstrapsMissingOpenHandsHooksFile(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	if _, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "openhands",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "1.16.0",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	}); err != nil {
+		t.Fatalf("Install with missing OpenHands hooks file: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".openhands", "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "openhands-hook") && !strings.Contains(string(data), "defenseclaw") {
+		t.Fatalf("hooks file lacks the DefenseClaw hook:\n%s", data)
+	}
+}

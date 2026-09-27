@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -77,6 +78,11 @@ type EnterpriseEnrollmentConfig struct {
 	// HomeRoots lists extra home parents (e.g. /srv/home) the guardian may
 	// write under. The lifecycle widens the guardian unit to exactly these.
 	HomeRoots []string `mapstructure:"home_roots" yaml:"home_roots,omitempty"`
+	// AgentPrefixes lists extra administrator-owned install prefixes (for
+	// example an npm prefix such as /opt/tools) where agent CLIs live. The
+	// enumerator and guardian discover agents only in known locations, so
+	// agents installed elsewhere are not enrolled without this.
+	AgentPrefixes []string `mapstructure:"agent_prefixes" yaml:"agent_prefixes,omitempty"`
 }
 
 // Machine policy knobs.
@@ -272,7 +278,23 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		return nil
 	}
 	cfg.Enterprise.Profile = profile
+	if cfg.StandaloneEnterprise() {
+		standaloneRulePackDefault(cfg, cfg.DataDir)
+	}
 	return validateEnterpriseConfig(cfg)
+}
+
+// standaloneRulePackDefault keeps the default rule pack inside policy_dir.
+// The loader's generic default lives under data_dir, which the standalone
+// gateway service can write, so in the standalone profile that path always
+// maps to the pack a per-user install would seed in policy_dir.
+func standaloneRulePackDefault(cfg *Config, dataDir string) {
+	implicit := filepath.Join(dataDir, "policies", "guardrail", "default")
+	if cfg.Guardrail.RulePackDir != implicit || strings.TrimSpace(cfg.PolicyDir) == "" ||
+		filepath.Clean(cfg.PolicyDir) == filepath.Join(dataDir, "policies") {
+		return
+	}
+	cfg.Guardrail.RulePackDir = filepath.Join(cfg.PolicyDir, "guardrail", "default")
 }
 
 func enterpriseBlockEmpty(e EnterpriseConfig) bool {
@@ -289,7 +311,7 @@ func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
 	return strings.TrimSpace(e.Mode) == "" && len(e.IncludeUsers) == 0 && len(e.ExcludeUsers) == 0 &&
 		len(e.IncludeGroups) == 0 && len(e.ExcludeGroups) == 0 && len(e.ExemptUsers) == 0 &&
 		strings.TrimSpace(e.UnenrolledUsers) == "" && strings.TrimSpace(e.Root) == "" &&
-		e.UIDMin == 0 && len(e.HomeRoots) == 0
+		e.UIDMin == 0 && len(e.HomeRoots) == 0 && len(e.AgentPrefixes) == 0
 }
 
 func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
@@ -344,6 +366,11 @@ func validateEnterpriseConfig(cfg *Config) error {
 	}
 	for _, root := range en.HomeRoots {
 		if err := validateEnterpriseHomeRoot(root); err != nil {
+			return err
+		}
+	}
+	for _, prefix := range en.AgentPrefixes {
+		if err := validateEnterpriseAgentPrefix(prefix); err != nil {
 			return err
 		}
 	}
@@ -425,6 +452,26 @@ func validateConnectorPolicy(prefix string, p EnterpriseConnectorPolicy) error {
 		value := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(digest), "sha256:"))
 		if !enterpriseSHA256Pattern.MatchString(value) {
 			return fmt.Errorf("config: %s.allowed_hooks entry %q must be a SHA-256 digest", prefix, digest)
+		}
+	}
+	return nil
+}
+
+// validateEnterpriseAgentPrefix accepts an absolute, administrator-style
+// install prefix. User-writable trees are refused: an agent binary found
+// there could be anything a user put there.
+func validateEnterpriseAgentPrefix(prefix string) error {
+	clean := strings.TrimSpace(prefix)
+	if clean == "" || !strings.HasPrefix(clean, "/") || strings.Contains(clean, "..") ||
+		strings.ContainsAny(clean, ":\x00\r\n") || filepath.Clean(clean) != clean {
+		return fmt.Errorf("config: enterprise.enrollment.agent_prefixes entry %q must be a clean absolute path", prefix)
+	}
+	if clean == "/" {
+		return fmt.Errorf("config: enterprise.enrollment.agent_prefixes entry %q is not an install prefix", prefix)
+	}
+	for _, forbidden := range []string{"/home", "/Users", "/tmp", "/var/tmp", "/dev/shm", "/private/tmp", "/root", "/var/root"} {
+		if clean == forbidden || strings.HasPrefix(clean, forbidden+"/") {
+			return fmt.Errorf("config: enterprise.enrollment.agent_prefixes entry %q is inside %s, which users can write", prefix, forbidden)
 		}
 	}
 	return nil

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 )
 
@@ -143,6 +144,38 @@ func (e *Env) restore(snap *snapshot) error {
 				errs = append(errs, fmt.Errorf("remove %s: %w", entry.Path, err))
 			}
 		}
+	}
+	errs = append(errs, e.removeCreatedDirs(snap))
+	return errors.Join(errs...)
+}
+
+// removeCreatedDirs removes the directories the rolled-back transaction
+// created, deepest first, so a failed first install leaves nothing that
+// the next attempt would mistake for an unmanaged layout. State directories
+// the services wrote into during activation are removed with their
+// contents; every other directory only when empty.
+func (e *Env) removeCreatedDirs(snap *snapshot) error {
+	l := e.Layout
+	state := map[string]bool{
+		l.DataDir: true, l.GuardianAuthDir: true, l.LogDir: true, filepath.Join(l.LogDir, "gateway"): true,
+		l.HookSocketDir: true, l.VendorPolicyDir: true,
+	}
+	created := []string{}
+	for _, entry := range snap.Entries {
+		if entry.Dir && !entry.Present {
+			created = append(created, entry.Path)
+		}
+	}
+	sort.Slice(created, func(i, j int) bool { return len(created[i]) > len(created[j]) })
+	var errs []error
+	for _, dir := range created {
+		if state[dir] {
+			if err := os.RemoveAll(e.P(dir)); err != nil {
+				errs = append(errs, fmt.Errorf("remove %s: %w", dir, err))
+			}
+			continue
+		}
+		_ = removeDirIfEmpty(e.P(dir))
 	}
 	return errors.Join(errs...)
 }

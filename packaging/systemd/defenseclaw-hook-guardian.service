@@ -47,7 +47,10 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# No MemoryDenyWriteExecute: the per-user workers this unit starts run agent
+# CLIs for version discovery and hook setup, and JIT runtimes such as Node
+# (V8) die under it (SIGTRAP). The DefenseClaw processes themselves are Go
+# and never map writable-executable memory.
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap

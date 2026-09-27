@@ -19,6 +19,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func codexPath(t *testing.T, opts Options) string {
@@ -41,7 +42,7 @@ func TestCodexReconcileFreshIsCoveredAndIdempotent(t *testing.T) {
 		t.Fatalf("fresh reconcile: %+v", state)
 	}
 	first := readFile(t, codexPath(t, opts))
-	for _, want := range []string{"allow_managed_hooks_only = true", "[features]", "hooks = true", `managed_dir = "/opt/defenseclaw/bin"`, "[[hooks.PreToolUse]]", `command = "'/opt/defenseclaw/bin/defenseclaw-hook' hook --connector codex --enterprise-managed"`} {
+	for _, want := range []string{"allow_managed_hooks_only = true", "[features]", "hooks = true", `managed_dir = "/opt/defenseclaw/bin"`, "[[hooks.PreToolUse]]", `command = "'/opt/defenseclaw/bin/defenseclaw-hook' hook --connector codex --enterprise-managed --event PreToolUse --hook-contract codex-hooks-v4"`} {
 		if !strings.Contains(first, want) {
 			t.Fatalf("rendered requirements missing %q:\n%s", want, first)
 		}
@@ -52,6 +53,48 @@ func TestCodexReconcileFreshIsCoveredAndIdempotent(t *testing.T) {
 	}
 	if again.Changed || readFile(t, codexPath(t, opts)) != first {
 		t.Fatalf("second reconcile is not a byte-identical no-op")
+	}
+}
+
+// The unix hook refuses a Codex invocation that does not name its event and
+// hook contract (live on RHEL every prompt was blocked), so each managed
+// group binds its own event and a contract that registers it.
+func TestCodexManagedCommandsBindEventAndContract(t *testing.T) {
+	opts := testOptions(t)
+	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := toml.Unmarshal([]byte(readFile(t, codexPath(t, opts))), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]any)
+	contract := connector.ResolveHookContract("codex", "").Contract
+	checked := 0
+	for event, raw := range hooks {
+		list, ok := raw.([]any)
+		if !ok {
+			continue
+		}
+		for _, group := range list {
+			handlers := group.(map[string]any)["hooks"].([]any)
+			command := handlers[0].(map[string]any)["command"].(string)
+			want := " --event " + event + " --hook-contract " + contract.ContractID
+			if !strings.HasSuffix(command, want) {
+				t.Fatalf("hooks.%s command %q does not end with %q", event, command, want)
+			}
+			allowed := false
+			for _, e := range contract.Events {
+				allowed = allowed || e == event
+			}
+			if !allowed {
+				t.Fatalf("contract %s does not register %s", contract.ContractID, event)
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no managed Codex groups rendered")
 	}
 }
 

@@ -42,9 +42,15 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	if enterpriseunix.CurrentGOOS() != goos {
 		return withExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
 	}
+	if opts.lockWait < 0 || opts.lockWait > enterpriseunix.MaxLockWait {
+		return withExitCode(fmt.Errorf("--lock-wait must be between 0 and %s", enterpriseunix.MaxLockWait), enterprisestatus.UnixExitInvalidArgs)
+	}
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
 		return withExitCode(err, enterprisestatus.UnixExitFailure)
+	}
+	if opts.lockWait > 0 {
+		env.LockTimeout = opts.lockWait
 	}
 	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{
 		Action:               action,

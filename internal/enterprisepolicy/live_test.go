@@ -129,13 +129,13 @@ func fakeAgentScript(t *testing.T, agent string, env map[string]string) string {
 func TestVerifyLiveCodexAppServer(t *testing.T) {
 	opts := testOptions(t)
 	home := t.TempDir()
-	good := fakeAgentScript(t, "codex", map[string]string{"DC_FAKE_LOCK": "true", "DC_FAKE_ENABLED": "true", "DC_FAKE_COMMAND": codexHookCommand(opts)})
+	good := fakeAgentScript(t, "codex", map[string]string{"DC_FAKE_LOCK": "true", "DC_FAKE_ENABLED": "true", "DC_FAKE_COMMAND": codexHookCommandForEvent(opts, "PreToolUse")})
 	result, err := VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorCodex, AgentBinary: good, Home: home, Timeout: 30 * time.Second})
 	if err != nil || !result.Verified || len(result.Evidence) != 2 {
 		t.Fatalf("a locked client with trusted hooks must verify: %+v %v", result, err)
 	}
 
-	disabled := fakeAgentScript(t, "codex", map[string]string{"DC_FAKE_LOCK": "false", "DC_FAKE_ENABLED": "false", "DC_FAKE_COMMAND": codexHookCommand(opts)})
+	disabled := fakeAgentScript(t, "codex", map[string]string{"DC_FAKE_LOCK": "false", "DC_FAKE_ENABLED": "false", "DC_FAKE_COMMAND": codexHookCommandForEvent(opts, "PreToolUse")})
 	result, err = VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorCodex, AgentBinary: disabled, Home: home, Timeout: 30 * time.Second})
 	if err != nil || result.Verified || result.HookContact != "no" || len(result.Problems) < 2 {
 		t.Fatalf("an unlocked client with disabled hooks must fail: %+v %v", result, err)

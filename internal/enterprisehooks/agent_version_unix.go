@@ -59,6 +59,15 @@ type unixAgentProbe struct {
 	npmPackages []string // package names, checked for a matching "name"
 	versionDirs []string // home-relative dirs whose children are version-named
 	binaries    []string // CLI names for the `--version` fallback
+	// stateEnv names the variable that relocates the agent state directory.
+	// The probe points it at a private scratch directory: the enumerator
+	// sees homes read-only, and some agents (Hermes) refuse to print their
+	// version when they cannot take a lock in their state directory.
+	stateEnv string
+	// uvTool names a `uv tool install` environment (tool, distribution)
+	// whose dist-info directory carries the version, for Python CLIs that
+	// take too long to start for the --version probe.
+	uvTool [2]string
 }
 
 var unixAgentProbes = map[string]unixAgentProbe{
@@ -69,9 +78,9 @@ var unixAgentProbes = map[string]unixAgentProbe{
 	"opencode":    {npmPackages: []string{"opencode-ai"}, binaries: []string{"opencode"}},
 	"amp":         {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
 	"devin":       {binaries: []string{"devin"}},
-	"hermes":      {binaries: []string{"hermes"}},
-	"openhands":   {binaries: []string{"openhands"}},
-	"omnigent":    {binaries: []string{"omnigent"}},
+	"hermes":      {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME"},
+	"openhands":   {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
+	"omnigent":    {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
 	"antigravity": {binaries: []string{"agy", "antigravity"}},
 	"kiro":        {binaries: []string{"kiro-cli"}},
 }
@@ -139,12 +148,17 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			return version, ""
 		}
 	}
+	if probe.uvTool[0] != "" {
+		if version := readUVToolVersion(home, probe.uvTool[0], probe.uvTool[1]); version != "" {
+			return version, ""
+		}
+	}
 	if !allowExec {
 		return "", fmt.Sprintf("no %s package metadata under this home", connector)
 	}
 	for _, binary := range probe.binaries {
 		for _, candidate := range unixAgentBinaryCandidates(home, binary) {
-			if version := execUnixAgentVersion(ctx, candidate, home); version != "" {
+			if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
 				return version, ""
 			}
 		}
@@ -172,6 +186,17 @@ func DiscoverUnixMachineAgentVersion(connector string) string {
 }
 
 func unixAgentBinaryCandidates(home, binary string) []string {
+	dirs := UnixAgentSearchDirs(home)
+	candidates := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		candidates = append(candidates, filepath.Join(dir, binary))
+	}
+	return candidates
+}
+
+// UnixAgentSearchDirs lists the directories agent discovery looks in for
+// home: per-user install locations first, then the machine prefixes.
+func UnixAgentSearchDirs(home string) []string {
 	dirs := []string{
 		filepath.Join(home, ".local", "bin"),
 		filepath.Join(home, ".npm-global", "bin"),
@@ -182,11 +207,27 @@ func unixAgentBinaryCandidates(home, binary string) []string {
 	for _, prefix := range machinePrefixes() {
 		dirs = append(dirs, filepath.Join(prefix, "bin"))
 	}
-	candidates := make([]string, 0, len(dirs))
-	for _, dir := range dirs {
-		candidates = append(candidates, filepath.Join(dir, binary))
+	return dirs
+}
+
+// readUVToolVersion reads the version of distribution dist from the default
+// `uv tool install` environment of tool under home (OpenHands needs about
+// 11 s to answer --version, beyond the probe timeout).
+func readUVToolVersion(home, tool, dist string) string {
+	pattern := filepath.Join(home, ".local", "share", "uv", "tools", tool, "lib", "python*", "site-packages", dist+"-*.dist-info")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) != 1 {
+		return ""
 	}
-	return candidates
+	info, err := os.Lstat(matches[0])
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	version := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(matches[0]), dist+"-"), ".dist-info")
+	if !validUnixAgentVersion(version) {
+		return ""
+	}
+	return version
 }
 
 type unixPackageJSON struct {
@@ -331,7 +372,7 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 
 // execUnixAgentVersion runs candidate --version with a minimal environment
 // and a timeout. The caller must already run as the target user.
-func execUnixAgentVersion(ctx context.Context, candidate, home string) string {
+func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string) string {
 	info, err := os.Stat(candidate)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return ""
@@ -351,12 +392,27 @@ func execUnixAgentVersion(ctx context.Context, candidate, home string) string {
 		"TERM=dumb",
 		"CI=1",
 	}
+	if stateEnv != "" {
+		scratch, err := os.MkdirTemp("", "dc-agent-probe-")
+		if err != nil {
+			return ""
+		}
+		defer os.RemoveAll(scratch)
+		cmd.Env = append(cmd.Env, stateEnv+"="+scratch, "TMPDIR="+scratch)
+	}
 	out := &cappedBuffer{limit: unixAgentVersionOutput}
+	errOut := &cappedBuffer{limit: unixAgentVersionOutput}
 	cmd.Stdout = out
-	cmd.Stderr = io.Discard
+	// Some agents (Hermes) print their version on stderr when stdout is
+	// not a terminal; read it only when stdout names no version.
+	cmd.Stderr = errOut
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
 	_ = cmd.Run()
 	first, _, _ := strings.Cut(out.buf.String(), "\n")
+	if version := ExtractUnixAgentVersion(first); version != "" {
+		return version
+	}
+	first, _, _ = strings.Cut(errOut.buf.String(), "\n")
 	return ExtractUnixAgentVersion(first)
 }

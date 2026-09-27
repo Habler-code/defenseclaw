@@ -2574,6 +2574,27 @@
       "since": "0.8.11"
     },
     {
+      "name": "DEFENSECLAW_LIFECYCLE_UNIT",
+      "category": "runtime_path",
+      "purpose": "Set by the standalone config-apply unit (systemd) or launchd job to its own name, so the lifecycle it runs never stops or restarts the unit executing the transaction.",
+      "default": "unset (an administrator or MDM run quiesces every DefenseClaw unit)",
+      "accepted_values": [
+        "defenseclaw-enterprise-apply.service",
+        "com.cisco.defenseclaw.apply",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/env.go",
+          "description": "Accepts only the config-apply entry point and skips it when quiescing, rolling back and activating"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Only exempts the config-apply entry point from being stopped; any other value is ignored. The units that set it are root-owned."
+    },
+    {
       "name": "DEFENSECLAW_LLM_DEBUG",
       "category": "debug",
       "purpose": "Python LLM bridge logs per-request prompt + response bodies. May contain secrets.",

@@ -20,6 +20,7 @@ import (
 	"os/user"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -31,6 +32,41 @@ import (
 func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, string, error) {
 	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
 	return layout, "", "", err
+}
+
+// pinStandaloneManagedEnv points an administrator's policy command at the
+// standalone deployment when the host runs one and the caller chose no
+// config, with the same pins the services run with. Without it root's
+// per-user ~/.defenseclaw/config.yaml would be read instead.
+func pinStandaloneManagedEnv() error {
+	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" {
+		return nil
+	}
+	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	if err != nil {
+		return nil
+	}
+	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
+	if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("standalone runtime descriptor: %w", err)
+	}
+	if !managed.IsStandaloneProfile(descriptor.Profile) {
+		return nil
+	}
+	for key, value := range map[string]string{
+		managed.ConfigPathEnv:        layout.ConfigPath,
+		"DEFENSECLAW_HOME":           layout.DataDir,
+		managed.DeploymentModeEnv:    managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
+	} {
+		if err := os.Setenv(key, value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // enterprisePolicyTarget resolves a local account for per-user checks.

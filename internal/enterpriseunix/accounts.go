@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
 
 // Account is the gateway service identity.
@@ -80,7 +82,14 @@ func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error
 	if account, ok, err := a.Lookup(ctx, name); err != nil || ok {
 		return account, err
 	}
-	if _, err := a.env.Runner.Run(ctx, "systemd-sysusers", a.env.P(sysusersInstallPath(ChannelPayload))); err != nil {
+	// The account must exist before the transaction renders any file, so
+	// the sysusers.d entry is passed inline rather than read from a
+	// sysusers.d file the lifecycle has not written yet.
+	lines, err := sysusersLines()
+	if err != nil {
+		return Account{}, err
+	}
+	if _, err := a.env.Runner.Run(ctx, "systemd-sysusers", append([]string{"--inline"}, lines...)...); err != nil {
 		if !errors.Is(err, ErrCommandNotFound) {
 			return Account{}, fmt.Errorf("create service account with systemd-sysusers: %w", err)
 		}
@@ -102,6 +111,26 @@ func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error
 	}
 	account.Created = true
 	return account, nil
+}
+
+// sysusersLines returns the entries of the embedded sysusers.d document
+// without comments or blank lines.
+func sysusersLines() ([]string, error) {
+	data, err := systemdunits.ReadFile(systemdunits.SysusersName)
+	if err != nil {
+		return nil, fmt.Errorf("read the sysusers.d entry: %w", err)
+	}
+	lines := []string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return nil, errors.New("the sysusers.d entry is empty")
+	}
+	return lines, nil
 }
 
 func (a *linuxAccounts) Remove(ctx context.Context, name string) error {

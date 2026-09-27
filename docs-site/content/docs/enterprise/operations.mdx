@@ -22,6 +22,15 @@ macOS the `com.cisco.defenseclaw.apply` daemon, run `ensure` when the file
 changes. On Windows, run `ensure` again from the MDM. `ensure` is a no-op
 when nothing changed.
 
+The apply trigger watches the config file and the top level of the
+secrets and policies directories. After editing a rule pack in a
+subdirectory, run `ensure` (or restart the gateway) so the gateway loads it.
+
+A lifecycle run that finds another one in progress waits 5 seconds and
+exits `75` (busy); MDM agents retry it later. Pass `--lock-wait` (at most
+`15m`) to wait longer; the apply trigger waits up to 10 minutes so a change
+made during another run is applied after it.
+
 The enterprise profile cannot change in place. To move between Secure
 Client and standalone, uninstall one and install the other.
 
@@ -76,6 +85,8 @@ and `security_complete` in the result are the fields to alert on.
 | `conflicts` on a connector | Your own policy sets a lock to false, or two writers manage one file | Remove the conflicting value, or set `ownership: verify_only` |
 | Users report `enterprise_foreign_hook_blocked` | A repository carries an unapproved hook | Review it; approve by digest or ask the owner to remove it |
 | The hook reports the gateway peer as unverified | The gateway is stopped, restarting, or something else holds its endpoint | Check `status`; find the process holding `127.0.0.1:18970` |
+| `status` warns `hook_contract_unverified` and reports `security_complete: false` | A user runs an agent version DefenseClaw has no verified hook contract for; the guardian refuses to install hooks it cannot parse, so that agent runs without DefenseClaw | Pin the agent to a verified version (see [Compatibility](/docs/connectors/compatibility)) or upgrade DefenseClaw to a release that verifies it |
+| `status` warns `guardian_target_failed` | The guardian could not install or repair hooks for that user and connector (the reason follows) | Fix the named cause; every other user stays protected meanwhile |
 
 ## Upgrade
 

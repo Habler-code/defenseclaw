@@ -23,9 +23,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // Drop-in names the lifecycle owns. Administrators may add their own
@@ -34,6 +36,7 @@ const (
 	dropinCredentials = "60-defenseclaw-credentials.conf"
 	dropinNetwork     = "70-defenseclaw-network.conf"
 	dropinPaths       = "50-defenseclaw-paths.conf"
+	dropinAgents      = "40-defenseclaw-agent-prefixes.conf"
 )
 
 // renderInputs are the host-specific values rendering needs.
@@ -63,6 +66,16 @@ func (e *Env) renderFiles(in renderInputs) ([]desiredFile, error) {
 		return nil, err
 	}
 	add(e.Layout.DescriptorPath, descriptor, 0o644, root, "descriptor")
+
+	// The vendor default policies and rule packs, read-only for every
+	// service; the gateway fails to start without a rule pack.
+	vendorPolicies, err := policyassets.Files()
+	if err != nil {
+		return nil, fmt.Errorf("embedded vendor policies: %w", err)
+	}
+	for _, policy := range vendorPolicies {
+		add(filepath.Join(e.Layout.VendorPolicyDir, filepath.FromSlash(policy.Path)), policy.Data, 0o644, root, "vendor-policy")
+	}
 
 	switch e.GOOS {
 	case "linux":
@@ -96,6 +109,12 @@ func (e *Env) renderFiles(in renderInputs) ([]desiredFile, error) {
 			}
 			if unit.Name == labelGateway {
 				data, err = injectPlistEnvironment(data, proxyEnvironment(in.Config))
+				if err != nil {
+					return nil, err
+				}
+			}
+			if unit.Name == labelGuardian || unit.Name == labelEnumerator {
+				data, err = injectPlistEnvironment(data, agentPrefixEnvironment(in.Config))
 				if err != nil {
 					return nil, err
 				}
@@ -135,6 +154,17 @@ func (e *Env) renderDropins(in renderInputs) []renderedDropin {
 		}
 		out = append(out, renderedDropin{Path: dropinPath(unitGateway, dropinNetwork), Data: []byte(b.String())})
 	}
+	if env := agentPrefixEnvironment(in.Config); len(env) > 0 {
+		var b strings.Builder
+		b.WriteString("# Written by the DefenseClaw enterprise lifecycle. Do not edit.\n# Administrator install prefixes where agent CLIs are discovered.\n[Service]\n")
+		for _, key := range sortedKeys(env) {
+			fmt.Fprintf(&b, "Environment=%s\n", systemdQuote(key+"="+env[key]))
+		}
+		data := []byte(b.String())
+		for _, unit := range []string{unitGuardian, unitGuardianOneshot, unitEnumerator} {
+			out = append(out, renderedDropin{Path: dropinPath(unit, dropinAgents), Data: data})
+		}
+	}
 	paths := e.guardianWritablePaths(in.Config)
 	if len(paths) > 0 {
 		var b strings.Builder
@@ -167,6 +197,16 @@ func (e *Env) guardianWritablePaths(cfg *validatedConfig) []string {
 		}
 	}
 	return sortedKeys(set)
+}
+
+// agentPrefixEnvironment passes enrollment.agent_prefixes to the agent
+// discovery in the enumerator and guardian.
+func agentPrefixEnvironment(cfg *validatedConfig) map[string]string {
+	env := map[string]string{}
+	if cfg != nil && len(cfg.AgentPrefixes) > 0 {
+		env[enterprisehooks.TrustedBinPrefixesEnv] = strings.Join(cfg.AgentPrefixes, ":")
+	}
+	return env
 }
 
 func proxyEnvironment(cfg *validatedConfig) map[string]string {

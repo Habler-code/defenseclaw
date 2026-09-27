@@ -51,12 +51,44 @@ func (codexTarget) Paths(opts Options) ([]string, error) {
 	return []string{path}, nil
 }
 
-// codexHookCommand is the command Codex runs for every managed event.
+// codexHookCommand is the event-less form of the managed Codex command:
+// the Windows command and the prefix every unix event command starts with.
 func codexHookCommand(opts Options) string {
 	if opts.goos() == "windows" {
 		return connector.WindowsCodexManagedHookCommand(opts.HookBinary)
 	}
 	return shellQuote(opts.HookBinary) + " hook --connector codex --enterprise-managed"
+}
+
+// codexHookCommandForEvent is the command Codex runs for one managed event.
+// The unix hook binds each Codex invocation to its installer-declared event
+// and hook contract and fails closed without them, so every event group
+// names both (live on RHEL an event-less command blocked every Codex
+// prompt).
+func codexHookCommandForEvent(opts Options, event string) string {
+	if opts.goos() == "windows" {
+		return codexHookCommand(opts)
+	}
+	return codexHookCommand(opts) + " --event " + event + " --hook-contract " + codexMachinePolicyContract(opts)
+}
+
+// codexMachinePolicyContract is the hook contract the machine-wide Codex
+// commands declare: the contract of the discovered machine Codex version,
+// else the default contract for an unversioned agent.
+func codexMachinePolicyContract(opts Options) string {
+	if resolution := connector.ResolveHookContract(codexConnector, opts.agentVersion(codexConnector)); resolution.Contract.ContractID != "" {
+		return resolution.Contract.ContractID
+	}
+	return connector.ResolveHookContract(codexConnector, "").Contract.ContractID
+}
+
+// codexOwnedCommands is every managed Codex command of groups.
+func codexOwnedCommands(opts Options, groups []connector.ManagedHookGroup) map[string]bool {
+	out := map[string]bool{}
+	for _, group := range groups {
+		out[codexHookCommandForEvent(opts, group.Event)] = true
+	}
+	return out
 }
 
 func codexManagedDirKey(opts Options) string {
@@ -242,8 +274,8 @@ func renderCodex(opts Options, admin []byte, policy config.ResolvedConnectorPoli
 	if err != nil {
 		return nil, nil, err
 	}
-	command := codexHookCommand(opts)
 	for _, group := range groups {
+		command := codexHookCommandForEvent(opts, group.Event)
 		if countCodexOwnedGroups(hooksCfg[group.Event], group, command, opts) > 0 {
 			continue
 		}
@@ -362,11 +394,10 @@ func inspectCodex(opts Options, raw []byte, policy config.ResolvedConnectorPolic
 	if err != nil {
 		return err
 	}
-	command := codexHookCommand(opts)
 	hooksCfg, _ := cfg[codexHooksTable].(map[string]any)
 	owned, foreign := 0, 0
 	for _, group := range groups {
-		count := countCodexOwnedGroups(hooksCfg[group.Event], group, command, opts)
+		count := countCodexOwnedGroups(hooksCfg[group.Event], group, codexHookCommandForEvent(opts, group.Event), opts)
 		switch {
 		case count == 0:
 			state.conflict("hooks.%s has no DefenseClaw managed group", group.Event)
@@ -378,7 +409,7 @@ func inspectCodex(opts Options, raw []byte, policy config.ResolvedConnectorPolic
 	for key, value := range hooksCfg {
 		if list, ok := value.([]any); ok {
 			for _, candidate := range list {
-				if !codexGroupIsOwned(candidate, command) {
+				if !codexGroupIsOwned(candidate, codexOwnedCommands(opts, groups)) {
 					foreign++
 				}
 			}
@@ -429,7 +460,6 @@ func inspectCodexHigherSources(opts Options, policy config.ResolvedConnectorPoli
 	if err != nil {
 		return
 	}
-	command := codexHookCommand(opts)
 	for name, raw := range sources {
 		cfg := map[string]any{}
 		if err := toml.Unmarshal(raw, &cfg); err != nil {
@@ -439,7 +469,7 @@ func inspectCodexHigherSources(opts Options, policy config.ResolvedConnectorPoli
 		hooksCfg, _ := cfg[codexHooksTable].(map[string]any)
 		missing := 0
 		for _, group := range groups {
-			if countCodexOwnedGroups(hooksCfg[group.Event], group, command, opts) == 0 {
+			if countCodexOwnedGroups(hooksCfg[group.Event], group, codexHookCommandForEvent(opts, group.Event), opts) == 0 {
 				missing++
 			}
 		}
@@ -457,7 +487,7 @@ func inspectCodexHigherSources(opts Options, policy config.ResolvedConnectorPoli
 	}
 }
 
-func codexGroupIsOwned(candidate any, command string) bool {
+func codexGroupIsOwned(candidate any, commands map[string]bool) bool {
 	entry, ok := candidate.(map[string]any)
 	if !ok {
 		return false
@@ -467,8 +497,10 @@ func codexGroupIsOwned(candidate any, command string) bool {
 		return false
 	}
 	for _, raw := range handlers {
-		if handler, ok := raw.(map[string]any); ok && handler["command"] == command {
-			return true
+		if handler, ok := raw.(map[string]any); ok {
+			if command, _ := handler["command"].(string); commands[command] {
+				return true
+			}
 		}
 	}
 	return false

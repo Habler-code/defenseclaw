@@ -521,12 +521,30 @@ func runEnterpriseHookWorker(
 	return response, nil
 }
 
+// enterpriseHookWorkerPath lets connector setup find an agent where
+// discovery found it (OmniGent locates itself on PATH), after the system
+// directories so they always win. The worker runs as the user, so the
+// user-owned entries grant nothing the user does not already have.
+func enterpriseHookWorkerPath(home string) string {
+	parts := []string{"/usr/bin", "/bin"}
+	seen := map[string]bool{"/usr/bin": true, "/bin": true}
+	for _, dir := range enterprisehooks.UnixAgentSearchDirs(home) {
+		dir = filepath.Clean(dir)
+		if seen[dir] || !filepath.IsAbs(dir) || strings.ContainsAny(dir, ":\x00") {
+			continue
+		}
+		seen[dir] = true
+		parts = append(parts, dir)
+	}
+	return strings.Join(parts, ":")
+}
+
 func enterpriseHookWorkerEnvironment(account enterpriseHookWorkerAccount) []string {
 	env := []string{
 		"HOME=" + account.Home,
 		"USER=" + account.User,
 		"LOGNAME=" + account.User,
-		"PATH=/usr/bin:/bin",
+		"PATH=" + enterpriseHookWorkerPath(account.Home),
 		"LANG=C",
 		"LC_ALL=C",
 	}

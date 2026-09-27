@@ -68,6 +68,14 @@ func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
 	if !tokenInfo.Mode().IsRegular() {
 		return fmt.Errorf("enterprise hooks: hook token is not a regular file: %s", tokenPath)
 	}
+	// Fix the mode while root still owns the file and only when it is
+	// wrong: the standalone guardian runs without CAP_FOWNER, so it cannot
+	// chmod a token after handing it to the service account.
+	if tokenInfo.Mode().Perm() != 0o600 {
+		if err := enterpriseHookTokenChmod(tokenPath, 0o600); err != nil {
+			return fmt.Errorf("enterprise hooks: chmod hook token: %w", err)
+		}
+	}
 	if os.Geteuid() == 0 {
 		if err := os.Lchown(tokenDir, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: lchown hook token dir: %w", err)
@@ -76,11 +84,11 @@ func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
 			return fmt.Errorf("enterprise hooks: lchown hook token: %w", err)
 		}
 	}
-	if err := os.Chmod(tokenPath, 0o600); err != nil {
-		return fmt.Errorf("enterprise hooks: chmod hook token: %w", err)
-	}
 	return nil
 }
+
+// enterpriseHookTokenChmod is replaced in tests.
+var enterpriseHookTokenChmod = os.Chmod
 
 func validateEnterpriseOTLPTokenLocation(dataDir string, scope connector.OTLPPathTokenScope) error {
 	if _, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true); err != nil {
@@ -135,6 +143,12 @@ func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathToken
 	if !tokenInfo.Mode().IsRegular() {
 		return fmt.Errorf("enterprise hooks: OTLP token is not a regular file: %s", tokenPath)
 	}
+	// As for the hook token: chmod only a wrong mode, before the hand-off.
+	if tokenInfo.Mode().Perm() != 0o600 {
+		if err := enterpriseHookTokenChmod(tokenPath, 0o600); err != nil {
+			return fmt.Errorf("enterprise hooks: chmod OTLP token: %w", err)
+		}
+	}
 	if os.Geteuid() == 0 {
 		if err := os.Lchown(tokenDir, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: lchown OTLP token dir: %w", err)
@@ -142,9 +156,6 @@ func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathToken
 		if err := os.Lchown(tokenPath, uid, gid); err != nil {
 			return fmt.Errorf("enterprise hooks: lchown OTLP token: %w", err)
 		}
-	}
-	if err := os.Chmod(tokenPath, 0o600); err != nil {
-		return fmt.Errorf("enterprise hooks: chmod OTLP token: %w", err)
 	}
 	return nil
 }

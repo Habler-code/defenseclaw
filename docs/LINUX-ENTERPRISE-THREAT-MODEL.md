@@ -147,7 +147,7 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-04 | W-05 | A compromised gateway edits policy or the ledger | `ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw -/var/lib/defenseclaw-hook-guardian`; empty capabilities; `ProtectHome=true` | `systemctl show` properties; write attempts from the service identity |
 | L-05 | W-25 | A user binds `127.0.0.1:18970` or the hook socket during a restart and returns an allow | PID 1 binds both sockets before any user process and holds them across restarts; the hook verifies the listener uid (socket: `SO_PEERCRED`; TCP: sock_diag owner of the exact 4-tuple) before writing | `internal/gateway/connector/hookexec/managed_standalone_transport_test.go`, `tcp_owner_linux_test.go`, `internal/systemd/systemd_test.go`; a squat-and-restart race on a host |
 | L-06 | — | A user pre-creates `/run/defenseclaw-hook/hook.sock` or its directory | The directory is created by PID 1 (root-owned, `0755`); the gateway's own bind (without activation) refuses a directory that is not owned by root or the service account or is writable by others, and replaces only a stale socket it owns | `internal/gateway/api_uds_unix_test.go` |
-| L-07 | W-14 | A user reads another user's hook token or the service's runtime state | `StateDirectoryMode=0750`, `RuntimeDirectoryMode=0750`, `UMask=0077`; tokens under each user's home with owner-only modes | Cross-user read attempts |
+| L-07 | W-14 | A user reads another user's hook token or the service's runtime state | `StateDirectoryMode=0700`, `RuntimeDirectoryMode=0750`, `UMask=0077`; tokens under each user's home with owner-only modes | Cross-user read attempts |
 | L-08 | W-28 | An unenrolled uid uses a per-user connector's hook route | Hook socket authorization: per-user connectors require a ledger row for that uid and connector; machine-policy connectors inspect every user unless `enrollment.unenrolled_users: deny`; uid 0 follows `enrollment.root`; `exempt_users` are inspected and logged | `internal/gateway/managed_hook_peer_test.go` |
 | L-09 | W-06 | The root guardian follows a user-planted symlink or races a check-then-act inside a home | The root guardian refuses in-process home access in the standalone profile; the per-user worker operates with the user's own kernel permissions, so a race gains nothing the user did not already have | `internal/enterprisehooks/standalone_unix_test.go`, worker tests |
 | L-10 | W-08 | A credential drop leaks into other goroutines | No `Seteuid` in the guardian process; the worker is a separate process started with the target credentials (`SysProcAttr.Credential`) | Worker tests |
@@ -195,3 +195,15 @@ access. Status shows presence, modification time and a digest prefix only.
 6. Confined SELinux users (`user_u`) and fapolicyd rules may block the hook
    binary or agent CLIs; the lifecycle reports but does not rewrite host
    policy.
+7. Amp loads plugins only from the per-user config directory, which follows
+   `XDG_CONFIG_HOME`. A user who starts Amp with `XDG_CONFIG_HOME` pointing
+   at another directory runs it without the DefenseClaw plugin (verified on
+   RHEL 9 on 2026-09-26). The guardian cannot see a per-process environment,
+   no DefenseClaw hook runs that could detect it, and Amp has no machine
+   plugin path (R3). Closing it needs application control over how users
+   launch Amp, or a vendor machine setting that pins the plugin directory.
+8. Agent versions without a verified DefenseClaw hook contract get no
+   DefenseClaw hooks (the guardian refuses hooks it cannot parse). Status
+   and verify report them as `hook_contract_unverified` with
+   `security_complete: false`; the administrator pins a verified version or
+   upgrades DefenseClaw.

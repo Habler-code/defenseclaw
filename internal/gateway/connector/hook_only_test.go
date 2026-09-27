@@ -4570,3 +4570,20 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 		t.Fatalf("OpenHands deny hook did not print decision JSON; output=%s", string(out))
 	}
 }
+
+// Hermes writes its direct-native state only on Windows; elsewhere the
+// file must not be declared as patched, or the enterprise installer
+// refuses every install for a file that never exists.
+func TestHermesAgentPathsDeclareNativeStateOnlyOnWindows(t *testing.T) {
+	dataDir := t.TempDir()
+	opts := SetupOpts{DataDir: dataDir}
+	paths := NewHermesConnector().AgentPaths(opts)
+	state := filepath.Join(dataDir, "hooks", hermesDirectNativeStateFileName)
+	declared := false
+	for _, path := range paths.PatchedFiles {
+		declared = declared || path == state
+	}
+	if declared != (runtime.GOOS == "windows") {
+		t.Fatalf("native state declared=%v on %s: %v", declared, runtime.GOOS, paths.PatchedFiles)
+	}
+}

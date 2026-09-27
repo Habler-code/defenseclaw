@@ -6,4 +6,5 @@ Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/lin
 Type=oneshot
 User=root
 Group=root
-ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --reason path --json
+Environment=DEFENSECLAW_LIFECYCLE_UNIT=defenseclaw-enterprise-apply.service
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --reason path --lock-wait 10m --json

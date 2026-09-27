@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -503,6 +504,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 	}
 
+	machinePolicy := enterpriseHookStandaloneMachinePolicySet()
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	slots := map[int]enterpriseHookStandaloneSlot{}
@@ -552,6 +554,26 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 		if target.HomeInode != 0 && check.Inode != target.HomeInode {
 			pendingRow(fmt.Sprintf("home %s was recreated after enumeration; waiting for the enumerator to re-enroll it", account.Home))
+			continue
+		}
+		if _, published := machinePolicy[strings.ToLower(row.Connector)]; published {
+			// Machine policy already hooks this connector for every user;
+			// with unenrolled_users: deny the row only records that this
+			// uid is enrolled. Installing per-user hooks as well would
+			// fight the managed-hooks lock the policy sets.
+			covered, err := enterpriseHookStandaloneMachinePolicyCovered(row.Connector)
+			switch {
+			case err != nil:
+				failRow(fmt.Errorf("enterprise hooks: %s machine policy is unreadable: %w", row.Connector, err))
+			case !covered:
+				failRow(fmt.Errorf("enterprise hooks: %s machine policy is not in place", row.Connector))
+			default:
+				row.OK = true
+				rows = append(rows, row)
+				next.Bindings[enterpriseHookProtectedTargetKey(row)] = enterpriseHookUnixBinding{
+					UID: account.UID, Home: account.Home, HomeInode: check.Inode,
+				}
+			}
 			continue
 		}
 		previousProtection, err := previousEnterpriseHookProtection(cfg.DataDir, target.User, account.Home, "", target.Connector)
@@ -843,4 +865,34 @@ func enterpriseHookStandaloneConfigChanged(startup string, w io.Writer) bool {
 	}
 	fmt.Fprintf(w, "[hook-guardian] managed config changed; exiting so the service manager restarts the guardian with it\n")
 	return true
+}
+
+// enterpriseHookStandaloneMachinePolicySet names the connectors the
+// lifecycle published through vendor machine policy, from the root-owned
+// runtime descriptor. Replaced in tests.
+var enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} {
+	out := map[string]struct{}{}
+	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	if err != nil {
+		return out
+	}
+	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
+	if err != nil {
+		return out
+	}
+	for _, name := range descriptor.MachinePolicyConnectors {
+		out[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	return out
+}
+
+// enterpriseHookStandaloneMachinePolicyCovered reports whether the
+// DefenseClaw entries of connector machine policy are in place. Replaced
+// in tests.
+var enterpriseHookStandaloneMachinePolicyCovered = func(connectorName string) (bool, error) {
+	opts, ok := standaloneMachinePolicyOptions(runtime.GOOS)
+	if !ok {
+		return false, errors.New("no standalone layout for this platform")
+	}
+	return enterprisepolicy.MachinePolicyPresent(opts, connectorName)
 }

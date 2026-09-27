@@ -3859,6 +3859,14 @@
               "items": {
                 "$ref": "#/$defs/pathString"
               }
+            },
+            "agent_prefixes": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/pathString"
+              }
             }
           }
         },

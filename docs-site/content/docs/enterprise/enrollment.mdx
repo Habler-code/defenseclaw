@@ -41,6 +41,7 @@ enterprise:
     root: inspect              # inspect | deny | exempt
     uid_min: 1000              # Linux and macOS; 0 reads UID_MIN from login.defs
     home_roots: [/srv/home]    # extra home parents beyond the defaults
+    agent_prefixes: [/opt/tools]    # extra administrator install prefixes for agent CLIs
 ```
 
 - **`unenrolled_users`** applies to connectors DefenseClaw publishes through
@@ -53,6 +54,13 @@ enterprise:
   unit to exactly these paths. System directories such as `/`, `/etc`, `/opt`
   or `/tmp` are rejected, and any home under a world-writable ancestor is
   refused.
+- **`agent_prefixes`** adds administrator install prefixes (for example an
+  npm `--prefix` such as `/opt/tools`) to the places the enumerator and the
+  guardian look for agent CLIs. Discovery covers per-user install locations
+  and `/usr/local`, `/usr` and `/opt/homebrew`; an agent installed anywhere
+  else is not enrolled, so its per-user connector gets no hooks, and with
+  `unenrolled_users: deny` its machine-policy connector refuses that user.
+  Paths under homes and temporary directories are rejected.
 
 ## Unavailable homes
 

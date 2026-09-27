@@ -720,7 +720,7 @@ func (l *lifecycle) quiesce(ctx context.Context, units []Unit) {
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	for _, unit := range ordered {
-		if unit.Kind == "socket" {
+		if unit.Kind == "socket" || unit.Name == l.env.SelfUnit {
 			continue
 		}
 		_ = l.env.Services.Stop(ctx, unit)
@@ -748,7 +748,7 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 		}
 	}
 	for _, file := range p.files {
-		if err := os.MkdirAll(env.P(filepath.Dir(file.Path)), 0o755); err != nil {
+		if err := mkdirAllExact(env.P(filepath.Dir(file.Path)), 0o755); err != nil {
 			return nil, err
 		}
 	}
@@ -824,6 +824,10 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets b
 		if err := env.Services.Enable(ctx, unit); err != nil {
 			return fmt.Errorf("enable %s: %w", unit.Name, err)
 		}
+		if unit.Name == env.SelfUnit {
+			// Already running: this transaction executes inside it.
+			continue
+		}
 		if unit.Kind == "socket" && env.Services.Active(ctx, unit) {
 			if !restartSockets {
 				continue
@@ -881,8 +885,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, previouslyActi
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	for _, unit := range ordered {
-		// A socket that was listening before keeps listening.
-		if unit.Kind == "socket" && contains(previouslyActive, unit.Name) {
+		// A socket that was listening before keeps listening, and the unit
+		// running this transaction keeps running.
+		if (unit.Kind == "socket" && contains(previouslyActive, unit.Name)) || unit.Name == env.SelfUnit {
 			continue
 		}
 		_ = env.Services.Stop(ctx, unit)
@@ -892,7 +897,7 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, previouslyActi
 	sort.SliceStable(units, func(i, j int) bool { return units[i].Stage < units[j].Stage })
 	var startErrs []error
 	for _, unit := range units {
-		if contains(previouslyActive, unit.Name) {
+		if contains(previouslyActive, unit.Name) && unit.Name != env.SelfUnit {
 			if err := env.Services.Start(ctx, unit); err != nil {
 				startErrs = append(startErrs, err)
 			}
@@ -1051,7 +1056,20 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	if err := env.Services.Reload(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	if env.GOOS == "linux" {
+		// A unit that failed before uninstall (the daily verify, say)
+		// would otherwise stay listed as "not-found failed".
+		names := make([]string, 0, len(units))
+		for _, unit := range units {
+			names = append(names, unit.Name)
+		}
+		_, _ = env.Runner.Run(ctx, "systemctl", append([]string{"reset-failed"}, names...)...)
+	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
+	// Vendor policies are product files: they leave with the deployment,
+	// including the nested rule-pack directories.
+	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
+	_ = removeDirIfEmpty(env.P(filepath.Dir(env.Layout.VendorPolicyDir)))
 	if env.GOOS == "darwin" {
 		if record != nil && record.Channel == ChannelPackage {
 			_, _ = env.Runner.Run(ctx, "pkgutil", "--forget", MacOSPackageID)

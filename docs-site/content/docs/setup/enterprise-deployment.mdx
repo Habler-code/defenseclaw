@@ -338,7 +338,7 @@ The API listener must be loopback-only. A security exposure score is a comparati
 The gateway unit pins `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise`,
 `DEFENSECLAW_ENTERPRISE_PROFILE=standalone`,
 `DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml` and
-`DEFENSECLAW_HOME=/var/lib/defenseclaw`, and `StateDirectoryMode=0750`,
+`DEFENSECLAW_HOME=/var/lib/defenseclaw`, and `StateDirectoryMode=0700`,
 `RuntimeDirectoryMode=0750` and `LogsDirectoryMode=0750`. It enables a
 restrictive sandbox (`ProtectSystem=strict`, `ProtectHome=true`, private
 devices/tmp, kernel and control-group protections, hidden non-service `/proc`

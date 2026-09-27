@@ -60,7 +60,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	l.describeMachinePolicy(record)
 	if strict {
 		for _, warning := range r.Warnings {
-			if warning.Code == codeMachinePolicyIncomplete {
+			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeHookContractUnverified || warning.Code == codeGuardianTargetFailed {
 				problems = append(problems, warning.Message)
 			}
 		}
@@ -247,6 +247,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	r.Enrollment = l.enrollmentCounts()
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0
+	l.describeHookContracts()
 	if r.Inspection.Local == "" {
 		r.Inspection.Local = "unknown"
 	}

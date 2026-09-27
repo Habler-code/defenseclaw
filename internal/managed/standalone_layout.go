@@ -39,15 +39,19 @@ type StandaloneLayout struct {
 	GOOS string
 
 	// Administrator-owned, never writable by a service identity.
-	InstallRoot    string // parent of BinDir
-	BinDir         string // gateway, hook, sensor helper, acp binaries
-	ConfigDir      string
-	ConfigPath     string
-	PolicyDir      string // standalone local-engine policy inputs
-	SecretsDir     string // AI Defense / judge credentials
-	ManifestPath   string // guardian target manifest (enumerator output)
-	DescriptorPath string // public, non-secret runtime descriptor for hooks
-	LifecycleDir   string // transaction state, snapshots, preimages, lock
+	InstallRoot string // parent of BinDir
+	BinDir      string // gateway, hook, sensor helper, acp binaries
+	ConfigDir   string
+	ConfigPath  string
+	PolicyDir   string // administrator policy inputs (custom rule packs, Rego)
+	// VendorPolicyDir holds the default policies and rule packs the product
+	// ships. The lifecycle replaces it on every upgrade; administrators point
+	// policy_dir or rule_pack_dir at PolicyDir to customize instead.
+	VendorPolicyDir string
+	SecretsDir      string // AI Defense / judge credentials
+	ManifestPath    string // guardian target manifest (enumerator output)
+	DescriptorPath  string // public, non-secret runtime descriptor for hooks
+	LifecycleDir    string // transaction state, snapshots, preimages, lock
 
 	// Service-owned runtime state.
 	DataDir         string // gateway state (audit DB, runtime tokens)
@@ -84,6 +88,7 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			ConfigDir:       "/etc/defenseclaw",
 			ConfigPath:      "/etc/defenseclaw/config.yaml",
 			PolicyDir:       "/etc/defenseclaw/policies",
+			VendorPolicyDir: "/opt/defenseclaw/share/policies",
 			SecretsDir:      "/etc/defenseclaw/secrets",
 			ManifestPath:    "/etc/defenseclaw/hook-guardian/targets.yaml",
 			DescriptorPath:  "/etc/defenseclaw/managed-runtime.json",
@@ -107,6 +112,7 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			ConfigDir:       root + "/etc",
 			ConfigPath:      root + "/etc/config.yaml",
 			PolicyDir:       root + "/etc/policies",
+			VendorPolicyDir: root + "/share/policies",
 			SecretsDir:      root + "/etc/secrets",
 			ManifestPath:    root + "/etc/hook-guardian/targets.yaml",
 			DescriptorPath:  root + "/etc/managed-runtime.json",
@@ -149,6 +155,7 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		ConfigDir:       state + `\etc`,
 		ConfigPath:      state + `\etc\config.yaml`,
 		PolicyDir:       state + `\policies`,
+		VendorPolicyDir: install + `\share\policies`,
 		SecretsDir:      state + `\secrets`,
 		ManifestPath:    state + `\hook-guardian\targets.yaml`,
 		DescriptorPath:  state + `\etc\managed-runtime.json`,
@@ -214,7 +221,7 @@ func (l StandaloneLayout) Validate() error {
 		return nil
 	}
 	for _, value := range []string{
-		l.InstallRoot, l.BinDir, l.ConfigDir, l.ConfigPath, l.PolicyDir, l.SecretsDir,
+		l.InstallRoot, l.BinDir, l.ConfigDir, l.ConfigPath, l.PolicyDir, l.VendorPolicyDir, l.SecretsDir,
 		l.ManifestPath, l.DescriptorPath, l.LifecycleDir, l.DataDir, l.GuardianAuthDir,
 		l.LogDir, l.HookSocketDir, l.HookSocketPath, l.SensorSocketDir,
 	} {

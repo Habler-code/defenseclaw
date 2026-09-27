@@ -3219,3 +3219,16 @@ func TestAgentUnchangedSinceLock(t *testing.T) {
 		t.Fatal("Amp's release-age annotation must not count as an agent change")
 	}
 }
+
+// Devin 3000.11.3 was live-verified on Linux only; Windows and macOS keep
+// the build their lanes were reviewed against.
+func TestDevinContractPinsArePerOS(t *testing.T) {
+	for goos, want := range map[string]string{"linux": HookCompatibilityKnown, "darwin": HookCompatibilityUnknown, "windows": HookCompatibilityUnknown} {
+		if got := resolveHookContractForOS("devin", "3000.11.3", goos).Status; got != want {
+			t.Fatalf("devin 3000.11.3 on %s: status %s, want %s", goos, got, want)
+		}
+		if got := resolveHookContractForOS("devin", "3000.4.25", goos).Status; got != HookCompatibilityKnown {
+			t.Fatalf("devin 3000.4.25 on %s: status %s", goos, got)
+		}
+	}
+}

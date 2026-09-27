@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -29,6 +30,7 @@ type unixLifecycleOptions struct {
 	removeServiceAccount bool
 	productVersion       string
 	reason               string
+	lockWait             time.Duration
 	json                 bool
 }
 
@@ -114,6 +116,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		if action == "ensure" {
 			flags.StringVar(&opts.reason, "reason", "", "why ensure runs (recorded in the result)")
 		}
+		flags.DurationVar(&opts.lockWait, "lock-wait", 0, "wait up to this long for another lifecycle run (default 5s, at most 15m) before exiting 75")
 	case "uninstall":
 		flags.BoolVar(&opts.purge, "purge", false, "also remove config, secrets, state and logs")
 		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "with --purge, also delete the gateway service account")

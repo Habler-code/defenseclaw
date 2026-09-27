@@ -50,6 +50,9 @@ and verify coverage statically or by running the real client as a user.
 These commands never write machine policy; the install and reconcile
 lifecycle does.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := pinStandaloneManagedEnv(); err != nil {
+			return err
+		}
 		return rootPersistentPreRunNoAuditE(cmd, args)
 	},
 }

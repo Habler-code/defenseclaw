@@ -2350,12 +2350,18 @@ func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
 		if validateHermesWindowsConfigPath(configPath) != nil {
 			return AgentPaths{}
 		}
+		patched := []string{
+			configPath,
+			filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+		}
+		// Setup writes the direct-native state only on Windows; listing it
+		// elsewhere made the enterprise installer refuse every POSIX Hermes
+		// install for a file that is never written.
+		if runtime.GOOS == "windows" {
+			patched = append(patched, filepath.Join(opts.DataDir, "hooks", hermesDirectNativeStateFileName))
+		}
 		return AgentPaths{
-			PatchedFiles: uniqueNonEmptyStrings([]string{
-				configPath,
-				filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
-				filepath.Join(opts.DataDir, "hooks", hermesDirectNativeStateFileName),
-			}),
+			PatchedFiles: uniqueNonEmptyStrings(patched),
 			BackupFiles: []string{
 				managedFileBackupPath(opts.DataDir, c.name, c.managedBackupLogicalName()),
 				managedFileBackupPath(opts.DataDir, c.name, hermesAllowlistLogicalName),

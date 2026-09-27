@@ -3719,6 +3719,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if guardianManagedLifecycle {
 			publishHealth := func() {
 				covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, []string{conn.Name()})
+				if s.currentConfig().StandaloneEnterprise() {
+					covered, status = managedGuardianStandaloneCoverage(s.currentConfig().DataDir)
+				}
 				state := StateStarting
 				verifiedEnforcement := false
 				hint := "awaiting a trusted enterprise hook guardian authorization record"
@@ -4282,6 +4285,9 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	}
 	publishHealth := func() {
 		covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, succeeded)
+		if s.currentConfig().StandaloneEnterprise() {
+			covered, status = managedGuardianStandaloneCoverage(s.currentConfig().DataDir)
+		}
 		state := StateStarting
 		enforcementEnabled := false
 		hint := "awaiting a trusted enterprise hook guardian authorization record"
@@ -4360,6 +4366,21 @@ type managedGuardianAuthorizationTarget struct {
 const managedGuardianAuthorizationMaxBytes int64 = 4 << 20
 
 func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (bool, string) {
+	return managedGuardianAuthorizationCoverage(dataDir, connectorNames, false)
+}
+
+// managedGuardianStandaloneCoverage is the standalone view of the same
+// record: a user whose home or agent config the guardian cannot repair
+// must not flip the whole host (and every other user) to "starting". The
+// record must still be trusted, fresh and self-consistent; per-target
+// failures and pending targets are reported, not fatal, and a connector
+// nobody uses is not a gap. The hook socket already authorizes each user
+// against their own protected targets.
+func managedGuardianStandaloneCoverage(dataDir string) (bool, string) {
+	return managedGuardianAuthorizationCoverage(dataDir, nil, true)
+}
+
+func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []string, isolateTargets bool) (bool, string) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
 	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
 		return false, err.Error()
@@ -4437,6 +4458,31 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
 		return false, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
 	}
+	if isolateTargets {
+		// A target whose current repair failed keeps its last successful
+		// row, so protected targets lie between the successes and the
+		// successes plus failures.
+		if authorization.TargetCount < 0 || authorization.SuccessCount < 0 ||
+			authorization.FailureCount < 0 || authorization.PendingCount < 0 ||
+			authorization.SuccessCount+authorization.FailureCount+authorization.PendingCount != authorization.TargetCount ||
+			len(authorization.ProtectedTargets) < authorization.SuccessCount ||
+			len(authorization.ProtectedTargets) > authorization.SuccessCount+authorization.FailureCount {
+			return false, "hook guardian authorization is inconsistent"
+		}
+		if reason := managedGuardianProtectedTargetsError(authorization.ProtectedTargets); reason != "" {
+			return false, reason
+		}
+		if authorization.FailureCount > 0 || authorization.PendingCount > 0 {
+			return true, fmt.Sprintf(
+				"%d of %d guardian targets need attention (%d failed, %d pending); every other user stays protected",
+				authorization.FailureCount+authorization.PendingCount,
+				authorization.TargetCount,
+				authorization.FailureCount,
+				authorization.PendingCount,
+			)
+		}
+		return true, ""
+	}
 	if !authorization.OK ||
 		authorization.TargetCount < 0 ||
 		authorization.SuccessCount < 0 ||
@@ -4454,25 +4500,12 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 			authorization.FailureCount,
 		)
 	}
+	if reason := managedGuardianProtectedTargetsError(authorization.ProtectedTargets); reason != "" {
+		return false, reason
+	}
 	covered := make(map[string]struct{}, len(authorization.ProtectedTargets))
-	targets := make(map[string]struct{}, len(authorization.ProtectedTargets))
 	for _, target := range authorization.ProtectedTargets {
-		if !target.OK || strings.TrimSpace(target.Error) != "" {
-			return false, "hook guardian authorization contains an unsuccessful protected target"
-		}
-		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-		if connectorName == "" && target.Result != nil {
-			connectorName = strings.ToLower(strings.TrimSpace(target.Result.Connector))
-		}
-		key := managedGuardianTargetKey(target, connectorName)
-		if connectorName == "" || key == "" {
-			return false, "hook guardian authorization contains an incomplete protected target"
-		}
-		if _, duplicate := targets[key]; duplicate {
-			return false, fmt.Sprintf("hook guardian authorization contains duplicate protected target %q", key)
-		}
-		targets[key] = struct{}{}
-		covered[connectorName] = struct{}{}
+		covered[managedGuardianTargetConnector(target)] = struct{}{}
 	}
 	for _, name := range connectorNames {
 		if _, ok := covered[strings.ToLower(strings.TrimSpace(name))]; !ok {
@@ -4480,6 +4513,35 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		}
 	}
 	return true, ""
+}
+
+// managedGuardianProtectedTargetsError validates every protected target:
+// successful, complete and unique.
+func managedGuardianProtectedTargetsError(protected []managedGuardianAuthorizationTarget) string {
+	targets := make(map[string]struct{}, len(protected))
+	for _, target := range protected {
+		if !target.OK || strings.TrimSpace(target.Error) != "" {
+			return "hook guardian authorization contains an unsuccessful protected target"
+		}
+		connectorName := managedGuardianTargetConnector(target)
+		key := managedGuardianTargetKey(target, connectorName)
+		if connectorName == "" || key == "" {
+			return "hook guardian authorization contains an incomplete protected target"
+		}
+		if _, duplicate := targets[key]; duplicate {
+			return fmt.Sprintf("hook guardian authorization contains duplicate protected target %q", key)
+		}
+		targets[key] = struct{}{}
+	}
+	return ""
+}
+
+func managedGuardianTargetConnector(target managedGuardianAuthorizationTarget) string {
+	connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
+	if connectorName == "" && target.Result != nil {
+		connectorName = strings.ToLower(strings.TrimSpace(target.Result.Connector))
+	}
+	return connectorName
 }
 
 func managedGuardianTargetKey(target managedGuardianAuthorizationTarget, connectorName string) string {

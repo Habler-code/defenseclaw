@@ -892,21 +892,35 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	if !opts.ManagedEnterprise || sp.connector != "copilot" {
 		return 0, false
 	}
-	const message = "DefenseClaw policy service is unavailable."
+	message, _ := json.Marshal(managedDenyMessage(reason))
 	var body string
 	// Exact reviewed event names only: an unreviewed spelling never reaches
 	// the gateway and never synthesizes enforcement.
 	switch opts.Event {
 	case "preToolUse":
-		body = `{"permissionDecision":"deny","permissionDecisionReason":"` + message + `"}`
+		body = `{"permissionDecision":"deny","permissionDecisionReason":` + string(message) + `}`
 	case "permissionRequest":
-		body = `{"behavior":"deny","message":"` + message + `"}`
+		body = `{"behavior":"deny","message":` + string(message) + `}`
 	default:
 		return 0, false
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
 	fmt.Fprintln(opts.Stdout, body)
 	return 0, true
+}
+
+// foreignHookBlockPrefix starts the foreign-hook guard denial, which names
+// the file and the allowlist key the user needs.
+const foreignHookBlockPrefix = "enterprise_foreign_hook_blocked:"
+
+// managedDenyMessage is the reason a managed fail-closed denial shows the
+// user: the foreign-hook guard explanation when that is the cause (it names
+// the file and how to get it approved), else the generic unavailable text.
+func managedDenyMessage(reason string) string {
+	if reason = strings.TrimSpace(reason); strings.HasPrefix(reason, foreignHookBlockPrefix) {
+		return reason
+	}
+	return "DefenseClaw policy service is unavailable."
 }
 
 // emit writes the connector-native failure body (if any) and returns its exit

@@ -224,3 +224,66 @@ func TestStandalonePolicyInputsMustBeAdministratorControlled(t *testing.T) {
 		t.Fatalf("Secure Client never consults local policy inputs: %v", err)
 	}
 }
+
+// The loader's implicit rule pack lives under data_dir, which the
+// standalone gateway can write; standalone keeps it inside policy_dir.
+func TestStandaloneImplicitRulePackFollowsPolicyDir(t *testing.T) {
+	implicit := filepath.Join("/var/lib/defenseclaw", "policies", "guardrail", "default")
+	cases := []struct {
+		name    string
+		goos    string
+		policy  string
+		pack    string
+		profile string
+		want    string
+	}{
+		{name: "standalone implicit follows policy_dir", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: implicit, want: "/opt/defenseclaw/share/policies/guardrail/default"},
+		{name: "standalone explicit pack is kept", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: "/etc/defenseclaw/policies/guardrail/custom", want: "/etc/defenseclaw/policies/guardrail/custom"},
+		{name: "standalone with data_dir policies is unchanged", goos: "linux", policy: "/var/lib/defenseclaw/policies", pack: implicit, want: implicit},
+		{name: "secure client is unchanged", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: implicit, profile: managed.ProfileSecureClient, want: implicit},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{DeploymentMode: "managed_enterprise", DataDir: "/var/lib/defenseclaw", PolicyDir: tc.policy}
+			cfg.Guardrail.RulePackDir = tc.pack
+			cfg.Enterprise.Profile = tc.profile
+			if err := resolveEnterpriseConfig(&cfg, tc.goos, ""); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Guardrail.RulePackDir != tc.want {
+				t.Fatalf("rule_pack_dir = %q, want %q", cfg.Guardrail.RulePackDir, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnterpriseAgentPrefixes(t *testing.T) {
+	for prefix, wantErr := range map[string]string{
+		"/opt/tools":         "",
+		"/usr/local/company": "",
+		"relative/path":      "clean absolute path",
+		"/opt/a:/opt/b":      "clean absolute path",
+		"/opt/../home/x":     "clean absolute path",
+		"/":                  "not an install prefix",
+		"/home/alice/.npm":   "users can write",
+		"/tmp/agents":        "users can write",
+		"/Users/bob/tools":   "users can write",
+	} {
+		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Enrollment: EnterpriseEnrollmentConfig{AgentPrefixes: []string{prefix}}}}
+		err := resolveEnterpriseConfig(&cfg, "linux", "")
+		if wantErr == "" {
+			if err != nil {
+				t.Fatalf("agent prefix %q rejected: %v", prefix, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("agent prefix %q error = %v, want %q", prefix, err, wantErr)
+		}
+	}
+	// Secure Client keeps rejecting standalone-only enrollment knobs.
+	cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client", Enrollment: EnterpriseEnrollmentConfig{AgentPrefixes: []string{"/opt/tools"}}}}
+	if err := resolveEnterpriseConfig(&cfg, "windows", ""); err == nil {
+		t.Fatal("secure_client accepted enrollment.agent_prefixes")
+	}
+}

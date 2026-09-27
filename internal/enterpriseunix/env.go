@@ -187,6 +187,11 @@ type Env struct {
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
 
+	// SelfUnit names the service unit or launchd job this lifecycle run
+	// executes inside (the config-apply trigger). The lifecycle never stops
+	// or restarts that unit: doing so would kill its own transaction.
+	SelfUnit string
+
 	LockTimeout  time.Duration
 	ReadyTimeout time.Duration
 	PollInterval time.Duration
@@ -205,7 +210,36 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 		ProductVersion: productVersion,
 	}
 	env.fillDefaults()
+	env.SelfUnit = selfUnitFromEnv(env.Services, os.Getenv(LifecycleUnitEnv))
 	return env, nil
+}
+
+// DefaultLockWait is how long a lifecycle run waits for another run to
+// finish before it reports busy (exit 75). MDM agents retry a busy run, so
+// they get the answer promptly; the config-apply trigger passes a longer
+// --lock-wait so a change made during another run is applied after it.
+const DefaultLockWait = 5 * time.Second
+
+// MaxLockWait bounds --lock-wait.
+const MaxLockWait = 15 * time.Minute
+
+// LifecycleUnitEnv is set by the units that run the lifecycle themselves
+// (the config-apply service and launchd job) to their own name.
+const LifecycleUnitEnv = "DEFENSECLAW_LIFECYCLE_UNIT"
+
+// selfUnitFromEnv accepts only a unit the service manager manages, so the
+// variable can only ever exempt a lifecycle entry point from quiescing.
+func selfUnitFromEnv(services ServiceManager, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || services == nil {
+		return ""
+	}
+	for _, unit := range services.Units() {
+		if unit.Name == value && (unit.Name == unitApplyService || unit.Name == labelApply) {
+			return value
+		}
+	}
+	return ""
 }
 
 func (e *Env) fillDefaults() {
@@ -244,7 +278,7 @@ func (e *Env) fillDefaults() {
 		e.MachinePolicy = newMachinePolicyManager(e)
 	}
 	if e.LockTimeout <= 0 {
-		e.LockTimeout = 2 * time.Minute
+		e.LockTimeout = DefaultLockWait
 	}
 	if e.ReadyTimeout <= 0 {
 		e.ReadyTimeout = 90 * time.Second

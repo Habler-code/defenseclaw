@@ -129,9 +129,8 @@ func codexPresent(opts Options) (bool, error) {
 		return false, err
 	}
 	hooksCfg, _ := cfg[codexHooksTable].(map[string]any)
-	command := codexHookCommand(opts)
 	for _, group := range groups {
-		if countCodexOwnedGroups(hooksCfg[group.Event], group, command, opts) > 0 {
+		if countCodexOwnedGroups(hooksCfg[group.Event], group, codexHookCommandForEvent(opts, group.Event), opts) > 0 {
 			return true, nil
 		}
 	}

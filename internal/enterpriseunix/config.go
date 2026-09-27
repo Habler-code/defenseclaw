@@ -16,12 +16,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // DefaultConfig is the configuration a fresh standalone install gets when
@@ -44,7 +47,8 @@ gateway:
 guardrail:
   enabled: true
   mode: observe
-`, layout.DataDir, layout.PolicyDir))
+  rule_pack_dir: %s
+`, layout.DataDir, layout.VendorPolicyDir, path.Join(layout.VendorPolicyDir, "guardrail", "default")))
 }
 
 // validatedConfig is an administrator config that passed every lifecycle
@@ -54,6 +58,7 @@ type validatedConfig struct {
 	SHA                    string
 	Connectors             []string
 	HomeRoots              []string
+	AgentPrefixes          []string
 	HTTPSProxy             string
 	NoProxy                string
 	SelfUpdateDisabled     bool
@@ -113,10 +118,14 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 	if port := cfg.Gateway.APIPort; port != 0 && port != 18970 {
 		return nil, fmt.Errorf("config gateway.api_port %d must be 18970: the socket unit owns that listener", port)
 	}
+	if err := e.checkRulePackDirs(cfg); err != nil {
+		return nil, err
+	}
 	v := &validatedConfig{
 		Raw:                    append([]byte(nil), raw...),
 		SHA:                    sha256Bytes(raw),
 		HomeRoots:              append([]string{}, cfg.Enterprise.Enrollment.HomeRoots...),
+		AgentPrefixes:          append([]string{}, cfg.Enterprise.Enrollment.AgentPrefixes...),
 		HTTPSProxy:             strings.TrimSpace(cfg.Enterprise.Network.HTTPSProxy),
 		NoProxy:                strings.TrimSpace(cfg.Enterprise.Network.NoProxy),
 		SelfUpdateDisabled:     cfg.Enterprise.Coexistence.SelfUpdateDisabled(),
@@ -133,7 +142,51 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 	}
 	sort.Strings(v.Connectors)
 	sort.Strings(v.HomeRoots)
+	sort.Strings(v.AgentPrefixes)
 	return v, nil
+}
+
+// checkRulePackDirs refuses rule packs the gateway cannot load or could
+// rewrite itself: every effective rule pack must be outside data_dir and
+// either ship with the vendor policies or already exist.
+func (e *Env) checkRulePackDirs(cfg *config.Config) error {
+	dirs := map[string]string{"guardrail.rule_pack_dir": cfg.Guardrail.RulePackDir}
+	for name := range cfg.Guardrail.Connectors {
+		dirs["guardrail.connectors."+name+".rule_pack_dir"] = cfg.EffectiveRulePackDirForConnector(name)
+	}
+	vendor, err := policyassets.Files()
+	if err != nil {
+		return fmt.Errorf("embedded vendor policies: %w", err)
+	}
+	for _, label := range sortedKeys(dirs) {
+		dir := strings.TrimSpace(dirs[label])
+		if dir == "" {
+			continue
+		}
+		clean := filepath.Clean(dir)
+		if clean == e.Layout.DataDir || strings.HasPrefix(clean, e.Layout.DataDir+"/") {
+			return fmt.Errorf("config %s %q is inside data_dir, which the gateway service can write; use %s or an administrator-owned directory under %s", label, dir, filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default"), e.Layout.PolicyDir)
+		}
+		if rel, ok := strings.CutPrefix(clean, e.Layout.VendorPolicyDir+"/"); ok {
+			if !vendorPolicyDirExists(vendor, filepath.ToSlash(rel)) {
+				return fmt.Errorf("config %s %q is not a rule pack the product ships", label, dir)
+			}
+			continue
+		}
+		if info, err := os.Stat(e.P(clean)); err != nil || !info.IsDir() {
+			return fmt.Errorf("config %s %q does not exist; install the rule pack first or use %s", label, dir, filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default"))
+		}
+	}
+	return nil
+}
+
+func vendorPolicyDirExists(files []policyassets.File, rel string) bool {
+	for _, file := range files {
+		if strings.HasPrefix(file.Path, rel+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // machinePolicyEnabled lists connectors that publish machine policy.

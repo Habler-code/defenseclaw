@@ -26,6 +26,10 @@ import (
 
 // standaloneEnterprisePolicyLayout resolves the layout from the protected
 // HKLM machine roots, never from the caller's environment.
+// pinStandaloneManagedEnv is a no-op on Windows: the managed services and
+// the lifecycle pass the machine config explicitly.
+func pinStandaloneManagedEnv() error { return nil }
+
 func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, string, error) {
 	programFiles, err := trustedWindowsEnterpriseProgramFiles()
 	if err != nil {
