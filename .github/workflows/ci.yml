@@ -960,6 +960,19 @@ jobs:
       - name: Build enterprise gateway CLI
         shell: bash
         run: go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
+      # The shell hooks' listener-owner check parses this runner's real
+      # `netstat -anv` output and the managed transport reads the kernel TCP
+      # PCB list. No other job runs these Go tests on macOS, so test both
+      # against the runner's macOS release once per run: a layout change in
+      # a new release then fails here instead of in every hook.
+      - name: Test listener-owner checks against this macOS release
+        if: runner.os == 'macOS' && matrix.connector == 'claudecode'
+        shell: bash
+        run: |
+          sw_vers -productVersion
+          netstat -anv -p tcp | sed -n 2p
+          go test -count=1 ./internal/gateway/connector -run 'TestHookListenerCheck'
+          go test -count=1 ./internal/gateway/connector/hookexec -run 'Darwin|Managed'
       - name: Test root boundary and connector repair
         shell: bash
         run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" "${{ matrix.connector }}"
