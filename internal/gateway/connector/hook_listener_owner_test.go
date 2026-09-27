@@ -71,8 +71,59 @@ func TestHookListenerCheckParsesLinuxSocketTables(t *testing.T) {
 	}
 }
 
+// parseDarwinNetstat feeds table to _defenseclaw_darwin_listener_pids for
+// port 18970 and returns the pids it printed and whether it exited 0.
+func parseDarwinNetstat(t *testing.T, table string) (string, bool) {
+	t.Helper()
+	return runHardeningShell(t, `set -o pipefail; printf '%s' "$1" | _defenseclaw_darwin_listener_pids 18970 | tr '\n' ' '`, table)
+}
+
+// darwin26Row is one socket as `netstat -anv -p tcp` prints it from macOS 26
+// (network_cmds 726 and later): a single "process:pid" column replaces the
+// separate pid and epid columns.
+type darwin26Row struct {
+	proto, local, foreign, state, name string
+	pid                                int
+}
+
+// darwin26Netstat renders rows with the printf formats of network_cmds-741
+// (netstat.tproj inet.c protopr and main.c print_socket_stats_*) for -anv.
+// That release prints the header's address columns 45 wide and the rows'
+// 22 wide; only the fields matter to the parser.
+func darwin26Netstat(rows ...darwin26Row) string {
+	var b strings.Builder
+	b.WriteString("Active Internet connections (including servers)\n")
+	fmt.Fprintf(&b, "%-5.5s %-6.6s %-6.6s  ", "Proto", "Recv-Q", "Send-Q")
+	fmt.Fprintf(&b, "%-45.45s %-45.45s ", "Local Address", "Foreign Address")
+	fmt.Fprintf(&b, "%-11.11s", "(state)")
+	fmt.Fprintf(&b, " %12.12s %12.12s", "rxbytes", "txbytes")
+	fmt.Fprintf(&b, " %7.7s %7.7s %16s:%-6s", "rhiwat", "shiwat", "process", "pid")
+	fmt.Fprintf(&b, " %5.5s %8.8s %16.16s %8.8s %8.8s %6s %6s %5s\n",
+		"state", "options", "gencnt", "flags", "flags1", "usecnt", "rtncnt", "fltrs")
+	return b.String() + darwin26Rows(rows...)
+}
+
+func darwin26Rows(rows ...darwin26Row) string {
+	var b strings.Builder
+	for i, row := range rows {
+		version := row.proto[3:]
+		if len(version) == 1 {
+			version += " "
+		}
+		fmt.Fprintf(&b, "%-3.3s%-2.2s %6d %6d  ", "tcp", version, 0, 0)
+		fmt.Fprintf(&b, "%-22.22s %-22.22s ", row.local, row.foreign)
+		fmt.Fprintf(&b, "%-11s", row.state)
+		fmt.Fprintf(&b, " %12d %12d", 0, 0)
+		fmt.Fprintf(&b, " %7d %7d %16s:%-6d", 1048576, 1048576, row.name, row.pid)
+		fmt.Fprintf(&b, " %05x %08x %016x %08x %08x %6d %6d %06x\n",
+			0x100, 6, 0x10cb7+i, 0, 0x900, 1, 0, 0)
+	}
+	return b.String()
+}
+
 func TestHookListenerCheckParsesDarwinNetstat(t *testing.T) {
-	const netstat = `Active Internet connections (including servers)
+	// macOS 15 and earlier: separate pid and epid columns.
+	const netstat15 = `Active Internet connections (including servers)
 Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)          rxbytes      txbytes  rhiwat  shiwat    pid   epid state  options           gencnt    flags   flags1 usecnt rtncnt fltrs
 tcp4       0      0  127.0.0.1.18970        *.*                    LISTEN                 0            0 1048576 1048576    501      0 00000 00000006 0000000000010cb7 00000000 00000900      1      0 000000
 tcp46      0      0  *.18970                *.*                    LISTEN                 0            0 1048576 1048576    777    888 00000 00000006 0000000000010cb8 00000000 00000900      1      0 000000
@@ -81,15 +132,90 @@ tcp4       0      0  127.0.0.1.18970        127.0.0.1.50000        ESTABLISHED  
 tcp4       0      0  127.0.0.1.18971        *.*                    LISTEN                 0            0 1048576 1048576    503      0 00000 00000006 0000000000010cbb 00000000 00000900      1      0 000000
 tcp4       0      0  10.0.0.1.18970         *.*                    LISTEN                 0            0 1048576 1048576    504      0 00000 00000006 0000000000010cbc 00000000 00000900      1      0 000000
 `
-	out, ok := runHardeningShell(t, `printf '%s' "$1" | _defenseclaw_darwin_listener_pids 18970 | tr '\n' ' '`, netstat)
+	out, ok := parseDarwinNetstat(t, netstat15)
 	if !ok {
-		t.Fatal("netstat parse failed")
+		t.Fatal("macOS 15 netstat parse failed")
 	}
 	if got, want := out, "501 777 888 1"; got != want {
-		t.Fatalf("listener pids = %q, want %q", got, want)
+		t.Fatalf("macOS 15 listener pids = %q, want %q", got, want)
 	}
-	if _, ok := runHardeningShell(t, `printf 'tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1 1 501 0\n' | _defenseclaw_darwin_listener_pids 18970`); ok {
+	if _, ok := parseDarwinNetstat(t, "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1 1 501 0\n"); ok {
 		t.Fatal("netstat output without a pid column was accepted")
+	}
+	header15 := strings.SplitAfterN(netstat15, "\n", 3)
+	colon15 := header15[0] + header15[1] +
+		"tcp4       0      0  127.0.0.1.18970        *.*                    LISTEN                 0            0 1048576 1048576  x:501      0 00000 00000006 0000000000010cb7 00000000 00000900      1      0 000000\n"
+	if out, ok := parseDarwinNetstat(t, colon15); ok {
+		t.Fatalf("macOS 15 pid column with a colon was accepted: %q", out)
+	}
+
+	// macOS 26: one "process:pid" column. Names may be empty, contain
+	// colons, or contain spaces on sockets that are not the gateway port.
+	netstat26 := darwin26Netstat(
+		darwin26Row{"tcp4", "127.0.0.1.18970", "*.*", "LISTEN", "defenseclaw-gateway", 7970},
+		darwin26Row{"tcp46", "*.18970", "*.*", "LISTEN", "", 7971},
+		darwin26Row{"tcp6", "::1.18970", "*.*", "LISTEN", "a:b:12", 1},
+		darwin26Row{"tcp4", "127.0.0.1.18970", "127.0.0.1.50000", "ESTABLISHED", "Code Helper (Renderer)", 502},
+		darwin26Row{"tcp4", "127.0.0.1.18971", "*.*", "LISTEN", "Google Chrome He", 503},
+		darwin26Row{"tcp4", "10.0.0.1.18970", "*.*", "LISTEN", "python3", 504},
+	)
+	out, ok = parseDarwinNetstat(t, netstat26)
+	if !ok {
+		t.Fatalf("macOS 26 netstat parse failed:\n%s", netstat26)
+	}
+	if got, want := out, "7970 7971 1"; got != want {
+		t.Fatalf("macOS 26 listener pids = %q, want %q", got, want)
+	}
+
+	// Any local user names the process that holds a socket. A gateway-port
+	// row whose name shifts or splits the row must make the lookup fail
+	// (exit 3, "cannot verify"), never yield a pid from a forged field.
+	gateway := func(name string, pid int) darwin26Row {
+		return darwin26Row{"tcp4", "127.0.0.1.18970", "*.*", "LISTEN", name, pid}
+	}
+	for label, table := range map[string]string{
+		// "x:345 evil" puts pid 345 where a parser counting from the start
+		// of the row reads the pid.
+		"space in name": darwin26Netstat(gateway("defenseclaw-gateway", 7970), gateway("x:345 evil", 4242)),
+		// The first line keeps the real prefix, then a forged pid field and
+		// eight forged socket fields: the field count matches and only the
+		// column formats give it away. The rest of the row becomes a line
+		// that does not start with a protocol.
+		"newline-split row": darwin26Netstat(gateway("x:345 0 0 0 0 0 0 0 0\nq", 4242)),
+		"newline-split short row": darwin26Netstat(gateway("x\ntcp4", 4242)),
+		// Another socket's name (29 bytes) starts a gateway-port LISTEN
+		// line; the eight trailing fields it inherits leave it short.
+		"newline-forged gateway row": darwin26Netstat(
+			darwin26Row{"tcp4", "127.0.0.1.50001", "127.0.0.1.443", "ESTABLISHED", "\ntcp4 0 0 *.18970 *.* LISTEN ", 4242},
+		),
+		"header without trailing columns": "Proto Recv-Q Send-Q  Local Address          Foreign Address        (state) process:pid\n" +
+			"tcp4 0 0 127.0.0.1.18970 *.* LISTEN defenseclaw:7970\n",
+	} {
+		if out, ok := parseDarwinNetstat(t, table); ok {
+			t.Fatalf("%s: lookup succeeded with pids %q, want refusal", label, out)
+		}
+	}
+	for label, row := range map[string]string{
+		"non-numeric pid":  "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:12x 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
+		"empty pid":        "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw: 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
+		"short gencnt":     "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:7970 00100 00000006 10cb7 00000000 00000900 1 0 000000\n",
+		"non-hex options":  "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:7970 00100 0000000g 0000000000010cb7 00000000 00000900 1 0 000000\n",
+		"extra field":      "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 x gw:7970 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
+	} {
+		if out, ok := parseDarwinNetstat(t, darwin26Netstat()+row); ok {
+			t.Fatalf("%s: lookup succeeded with pids %q, want refusal", label, out)
+		}
+	}
+
+	// Only the first header sets the layout: a later "Proto" line, such as
+	// one a process name starts, cannot move the pid column.
+	injected := darwin26Netstat(
+		darwin26Row{"tcp4", "127.0.0.1.50001", "127.0.0.1.443", "ESTABLISHED", "q\nProto pid", 4242},
+	) + "Proto a b c d e f pid g state options gencnt flags flags1 usecnt rtncnt fltrs\n" +
+		darwin26Rows(gateway("defenseclaw-gateway", 7970))
+	out, ok = parseDarwinNetstat(t, injected)
+	if !ok || out != "7970" {
+		t.Fatalf("injected header: pids %q ok %v, want 7970", out, ok)
 	}
 }
 
@@ -118,6 +244,16 @@ func TestHookListenerCheckAcceptsOwnListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := listener.Addr().String()
+	port := fmt.Sprint(listener.Addr().(*net.TCPAddr).Port)
+	// The live socket table must show this listener, so the acceptance
+	// below is not the "nothing listening" case of a table it misread.
+	lookup, want := `_defenseclaw_listener_uids_linux "$1"`, fmt.Sprint(os.Getuid())
+	if runtime.GOOS == "darwin" {
+		lookup, want = `set -o pipefail; netstat -anv -p tcp | _defenseclaw_darwin_listener_pids "$1"`, fmt.Sprint(os.Getpid())
+	}
+	if out, ok := runHardeningShell(t, lookup, port); !ok || out != want {
+		t.Fatalf("live listener lookup for port %s = %q ok %v, want %q", port, out, ok, want)
+	}
 	if out, ok := runHardeningShell(t, `defenseclaw_verify_gateway_listener "$1" || { printf '%s' "$DEFENSECLAW_LISTENER_REASON"; exit 1; }`, addr); !ok {
 		t.Fatalf("own listener %s refused: %s", addr, out)
 	}

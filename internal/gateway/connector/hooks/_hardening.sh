@@ -828,27 +828,81 @@ _defenseclaw_listener_uids_linux() {
 # _defenseclaw_darwin_listener_pids PORT reads `netstat -anv -p tcp` output
 # on stdin and prints the serving pid (and a distinct delegate pid) of
 # every listening socket on PORT bound to 127.0.0.1, ::1 or a wildcard
-# address. It fails when the pid column cannot be located.
+# address.
+#
+# Two layouts exist. Up to macOS 15 netstat prints separate "pid" and
+# "epid" columns. From macOS 26 (network_cmds 726) it prints one
+# "process:pid" column as "%16s:%-6u", where the process name comes from
+# whichever process last used the socket, so any local user chooses it:
+# it can contain spaces, colons or a newline that splits the row and
+# starts a forged one. Both layouts end with the same eight fixed-format
+# columns (state options gencnt flags flags1 usecnt rtncnt fltrs), so the
+# pid column is located as an offset from the end of the header. In the
+# "process:pid" layout the pid is the digits after the field's last colon.
+#
+# A matching row is trusted only when it has exactly the header's field
+# count (the header's "Local Address" and "Foreign Address" are two words
+# each) and its last eight fields have the formats netstat prints. A name
+# that adds a field, or a newline that cuts the row short, therefore
+# makes the lookup fail rather than shift a column; a name is at most 31
+# bytes, too short to carry the eight trailing fields of a forged row.
+# Only the first header line (netstat prints one) sets the layout, so a
+# name that injects a "Proto" line changes nothing. It fails (exit 3) when
+# the header or any matching row does not have this shape.
 _defenseclaw_darwin_listener_pids() {
   awk -v p="$1" '
+    function hex(s, lo, hi) {
+      return length(s) >= lo && length(s) <= hi && s !~ /[^0-9a-f]/
+    }
+    function num(s) { return s ~ /^-?[0-9]+$/ }
+    # A "process:pid" field keeps the digits after its last colon; a plain
+    # pid field must already be digits.
+    function pidat(k, named,   v) {
+      v = $(NF - k)
+      if (named) sub(/.*:/, "", v)
+      return v
+    }
     $1 == "Proto" {
-      for (i = 1; i <= NF; i++) {
-        if ($i == "pid") col = i - 2
-        if ($i == "epid") ecol = i - 2
+      if (seen) next
+      seen = 1
+      if (NF < 17 || $4 != "Local" || $5 != "Address" || $6 != "Foreign" ||
+          $7 != "Address" || $(NF - 7) != "state" || $(NF - 6) != "options" ||
+          $(NF - 5) != "gencnt" || $(NF - 4) != "flags" || $(NF - 3) != "flags1" ||
+          $(NF - 2) != "usecnt" || $(NF - 1) != "rtncnt" || $NF != "fltrs") next
+      # The pid columns sit between "(state)" and the eight socket columns.
+      for (i = 9; i <= NF - 8; i++) {
+        if ($i == "pid") { tail = NF - i; named = 0 }
+        if ($i == "process:pid") { tail = NF - i; named = 1 }
+        if ($i == "epid") { etail = NF - i; enamed = 0 }
+        if ($i == "eprocess:epid") { etail = NF - i; enamed = 1 }
       }
+      # "Local Address" and "Foreign Address" are two header words each.
+      rowf = NF - 2
       next
     }
-    col && ($1 == "tcp4" || $1 == "tcp6" || $1 == "tcp46") && $6 == "LISTEN" {
+    tail && ($1 == "tcp4" || $1 == "tcp6" || $1 == "tcp46") && $6 == "LISTEN" {
       addr = $4; dot = 0
       for (i = length(addr); i > 0; i--) if (substr(addr, i, 1) == ".") { dot = i; break }
       if (!dot || substr(addr, dot + 1) != p) next
       host = substr(addr, 1, dot - 1)
-      if (host == "127.0.0.1" || host == "*" || host == "::1" || host == "::ffff:127.0.0.1") {
-        print $col
-        if (ecol && $ecol != "0" && $ecol != $col) print $ecol
-      }
+      if (host != "127.0.0.1" && host != "*" && host != "::1" && host != "::ffff:127.0.0.1") next
+      if (NF != rowf || !hex($(NF - 7), 5, 8) || !hex($(NF - 6), 8, 8) ||
+          !hex($(NF - 5), 16, 16) || !hex($(NF - 4), 8, 8) || !hex($(NF - 3), 8, 8) ||
+          !num($(NF - 2)) || !num($(NF - 1)) || !hex($NF, 6, 8)) { bad = 1; next }
+      pid = pidat(tail, named)
+      if (pid !~ /^[0-9]+$/) { bad = 1; next }
+      out = out pid "\n"
+      if (!etail) next
+      # macOS 26 leaves eprocess:epid blank when there is no delegate.
+      epid = pidat(etail, enamed)
+      if (enamed && epid == "") next
+      if (epid !~ /^[0-9]+$/) { bad = 1; next }
+      if (epid != "0" && epid != pid) out = out epid "\n"
     }
-    END { if (!col) exit 3 }'
+    END {
+      if (!tail || bad) exit 3
+      printf "%s", out
+    }'
 }
 
 # _defenseclaw_listener_uids_darwin PORT prints the uid serving each
