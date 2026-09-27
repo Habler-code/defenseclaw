@@ -268,8 +268,15 @@ def test_standalone_recovery_falls_back_only_to_a_verified_setup_gateway() -> No
         admission.index("-Code inside_install_root"),
         admission.index("Get-DefenseClawSourceDescriptor `"),
         admission.index("-Code same_binary"),
+        admission.index("-Code version_unknown"),
+        admission.index("-Code older_release"),
+        admission.index("admitted = $true"),
     ]
     assert order == sorted(order)
+    # The run record names the release of the gateway that ran, not the
+    # version the lifecycle records for the deployment.
+    assert "product_version = [string]$admission.product_version" in step
+    assert "$Layout.ProductVersion" not in step
     descriptor = admission[admission.index("Get-DefenseClawSourceDescriptor `") :]
     descriptor = descriptor[: descriptor.index("}")]
     assert "-Authenticode" in descriptor and "AllowUnsigned" not in descriptor

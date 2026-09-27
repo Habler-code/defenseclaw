@@ -225,18 +225,22 @@ when all of these hold:
   when any are set, or the SHA-256 the payload manifest pins);
 - it is not the gateway that already failed, and it is not inside the
   install root;
+- it is the same release as the gateway that failed or a newer one, read
+  from each gateway's version resource (an older Setup never recovers a
+  newer release's transaction);
 - the run is not an `--allow-unsigned` certification run.
 
 The verified gateway is copied to `C:\Program Files\Cisco\DefenseClaw\bin`,
 where the hidden command must run, and the step runs again; the rollback
 then restores that file to its state before the transaction. The result and
 `enterprise-lifecycle.log` record a `recovery_gateway_fallback` warning with
-the binary, where it was copied from, its SHA-256, the trust basis, the
-account, and the staged gateway's failure. When recovery declines the
+the binary, where it was copied from, its SHA-256, the trust basis, its
+release and the staged gateway's release, the account, and the staged
+gateway's failure. When recovery declines the
 fallback, a `recovery_gateway_not_used` warning gives the reason
-(`not_local_system`, `untrusted`, `same_binary`, `no_payload`,
-`inside_install_root`, `unsigned_scope`) and the staged gateway's error
-stands. A failure that concerns file permissions is reported in plain terms;
+(`not_local_system`, `untrusted`, `same_binary`, `older_release`,
+`version_unknown`, `no_payload`, `inside_install_root`, `unsigned_scope`)
+and the staged gateway's error stands. A failure that concerns file permissions is reported in plain terms;
 the internal detail is kept in a `lifecycle_diagnostic` warning for support.
 Do not edit DefenseClaw files or permissions by hand to recover.
 

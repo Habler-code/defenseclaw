@@ -39,6 +39,7 @@ type windowsEnterpriseRecoveryGatewayRun struct {
 	ProductVersion   string `json:"product_version"`
 	Identity         string `json:"identity"`
 	ReplacedSHA256   string `json:"replaced_sha256"`
+	StagedVersion    string `json:"staged_version"`
 	Reason           string `json:"reason"`
 	StagedError      string `json:"staged_error"`
 	Outcome          string `json:"outcome"`
@@ -116,6 +117,9 @@ func windowsEnterpriseRecoveryGatewayWarnings(
 		message += ", as " + run.Identity
 		if run.ReplacedSHA256 != "" {
 			message += ", replaced staged sha256 " + run.ReplacedSHA256
+		}
+		if run.StagedVersion != "" {
+			message += ", staged version " + run.StagedVersion
 		}
 		message += "; outcome " + run.Outcome
 		if run.Error != "" {
@@ -268,6 +272,19 @@ func windowsEnterpriseStandaloneNextStep(
 		}
 		return lead + " This Setup's gateway did not pass the payload trust check" + detail + "." +
 			" Next step: run a DefenseClaw Setup whose payload passes the deployment's trust mode, as LocalSystem: " + command + recovers
+	case "older_release":
+		if detail != "" {
+			detail = " (" + detail + ")"
+		}
+		return lead + " This Setup is an older release than the one that staged the transaction" + detail + "." +
+			" Next step: run a DefenseClaw Setup of that release or a newer one as LocalSystem: " + command + recovers
+	case "version_unknown":
+		if detail != "" {
+			detail = " (" + detail + ")"
+		}
+		return lead + " The release of this Setup's gateway or of the staged gateway could not be read" + detail + "." +
+			" Next step: leave DefenseClaw files and permissions as they are, send the lifecycle log to DefenseClaw support," +
+			" and run a DefenseClaw Setup whose gateway carries its release version as LocalSystem: " + command + recovers
 	default:
 		return lead + " Next step: run DefenseClaw Setup (this release or a newer one) as LocalSystem: " + command + recovers
 	}

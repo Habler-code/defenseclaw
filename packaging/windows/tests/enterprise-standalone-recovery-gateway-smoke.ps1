@@ -9,12 +9,17 @@
 # state it cannot repair), no newer Setup could finish the recovery. A
 # standalone recovery now reruns the failed step with the running Setup's own
 # gateway, but only after that gateway passed the payload trust check an
-# Install applies and only as LocalSystem, and records which binary ran and
-# why. Everything else keeps the staged gateway's error. The gateway command,
-# the LocalSystem test and the protected-location check (owned by the
-# exact-ACL and bootstrap smokes) are stubbed; the standalone hash-pinned
-# trust policy, the source descriptor and the atomic install are the
-# production functions, run in a disposable scratch directory. The standalone
+# Install applies, only as LocalSystem and only when it is not an older
+# release than the staged gateway, and records which binary ran (with its own
+# release) and why. Everything else keeps the staged gateway's error. The
+# gateway command, the LocalSystem test, the protected-location check (owned
+# by the exact-ACL and bootstrap smokes) and the version-resource read are
+# stubbed; the standalone hash-pinned trust policy, the source descriptor, the
+# release ordering and the atomic install are the production functions, run in
+# a disposable scratch directory. The last case drives the real
+# Restore-DefenseClawTransaction through a fallback with service control
+# stubbed, to show the later cleanup runs with the verified gateway and the
+# file rollback puts <InstallRoot>\bin back to its preimage. The standalone
 # lifecycle runs only on PowerShell 7.
 
 [CmdletBinding()]
@@ -49,6 +54,7 @@ $failures = & $module {
     $script:TestFailing = @{}
     $script:TestLocalSystem = $true
     $script:TestUntrustedSource = ''
+    $script:TestVersions = @{}
     $relaxedHooks = 'managed Windows DACL on C:\Users\dcw-std1\.defenseclaw\hooks has 2 ACEs, expected 7'
 
     function Assert-DefenseClawAdministrator {
@@ -63,6 +69,18 @@ $failures = & $module {
             throw "untrusted principal S-1-5-32-545 has write-like access to $Label source: $full"
         }
         return $full
+    }
+    # The release a gateway's version resource carries, keyed by its bytes.
+    function Get-DefenseClawRecoveryGatewayVersion {
+        param([string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.File]::Exists($Path)) {
+            return ''
+        }
+        $content = [IO.File]::ReadAllText($Path).Trim()
+        if ($script:TestVersions.ContainsKey($content)) {
+            return [string]$script:TestVersions[$content]
+        }
+        return ''
     }
     # The hidden command, keyed by which gateway bytes sit at GatewayPath.
     function Invoke-DefenseClawGatewayCommand {
@@ -128,7 +146,9 @@ $failures = & $module {
             GatewayPath = [IO.Path]::Combine($installRoot, 'bin', 'defenseclaw-gateway.exe')
             ManagedHooksLifecycleJournalPath = [IO.Path]::Combine($root, 'state', 'install', 'managed-hooks-lifecycle.json')
             PendingPath = [IO.Path]::Combine($root, 'state', 'install', 'pending.json')
-            ProductVersion = '1.0.42'
+            # An ensure-driven repair records the staged gateway's release,
+            # not the running Setup's.
+            ProductVersion = '1.0.40'
         }
         $setupInstaller = [IO.Path]::Combine($setupRoot, 'install-enterprise.ps1')
         $setupGateway = [IO.Path]::Combine($setupRoot, 'defenseclaw-gateway.exe')
@@ -144,8 +164,14 @@ $failures = & $module {
             param(
                 [string]$SetupContent = 'setup-gateway',
                 [string]$PinnedSHA256 = '',
-                [string[]]$Failing = @('staged-gateway:retire')
+                [string[]]$Failing = @('staged-gateway:retire'),
+                [string]$StagedVersion = '1.0.40',
+                [string]$SetupVersion = '1.0.43'
             )
+            $script:TestVersions = @{
+                'staged-gateway' = $StagedVersion
+                'setup-gateway' = $SetupVersion
+            }
             [IO.File]::WriteAllText($layout.GatewayPath, 'staged-gateway', $utf8)
             [IO.File]::WriteAllText($setupGateway, $SetupContent, $utf8)
             if ([string]::IsNullOrEmpty($PinnedSHA256)) {
@@ -237,8 +263,11 @@ $failures = & $module {
                 @('sha256', $setupSHA256),
                 @('trust', 'hash_pinned'),
                 @('identity', 'NT AUTHORITY\SYSTEM'),
-                @('product_version', '1.0.42'),
+                # The release of the gateway that ran, not the version the
+                # lifecycle records for the deployment.
+                @('product_version', '1.0.43'),
                 @('replaced_sha256', $stagedSHA256),
+                @('staged_version', '1.0.40'),
                 @('reason', 'staged_gateway_failed'),
                 @('outcome', 'succeeded')
             )) {
@@ -334,6 +363,68 @@ $failures = & $module {
         Set-DefenseClawRecoveryGatewayCandidate -GatewayBinary $insideGateway
         Assert-TestRefused 'a gateway inside InstallRoot' 'inside_install_root'
 
+        # 3b. Version floor: never an older release than the staged gateway,
+        # and never a gateway whose release cannot be read.
+        Reset-TestHost -SetupVersion '1.0.39'
+        Assert-TestRefused 'an older Setup release' 'older_release'
+        $refusal = $script:DefenseClawRecoveryGatewayRefusal
+        if ($null -eq $refusal -or
+            -not ([string]$refusal.message).Contains('release 1.0.39, older than the staged gateway''s release 1.0.40')) {
+            $failures.Add("older release refusal message: $(if ($null -eq $refusal) { 'none' } else { [string]$refusal.message })")
+        }
+
+        Reset-TestHost -StagedVersion '1.0.40' -SetupVersion '1.0.40-rc.1'
+        Assert-TestRefused 'a prerelease of the staged release' 'older_release'
+
+        Reset-TestHost -SetupVersion ''
+        Assert-TestRefused 'a Setup gateway without a version resource' 'version_unknown'
+
+        Reset-TestHost -StagedVersion 'dev'
+        Assert-TestRefused 'a staged gateway without a release version' 'version_unknown'
+
+        foreach ($pair in @(
+            @('1.0.40', '1.0.40'),
+            @('1.0.40-rc.1', '1.0.40'),
+            @('1.0.40', 'v1.0.41+abc'),
+            @('1.0.9', '1.0.10')
+        )) {
+            Reset-TestHost -StagedVersion $pair[0] -SetupVersion $pair[1]
+            $outcome = Invoke-TestRecovery
+            if (-not [string]::IsNullOrEmpty($outcome.error) -or
+                @($script:DefenseClawRecoveryGatewayRuns).Count -ne 1 -or
+                [string]@(Get-DefenseClawRecoveryGatewayRunRecords)[0].product_version -cne $pair[1]) {
+                $failures.Add("Setup release $($pair[1]) over staged $($pair[0]) was not admitted: $($outcome.error)")
+            }
+        }
+
+        foreach ($case in @(
+            @('1.0.43', '1.0.43', 0),
+            @('1.0.43', '1.0.42', 1),
+            @('1.0.9', '1.0.10', -1),
+            @('1.0', '1.0.0', 0),
+            @('V1.0.43+build.7', '1.0.43', 0),
+            @('1.0.43-rc.1', '1.0.43', -1),
+            @('1.0.43-rc.2', '1.0.43-rc.10', 1),
+            @('1.0.43.1', '1.0.43', 1)
+        )) {
+            $left = ConvertTo-DefenseClawRecoveryGatewayRelease -Value $case[0]
+            $right = ConvertTo-DefenseClawRecoveryGatewayRelease -Value $case[1]
+            $order = if ($null -eq $left -or $null -eq $right) {
+                'unparsed'
+            }
+            else {
+                Compare-DefenseClawRecoveryGatewayRelease -Left $left -Right $right
+            }
+            if ([string]$order -cne [string]$case[2]) {
+                $failures.Add("release order $($case[0]) vs $($case[1]) = $order, want $($case[2])")
+            }
+        }
+        foreach ($value in @('', 'dev', '1..2', '1.2.3.4.5', '7.4.6 SHA: 0123abc', '1.0.x', '-1.0')) {
+            if ($null -ne (ConvertTo-DefenseClawRecoveryGatewayRelease -Value $value)) {
+                $failures.Add("'$value' parsed as a release")
+            }
+        }
+
         # 4. The Setup gateway fails the step too: the run is recorded as
         # failed and both failures are reported.
         Reset-TestHost -Failing @('staged-gateway:retire', 'setup-gateway:retire')
@@ -412,6 +503,125 @@ $failures = & $module {
         if (-not $status.Contains("`$status['recovery_gateway_runs'] = `$recoveryRuns") -or
             -not $status.Contains("`$status['recovery_gateway_refusal']")) {
             $failures.Add('the standalone status document does not report the recovery gateway')
+        }
+
+        # 7. End to end through Restore-DefenseClawTransaction. After the
+        # fallback retires with the verified gateway, the per-user runtime
+        # cleanup runs with that gateway, and the generic file rollback puts
+        # <InstallRoot>\bin back to its preimage: the prior release's gateway
+        # after a failed upgrade, no gateway after a failed first install.
+        # Service control, the recovery binding and the ACL steps are stubbed.
+        function Assert-DefenseClawOwnedServiceOrAbsent {
+        }
+        function Test-DefenseClawServiceExists {
+            param([string]$Name)
+            return $false
+        }
+        function Set-DefenseClawServiceStartMode {
+        }
+        function Stop-DefenseClawService {
+        }
+        function Set-DefenseClawServiceActivationPhase {
+        }
+        function Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding {
+            return $null
+        }
+        function Assert-DefenseClawUnboundLegacyLifecycleRecoveryPreimage {
+            return $null
+        }
+        function Invoke-DefenseClawTargetRuntimeRollbackCleanup {
+            param(
+                [string]$SnapshotPath,
+                [hashtable]$Layout,
+                [string]$GatewayServiceName,
+                [string]$GuardianServiceName
+            )
+            $script:TestCalls.Add('cleanup:' + [IO.File]::ReadAllText([string]$Layout.GatewayPath).Trim())
+            return (Microsoft.PowerShell.Management\Get-Content -LiteralPath $SnapshotPath -Raw |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json)
+        }
+        function Restore-DefenseClawRedactionKeySecuritySnapshot {
+        }
+        function Revoke-DefenseClawManagedIPCServiceAccess {
+        }
+        function Remove-DefenseClawService {
+        }
+        function Remove-DefenseClawTransactionCreatedSharedDirectories {
+        }
+        function Restore-DefenseClawRetainedStateAclsFromTransaction {
+        }
+        function Assert-DefenseClawRestoredTransactionReadyForActivation {
+            return $false
+        }
+
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        $stateRoot = [IO.Path]::Combine($root, 'state')
+        $layout.StateRoot = $stateRoot
+        $layout.ManifestPath = [IO.Path]::Combine($stateRoot, 'targets.yaml')
+        $layout.CertificationCodexHome = ''
+        $layout.CoreHardeningCertification = $false
+        $layout.ProviderLibraryPath = ''
+        $layout.BrokerServiceName = ''
+        $layout.CodexMachinePolicyDirectory = [IO.Path]::Combine($root, 'codex-policy')
+        $layout.CodexMachinePolicyPath = [IO.Path]::Combine($root, 'codex-policy', 'requirements.toml')
+        $layout.CodexManagedHooksStatePath = [IO.Path]::Combine($stateRoot, 'codex-managed-hooks.json')
+        $layout.AgentApplicationControlAttestationPath = [IO.Path]::Combine($stateRoot, 'agent-application-control.json')
+        $layout.StateRootAncestors = @()
+        $priorGateway = [IO.Path]::Combine($stateRoot, 'install', 'backup', 'defenseclaw-gateway.exe')
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($priorGateway))
+        [IO.File]::WriteAllText($priorGateway, 'prior-gateway', $utf8)
+        $snapshotPath = [IO.Path]::Combine($stateRoot, 'install', 'transaction.json')
+        foreach ($existed in @($true, $false)) {
+            $label = if ($existed) { 'rollback of a failed upgrade' } else { 'rollback of a failed first install' }
+            Reset-TestHost
+            [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{}', $utf8)
+            $snapshot = [ordered]@{
+                gateway_service = 'DefenseClawGateway'
+                guardian_service = 'DefenseClawHookGuardian'
+                core_hardening_certification = $false
+                agent_application_control_attested = $false
+                claude_effective_policy_verified = $false
+                services = @(
+                    [ordered]@{ name = 'DefenseClawGateway'; existed = $false },
+                    [ordered]@{ name = 'DefenseClawHookGuardian'; existed = $false }
+                )
+                files = @(
+                    [ordered]@{
+                        path = $layout.GatewayPath
+                        existed = $existed
+                        backup = $(if ($existed) { $priorGateway } else { '' })
+                    }
+                )
+            }
+            [IO.File]::WriteAllText(
+                $snapshotPath,
+                ($snapshot | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6),
+                $utf8
+            )
+            $restoreError = ''
+            try {
+                $null = Restore-DefenseClawTransaction -SnapshotPath $snapshotPath -Layout $layout
+            }
+            catch {
+                $restoreError = $_.Exception.Message
+            }
+            $calls = @($script:TestCalls) -join '|'
+            if (-not [string]::IsNullOrEmpty($restoreError) -or
+                $calls -cne 'staged-gateway:restore|staged-gateway:retire|setup-gateway:retire|cleanup:setup-gateway') {
+                $failures.Add("${label}: '$restoreError', calls $calls")
+            }
+            $runs = @(Get-DefenseClawRecoveryGatewayRunRecords)
+            if ($runs.Count -ne 1 -or [string]$runs[0].outcome -cne 'succeeded') {
+                $failures.Add("${label}: recorded $($runs.Count) recovery gateway runs")
+            }
+            $present = [IO.File]::Exists($layout.GatewayPath)
+            if ($existed -and
+                (-not $present -or [IO.File]::ReadAllText($layout.GatewayPath).Trim() -cne 'prior-gateway')) {
+                $failures.Add("${label}: <InstallRoot>\bin does not hold the prior release's gateway again")
+            }
+            if (-not $existed -and $present) {
+                $failures.Add("${label}: the recovery gateway was left at <InstallRoot>\bin")
+            }
         }
     }
     finally {

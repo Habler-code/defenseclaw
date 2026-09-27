@@ -14553,6 +14553,114 @@ function New-DefenseClawRecoveryGatewayRefusal {
     }
 }
 
+function Get-DefenseClawRecoveryGatewayVersion {
+    <#
+        The release a gateway binary carries: the ProductVersion string of its
+        version resource, which every standalone build stamps with the release
+        (the Go lifecycle reads the installed release the same way). Empty
+        when the file is missing or has no version resource.
+    #>
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
+    }
+    try {
+        if (-not [IO.File]::Exists($Path)) {
+            return ''
+        }
+        $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion
+    }
+    catch {
+        return ''
+    }
+    if ($null -eq $version) {
+        return ''
+    }
+    return ([string]$version).Trim()
+}
+
+function ConvertTo-DefenseClawRecoveryGatewayRelease {
+    <#
+        Parses a release the way the Go lifecycle orders releases
+        (compareWindowsEnterpriseVersions): an optional leading v, one to four
+        dot-separated numbers, an optional -prerelease, and ignored +build
+        metadata. Returns $null for anything else.
+    #>
+    param([string]$Value)
+    $text = ([string]$Value).Trim()
+    if ($text.StartsWith('v', [StringComparison]::OrdinalIgnoreCase)) {
+        $text = $text.Substring(1)
+    }
+    $build = $text.IndexOf('+')
+    if ($build -ge 0) {
+        $text = $text.Substring(0, $build)
+    }
+    $prerelease = ''
+    $dash = $text.IndexOf('-')
+    if ($dash -ge 0) {
+        $prerelease = $text.Substring($dash + 1)
+        $text = $text.Substring(0, $dash)
+    }
+    $parts = $text.Split('.')
+    if ($parts.Count -lt 1 -or $parts.Count -gt 4) {
+        return $null
+    }
+    $numbers = @()
+    foreach ($part in $parts) {
+        if ($part -cnotmatch '^[0-9]{1,9}$') {
+            return $null
+        }
+        $numbers += [long]$part
+    }
+    return [pscustomobject]@{
+        numbers = $numbers
+        prerelease = $prerelease
+    }
+}
+
+function Compare-DefenseClawRecoveryGatewayRelease {
+    <#
+        Orders two parsed releases like compareWindowsEnterpriseVersions:
+        numerically with missing parts read as 0, then a prerelease before its
+        release, then prereleases by ordinal text. Returns -1, 0 or 1.
+    #>
+    param(
+        [Parameter(Mandatory)]$Left,
+        [Parameter(Mandatory)]$Right
+    )
+    $leftNumbers = @($Left.numbers)
+    $rightNumbers = @($Right.numbers)
+    $count = [Math]::Max($leftNumbers.Count, $rightNumbers.Count)
+    for ($index = 0; $index -lt $count; $index++) {
+        $a = [long]0
+        $b = [long]0
+        if ($index -lt $leftNumbers.Count) {
+            $a = [long]$leftNumbers[$index]
+        }
+        if ($index -lt $rightNumbers.Count) {
+            $b = [long]$rightNumbers[$index]
+        }
+        if ($a -lt $b) {
+            return -1
+        }
+        if ($a -gt $b) {
+            return 1
+        }
+    }
+    $leftPrerelease = [string]$Left.prerelease
+    $rightPrerelease = [string]$Right.prerelease
+    if ($leftPrerelease -ceq $rightPrerelease) {
+        return 0
+    }
+    if ($leftPrerelease -ceq '') {
+        return 1
+    }
+    if ($rightPrerelease -ceq '') {
+        return -1
+    }
+    return [Math]::Sign([string]::CompareOrdinal($leftPrerelease, $rightPrerelease))
+}
+
 function Get-DefenseClawRecoveryGatewayAdmission {
     <#
         Decides whether a standalone recovery may rerun a managed-hook
@@ -14569,6 +14677,10 @@ function Get-DefenseClawRecoveryGatewayAdmission {
           inside_install_root  the candidate is the installed payload
           untrusted            the candidate fails the source or trust checks
           same_binary          the candidate is the staged gateway that failed
+          version_unknown      the release of the candidate or of the staged
+                               gateway cannot be read
+          older_release        the candidate is an older release than the
+                               staged gateway
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
     $candidate = $script:DefenseClawRecoveryGatewayCandidate
@@ -14651,6 +14763,32 @@ function Get-DefenseClawRecoveryGatewayAdmission {
             -Code same_binary `
             -Message 'the running Setup gateway is the staged gateway that failed')
     }
+    # Never run an older release over a newer release's transaction: the
+    # staged gateway is the release that wrote it, and within one journal
+    # schema an older release can still handle that state differently.
+    $version = Get-DefenseClawRecoveryGatewayVersion -Path $candidatePath
+    $stagedVersion = Get-DefenseClawRecoveryGatewayVersion `
+        -Path ([string]$Layout.GatewayPath)
+    $release = ConvertTo-DefenseClawRecoveryGatewayRelease -Value $version
+    $stagedRelease = ConvertTo-DefenseClawRecoveryGatewayRelease -Value $stagedVersion
+    $shownVersion = ConvertTo-DefenseClawBoundedDiagnostic -Value $version -MaxLength 128
+    $shownStagedVersion = ConvertTo-DefenseClawBoundedDiagnostic -Value $stagedVersion -MaxLength 128
+    if ($null -eq $release -or $null -eq $stagedRelease) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code version_unknown `
+            -Message (
+                "the release of the running Setup gateway ($shownVersion) or of " +
+                "the staged gateway ($shownStagedVersion) is not a readable release " +
+                'version, so recovery cannot rule out running an older release'
+            ))
+    }
+    if ((Compare-DefenseClawRecoveryGatewayRelease `
+            -Left $release `
+            -Right $stagedRelease) -lt 0) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code older_release `
+            -Message "the running Setup gateway is release $shownVersion, older than the staged gateway's release $shownStagedVersion")
+    }
     $trust = if ([string]$source.signature_status -ceq 'Valid') {
         'authenticode'
     }
@@ -14665,6 +14803,8 @@ function Get-DefenseClawRecoveryGatewayAdmission {
         sha256 = $sha256
         trust = $trust
         replaced_sha256 = $stagedSHA256
+        product_version = $version
+        staged_version = $stagedVersion
     }
 }
 
@@ -14723,9 +14863,12 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
         sha256 = [string]$admission.sha256
         trust = [string]$admission.trust
         signer_thumbprint = [string]$source.signer_thumbprint
-        product_version = [string]$Layout.ProductVersion
+        # The release of the gateway that runs the step. An ensure-driven
+        # repair records the staged release as the deployment's version.
+        product_version = [string]$admission.product_version
         identity = 'NT AUTHORITY\SYSTEM'
         replaced_sha256 = [string]$admission.replaced_sha256
+        staged_version = [string]$admission.staged_version
         reason = 'staged_gateway_failed'
         staged_error = ConvertTo-DefenseClawBoundedDiagnostic `
             -Value $stagedFailure.Exception.Message `
@@ -14743,6 +14886,16 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
         Install-DefenseClawSourceDescriptor `
             -Source $source `
             -Destination $Layout.GatewayPath
+        # The copy carries the verified digest; it must also be the release
+        # that was admitted.
+        $installedVersion = Get-DefenseClawRecoveryGatewayVersion `
+            -Path ([string]$Layout.GatewayPath)
+        if ($installedVersion -cne [string]$admission.product_version) {
+            throw (
+                "the staged copy is release '$installedVersion', not the " +
+                "admitted release '$($admission.product_version)'"
+            )
+        }
     }
     catch {
         $run.outcome = 'failed'

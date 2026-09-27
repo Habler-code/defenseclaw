@@ -115,6 +115,19 @@ func TestWindowsEnterpriseStandaloneNextStepNamesTheRecoveryCommand(t *testing.T
 			want:    []string{"did not pass the payload trust check (not admitted", `CONFIG="C:\Program Data\config.yaml"`},
 		},
 		{
+			name:    "an older Setup release",
+			action:  "ensure",
+			config:  `C:\Staging\config.yaml`,
+			refusal: &windowsEnterpriseRecoveryGatewayRefusal{Action: "retire", Code: "older_release", Message: "the running Setup gateway is release 1.0.41, older than the staged gateway's release 1.0.43"},
+			want:    []string{"older release than the one that staged the transaction (the running Setup gateway is release 1.0.41", "that release or a newer one", setup + ` /ensure CONFIG=C:\Staging\config.yaml JSON=1`},
+		},
+		{
+			name:    "a release that cannot be read",
+			action:  "uninstall",
+			refusal: &windowsEnterpriseRecoveryGatewayRefusal{Action: "restore", Code: "version_unknown", Message: "the release of the running Setup gateway (unavailable) or of the staged gateway (1.0.40) is not a readable release version"},
+			want:    []string{"could not be read (the release of the running Setup gateway", "send the lifecycle log to DefenseClaw support", setup + " /uninstall JSON=1"},
+		},
+		{
 			name:   "uninstall",
 			action: "uninstall",
 			want:   []string{setup + " /uninstall JSON=1", "this release or a newer one"},
@@ -147,8 +160,8 @@ func TestWindowsEnterpriseRecoveryGatewayEvidenceBecomesWarnings(t *testing.T) {
 		"binary":"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
 		"source":"C:\\ProgramData\\DefenseClaw-Enterprise-Setup-0f\\defenseclaw-gateway.exe",
 		"sha256":"c15794a6a68372461b8fb88be839a3304094dbbef21f19bc9ef6d39dd5a32635",
-		"trust":"hash_pinned","signer_thumbprint":"","product_version":"1.0.42",
-		"identity":"NT AUTHORITY\\SYSTEM","replaced_sha256":"aa",
+		"trust":"hash_pinned","signer_thumbprint":"","product_version":"1.0.43",
+		"identity":"NT AUTHORITY\\SYSTEM","replaced_sha256":"aa","staged_version":"1.0.40",
 		"reason":"staged_gateway_failed",
 		"staged_error":"managed-hook lifecycle snapshot retire failed: managed Windows DACL on C:\\Users\\u\\.defenseclaw\\hooks has 2 ACEs, expected 7",
 		"outcome":"succeeded","error":""}]`))
@@ -164,7 +177,7 @@ func TestWindowsEnterpriseRecoveryGatewayEvidenceBecomesWarnings(t *testing.T) {
 		`binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`,
 		`copied from C:\ProgramData\DefenseClaw-Enterprise-Setup-0f\defenseclaw-gateway.exe`,
 		"sha256 c15794a6a68372461b8fb88be839a3304094dbbef21f19bc9ef6d39dd5a32635",
-		"trust hash_pinned", "version 1.0.42", `as NT AUTHORITY\SYSTEM`,
+		"trust hash_pinned", ", version 1.0.43, ", "replaced staged sha256 aa, staged version 1.0.40", `as NT AUTHORITY\SYSTEM`,
 		"because the staged gateway failed it", "outcome succeeded",
 		`the permissions on C:\Users\u\.defenseclaw\hooks are not the ones DefenseClaw set`,
 	} {
