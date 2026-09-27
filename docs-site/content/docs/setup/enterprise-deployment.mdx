@@ -578,9 +578,15 @@ attestation does not block either connector's managed hooks. The current
 minimum Claude version is 2.1.154, the first Claude hook contract. A
 `targets.yaml` row that an earlier release recorded at 2.1.152 or 2.1.153
 (often its placeholder for a user with no detected client) still loads, so
-Upgrade, Repair, Uninstall and the enumerator keep working. That one target
+Upgrade, Repair, Uninstall and the enumerator keep working. That target
 fails enrollment until a `Repair -Mode` or `-Manifest` records 2.1.154 or newer
-for it, or the row is disabled. An enabled
+for it, or the row is disabled. A deferred row whose SID an earlier release
+already staged stays pending while its user is signed out and fails once that
+user signs in. A failing row keeps the guardian not ready. Unless it was never
+protected and its user is signed out, it also withholds deferred-policy staging
+and the protected enrollment set for every other target, as any other failed
+target does, so re-render such rows with `Install`, `Upgrade` or `Repair`
+`-Mode` (or supply a corrected `-Manifest`). An enabled
 Codex target is complete when its protected managed hook policy is installed
 and verified.
 
