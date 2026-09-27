@@ -1488,8 +1488,8 @@ function Get-DefenseClawBootstrapCertificateCommonName {
     # not used: for a subject without a CN, Windows returns its OU, O, or
     # e-mail address instead, so OU=Cisco Systems, Inc. would pass as the
     # publisher. The lifecycle module (Get-DefenseClawCertificateCommonName)
-    # and the CMID broker (internal/managed/cmidbroker/library_trust.go)
-    # apply the same rule.
+    # and the Go signer checks (internal/authenticode/subject.go) apply the
+    # same rule.
     param(
         [Parameter(Mandatory)]
         [Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
