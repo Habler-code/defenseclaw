@@ -23,9 +23,6 @@ package ipc
 // system process snapshot are available to any caller.
 
 import (
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -35,6 +32,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/authenticode"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -460,98 +458,27 @@ func (i *openedWindowsPeerImage) VerifySigner() (windowsImageSigner, error) {
 	if err != nil {
 		return windowsImageSigner{}, fmt.Errorf("encode image path: %w", err)
 	}
-	fileInfo := &windows.WinTrustFileInfo{
-		Size:     uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
-		FilePath: pathPtr,
-		File:     i.handle,
-	}
-	data := &windows.WinTrustData{
-		Size:                            uint32(unsafe.Sizeof(windows.WinTrustData{})),
-		UIChoice:                        windows.WTD_UI_NONE,
-		RevocationChecks:                windows.WTD_REVOKE_NONE,
-		UnionChoice:                     windows.WTD_CHOICE_FILE,
-		FileOrCatalogOrBlobOrSgnrOrCert: unsafe.Pointer(fileInfo),
-		StateAction:                     windows.WTD_STATEACTION_VERIFY,
-		ProvFlags: windows.WTD_CACHE_ONLY_URL_RETRIEVAL |
-			windows.WTD_REVOCATION_CHECK_NONE |
-			windows.WTD_DISABLE_MD2_MD4,
-		UIContext: windows.WTD_UICONTEXT_EXECUTE,
-	}
-	verifyErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
-	defer func() {
-		data.StateAction = windows.WTD_STATEACTION_CLOSE
-		_ = windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
-	}()
+	verification, verifyErr := authenticode.VerifyFile(pathPtr, i.handle)
+	defer func() { _ = verification.Close() }()
 	if verifyErr != nil {
 		return windowsImageSigner{}, fmt.Errorf("WinVerifyTrust: %w", verifyErr)
 	}
-	encoded, err := wintrustLeafCertificate(data.StateData)
+	encoded, err := wintrustLeafCertificate(verification)
 	if err != nil {
 		return windowsImageSigner{}, err
 	}
-	certificate, err := x509.ParseCertificate(encoded)
+	return windowsImageSignerFromCertificate(encoded)
+}
+
+// wintrustLeafCertificate copies the DER leaf certificate of the
+// primary signer out of an open WinVerifyTrust state.
+func wintrustLeafCertificate(verification *authenticode.Verification) ([]byte, error) {
+	leaf, err := verification.PrimarySignerCertificate()
 	if err != nil {
-		return windowsImageSigner{}, fmt.Errorf("parse signer certificate: %w", err)
+		return nil, err
 	}
-	digest := sha256.Sum256(encoded)
-	return windowsImageSigner{
-		CommonName:       certificate.Subject.CommonName,
-		Organizations:    append([]string(nil), certificate.Subject.Organization...),
-		ThumbprintSHA256: hex.EncodeToString(digest[:]),
-	}, nil
-}
-
-var (
-	modWintrust                        = windows.NewLazySystemDLL("wintrust.dll")
-	procWTHelperProvDataFromStateData  = modWintrust.NewProc("WTHelperProvDataFromStateData")
-	procWTHelperGetProvSignerFromChain = modWintrust.NewProc("WTHelperGetProvSignerFromChain")
-	procWTHelperGetProvCertFromChain   = modWintrust.NewProc("WTHelperGetProvCertFromChain")
-)
-
-// cryptProviderCertPrefix is the leading part of CRYPT_PROVIDER_CERT;
-// only these fields are read.
-type cryptProviderCertPrefix struct {
-	Size uint32
-	Cert *windows.CertContext
-}
-
-// wintrustLeafCertificate copies the DER leaf certificate of signer 0
-// out of an open WinVerifyTrust state.
-func wintrustLeafCertificate(state windows.Handle) ([]byte, error) {
-	for _, proc := range []*windows.LazyProc{
-		procWTHelperProvDataFromStateData,
-		procWTHelperGetProvSignerFromChain,
-		procWTHelperGetProvCertFromChain,
-	} {
-		if err := proc.Find(); err != nil {
-			return nil, fmt.Errorf("resolve %s: %w", proc.Name, err)
-		}
-	}
-	providerData, _, _ := procWTHelperProvDataFromStateData.Call(uintptr(state))
-	if providerData == 0 {
-		return nil, errors.New("WinVerifyTrust state has no provider data")
-	}
-	signer, _, _ := procWTHelperGetProvSignerFromChain.Call(providerData, 0, 0, 0)
-	if signer == 0 {
-		return nil, errors.New("WinVerifyTrust state has no primary signer")
-	}
-	providerCert, _, _ := procWTHelperGetProvCertFromChain.Call(signer, 0)
-	if providerCert == 0 {
-		return nil, errors.New("WinVerifyTrust signer has no certificate chain")
-	}
-	prefix := (*cryptProviderCertPrefix)(wintrustPointer(providerCert))
-	if prefix.Size < uint32(unsafe.Sizeof(cryptProviderCertPrefix{})) || prefix.Cert == nil {
-		return nil, errors.New("WinVerifyTrust signer certificate is malformed")
-	}
-	if prefix.Cert.EncodedCert == nil || prefix.Cert.Length == 0 || prefix.Cert.Length > 1<<20 {
+	if leaf.EncodedCert == nil || leaf.Length == 0 || leaf.Length > 1<<20 {
 		return nil, errors.New("WinVerifyTrust signer certificate is empty or oversized")
 	}
-	return append([]byte(nil), unsafe.Slice(prefix.Cert.EncodedCert, prefix.Cert.Length)...), nil
-}
-
-// wintrustPointer converts an address returned by wintrust.dll into a
-// pointer. The memory belongs to the WinVerifyTrust state, never the Go
-// heap, and stays valid until the state is closed.
-func wintrustPointer(address uintptr) unsafe.Pointer {
-	return *(*unsafe.Pointer)(unsafe.Pointer(&address))
+	return append([]byte(nil), unsafe.Slice(leaf.EncodedCert, leaf.Length)...), nil
 }
