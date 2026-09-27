@@ -1441,12 +1441,15 @@ the guardian log (by default
 If it cannot edit the file, for example
 because the file is a link or is not valid JSON, it leaves the file as it was
 and records a warning in the same log, and the hook denies the entries like
-any other unapproved user-level hook. Cursor also loads the hooks in
+any other unapproved user-level hook. It records no warning for a file it can
+read that has none of those entries. Cursor also loads the hooks in
 `%USERPROFILE%\.claude\settings.json`, so the same install or repair also
 removes the handlers that per-user DefenseClaw setup for Claude Code wrote
 there: a `defenseclaw-hook.exe` or `defenseclaw-gateway.exe` command from
 the same folders with the arguments `hook --connector claudecode`. It removes
-a matcher group only when that group has no other handlers, keeps every other
+a matcher group only when that group has no other handlers and no `type`,
+`command`, `url` or `prompt` field of its own; a group with such a field
+stays with an empty `hooks` list, and the hook still checks it. It keeps every other
 setting, including the `env` values per-user setup added, keeps the previous
 file as `settings.json.defenseclaw-backup`, and logs the removal or a warning
 in the same way. It does not edit `settings.local.json` or a folder set with
