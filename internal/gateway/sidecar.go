@@ -223,7 +223,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if err != nil {
 		return nil, err
 	}
-	initialRules, err := compileRulePackCategories(rp)
+	initialRules, err := compileRulePackCategoriesForSource(rp, cfg.Guardrail.EffectiveRegexSource())
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: prepare guardrail rule-pack activation: %w", err)
 	}
@@ -488,7 +488,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// process-global scanners unchanged, and must not publish a rule pack to
 	// its router before that router is part of a runnable Sidecar.
 	publishRulePackOverrides(initialRules)
-	publishLocalPatternsOverride(initialPatterns)
+	if cfg.Guardrail.EffectiveRegexSource() != config.RegexSourceAgentControl {
+		publishLocalPatternsOverride(initialPatterns)
+	}
 	router.SetRulePack(rp)
 	sidecar.setEventRouter(router)
 	sidecar.publishConfig(cfg)
@@ -1471,6 +1473,23 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 	return rp, nil
 }
 
+func loadValidatedRulePackForSource(cache *guardrail.RulePackCache, baseDir string, overlayDirs []string, source, scope string) (*guardrail.RulePack, error) {
+	if cache == nil {
+		return nil, fmt.Errorf("%s rule pack: cache is unavailable", scope)
+	}
+	rp, err := cache.LoadForRegexSource(baseDir, overlayDirs, source)
+	if err != nil {
+		return nil, fmt.Errorf("%s rule pack %q: %w", scope, baseDir, err)
+	}
+	if rp == nil {
+		return nil, fmt.Errorf("%s rule pack %q: loader returned no rule pack", scope, baseDir)
+	}
+	if err := rp.Validate(); err != nil {
+		return nil, fmt.Errorf("%s rule pack %q: %w", scope, baseDir, err)
+	}
+	return rp, nil
+}
+
 // loadInitialSidecarRulePack performs the cold-start contract. Multi-connector
 // packs remain isolated to their individual setup transactions, but the global
 // pack and an enabled single connector's effective pack must be valid before a
@@ -1480,7 +1499,7 @@ func loadInitialSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error)
 		return nil, fmt.Errorf("sidecar: guardrail rule pack config is unavailable")
 	}
 	cache := guardrail.NewRulePackCache()
-	global, err := loadValidatedRulePack(cache, cfg.Guardrail.RulePackDir, "global")
+	global, err := loadValidatedRulePackForSource(cache, cfg.Guardrail.RulePackDir, cfg.Guardrail.RulePackOverlayDirs, cfg.Guardrail.EffectiveRegexSource(), "global")
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: %w", err)
 	}
@@ -1489,9 +1508,11 @@ func loadInitialSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error)
 	if cfg.Guardrail.Enabled && len(names) == 1 {
 		name := canonicalConnectorRulePackKey(names[0])
 		if name != "" && cfg.Guardrail.EffectiveEnabled(name) {
-			active, err = loadValidatedRulePack(
+			active, err = loadValidatedRulePackForSource(
 				cache,
 				cfg.EffectiveRulePackDirForConnector(name),
+				cfg.Guardrail.RulePackOverlayDirs,
+				cfg.Guardrail.EffectiveRegexSource(),
 				"connector "+name,
 			)
 			if err != nil {
@@ -1512,7 +1533,7 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 		return nil, fmt.Errorf("config reload rule pack candidate is unavailable")
 	}
 	cache := guardrail.NewRulePackCache()
-	global, err := loadValidatedRulePack(cache, cfg.Guardrail.RulePackDir, "global")
+	global, err := loadValidatedRulePackForSource(cache, cfg.Guardrail.RulePackDir, cfg.Guardrail.RulePackOverlayDirs, cfg.Guardrail.EffectiveRegexSource(), "global")
 	if err != nil {
 		return nil, err
 	}
@@ -1530,9 +1551,11 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 			if name == "" || !cfg.Guardrail.EffectiveEnabled(name) {
 				continue
 			}
-			rp, loadErr := loadValidatedRulePack(
+			rp, loadErr := loadValidatedRulePackForSource(
 				cache,
 				cfg.EffectiveRulePackDirForConnector(name),
+				cfg.Guardrail.RulePackOverlayDirs,
+				cfg.Guardrail.EffectiveRegexSource(),
 				"connector "+name,
 			)
 			if loadErr != nil {
@@ -1581,7 +1604,7 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 			}
 		}
 	}
-	candidate.activeRules, err = compileRulePackCategories(candidate.active)
+	candidate.activeRules, err = compileRulePackCategoriesForSource(candidate.active, cfg.Guardrail.EffectiveRegexSource())
 	if err != nil {
 		return nil, fmt.Errorf("active rule pack activation: %w", err)
 	}
@@ -1590,7 +1613,7 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 		return nil, fmt.Errorf("active local-pattern activation: %w", err)
 	}
 	for name, rp := range candidate.connectors {
-		compiled, compileErr := compileRulePackCategories(rp)
+		compiled, compileErr := compileRulePackCategoriesForSource(rp, cfg.Guardrail.EffectiveRegexSource())
 		if compileErr != nil {
 			return nil, fmt.Errorf("connector %s rule pack activation: %w", name, compileErr)
 		}
@@ -1825,7 +1848,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	if nextRulePack != nil {
 		publishRulePackOverrides(rulePackCandidate.activeRules)
-		publishLocalPatternsOverride(rulePackCandidate.activePatterns)
+		if appliedCfg.Guardrail.EffectiveRegexSource() != config.RegexSourceAgentControl {
+			publishLocalPatternsOverride(rulePackCandidate.activePatterns)
+		}
 	}
 	publishConnectorRulePackGeneration(
 		current.ActiveConnectors(),
@@ -1997,7 +2022,9 @@ func rulePackNeedsReload(oldCfg, newCfg *config.Config) bool {
 	if oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir {
 		return true
 	}
-	return effectiveActiveSidecarRulePackDir(oldCfg) != effectiveActiveSidecarRulePackDir(newCfg)
+	return !reflect.DeepEqual(oldCfg.Guardrail.RulePackOverlayDirs, newCfg.Guardrail.RulePackOverlayDirs) ||
+		oldCfg.Guardrail.EffectiveRegexSource() != newCfg.Guardrail.EffectiveRegexSource() ||
+		effectiveActiveSidecarRulePackDir(oldCfg) != effectiveActiveSidecarRulePackDir(newCfg)
 }
 
 func effectiveActiveSidecarRulePackDir(cfg *config.Config) string {
@@ -2047,7 +2074,10 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
-		oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
+		oldG.RulePackDir != newG.RulePackDir ||
+		!reflect.DeepEqual(oldG.RulePackOverlayDirs, newG.RulePackOverlayDirs) ||
+		oldG.EffectiveRegexSource() != newG.EffectiveRegexSource() ||
+		oldG.HookSelfHeal != newG.HookSelfHeal ||
 		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
 		oldG.Judge.Enabled != newG.Judge.Enabled || !reflect.DeepEqual(oldG.Judge, newG.Judge) {
 		return true
@@ -3363,7 +3393,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// somehow not blocking anything" sidecar.
 		return err
 	}
-	compiledConnectorRules, err := compileRulePackCategories(rp)
+	compiledConnectorRules, err := compileRulePackCategoriesForSource(rp, s.currentConfig().Guardrail.EffectiveRegexSource())
 	if err != nil {
 		return fmt.Errorf("guardrail: compile connector %s rule pack: %w", conn.Name(), err)
 	}
@@ -4216,9 +4246,11 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	succeeded := make([]string, 0, len(registrations))
 	for _, registration := range registrations {
 		name := registration.conn.Name()
-		rp, loadErr := loadValidatedRulePack(
+		rp, loadErr := loadValidatedRulePackForSource(
 			cache,
 			s.currentConfig().EffectiveRulePackDirForConnector(name),
+			s.currentConfig().Guardrail.RulePackOverlayDirs,
+			s.currentConfig().Guardrail.EffectiveRegexSource(),
 			"connector "+name,
 		)
 		if loadErr != nil {
@@ -4226,7 +4258,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: managed connector %s rule pack rejected, skipping (other connectors unaffected): %v\n", name, loadErr)
 			continue
 		}
-		compiled, compileErr := compileRulePackCategories(rp)
+		compiled, compileErr := compileRulePackCategoriesForSource(rp, s.currentConfig().Guardrail.EffectiveRegexSource())
 		if compileErr != nil {
 			RemoveConnectorRulePackOverrides(name)
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: managed connector %s rule pack activation rejected, skipping (other connectors unaffected): %v\n", name, compileErr)
@@ -5179,15 +5211,17 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	}
 	// Load + validate this connector's effective rule pack through the
 	// shared cache. Connectors sharing a profile read disk once.
-	rp, err := loadValidatedRulePack(
+	rp, err := loadValidatedRulePackForSource(
 		cache,
 		s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()),
+		s.currentConfig().Guardrail.RulePackOverlayDirs,
+		s.currentConfig().Guardrail.EffectiveRegexSource(),
 		"connector "+conn.Name(),
 	)
 	if err != nil {
 		return err
 	}
-	compiledRules, err := compileRulePackCategories(rp)
+	compiledRules, err := compileRulePackCategoriesForSource(rp, s.currentConfig().Guardrail.EffectiveRegexSource())
 	if err != nil {
 		return fmt.Errorf("connector %s rule pack activation: %w", conn.Name(), err)
 	}
@@ -6221,6 +6255,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api.SetNotifier(s.osNotifier)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
+		api.SetPolicyStatusProvider(s.opa.Status)
 	}
 	reg := connector.NewDefaultRegistry()
 	if s.currentConfig().PluginDir != "" {

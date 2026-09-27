@@ -212,22 +212,10 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) error {
 // the reserved managed category so bundled DefenseClaw defaults cannot leak
 // into central policy evaluation; hybrid mode retains the normal merged set.
 func ApplyRulePackOverridesForSource(rp *guardrail.RulePack, source string) {
-	compiled, err := compileRulePackCategories(rp)
+	compiled, err := compileRulePackCategoriesForSource(rp, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] rule pack activation failed: %v\n", err)
 		return
-	}
-	if strings.EqualFold(strings.TrimSpace(source), guardrail.RegexSourceAgentControl) {
-		filtered := make([]ruleCategory, 0, 1)
-		for _, category := range compiled.categories {
-			if category.Name == "agent-control" {
-				filtered = append(filtered, category)
-			}
-		}
-		compiled.categories = filtered
-		compiled.semanticRules = nil
-		compiled.overridden = 0
-		compiled.added = len(filtered)
 	}
 	publishRulePackOverrides(compiled)
 }
@@ -440,22 +428,33 @@ func ApplyConnectorRulePackOverridesForSource(connector string, rp *guardrail.Ru
 	if connector == "" {
 		return
 	}
-	compiled, err := compileRulePackCategories(rp)
+	compiled, err := compileRulePackCategoriesForSource(rp, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule pack activation failed: %v\n", connector, err)
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(source), guardrail.RegexSourceAgentControl) {
-		filtered := make([]ruleCategory, 0, 1)
-		for _, category := range compiled.categories {
-			if category.Name == "agent-control" {
-				filtered = append(filtered, category)
-			}
-		}
-		compiled.categories = filtered
-		compiled.semanticRules = nil
-	}
 	publishConnectorRulePackOverrides(connector, compiled)
+}
+
+func compileRulePackCategoriesForSource(rp *guardrail.RulePack, source string) (*compiledRulePackCategories, error) {
+	compiled, err := compileRulePackCategories(rp)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(source), guardrail.RegexSourceAgentControl) {
+		return compiled, nil
+	}
+	filtered := make([]ruleCategory, 0, 1)
+	for _, category := range compiled.categories {
+		if category.Name == "agent-control" {
+			filtered = append(filtered, category)
+		}
+	}
+	compiled.categories = filtered
+	compiled.semanticRules = nil
+	compiled.overridden = 0
+	compiled.added = len(filtered)
+	return compiled, nil
 }
 
 func activeManagedRulePackStatus(cfg *config.GuardrailConfig) (guardrail.ManagedRulePackStatus, error) {

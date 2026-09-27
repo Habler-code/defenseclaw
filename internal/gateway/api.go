@@ -179,6 +179,11 @@ type APIServer struct {
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
+	// policyStatus reads the same generation-owned OPA metadata as the
+	// watcher. Keeping this separate from policyReloader lets the management
+	// API report the active AgentControl artifact without rebuilding an engine
+	// on every status request.
+	policyStatus func() policy.EngineStatus
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
@@ -664,6 +669,12 @@ func (a *APIServer) SetPolicyReloader(fn func() error) {
 	a.policyReloader = fn
 }
 
+// SetPolicyStatusProvider registers the shared OPA status reader used by
+// /policy/status.
+func (a *APIServer) SetPolicyStatusProvider(fn func() policy.EngineStatus) {
+	a.policyStatus = fn
+}
+
 // SetConnectorRegistry attaches the connector registry so the
 // /v1/connectors endpoint can list available connectors.
 func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
@@ -872,6 +883,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/policy/evaluate/audit", a.handlePolicyEvaluateAudit)
 	mux.HandleFunc("/policy/evaluate/skill-actions", a.handlePolicyEvaluateSkillActions)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
+	mux.HandleFunc("/policy/status", a.handlePolicyStatus)
 	mux.HandleFunc("/skills", a.handleSkills)
 	mux.HandleFunc("/mcps", a.handleMCPs)
 	mux.HandleFunc("/tools/catalog", a.handleToolsCatalog)
@@ -3920,6 +3932,44 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, map[string]string{
 		"status":     "reloaded",
 		"policy_dir": a.scannerCfg.PolicyDir,
+	})
+}
+
+// handlePolicyStatus reports the active OPA and AgentControl rule-pack
+// artifacts. The synchronizer uses this endpoint to distinguish a published
+// digest from the digest actually loaded by the live gateway.
+func (a *APIServer) handlePolicyStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.scannerCfg == nil || strings.TrimSpace(a.scannerCfg.PolicyDir) == "" {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy_dir not configured"})
+		return
+	}
+
+	var opaStatus policy.EngineStatus
+	if a.policyStatus != nil {
+		opaStatus = a.policyStatus()
+	} else {
+		engine, err := policy.New(a.scannerCfg.PolicyDir)
+		if err != nil {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
+		opaStatus = engine.Status()
+	}
+
+	ruleStatus, err := activeManagedRulePackStatus(&a.scannerCfg.Guardrail)
+	if err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"generation":        opaStatus.Generation,
+		"agent_control":     opaStatus.AgentControl,
+		"rule_pack":         ruleStatus,
+		"restart_supported": true,
 	})
 }
 

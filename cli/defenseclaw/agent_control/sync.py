@@ -9,7 +9,7 @@ import random
 import re
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
@@ -90,6 +90,58 @@ def resolve_agent_control_sdk_credentials(settings: Any, data_dir: str, *, requi
     return settings.server_url.rstrip("/"), credential.value
 
 
+def _canonical_v8_otel_destination(cfg: Any, name: str) -> dict[str, Any] | None:
+    """Read a named destination from the canonical v8 observability graph.
+
+    ``Config.otel`` is the legacy preview DTO.  Galileo setup writes the
+    canonical v8 graph under ``observability.destinations`` instead, so the
+    Agent Control bridge must consult that source when the legacy DTO is
+    empty.
+    """
+
+    from defenseclaw.config import config_path_for_data_dir
+
+    try:
+        import yaml
+
+        raw = yaml.safe_load(config_path_for_data_dir(cfg.data_dir).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    observability = raw.get("observability")
+    if not isinstance(observability, Mapping):
+        return None
+    destinations = observability.get("destinations")
+    if not isinstance(destinations, list):
+        return None
+    for item in destinations:
+        if not isinstance(item, Mapping) or item.get("name") != name:
+            continue
+        send = item.get("send")
+        selected_signals = send.get("signals") if isinstance(send, Mapping) else None
+        headers_raw = item.get("headers")
+        headers: dict[str, str] = {}
+        if isinstance(headers_raw, Mapping):
+            for header_name, header_value in headers_raw.items():
+                if isinstance(header_value, Mapping) and isinstance(header_value.get("env"), str):
+                    headers[str(header_name)] = "${" + header_value["env"] + "}"
+                else:
+                    headers[str(header_name)] = str(header_value)
+        protocol = str(item.get("protocol", "") or "").strip().lower()
+        if protocol == "http/protobuf":
+            protocol = "http"
+        return {
+            "enabled": item.get("enabled", True) is True,
+            "traces_enabled": selected_signals is None or "traces" in selected_signals,
+            "protocol": protocol,
+            "endpoint": str(item.get("endpoint", "") or "").strip(),
+            "url_path": "",
+            "headers": headers,
+        }
+    return None
+
+
 def agent_control_observability_init_kwargs(cfg: Any) -> dict[str, Any]:
     """Build secret-safe SDK observability options from DefenseClaw config.
 
@@ -108,21 +160,33 @@ def agent_control_observability_init_kwargs(cfg: Any) -> dict[str, Any]:
         (item for item in cfg.otel.destinations if item.name == settings.otel_destination),
         None,
     )
-    if destination is None:
+    canonical_destination = None if destination is not None else _canonical_v8_otel_destination(cfg, settings.otel_destination)
+    if destination is None and canonical_destination is None:
         raise SynchronizationError(
             f"Agent Control OTEL destination {settings.otel_destination!r} is not configured; "
             "run 'defenseclaw setup galileo' first"
         )
-    if not cfg.otel.enabled or not destination.enabled or not destination.traces.enabled:
+    if destination is not None:
+        enabled = cfg.otel.enabled and destination.enabled
+        traces_enabled = destination.traces.enabled
+        protocol = (destination.traces.protocol or destination.protocol).strip().lower()
+        endpoint = (destination.traces.endpoint or destination.endpoint).strip()
+        url_path = destination.traces.url_path.strip()
+        raw_headers = destination.headers
+    else:
+        enabled = bool(canonical_destination["enabled"])
+        traces_enabled = bool(canonical_destination["traces_enabled"])
+        protocol = str(canonical_destination["protocol"])
+        endpoint = str(canonical_destination["endpoint"])
+        url_path = str(canonical_destination["url_path"])
+        raw_headers = canonical_destination["headers"]
+    if not enabled or not traces_enabled:
         raise SynchronizationError(
             f"Agent Control OTEL destination {settings.otel_destination!r} must have trace export enabled"
         )
-    protocol = (destination.traces.protocol or destination.protocol).strip().lower()
     if protocol != "http":
         raise SynchronizationError("Agent Control ControlSpan export requires an OTLP HTTP destination")
 
-    endpoint = (destination.traces.endpoint or destination.endpoint).strip()
-    url_path = destination.traces.url_path.strip()
     if url_path:
         endpoint = endpoint.rstrip("/") + "/" + url_path.lstrip("/")
     parsed = urlsplit(endpoint)
@@ -132,7 +196,7 @@ def agent_control_observability_init_kwargs(cfg: Any) -> dict[str, Any]:
     from defenseclaw.credentials import resolve
 
     headers: dict[str, str] = {}
-    for name, raw_value in destination.headers.items():
+    for name, raw_value in raw_headers.items():
         value = str(raw_value)
 
         def replace_secret(match: re.Match[str]) -> str:

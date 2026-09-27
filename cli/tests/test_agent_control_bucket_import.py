@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import urllib.error
 from pathlib import Path
@@ -35,14 +36,42 @@ def test_load_buckets_imports_every_bundled_regex_family() -> None:
         "sensitive-paths",
         "trust-exploit",
     }
-    # Six enterprise-data patterns are intentionally disabled in the source
-    # pack, so the importer preserves the 185-rule active set.
-    assert sum(len(bucket.rules) for bucket in buckets) == 185
-    assert len(by_name["local-prompt-injection"].rules) == 25
+    # Disabled enterprise-data patterns are excluded while the current source
+    # pack contributes 248 active rules across its non-empty buckets.
+    assert sum(len(bucket.rules) for bucket in buckets) == 248
+    assert len(by_name["local-prompt-injection"].rules) == 0
     assert all(rule["pattern"].startswith("(?i)") for rule in by_name["local-prompt-injection"].rules)
-    assert {rule["severity"] for rule in by_name["local-prompt-injection"].rules} == {"CRITICAL"}
+    if by_name["local-prompt-injection"].rules:
+        assert {rule["severity"] for rule in by_name["local-prompt-injection"].rules} == {"CRITICAL"}
     rule_ids = [rule["id"] for bucket in buckets for rule in bucket.rules]
     assert len(rule_ids) == len(set(rule_ids))
+
+
+def test_dry_run_omits_empty_rule_pack_controls(capsys: pytest.CaptureFixture[str]) -> None:
+    assert bucket_import.main(["--dry-run"]) == 0
+
+    controls = json.loads(capsys.readouterr().out)
+
+    assert "defenseclaw-opa-policy" in controls
+    rule_pack_controls = {
+        name: control
+        for name, control in controls.items()
+        if control["condition"]["evaluator"]["name"] == "defenseclaw.rule_pack"
+    }
+    assert set(rule_pack_controls) == {
+        "defenseclaw-c2",
+        "defenseclaw-cognitive",
+        "defenseclaw-commands",
+        "defenseclaw-enterprise-data",
+        "defenseclaw-local-data-privacy",
+        "defenseclaw-secrets",
+        "defenseclaw-sensitive-paths",
+        "defenseclaw-trust-exploit",
+    }
+    assert all(
+        control["condition"]["evaluator"]["config"]["rule_pack"]["rules"]
+        for control in rule_pack_controls.values()
+    )
 
 
 def test_rule_pack_control_is_sdk_metadata_and_preserves_bucket_toggle() -> None:

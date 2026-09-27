@@ -774,8 +774,17 @@ def _assert_schema_parity(schema: dict[str, Any]) -> None:
 
 
 def _validate_schema(document: dict[str, Any], source_name: str) -> None:
+    # ``agent_control`` is a DefenseClaw runtime integration block owned by
+    # the gateway/config loaders, not part of the telemetry v8 source graph.
+    # Validate the canonical telemetry document without rejecting this
+    # explicitly supported top-level extension, while returning it unchanged
+    # to callers that need to preserve the complete config.
+    schema_document = document
+    if "agent_control" in document:
+        schema_document = copy.deepcopy(document)
+        schema_document.pop("agent_control", None)
     errors = sorted(
-        _schema_validator().iter_errors(document),
+        _schema_validator().iter_errors(schema_document),
         key=lambda error: tuple(str(part) for part in error.absolute_path),
     )
     if not errors:

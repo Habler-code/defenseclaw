@@ -31,8 +31,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -607,6 +609,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	if a.managedAIDOnly() {
 		return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
 	}
+	// The source is a gateway-owned setting, never a field supplied by the
+	// hook caller. This lets the trusted-action dispatcher apply the managed
+	// AgentControl enforcement bridge only when the sidecar itself is running
+	// in AgentControl regex-source mode.
+	action.AgentControlRulePack = a.agentControlRulePackEnabled(req.Connector)
 
 	// Static block/allow list takes priority — checked before any rule
 	// scanning. Connector-scoped (@C/T) entries resolve before the bare
@@ -724,6 +731,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
 		}
+		if agentControlAction := a.agentControlRulePackAction(
+			ctx, req.Connector, severity, ruleFindings, action.EnforcementCapable,
+		); agentControlAction != "" {
+			runtimeAction = strongerGuardrailAction(runtimeAction, agentControlAction)
+		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 		for i, f := range ruleFindings {
@@ -772,6 +784,67 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	return verdict
+}
+
+func (a *APIServer) agentControlRulePackEnabled(connector string) bool {
+	if a == nil || a.scannerCfg == nil {
+		return false
+	}
+	return strings.EqualFold(
+		strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveRegexSource()),
+		config.RegexSourceAgentControl,
+	)
+}
+
+// agentControlRulePackAction evaluates the matched AgentControl finding
+// through the same OPA guardrail policy used by the content lane. This is
+// important for hook tool calls: the trusted-action lane cannot use the
+// ordinary connector profile alone because the synced AgentControl overlay
+// may tighten the effective block_threshold below the local default.
+func (a *APIServer) agentControlRulePackAction(
+	ctx context.Context,
+	connector, severity string,
+	findings []RuleFinding,
+	enforcementCapable bool,
+) string {
+	if !a.agentControlRulePackEnabled(connector) || severity == "NONE" {
+		return ""
+	}
+	if a.scannerCfg == nil || strings.TrimSpace(a.scannerCfg.PolicyDir) == "" {
+		if !enforcementCapable {
+			return guardrailActionAlert
+		}
+		return guardrailRuntimeActionForConnector(a.scannerCfg, connector, severity, true)
+	}
+
+	mode := "observe"
+	if enforcementCapable {
+		mode = "action"
+	}
+	reason := "AgentControl rule matched"
+	if len(findings) > 0 {
+		reason = fmt.Sprintf("matched: %s", strings.Join(FindingStrings(findings), ", "))
+	}
+	out, err := a.evaluateGuardrailPolicy(ctx, policy.GuardrailInput{
+		Direction:   "prompt",
+		Mode:        mode,
+		ScannerMode: "local",
+		LocalResult: &policy.GuardrailScanResult{
+			Action:   "allow",
+			Severity: severity,
+			Reason:   reason,
+			Findings: FindingStrings(findings),
+		},
+	})
+	if err != nil || out == nil {
+		// evaluateGuardrailPolicy is fail-closed when a configured policy
+		// bundle is unavailable. Keep that invariant for the hook lane.
+		if enforcementCapable {
+			return guardrailActionBlock
+		}
+		return guardrailActionAlert
+	}
+	return strings.ToLower(strings.TrimSpace(out.Action))
 }
 
 // highestInspectConfidence keeps verdict confidence aligned with the visible
@@ -1139,6 +1212,15 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 				HighestSeverity(enforceable),
 				strings.EqualFold(req.Direction, "outbound"),
 			)
+		}
+		if agentControlAction := a.agentControlRulePackAction(
+			ctx,
+			req.Connector,
+			severity,
+			ruleFindings,
+			strings.EqualFold(req.Direction, "outbound"),
+		); agentControlAction != "" {
+			action = strongerGuardrailAction(action, agentControlAction)
 		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))

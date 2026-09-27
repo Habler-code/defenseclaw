@@ -514,6 +514,7 @@
         "server_url": { "type": "string", "maxLength": 8192 },
         "installation_id": { "$ref": "#/$defs/boundedString" },
         "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "api_key_header": { "$ref": "#/$defs/boundedString" },
         "agent_name": { "const": "defenseclaw-policy-sync" },
         "target_type": { "type": "string", "enum": ["defenseclaw.installation", "log_stream"] },
         "refresh_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
@@ -543,7 +544,9 @@
           "additionalProperties": false,
           "properties": {
             "enabled": { "type": "boolean" },
-            "include_content": { "type": "boolean" }
+            "include_content": { "type": "boolean" },
+            "sink": { "type": "string", "enum": ["agent_control", "otel"] },
+            "otel_destination": { "$ref": "#/$defs/boundedString" }
           }
         }
       }

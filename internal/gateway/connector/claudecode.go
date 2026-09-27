@@ -2115,6 +2115,18 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
 		return true
 	}
+	// Unix installations may prefix the generated hook with environment
+	// assignments so the hook always uses its intended runtime directory. The
+	// command still belongs to DefenseClaw when one shell token is the exact
+	// managed hook path; recognize that form so setup repairs, rather than
+	// duplicates, the handler.
+	if hooksDir != "" {
+		for _, token := range strings.Fields(command) {
+			if strings.HasPrefix(token, hooksDir+"/") {
+				return true
+			}
+		}
+	}
 	// Native Go hook commands (Windows) are not a file path under hooksDir
 	// and carry no on-disk marker, so recognize them by their entrypoint
 	// invocation fragment.

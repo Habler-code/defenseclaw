@@ -47,7 +47,10 @@ export DEFENSECLAW_MANAGED_HOOK
 DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
-DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+HOOK_RUNTIME_DIR="$(cd -P -- "${HOOK_DIR}/.." 2>/dev/null && pwd)" || exit 2
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOOK_RUNTIME_DIR}}"
+DEFENSECLAW_DATA_DIR="${DEFENSECLAW_DATA_DIR:-${DEFENSECLAW_HOME}}"
+export DEFENSECLAW_HOME DEFENSECLAW_DATA_DIR
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   exit 0
 fi
@@ -110,6 +113,7 @@ case "${BOUND_CONTRACT}:${BOUND_EVENT}" in
   codex-hooks-v1:SessionStart|codex-hooks-v1:UserPromptSubmit|codex-hooks-v1:PreToolUse|codex-hooks-v1:PermissionRequest|codex-hooks-v1:PostToolUse|codex-hooks-v1:Stop) ;;
   codex-hooks-v2:SessionStart|codex-hooks-v2:UserPromptSubmit|codex-hooks-v2:PreToolUse|codex-hooks-v2:PermissionRequest|codex-hooks-v2:PostToolUse|codex-hooks-v2:PreCompact|codex-hooks-v2:PostCompact|codex-hooks-v2:Stop) ;;
   codex-hooks-v3:SessionStart|codex-hooks-v3:UserPromptSubmit|codex-hooks-v3:PreToolUse|codex-hooks-v3:PermissionRequest|codex-hooks-v3:PostToolUse|codex-hooks-v3:SubagentStart|codex-hooks-v3:SubagentStop|codex-hooks-v3:PreCompact|codex-hooks-v3:PostCompact|codex-hooks-v3:Stop) ;;
+  codex-hooks-v3-generic:SessionStart|codex-hooks-v3-generic:UserPromptSubmit|codex-hooks-v3-generic:PreToolUse|codex-hooks-v3-generic:PermissionRequest|codex-hooks-v3-generic:PostToolUse|codex-hooks-v3-generic:SubagentStart|codex-hooks-v3-generic:SubagentStop|codex-hooks-v3-generic:PreCompact|codex-hooks-v3-generic:PostCompact|codex-hooks-v3-generic:Stop) ;;
   codex-hooks-v4:SessionStart|codex-hooks-v4:UserPromptSubmit|codex-hooks-v4:PreToolUse|codex-hooks-v4:PermissionRequest|codex-hooks-v4:PostToolUse|codex-hooks-v4:SubagentStart|codex-hooks-v4:SubagentStop|codex-hooks-v4:PreCompact|codex-hooks-v4:PostCompact|codex-hooks-v4:Stop|codex-hooks-v4:SessionEnd) ;;
   *) fail_binding "registered event is not part of the bound Codex hook contract" ;;
 esac
@@ -306,9 +310,28 @@ fi
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+# Older/alternate gateway response paths can return only Codex's structured
+# output. Recover the canonical gateway action from that nested decision before
+# treating the response as malformed. This keeps the hook compatible with the
+# Codex hook contract while still rejecting responses with no usable verdict.
+if [ -z "$ACTION" ] || [ "$ACTION" = "null" ]; then
+  CODEX_DECISION=$(echo "$RESULT" | _dc_jq -r '
+    .codex_output.hookSpecificOutput.permissionDecision //
+    .codex_output.permissionDecision // empty
+  ' 2>/dev/null) || CODEX_DECISION=""
+  case "$CODEX_DECISION" in
+    allow) ACTION="allow" ;;
+    deny|block) ACTION="block" ;;
+    ask|confirm) ACTION="confirm" ;;
+  esac
+fi
 case "$ACTION" in
-  allow|block|confirm) ;;
-  *) fail_response "invalid or missing action in gateway response" ;;
+	# "alert" is a valid gateway observability verdict. Codex has no
+	# lifecycle-level alert action, so carry its structured codex_output and
+	# allow the event to continue; PreToolUse blocking remains "block".
+	allow|alert) ACTION="allow" ;;
+	block|confirm) ;;
+	*) fail_response "invalid or missing action in gateway response" ;;
 esac
 
 # Codex's hook protocol is strictly EITHER structured JSON on stdout

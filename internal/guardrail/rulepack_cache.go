@@ -18,6 +18,7 @@ package guardrail
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -47,10 +48,12 @@ import (
 // Failed loads are shared only by callers already waiting on that attempt and
 // are never retained in the success cache.
 type RulePackCache struct {
-	mu       sync.Mutex
-	packs    map[string]*RulePack
-	inflight map[string]*rulePackLoad
-	loader   func(string) (*RulePack, error)
+	mu            sync.Mutex
+	packs         map[string]*RulePack
+	inflight      map[string]*rulePackLoad
+	sourcePacks   map[string]*RulePack
+	sourcePending map[string]*rulePackLoad
+	loader        func(string) (*RulePack, error)
 }
 
 type rulePackLoad struct {
@@ -75,9 +78,11 @@ func newRulePackCacheWithLoader(loader func(string) (*RulePack, error)) *RulePac
 		loader = LoadRulePack
 	}
 	return &RulePackCache{
-		packs:    make(map[string]*RulePack),
-		inflight: make(map[string]*rulePackLoad),
-		loader:   loader,
+		packs:         make(map[string]*RulePack),
+		inflight:      make(map[string]*rulePackLoad),
+		sourcePacks:   make(map[string]*RulePack),
+		sourcePending: make(map[string]*rulePackLoad),
+		loader:        loader,
 	}
 }
 
@@ -129,6 +134,51 @@ func (c *RulePackCache) Load(dir string) (rp *RulePack, err error) {
 	return rp, err
 }
 
+// LoadForRegexSource caches the effective rule pack for the selected regex
+// authority. Agent Control packs use a source-qualified cache key because
+// they retain local non-regex assets while replacing the regex rule set.
+func (c *RulePackCache) LoadForRegexSource(baseDir string, overlayDirs []string, source string) (rp *RulePack, err error) {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "" || source == RegexSourceLocal {
+		return c.Load(baseDir)
+	}
+	key := source + "\x00" + overlayCacheKey(baseDir, overlayDirs)
+
+	c.mu.Lock()
+	if cached, ok := c.sourcePacks[key]; ok {
+		c.mu.Unlock()
+		return cached, nil
+	}
+	if pending, ok := c.sourcePending[key]; ok {
+		pending.followers++
+		c.mu.Unlock()
+		<-pending.ready
+		return pending.pack, pending.err
+	}
+	pending := &rulePackLoad{ready: make(chan struct{})}
+	c.sourcePending[key] = pending
+	c.mu.Unlock()
+
+	defer func() {
+		if recover() != nil {
+			rp = nil
+			err = rulePackErr(".", "loader_panic", "source-aware rule-pack loader terminated unexpectedly")
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err == nil && rp != nil {
+			c.sourcePacks[key] = rp
+		}
+		pending.pack = rp
+		pending.err = err
+		delete(c.sourcePending, key)
+		close(pending.ready)
+	}()
+
+	rp, err = LoadRulePackForRegexSource(baseDir, overlayDirs, source)
+	return rp, err
+}
+
 // normalizeRulePackDir canonicalizes a rule-pack directory into a stable
 // cache key. The empty string (embedded defaults) is preserved exactly to
 // match LoadRulePack's special-casing; any non-empty path is cleaned so that
@@ -138,4 +188,13 @@ func normalizeRulePackDir(dir string) string {
 		return ""
 	}
 	return filepath.Clean(dir)
+}
+
+func overlayCacheKey(baseDir string, overlayDirs []string) string {
+	parts := make([]string, 0, len(overlayDirs)+1)
+	parts = append(parts, normalizeRulePackDir(baseDir))
+	for _, dir := range overlayDirs {
+		parts = append(parts, normalizeRulePackDir(strings.TrimSpace(dir)))
+	}
+	return strings.Join(parts, "\x00")
 }

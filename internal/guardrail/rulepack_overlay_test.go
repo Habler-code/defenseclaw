@@ -117,6 +117,35 @@ injection:
 	}
 }
 
+func TestRulePackCacheLoadsAndCachesSourceAwareOverlay(t *testing.T) {
+	overlay := writeOverlay(t, "agent-control.yaml", validManagedRuleFile)
+	cache := NewRulePackCache()
+
+	first, err := cache.LoadForRegexSource("", []string{overlay}, RegexSourceAgentControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.RuleFiles) != 1 || first.RuleFiles[0].Category != "agent-control" {
+		t.Fatalf("managed cached rule files = %+v", first.RuleFiles)
+	}
+
+	second, err := cache.LoadForRegexSource("", []string{overlay}, RegexSourceAgentControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatal("source-aware cache did not reuse the loaded rule pack")
+	}
+
+	local, err := cache.LoadForRegexSource("", []string{overlay}, RegexSourceLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local == first {
+		t.Fatal("local and managed sources shared a cached rule pack")
+	}
+}
+
 func TestAgentControlRegexSourceDoesNotConflictWithExcludedLocalIDs(t *testing.T) {
 	base := writeOverlay(t, "base.yaml", strings.Replace(validManagedRuleFile, "category: agent-control", "category: local", 1))
 	overlay := writeOverlay(t, "agent-control.yaml", validManagedRuleFile)

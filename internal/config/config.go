@@ -248,6 +248,7 @@ type AgentControlConfig struct {
 	ServerURL           string                          `mapstructure:"server_url"             yaml:"server_url"`
 	InstallationID      string                          `mapstructure:"installation_id"        yaml:"installation_id"`
 	APIKeyEnv           string                          `mapstructure:"api_key_env"            yaml:"api_key_env"`
+	APIKeyHeader        string                          `mapstructure:"api_key_header"         yaml:"api_key_header"`
 	AgentName           string                          `mapstructure:"agent_name"             yaml:"agent_name"`
 	TargetType          string                          `mapstructure:"target_type"            yaml:"target_type"`
 	RefreshSeconds      int                             `mapstructure:"refresh_seconds"        yaml:"refresh_seconds"`
@@ -272,8 +273,10 @@ type AgentControlRulePackConfig struct {
 }
 
 type AgentControlObservabilityConfig struct {
-	Enabled        bool `mapstructure:"enabled"         yaml:"enabled"`
-	IncludeContent bool `mapstructure:"include_content" yaml:"include_content"`
+	Enabled         bool   `mapstructure:"enabled"         yaml:"enabled"`
+	IncludeContent  bool   `mapstructure:"include_content" yaml:"include_content"`
+	Sink            string `mapstructure:"sink"            yaml:"sink"`
+	OTELDestination string `mapstructure:"otel_destination" yaml:"otel_destination"`
 }
 
 func (c *AgentControlConfig) Validate() error {

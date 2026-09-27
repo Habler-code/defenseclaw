@@ -498,6 +498,36 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(SynchronizationError, "is not configured"):
             agent_control_observability_init_kwargs(cfg)
 
+    def test_agent_control_otel_sink_reuses_canonical_v8_galileo_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config(data_dir=tmp)
+            cfg.agent_control.observability.sink = "otel"
+            Path(tmp, "config.yaml").write_text(
+                """
+config_version: 8
+observability:
+  destinations:
+    - name: galileo
+      kind: otlp
+      enabled: true
+      endpoint: https://api.example.test/otel/traces
+      protocol: http/protobuf
+      headers:
+        Galileo-API-Key: {env: GALILEO_API_KEY}
+        project: project-id
+        logstream: log-stream-id
+""".lstrip(),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"GALILEO_API_KEY": "protected-test-key"}, clear=False):
+                values = agent_control_observability_init_kwargs(cfg)
+
+            sink = values["observability_sink_config"]
+            self.assertEqual(sink["endpoint"], "https://api.example.test/otel/traces")
+            self.assertEqual(sink["headers"]["Galileo-API-Key"], "protected-test-key")
+            self.assertEqual(sink["headers"]["project"], "project-id")
+            self.assertEqual(sink["headers"]["logstream"], "log-stream-id")
+
     def test_guardrail_rejects_duplicate_overlay_dirs(self) -> None:
         value = GuardrailConfig(rule_pack_overlay_dirs=["/tmp/rules", "/tmp/rules/"])
         with self.assertRaisesRegex(ValueError, "duplicate path"):

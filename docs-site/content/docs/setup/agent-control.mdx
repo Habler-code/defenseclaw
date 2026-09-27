@@ -292,7 +292,7 @@ The evaluator's typed form supplies the versioned `config`. Agent Control's SDK 
 
 ### Local end-to-end bucket demo
 
-The source checkout includes an idempotent importer that converts the bundled DefenseClaw rule files and local pattern families into independently toggleable Agent Control controls. It imports 11 regex buckets with 185 active rules and one OPA threshold control. Six patterns marked `enabled: false` in the source pack remain excluded.
+The source checkout includes an idempotent importer that converts the bundled DefenseClaw rule files and non-empty local pattern families into independently toggleable Agent Control controls. The current source pack imports 8 non-empty regex buckets with 248 active rules and one OPA threshold control. Empty local pattern families are omitted because Agent Control rejects rule-pack controls with no rules. Disabled patterns in the source pack remain excluded.
 
 First run the Agent Control server and UI with the DefenseClaw evaluator package installed. Use a bootstrap administrator key even for the local recording so the demo also proves the production authentication path.
 

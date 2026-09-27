@@ -354,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     controls = [
         (f"{args.prefix}-{bucket.name}", rule_pack_control(bucket, enabled=bucket.name not in disabled))
         for bucket in buckets
+        if bucket.rules
     ]
     controls.append((f"{args.prefix}-opa-policy", opa_policy_control()))
     if args.dry_run:

@@ -52,6 +52,13 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// AgentControlRulePack marks a trusted action evaluated against the
+	// source-aware AgentControl overlay. That overlay intentionally contains
+	// producer-owned regex rules rather than DefenseClaw semantic owners, so
+	// the normal built-in proof boundary cannot be used for its findings.
+	// The action boundary still remains authoritative: only a complete,
+	// trusted tool action can set this flag.
+	AgentControlRulePack bool
 	// DowngradeReadOnlyDataArgs is advisory-only. Bare executable names and
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
@@ -1986,7 +1993,40 @@ func finalizeTrustedActionFindings(
 		facts,
 		findings,
 	)
+	if request.AgentControlRulePack {
+		return applyAgentControlRulePackBoundary(findings, request.EnforcementCapable)
+	}
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
+}
+
+// applyAgentControlRulePackBoundary is the source-aware enforcement bridge
+// for AgentControl controls. AgentControl rules are intentionally not mapped
+// to DefenseClaw's built-in semantic owners; requiring one of those owners'
+// proofs would make every synced custom control detection-only. The trusted
+// hook adapter has already established the executable tool boundary, so a
+// matched managed rule may participate in enforcement. Explicit audit-only
+// and alert-only dispositions remain ceilings and are never promoted here.
+func applyAgentControlRulePackBoundary(
+	findings []RuleFinding,
+	enforcementCapable bool,
+) []RuleFinding {
+	if len(findings) == 0 {
+		return nil
+	}
+	bounded := append([]RuleFinding(nil), findings...)
+	for index := range bounded {
+		finding := &bounded[index]
+		if !enforcementCapable {
+			finding.enforcement = findingEnforcementDetectionOnly
+			continue
+		}
+		if finding.enforcement == findingEnforcementDetectionOnly ||
+			finding.enforcement == findingEnforcementAlertOnly {
+			continue
+		}
+		finding.enforcement = findingEnforcementAllowed
+	}
+	return bounded
 }
 
 // deduplicateTrustedActionFindings collapses both exact duplicate rule IDs and

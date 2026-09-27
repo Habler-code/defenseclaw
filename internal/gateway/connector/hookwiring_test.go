@@ -2250,6 +2250,22 @@ func TestIsOwnedHookRecognizesNativeCommand(t *testing.T) {
 	}
 }
 
+func TestIsOwnedHookRecognizesEnvPrefixedCommand(t *testing.T) {
+	const hooksDir = "/home/u/.defenseclaw/hooks"
+	owned := map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type": "command",
+				"command": "env DEFENSECLAW_HOME=/home/u/.defenseclaw " +
+					hooksDir + "/codex-hook.sh --event PreToolUse --hook-contract codex-hooks-v3-generic",
+			},
+		},
+	}
+	if !isOwnedHook(owned, hooksDir) {
+		t.Fatal("env-prefixed DefenseClaw hook command not recognized as owned")
+	}
+}
+
 func TestWindowsDriveAbsoluteHookPath(t *testing.T) {
 	if !isWindowsDriveAbsolutePath(`C:\Program Files\DefenseClaw\defenseclaw-hook.exe`) {
 		t.Fatal("drive-rooted Windows hook path was not recognized as absolute")
