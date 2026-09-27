@@ -401,6 +401,14 @@ normal per-user application-protection controller is not removed from the
 product; managed mode deliberately transfers that work to the guardian so the
 gateway virtual account never scans or writes arbitrary profiles.
 
+The gateway service creates its device identity (`device.key`,
+`device.key.provenance` and `device.provenance.secret`) in the runtime
+directory the first time it starts. The files inherit the runtime directory
+ACL: SYSTEM and Administrators get full control, and the gateway service
+account gets Modify. The gateway will not create them if any other principal
+could read new files in that directory. Keep `gateway.device_key_file` inside
+`data_dir`.
+
 Stage a schema-valid `targets.yaml` for the first transaction. The enumerator
 subsequently maintains this protected file from eligible Windows profiles. A
 target user must already have a supported CLI installation that the enumerator
