@@ -679,17 +679,6 @@ func TestCursorForeignHookGuardFailsClosedOnUnverifiablePluginTrees(t *testing.T
 			})
 			return path, "inline hooks"
 		},
-		"nested too deep": func(t *testing.T, plugins string) (string, string) {
-			parts := []string{plugins}
-			for level := 0; level <= foreignHookPluginMaxDepth; level++ {
-				parts = append(parts, "d"+strconv.Itoa(level))
-			}
-			deep := filepath.Join(parts...)
-			if err := os.MkdirAll(deep, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			return deep, "nested more than"
-		},
 		"too many folders": func(t *testing.T, plugins string) (string, string) {
 			for index := 0; index <= foreignHookPluginMaxDirs; index++ {
 				if err := os.MkdirAll(filepath.Join(plugins, "cache", strconv.Itoa(index)), 0o700); err != nil {
@@ -722,6 +711,135 @@ func TestCursorForeignHookGuardFailsClosedOnUnverifiablePluginTrees(t *testing.T
 			assertForeignHookDenied(t, result, path)
 			if !strings.Contains(result.stdout, "cannot be verified") || !strings.Contains(result.stdout, detail) {
 				t.Fatalf("unverifiable plugin source message = %s", result.stdout)
+			}
+		})
+	}
+}
+
+// Depth alone does not make a plugin tree unverifiable: an installed plugin
+// (cache/<marketplace>/<plugin>/<version>) with a deep source or skill folder
+// is walked to the bottom within the folder bound, and a hooks file at any
+// depth is still found.
+func TestCursorForeignHookGuardWalksDeepPluginFolders(t *testing.T) {
+	deepFolder := func(plugins string) string {
+		parts := []string{plugins, "cache", "acme", "p", "1.2.0", "skills", "s"}
+		for level := 0; level < 8; level++ {
+			parts = append(parts, "d"+strconv.Itoa(level))
+		}
+		return filepath.Join(parts...)
+	}
+
+	fixture := newForeignHookFixture(t)
+	deep := deepFolder(filepath.Join(fixture.profile, ".cursor", "plugins"))
+	writeCursorPluginManifest(t, filepath.Join(fixture.profile, ".cursor", "plugins", "cache", "acme", "p", "1.2.0"),
+		map[string]interface{}{"name": "p"})
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "notes.md"), []byte("notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := fixture.run(t, "preToolUse", nil); result.rt.requests != 1 {
+		t.Fatalf("a deep plugin folder without hooks was denied: %s", result.stdout)
+	}
+
+	hooks := filepath.Join(deep, "hooks", "hooks.json")
+	writeForeignHookJSON(t, hooks, rewritingCursorHooks("./rewrite.sh"))
+	result := fixture.withGateway().run(t, "preToolUse", nil)
+	assertForeignHookDenied(t, result, hooks)
+	if !strings.Contains(result.stdout, "plugin-level hook file") || !strings.Contains(result.stdout, "registers a preToolUse hook") {
+		t.Fatalf("a deep plugin hooks file was not reported as a handler: %s", result.stdout)
+	}
+}
+
+func symlinkForTest(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation needs privileges on Windows: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
+// A link inside a plugin that resolves to a file under a name Cursor never
+// loads hooks from (CLAUDE.md linked to AGENTS.md, a script alias) holds no
+// hooks and does not deny. A link that resolves to a folder, cannot be
+// resolved, or stands in for a hooks folder, a hooks/hooks.json file or a
+// .cursor-plugin folder still cannot be verified.
+func TestCursorForeignHookGuardIgnoresPluginLinksToFiles(t *testing.T) {
+	fixture := newForeignHookFixture(t)
+	plugin := filepath.Join(fixture.profile, ".cursor", "plugins", "local", "p")
+	writeCursorPluginManifest(t, plugin, map[string]interface{}{"name": "p"})
+	if err := os.WriteFile(filepath.Join(plugin, "AGENTS.md"), []byte("# Agents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkForTest(t, "AGENTS.md", filepath.Join(plugin, "CLAUDE.md"))
+	symlinkForTest(t, filepath.Join("..", "AGENTS.md"), filepath.Join(plugin, "scripts", "README.md"))
+	if result := fixture.run(t, "preToolUse", nil); result.rt.requests != 1 {
+		t.Fatalf("links to files inside a plugin were denied: %s", result.stdout)
+	}
+
+	for name, prepare := range map[string]func(t *testing.T, plugin string) string{
+		"link to a folder": func(t *testing.T, plugin string) string {
+			target := filepath.Join(filepath.Dir(plugin), "..", "..", "..", "elsewhere")
+			writeForeignHookJSON(t, filepath.Join(target, "hooks", "hooks.json"), rewritingCursorHooks("./rewrite.sh"))
+			link := filepath.Join(plugin, "vendor")
+			symlinkForTest(t, target, link)
+			return link
+		},
+		// Created before its target exists, so on Windows this is a file
+		// symbolic link; Windows still opens paths through it.
+		"file link that now points at a folder": func(t *testing.T, plugin string) string {
+			target := filepath.Join(filepath.Dir(plugin), "..", "..", "..", "later")
+			link := filepath.Join(plugin, "later")
+			symlinkForTest(t, target, link)
+			writeForeignHookJSON(t, filepath.Join(target, "hooks", "hooks.json"), rewritingCursorHooks("./rewrite.sh"))
+			return link
+		},
+		"link that cannot be resolved": func(t *testing.T, plugin string) string {
+			link := filepath.Join(plugin, "missing")
+			symlinkForTest(t, filepath.Join(plugin, "does-not-exist"), link)
+			return link
+		},
+		"hooks.json link": func(t *testing.T, plugin string) string {
+			target := filepath.Join(plugin, "real-hooks.json")
+			writeForeignHookJSON(t, target, rewritingCursorHooks("./rewrite.sh"))
+			link := filepath.Join(plugin, "hooks", "hooks.json")
+			symlinkForTest(t, target, link)
+			return link
+		},
+		"hooks folder link to a file": func(t *testing.T, plugin string) string {
+			target := filepath.Join(plugin, "notes.txt")
+			if err := os.WriteFile(target, []byte("notes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(plugin, "hooks")
+			symlinkForTest(t, target, link)
+			return link
+		},
+		"plugin metadata link to a file": func(t *testing.T, plugin string) string {
+			target := filepath.Join(plugin, "plugin.json")
+			writeForeignHookJSON(t, target, map[string]interface{}{"name": "p", "hooks": rewritingCursorHooks("./rewrite.sh")})
+			link := filepath.Join(plugin, ".cursor-plugin")
+			symlinkForTest(t, target, link)
+			return link
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newForeignHookFixture(t)
+			plugin := filepath.Join(fixture.profile, ".cursor", "plugins", "local", "p")
+			if err := os.MkdirAll(plugin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			link := prepare(t, plugin)
+			result := fixture.run(t, "preToolUse", nil)
+			assertForeignHookDenied(t, result, link)
+			if !strings.Contains(result.stdout, "cannot be verified") || !strings.Contains(result.stdout, "link or reparse point") {
+				t.Fatalf("unverifiable link message = %s", result.stdout)
 			}
 		})
 	}
@@ -910,6 +1028,16 @@ func TestCursorForeignHookGuardRecognizesOnlyTrustedExecutableRegistrations(t *t
 		{"command": filepath.Join(filepath.Dir(trusted), "..", "..", "user", "cursor-hook.ps1")},
 		{"type": "http", "url": "http://127.0.0.1:1/rewrite"},
 		{"type": "command", "command": "defenseclaw-hook.exe", "args": []interface{}{"hook", "--connector", "cursor"}},
+		// The per-user DefenseClaw Cursor registration left in a user's
+		// hooks.json after a move to the managed deployment runs the adapter
+		// in the user's own data directory, which the user can edit, so it
+		// stays foreign.
+		{
+			"type":       "command",
+			"command":    "& '" + filepath.Join(t.TempDir(), ".defenseclaw", "hooks", "cursor-hook.ps1") + "'",
+			"timeout":    json.Number("30"),
+			"failClosed": true,
+		},
 	}
 	for _, handler := range foreign {
 		if foreignHookHandlerOwned(handler, trusted) {
@@ -1095,7 +1223,7 @@ func TestCursorForeignHookGuardDeniesUnverifiableWorkspaceRoots(t *testing.T) {
 	}
 }
 
-func TestForeignHookParseCacheIsKeyedByContent(t *testing.T) {
+func TestCursorForeignHookGuardRereadsChangedHookFiles(t *testing.T) {
 	fixture := newForeignHookFixture(t)
 	path := filepath.Join(fixture.workspace, ".cursor", "hooks.json")
 	writeForeignHookJSON(t, path, map[string]interface{}{"hooks": map[string]interface{}{}})
@@ -1103,7 +1231,7 @@ func TestForeignHookParseCacheIsKeyedByContent(t *testing.T) {
 		t.Fatalf("clean file blocked: %s", result.stdout)
 	}
 	// Rewriting the same path must be re-read and re-parsed, never served
-	// from a cached "clean" verdict.
+	// from an earlier "clean" result.
 	writeForeignHookJSON(t, path, rewritingCursorHooks("rewrite"))
 	fixture.rt = ok(`{"action":"allow"}`)
 	assertForeignHookDenied(t, fixture.run(t, "preToolUse", nil), path)

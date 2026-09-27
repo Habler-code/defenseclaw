@@ -32,7 +32,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode/utf8"
 )
 
@@ -54,13 +53,9 @@ const (
 	// foreignHookMaxRoots bounds the distinct workspace roots taken from the
 	// payload. A payload that reports more cannot be verified and denies.
 	foreignHookMaxRoots = 32
-	// foreignHookCacheLimit bounds the in-process parse cache.
-	foreignHookCacheLimit = 64
-	// foreignHookPluginMaxDepth and foreignHookPluginMaxDirs bound the walk of
-	// <home>/.cursor/plugins. A tree that exceeds either bound cannot be
-	// verified and denies.
-	foreignHookPluginMaxDepth = 8
-	foreignHookPluginMaxDirs  = 4096
+	// foreignHookPluginMaxDirs bounds the walk of <home>/.cursor/plugins. A
+	// tree with more folders cannot be verified and denies.
+	foreignHookPluginMaxDirs = 4096
 	// foreignHookDescribeLimit bounds the handler text shown in a denial.
 	foreignHookDescribeLimit = 200
 
@@ -125,16 +120,6 @@ type foreignHookParseResult struct {
 	handlers []foreignHookParsedHandler
 	problem  string
 }
-
-// foreignHookParseCache memoizes parse results by source format and content
-// sha256 so repeated sources (for example the same file reached through two
-// workspace roots, or a long-lived caller) are parsed once. It never caches a
-// verdict for a path: every call re-reads and re-hashes the current bytes, and
-// the allowlist and ownership checks run on every lookup.
-var foreignHookParseCache = struct {
-	sync.Mutex
-	entries map[string]foreignHookParseResult
-}{entries: map[string]foreignHookParseResult{}}
 
 // cursorForeignHookGuardApplies reports whether this invocation is the managed
 // Cursor preToolUse gate.
@@ -288,8 +273,11 @@ func (o Options) getenv(key string) string {
 // plugin that holds further plugins. Each .cursor-plugin folder adds the hook
 // configs its plugin.json and marketplace.json declare, and every
 // hooks/hooks.json in the tree is scanned. The walk never follows links or
-// reparse points, skips version-control and package folders that are not
-// plugins themselves, and stops at a bounded depth and size. Anything it
+// reparse points (one that could hold hooks is reported, see
+// foreignHookLinkMayHoldHooks), skips version-control and package folders
+// that are not plugins themselves, and lists at most foreignHookPluginMaxDirs
+// folders; it has no depth limit, because the folder bound already limits
+// its cost and a deep folder can hold hooks like any other. Anything it
 // cannot verify is reported as a problem so the guard denies.
 func scanCursorPluginTree(
 	tree string,
@@ -314,11 +302,7 @@ func scanCursorPluginTree(
 	if !info.IsDir() {
 		return
 	}
-	type pending struct {
-		dir   string
-		depth int
-	}
-	queue := []pending{{dir: tree}}
+	queue := []string{tree}
 	for listed := 0; len(queue) > 0; listed++ {
 		if listed == foreignHookPluginMaxDirs {
 			folderProblem(tree, fmt.Sprintf("the plugin folders hold more than %d directories", foreignHookPluginMaxDirs))
@@ -326,19 +310,21 @@ func scanCursorPluginTree(
 		}
 		current := queue[0]
 		queue = queue[1:]
-		entries, err := os.ReadDir(current.dir)
+		entries, err := os.ReadDir(current)
 		if err != nil {
-			folderProblem(current.dir, fmt.Sprintf("cannot list the folder: %v", err))
+			folderProblem(current, fmt.Sprintf("cannot list the folder: %v", err))
 			continue
 		}
-		scanCursorPluginMetadata(current.dir, entries, addSource, problem)
+		scanCursorPluginMetadata(current, entries, addSource, problem)
 		for _, entry := range entries {
 			name := entry.Name()
-			path := filepath.Join(current.dir, name)
+			path := filepath.Join(current, name)
 			mode := entry.Type()
 			switch {
 			case foreignHookLinkMode(mode):
-				folderProblem(path, "the entry is a link or reparse point")
+				if foreignHookLinkMayHoldHooks(current, name, path) {
+					folderProblem(path, "the entry is a link or reparse point")
+				}
 			case mode.IsDir() && foreignHookNameIs(name, ".cursor-plugin"):
 				// Plugin and marketplace manifests, read above.
 			case mode.IsDir() && (foreignHookNameIs(name, ".git") || foreignHookNameIs(name, "node_modules")) &&
@@ -346,12 +332,8 @@ func scanCursorPluginTree(
 				// Version-control and package folders are not plugin sources
 				// unless the folder is itself a plugin.
 			case mode.IsDir():
-				if current.depth+1 > foreignHookPluginMaxDepth {
-					folderProblem(path, fmt.Sprintf("the folder is nested more than %d levels deep", foreignHookPluginMaxDepth))
-					continue
-				}
-				queue = append(queue, pending{dir: path, depth: current.depth + 1})
-			case foreignHookNameIs(name, "hooks.json") && foreignHookNameIs(filepath.Base(current.dir), "hooks"):
+				queue = append(queue, path)
+			case foreignHookNameIs(name, "hooks.json") && foreignHookNameIs(filepath.Base(current), "hooks"):
 				addSource(foreignHookSource{scope: foreignHookScopePlugin, path: path, format: foreignHookFormatPlugin})
 			}
 		}
@@ -628,6 +610,25 @@ func foreignHookLinkMode(mode fs.FileMode) bool {
 	return mode&(fs.ModeSymlink|fs.ModeIrregular) != 0
 }
 
+// foreignHookLinkMayHoldHooks reports whether a link or reparse point found in
+// the plugin tree at dir/name (path) could lead Cursor to hooks the walk does
+// not read: one named like a hooks folder, a hooks/hooks.json file or a
+// .cursor-plugin folder, one that resolves to a folder (which may be or hold
+// a plugin), and one whose target cannot be resolved. Resolving reads only
+// the target's type; the walk still never lists or reads through a link. A
+// link to a file under any other name, such as CLAUDE.md linked to AGENTS.md,
+// holds no hooks. Windows can open a path through a file symbolic link that
+// points at a folder, so the target type is resolved on every platform rather
+// than taken from the link itself.
+func foreignHookLinkMayHoldHooks(dir, name, path string) bool {
+	if foreignHookNameIs(name, "hooks") || foreignHookNameIs(name, ".cursor-plugin") ||
+		(foreignHookNameIs(name, "hooks.json") && foreignHookNameIs(filepath.Base(dir), "hooks")) {
+		return true
+	}
+	target, err := os.Stat(path)
+	return err != nil || target.IsDir()
+}
+
 // cursorPayloadWorkspaceRoots returns the distinct absolute workspace roots
 // Cursor reports for this invocation (workspace_roots plus cwd when
 // present). Cursor sends workspace_roots with every hook call, as an empty
@@ -726,22 +727,7 @@ func readForeignHookSource(source foreignHookSource) foreignHookParseResult {
 	if !exists || len(bytes.TrimSpace(data)) == 0 {
 		return foreignHookParseResult{}
 	}
-	sum := sha256.Sum256(data)
-	key := source.format + ":" + hex.EncodeToString(sum[:])
-	foreignHookParseCache.Lock()
-	cached, ok := foreignHookParseCache.entries[key]
-	foreignHookParseCache.Unlock()
-	if ok {
-		return cached
-	}
-	result := parseForeignHookDocument(source.format, data)
-	foreignHookParseCache.Lock()
-	if len(foreignHookParseCache.entries) >= foreignHookCacheLimit {
-		foreignHookParseCache.entries = map[string]foreignHookParseResult{}
-	}
-	foreignHookParseCache.entries[key] = result
-	foreignHookParseCache.Unlock()
-	return result
+	return parseForeignHookDocument(source.format, data)
 }
 
 // readForeignHookFile reads a user-, project- or plugin-owned hook file
