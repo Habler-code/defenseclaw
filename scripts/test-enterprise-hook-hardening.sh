@@ -331,10 +331,22 @@ class Handler(BaseHTTPRequestHandler):
         }
         with open(result_path, "w", encoding="utf-8") as handle:
             json.dump(result, handle)
+        response = b'{"action":"allow"}'
         self.send_response(200 if auth_ok and path_ok and body_ok else 401)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
         self.end_headers()
-        self.wfile.write(b'{"action":"allow"}')
+        self.wfile.write(response)
+        self.wfile.flush()
+        # Let the client close first so this port is not left in TIME_WAIT
+        # under the fake gateway's uid when the same-user listener below
+        # binds it (macOS refuses that bind across uids).
+        self.connection.settimeout(5)
+        try:
+            while self.connection.recv(4096):
+                pass
+        except OSError:
+            pass
 
     def log_message(self, *_args):
         return
@@ -742,10 +754,23 @@ if [ "$artifact_kind" != plugin ]; then
 import socket
 import sys
 
+import time
+
 port, ready, result = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind(("127.0.0.1", port))
+# A connection the fake gateway closed first can hold the port in TIME_WAIT
+# for up to a minute; keep trying rather than fail on a transient bind error.
+deadline = time.monotonic() + 60
+while True:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind(("127.0.0.1", port))
+        break
+    except OSError:
+        server.close()
+        if time.monotonic() > deadline:
+            raise
+        time.sleep(0.5)
 server.listen(1)
 open(ready, "w").close()
 server.settimeout(20)
@@ -761,7 +786,7 @@ with open(result, "wb") as handle:
         pass
 PY
     impostor_pid=$!
-    if ! wait_for_file "$impostor_ready" 100; then
+    if ! wait_for_file "$impostor_ready" 700; then
         cat "${target_home}/impostor.log" >&2 || true
         fail "same-user listener did not start"
     fi
