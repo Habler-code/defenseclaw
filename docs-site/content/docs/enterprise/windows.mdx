@@ -119,7 +119,7 @@ Exit codes follow Windows Installer conventions so MDM retry logic works:
 | Code | Meaning |
 | --- | --- |
 | `0` | Success or no change |
-| `1603` | Failure; the transaction rolled back |
+| `1603` | Failure; the transaction rolled back, or stayed pending when the rollback could not finish (see [Recover a pending transaction](#recover-a-pending-transaction)) |
 | `1618` | Another lifecycle run holds the lock; retry later |
 | `1639` | Invalid arguments |
 | `3010` | Reserved for a required restart |
@@ -183,6 +183,62 @@ agents blocks on that: Devin blocks only on exit code 2 (a missing command
 exits 127), and Hermes and Antigravity do not enforce a nonzero hook exit. A
 DefenseClaw Copilot user hook that stays fails open, like every Copilot
 integration failure.
+
+## Recover a pending transaction
+
+A lifecycle that fails normally rolls back. If the rollback itself cannot
+finish, the transaction stays pending: the result reports
+`transaction_pending: true`, the DefenseClaw services stay stopped, and
+vendor machine policy the transaction had already published can still point
+at the stopped gateway. `status` shows the state; `verify` refuses until the
+transaction is recovered. The failed result names the command to run next.
+
+Recover by running DefenseClaw Setup as LocalSystem (Intune install behavior
+**System**, or another MDM's system context). `/ensure` recovers the pending
+transaction and then installs or upgrades; `/uninstall` recovers it and
+removes the deployment:
+
+```powershell title="As LocalSystem"
+DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\Staging\config.yaml JSON=1
+DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
+```
+
+`/repair` also recovers the transaction; after a failed first install it
+then stops with "run Install", so `/ensure` is the one-step command. Outside
+an MDM, a one-time scheduled task that runs as SYSTEM gives the same context.
+From a protected staged copy of a release (as in [Install or
+converge](#install-or-converge)), `"$Stage\defenseclaw.exe" enterprise windows
+ensure` (or `repair`, `uninstall`) with the same `--profile`, trust and
+`--config` options, run as LocalSystem, works the same way.
+
+Recovery first uses the gateway the pending transaction staged. When that
+gateway cannot restore or retire the transaction's managed-hook state (for
+example a release whose defect caused the failure), the standalone lifecycle
+retries that step once with the `defenseclaw-gateway.exe` that ships in the
+running Setup's payload (or beside the staged `defenseclaw.exe`), and only
+when all of these hold:
+
+- the lifecycle runs as LocalSystem;
+- that gateway passes the same checks an install applies to its payload: an
+  administrator-owned source on a local NTFS volume and the deployment's
+  trust mode (a valid Authenticode signature, limited to the allowed signers
+  when any are set, or the SHA-256 the payload manifest pins);
+- it is not the gateway that already failed, and it is not inside the
+  install root;
+- the run is not an `--allow-unsigned` certification run.
+
+The verified gateway is copied to `C:\Program Files\Cisco\DefenseClaw\bin`,
+where the hidden command must run, and the step runs again; the rollback
+then restores that file to its state before the transaction. The result and
+`enterprise-lifecycle.log` record a `recovery_gateway_fallback` warning with
+the binary, where it was copied from, its SHA-256, the trust basis, the
+account, and the staged gateway's failure. When recovery declines the
+fallback, a `recovery_gateway_not_used` warning gives the reason
+(`not_local_system`, `untrusted`, `same_binary`, `no_payload`,
+`inside_install_root`, `unsigned_scope`) and the staged gateway's error
+stands. A failure that concerns file permissions is reported in plain terms;
+the internal detail is kept in a `lifecycle_diagnostic` warning for support.
+Do not edit DefenseClaw files or permissions by hand to recover.
 
 ## Per-user installs
 

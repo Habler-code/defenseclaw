@@ -232,6 +232,53 @@ def test_standalone_rollback_quiesces_the_sensor_helper_before_restoring_files()
     assert stop < ready < restart < services_restart < boot_policy
 
 
+def test_standalone_recovery_falls_back_only_to_a_verified_setup_gateway() -> None:
+    # WIN-F17: a pending transaction's managed-hook lifecycle restore and
+    # retire run through the recovery step. Secure Client calls the staged
+    # gateway directly; standalone may rerun a failed step with the running
+    # Setup's gateway only as LocalSystem and only after the Install payload
+    # checks (protected source, Authenticode or hash pin, never -AllowUnsigned).
+    module = _text(MODULE)
+    restore = _function_body(module, "Restore-DefenseClawTransaction")
+    for action in ("restore", "retire"):
+        assert restore.count(
+            "Invoke-DefenseClawManagedHooksLifecycleRecoveryStep `\n"
+            "            -Layout $Layout `\n"
+            "            -GatewayServiceName ([string]$snapshot.gateway_service) `\n"
+            f"            -Action {action})"
+        ) == 1, action
+        assert restore.count(
+            "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `\n"
+            "            -Layout $Layout `\n"
+            "            -GatewayServiceName ([string]$snapshot.gateway_service) `\n"
+            f"            -Action {action})"
+        ) == 0, action
+    step = _function_body(module, "Invoke-DefenseClawManagedHooksLifecycleRecoveryStep")
+    secure_client = step.index("if (-not (Test-DefenseClawStandaloneProfile)) {")
+    first_try = step.index("try {")
+    assert secure_client < first_try
+    assert step.index("Get-DefenseClawRecoveryGatewayAdmission -Layout $Layout") < step.index(
+        "Install-DefenseClawSourceDescriptor `"
+    )
+    assert "throw $stagedFailure" in step
+    admission = _function_body(module, "Get-DefenseClawRecoveryGatewayAdmission")
+    order = [
+        admission.index("[bool]$candidate.unsigned_scope"),
+        admission.index("Test-DefenseClawLocalSystemToken"),
+        admission.index("-Code inside_install_root"),
+        admission.index("Get-DefenseClawSourceDescriptor `"),
+        admission.index("-Code same_binary"),
+    ]
+    assert order == sorted(order)
+    descriptor = admission[admission.index("Get-DefenseClawSourceDescriptor `") :]
+    descriptor = descriptor[: descriptor.index("}")]
+    assert "-Authenticode" in descriptor and "AllowUnsigned" not in descriptor
+    candidate = _function_body(module, "Set-DefenseClawRecoveryGatewayCandidate")
+    assert candidate.index("if (-not (Test-DefenseClawStandaloneProfile)) {") < candidate.index(
+        "'defenseclaw-gateway.exe'"
+    )
+
+
 def test_standalone_runtime_cleanup_scope_owns_its_sensor_helper() -> None:
     module = _text(MODULE)
     body = module[
@@ -399,6 +446,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-opencode-plugin-uninstall-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
+    "enterprise-standalone-recovery-gateway-smoke.ps1",
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",

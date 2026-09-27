@@ -84,6 +84,11 @@ type windowsEnterpriseInstallerReport struct {
 	// lifecycle's report.
 	UserRegistrationsPending json.RawMessage `json:"user_registrations_pending"`
 	UserRegistrationsFailed  json.RawMessage `json:"user_registrations_failed"`
+	// Pending-transaction recovery reports each managed-hook lifecycle step
+	// it ran with the Setup's verified gateway, and why it kept the staged
+	// one. Decoded leniently, like the registration lists.
+	RecoveryGatewayRuns    json.RawMessage `json:"recovery_gateway_runs"`
+	RecoveryGatewayRefusal json.RawMessage `json:"recovery_gateway_refusal"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed or transaction_pending field): the
@@ -392,12 +397,24 @@ func applyWindowsEnterpriseInstallerReport(
 	if len(messages) == 0 && strings.TrimSpace(report.Error) != "" {
 		messages = append(messages, report.Error)
 	}
+	// A failed lifecycle tells the administrator what failed in plain terms
+	// and what to run next; internal security-descriptor detail stays in a
+	// lifecycle_diagnostic warning for support.
+	lifecycle := windowsEnterpriseStandaloneLifecycleAction(result.Action)
+	firstError := len(result.Errors)
 	for _, message := range messages {
 		message = strings.TrimSpace(message)
 		if message == "" {
 			continue
 		}
-		result.AddError(windowsEnterpriseMessageCode(message, "lifecycle_error"), message)
+		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
+		if lifecycle {
+			if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
+				result.AddWarning("lifecycle_diagnostic", windowsEnterpriseBoundedDiagnostic(message))
+				message = text
+			}
+		}
+		result.AddError(code, message)
 	}
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
@@ -406,7 +423,55 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
 	}
+	if lifecycle && !report.OK && len(result.Errors) > firstError {
+		configPath := ""
+		if opts != nil {
+			configPath = opts.configPath
+		}
+		if next := windowsEnterpriseStandaloneNextStep(
+			result.Action,
+			configPath,
+			report.TransactionPending,
+			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
+			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
+		); next != "" {
+			result.Errors[firstError].Message += " " + next
+		}
+	}
 	addWindowsEnterpriseUserRegistrationWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+}
+
+// addWindowsEnterpriseRecoveryGatewayWarnings records which gateway a
+// pending-transaction recovery ran and why. Ensure can apply the same
+// installer report twice (once when a repair recovers, again as the final
+// result), so an identical warning is recorded once.
+func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if result == nil || report == nil {
+		return
+	}
+	for _, warning := range windowsEnterpriseRecoveryGatewayWarnings(
+		decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
+		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
+	) {
+		duplicate := false
+		for _, existing := range result.Warnings {
+			if existing == warning {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			result.AddWarning(warning.Code, warning.Message)
+		}
+	}
+}
+
+func windowsEnterpriseBoundedDiagnostic(message string) string {
+	if len(message) > windowsEnterpriseDiagnosticMax {
+		return message[:windowsEnterpriseDiagnosticMax] + "..."
+	}
+	return message
 }
 
 // windowsEnterpriseUserRegistrationListMax bounds how many connector/SID
@@ -921,6 +986,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
+	// A repair that recovers a pending transaction may be followed by an
+	// install or upgrade whose report replaces this one; keep its record of
+	// the gateway recovery ran.
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
 	if allowRetry && plan.Action == "install" && windowsEnterpriseInstallLostRace(report) {
 		result.AddWarning("concurrent_install", "another lifecycle installed this host while ensure waited for the lifecycle lock; ensure re-planned from a fresh status")
 		return true, nil
