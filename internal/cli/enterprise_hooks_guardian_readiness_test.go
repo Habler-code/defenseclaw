@@ -749,3 +749,38 @@ func TestGuardianWaitingWriteFailureWithdrawsReady(t *testing.T) {
 		t.Fatalf("failed retraction over a directory logged %q", log.String())
 	}
 }
+
+// The watch loop's refresher keeps a published ready fresh only while the
+// pass keeps finishing targets, so the reconcile pass itself has to note its
+// progress when it reaches each target and after the last one.
+func TestReconcileNotesProgressAtEveryTarget(t *testing.T) {
+	stubSignInIsolationReconcile(t)
+	unset := time.Unix(0, 0)
+	progress := newEnterpriseHookReconcileProgress(unset)
+	lastNoted := func() time.Time {
+		progress.mu.Lock()
+		defer progress.mu.Unlock()
+		return progress.last
+	}
+	installs := 0
+	runSignInIsolationReconcileWithOptions(t, []signInIsolationTarget{
+		{name: "alice", sid: "S-1-5-21-1000-2000-3000-1101", connector: "codex"},
+		{name: "bob", sid: "S-1-5-21-1000-2000-3000-1102", connector: "codex"},
+		{name: "carol", sid: "S-1-5-21-1000-2000-3000-1103", connector: "codex"},
+	}, signInIsolationOptions{
+		ctx: withEnterpriseHookReconcileProgress(context.Background(), progress),
+		observeInstallContext: func(context.Context) {
+			installs++
+			if lastNoted().Equal(unset) {
+				t.Errorf("install %d started with no progress noted since the previous target", installs)
+			}
+			progress.note(unset)
+		},
+	})
+	if installs != 3 {
+		t.Fatalf("installs = %d, want one per target", installs)
+	}
+	if lastNoted().Equal(unset) {
+		t.Fatal("the pass noted no progress after its last target")
+	}
+}

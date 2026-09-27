@@ -44,6 +44,8 @@ type signInIsolationOptions struct {
 	// observeInstallContext, when set, sees the context of every stubbed
 	// per-target install and verification.
 	observeInstallContext func(context.Context)
+	// ctx, when set, is the context the reconcile pass runs under.
+	ctx context.Context
 }
 
 type signInIsolationPublication struct {
@@ -195,7 +197,11 @@ func runSignInIsolationReconcileWithOptions(
 		return nil
 	}
 
-	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	ctx := options.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	run, err := runEnterpriseHookReconcileOnce(ctx)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
