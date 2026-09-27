@@ -580,8 +580,9 @@ enrollment authority; and the guardian is the per-user repair authority.
    install, upgrade, and repair actions, and their gateway `start`, `restart`,
    and foreground run all refuse. A per-user gateway from such a release that
    is already running when the service is registered checks every 5 seconds
-   and stops itself, and a Setup rollback after that point restores the
-   earlier files but leaves the per-user gateway stopped. A production
+   and stops itself. When Setup rolls back or completes an interrupted
+   per-user operation after that point, it leaves the per-user gateway
+   stopped. A production
    deployment also owns
    `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1`. It never
    changes a value that Group Policy or another administrator already set, and

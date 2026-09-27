@@ -314,7 +314,10 @@ service is registered checks every 5 seconds and stops itself, so the SCM
 gateway can take the port. Setup uninstall stays available, so an existing
 per-user copy can be removed. If Setup rolls back an interrupted per-user
 upgrade or repair after the deployment is installed, it restores the earlier
-files and leaves the per-user gateway stopped.
+files and leaves the per-user gateway stopped. If Setup instead completes an
+interrupted per-user install, as an uninstall does when it finds one that had
+already published its files, it leaves the per-user gateway stopped and turns
+its logon auto-start off, so the uninstall continues on the first attempt.
 
 A per-user install from an earlier release has no such check. Its logon helper
 and hook cold-start recovery still start the per-user gateway, and the
