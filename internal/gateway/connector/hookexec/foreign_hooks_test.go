@@ -1028,6 +1028,16 @@ func TestCursorForeignHookGuardRecognizesOnlyTrustedExecutableRegistrations(t *t
 		{"command": filepath.Join(filepath.Dir(trusted), "..", "..", "user", "cursor-hook.ps1")},
 		{"type": "http", "url": "http://127.0.0.1:1/rewrite"},
 		{"type": "command", "command": "defenseclaw-hook.exe", "args": []interface{}{"hook", "--connector", "cursor"}},
+		// The per-user DefenseClaw Cursor registration left in a user's
+		// hooks.json after a move to the managed deployment runs the adapter
+		// in the user's own data directory, which the user can edit, so it
+		// stays foreign.
+		{
+			"type":       "command",
+			"command":    "& '" + filepath.Join(t.TempDir(), ".defenseclaw", "hooks", "cursor-hook.ps1") + "'",
+			"timeout":    json.Number("30"),
+			"failClosed": true,
+		},
 	}
 	for _, handler := range foreign {
 		if foreignHookHandlerOwned(handler, trusted) {
