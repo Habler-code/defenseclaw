@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,11 +119,37 @@ def _write_bridge_publication(
     lock_path.chmod(0o600)
 
 
+def _bridge_listener_check_js(repository_root: Path) -> str:
+    """Render DC_LISTENER_CHECK the way setup does (hookListenerCheckProgram
+    escaped by javaScriptStringContent, that is Go's encoding/json)."""
+
+    connector_dir = repository_root / "internal" / "gateway" / "connector"
+    helper = (connector_dir / "hooks" / "_hardening.sh").read_text(encoding="utf-8")
+    begin_marker = "# --- BEGIN defenseclaw gateway listener check ---\n"
+    end_marker = "# --- END defenseclaw gateway listener check ---\n"
+    assert helper.count(begin_marker) == 1 and helper.count(end_marker) == 1
+    begin = helper.index(begin_marker)
+    end = helper.index(end_marker, begin) + len(end_marker)
+    go_source = (connector_dir / "hook_listener_check.go").read_text(encoding="utf-8")
+    call = re.search(r'const hookListenerCheckCall = `([^`]*)` \+ "\\n"', go_source)
+    assert call is not None
+    program = helper[begin:end] + call.group(1) + "\n"
+    assert program.isascii()
+    return (
+        json.dumps(program)[1:-1]
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def _render_bridge_publication(
     repository_root: Path,
     data_dir: Path,
     *,
     connector: str,
+    managed: bool = False,
+    listener_check_js: str | None = None,
 ) -> bytes:
     template_name = {
         "amp": "amp-plugin.ts",
@@ -139,8 +166,15 @@ def _render_bridge_publication(
         template.replace("{{.APIAddr}}", "127.0.0.1:18970")
         .replace("{{.TokenFileJS}}", token_path_js)
         .replace("{{.FailMode}}", "closed")
+        .replace(
+            "{{.ListenerCheckJS}}",
+            _bridge_listener_check_js(repository_root)
+            if listener_check_js is None
+            else listener_check_js,
+        )
+        .replace("{{if .Managed}}1{{end}}", "1" if managed else "")
     )
-    assert "{{." not in rendered
+    assert "{{" not in rendered
     return rendered.encode()
 
 
@@ -439,6 +473,58 @@ def test_registered_connector_bridge_requires_exact_published_bytes(
 
     assert not self_identity._looks_like_bridge_file(str(target))
     assert first_party_self_reason(target) is None
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_path"),
+    [
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
+def test_registered_connector_bridge_pins_the_listener_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+) -> None:
+    # The bridge runs DC_LISTENER_CHECK with /bin/sh before every request, so
+    # its rendered value is pinned; DC_MANAGED_HOOK is "" or "1".
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+
+    for managed in (False, True):
+        published = _render_bridge_publication(
+            repository_root, data_dir, connector=connector, managed=managed
+        )
+        _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+        assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
+
+    check = _bridge_listener_check_js(repository_root)
+    for changed in (check + "true\\n", check.replace("exit 1", "exit 0", 1), ""):
+        assert changed != check
+        published = _render_bridge_publication(
+            repository_root, data_dir, connector=connector, listener_check_js=changed
+        )
+        _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+        assert first_party_self_reason(target) is None
+
+    published = _render_bridge_publication(repository_root, data_dir, connector=connector).replace(
+        b'DC_MANAGED_HOOK = ""', b'DC_MANAGED_HOOK = "0"'
+    )
+    _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+    assert first_party_self_reason(target) is None
+
+
+def test_bridge_listener_check_digest_matches_gateway_source() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    rendered = _bridge_listener_check_js(repository_root).encode()
+
+    assert hashlib.sha256(rendered).hexdigest() == self_identity._BRIDGE_LISTENER_CHECK_DIGEST
 
 
 @pytest.mark.parametrize(

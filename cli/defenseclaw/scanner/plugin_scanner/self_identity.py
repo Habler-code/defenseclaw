@@ -65,9 +65,16 @@ _BRIDGE_PUBLICATION_SCHEMA = {
     },
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
-    "amp": "b33193cbc307ac96de1ea1225e45de6eda9abd3043b848051c8fbab58a57924c",
-    "opencode": "92812c1b93005892875db052f751244fe020ea6b7506ecf43e1e778071902e5d",
+    "amp": "cab8d09f3f055b9bfc1fb01644a8f8d2753b86856ba3840448318c577f00e88b",
+    "opencode": "c6b998a222e4de675c223f0928a3a06ecb8f949e52bd39be1b97524b0909a035",
 }
+# SHA-256 of the gateway listener-owner check as setup renders it into a
+# bridge's DC_LISTENER_CHECK line: the listener check block of
+# internal/gateway/connector/hooks/_hardening.sh plus its call, as JavaScript
+# string content escaped the way Go's encoding/json escapes it. The bridge runs
+# that program with /bin/sh, so it is pinned like the template bytes instead of
+# being accepted as a rendered value.
+_BRIDGE_LISTENER_CHECK_DIGEST = "36cf2a26c08be9065f973e24b3ceec2b5dd876002b02a853202c4b57d07931db"
 _BRIDGE_DYNAMIC_LINES = {
     "amp": (
         (
@@ -88,6 +95,18 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"\n',
             "mode",
         ),
+        (
+            b'const DC_LISTENER_CHECK = "',
+            b'"\n',
+            b'const DC_LISTENER_CHECK = "{{.ListenerCheckJS}}"\n',
+            "listener",
+        ),
+        (
+            b'const DC_MANAGED_HOOK = "',
+            b'"\n',
+            b'const DC_MANAGED_HOOK = "{{if .Managed}}1{{end}}"\n',
+            "managed",
+        ),
     ),
     "opencode": (
         (
@@ -107,6 +126,18 @@ _BRIDGE_DYNAMIC_LINES = {
             b'"; // "open" or "closed"\n',
             b'const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"\n',
             "mode",
+        ),
+        (
+            b'const DC_LISTENER_CHECK = "',
+            b'";\n',
+            b'const DC_LISTENER_CHECK = "{{.ListenerCheckJS}}";\n',
+            "listener",
+        ),
+        (
+            b'const DC_MANAGED_HOOK = "',
+            b'";\n',
+            b'const DC_MANAGED_HOOK = "{{if .Managed}}1{{end}}";\n',
+            "managed",
         ),
     ),
 }
@@ -323,6 +354,10 @@ def _valid_bridge_dynamic_value(
         return _valid_bridge_api_address(value)
     if kind == "mode":
         return value in {b"open", b"closed"}
+    if kind == "listener":
+        return hashlib.sha256(value).hexdigest() == _BRIDGE_LISTENER_CHECK_DIGEST
+    if kind == "managed":
+        return value in {b"", b"1"}
     if kind != "token":
         return False
     try:
