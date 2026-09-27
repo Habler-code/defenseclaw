@@ -68,6 +68,13 @@ try {
                 -Name Test-DefenseClawSourceDescriptorPublishesReplacement `
                 -CommandType Function
         ).ScriptBlock
+        # The stale IPC socket cases need the real per-item reparse check
+        # that Set-DefenseClawPathAcl and Assert-DefenseClawPathAcl run.
+        $script:HarnessRealNoReparsePath = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Assert-DefenseClawNoReparsePath `
+                -CommandType Function
+        ).ScriptBlock
 
         function Assert-Harness {
             param(
@@ -2840,6 +2847,14 @@ targets:
             if ([bool]$script:HarnessState.active_references) {
                 throw 'retirement ACL strip preceded verified reference removal'
             }
+            # The real pass refuses a reparse point on every item, so a stale
+            # IPC socket must already be gone.
+            $staleSocketPath = [string]$Layout.ManagedIPCSocketPath
+            if (-not [string]::IsNullOrWhiteSpace($staleSocketPath) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $staleSocketPath)) {
+                throw 'retirement ACL pass reached a stale managed IPC socket'
+            }
             $script:HarnessState.events.Add('self-strip-users-rx')
         }
         function script:Publish-DefenseClawSelfUninstallReceipt {
@@ -2900,6 +2915,91 @@ targets:
             return [int64]9876
         }
 
+        # A gateway that stops uncleanly leaves its socket file behind. Where
+        # the engine can bind AF_UNIX (PowerShell 7) the fixture is a real
+        # socket file, which Windows backs with an NTFS reparse point;
+        # otherwise a plain file stands in for it.
+        function New-HarnessStaleIPCSocket {
+            param([Parameter(Mandatory)][string]$Path)
+            $directory = [IO.Path]::GetDirectoryName($Path)
+            Microsoft.PowerShell.Management\New-Item `
+                -ItemType Directory `
+                -Path $directory `
+                -Force | Microsoft.PowerShell.Core\Out-Null
+            if ($null -eq ('System.Net.Sockets.UnixDomainSocketEndPoint' -as [type])) {
+                [IO.File]::WriteAllText($Path, '', [Text.UTF8Encoding]::new($false))
+                return 'file'
+            }
+            # .NET deletes the socket file when a bound socket is disposed.
+            # Bind it in a child process and terminate that process instead,
+            # which is the unclean stop this fixture reproduces.
+            $binder = Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'bind-stale-ipc-socket.ps1'
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $binder `
+                    -PathType Leaf)) {
+                [IO.File]::WriteAllText(
+                    $binder,
+                    (
+                        "param([string]`$Directory, [string]`$Name)`n" +
+                        "`$socket = [Net.Sockets.Socket]::new(" +
+                        "[Net.Sockets.AddressFamily]::Unix, " +
+                        "[Net.Sockets.SocketType]::Stream, " +
+                        "[Net.Sockets.ProtocolType]::Unspecified)`n" +
+                        "[Environment]::CurrentDirectory = `$Directory`n" +
+                        "`$socket.Bind(" +
+                        "[Net.Sockets.UnixDomainSocketEndPoint]::new(`$Name))`n" +
+                        "Start-Sleep -Seconds 300`n"
+                    ),
+                    [Text.UTF8Encoding]::new($false)
+                )
+            }
+            $startInfo = [Diagnostics.ProcessStartInfo]::new(
+                (Microsoft.PowerShell.Management\Get-Process -Id $PID).Path
+            )
+            $startInfo.UseShellExecute = $false
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            foreach ($argument in @(
+                '-NoLogo',
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                $binder,
+                '-Directory',
+                $directory,
+                '-Name',
+                [IO.Path]::GetFileName($Path)
+            )) {
+                $startInfo.ArgumentList.Add([string]$argument)
+            }
+            $binderProcess = [Diagnostics.Process]::Start($startInfo)
+            try {
+                $deadline = [DateTime]::UtcNow.AddSeconds(60)
+                while (-not [IO.File]::Exists($Path) -and
+                    -not $binderProcess.HasExited -and
+                    [DateTime]::UtcNow -lt $deadline) {
+                    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 100
+                }
+            }
+            finally {
+                if (-not $binderProcess.HasExited) {
+                    $binderProcess.Kill()
+                }
+                [void]$binderProcess.WaitForExit(30000)
+                $binderProcess.Dispose()
+            }
+            if (-not [IO.File]::Exists($Path) -or
+                ([IO.File]::GetAttributes($Path) -band
+                    [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                throw 'stale AF_UNIX socket fixture left no reparse point'
+            }
+            return 'af_unix'
+        }
+
         $uninstallResults = [Collections.Generic.List[object]]::new()
         function Invoke-HarnessUninstallCase {
             param(
@@ -2913,7 +3013,8 @@ targets:
                 [bool]$InitialReferences = $true,
                 [bool]$AlreadyUninstalled = $false,
                 [bool]$Purge = $false,
-                [bool]$SelfUninstall = $false
+                [bool]$SelfUninstall = $false,
+                [bool]$StaleIPCSocket = $false
             )
             $root = New-HarnessCaseRoot `
                 -Parent $TestRoot `
@@ -2924,6 +3025,11 @@ targets:
                 '{}',
                 [Text.UTF8Encoding]::new($false)
             )
+            $staleSocketKind = ''
+            if ($StaleIPCSocket) {
+                $staleSocketKind = New-HarnessStaleIPCSocket `
+                    -Path $layout.ManagedIPCSocketPath
+            }
             if ($PreexistingPrepared) {
                 Write-HarnessJournal `
                     -Path $layout.ManagedHooksTeardownJournalPath `
@@ -3048,6 +3154,21 @@ targets:
                         ) -ge 0
                     ) `
                     -Message "$Name did not run managed IPC permission cleanup"
+                if ($StaleIPCSocket) {
+                    # The retirement ACL mock refuses a surviving socket, and
+                    # the removal refuses to run while the gateway exists.
+                    Assert-Harness `
+                        -Condition (
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath $layout.ManagedIPCSocketPath) -and
+                            $script:HarnessState.events.IndexOf(
+                                'self-strip-users-rx'
+                            ) -gt $script:HarnessState.events.IndexOf(
+                                'remove-service:DefenseClawGateway'
+                            )
+                        ) `
+                        -Message "$Name did not remove the stale $staleSocketKind IPC socket after gateway deletion"
+                }
             }
 
             if ($AlreadyUninstalled) {
@@ -3233,6 +3354,7 @@ targets:
                 no_surviving_reference_before_delete = (
                     -not [bool]$script:HarnessState.reheal_observed
                 )
+                stale_ipc_socket = $staleSocketKind
                 failure = $failureMessage
             })
         }
@@ -6436,6 +6558,17 @@ targets:
             -CrashAt '' `
             -ExpectSuccess:$true
         Invoke-HarnessUninstallCase `
+            -Name 'stale-ipc-socket-before-retirement-acls' `
+            -CrashAt '' `
+            -ExpectSuccess:$true `
+            -StaleIPCSocket:$true
+        Invoke-HarnessUninstallCase `
+            -Name 'self-uninstall-stale-ipc-socket' `
+            -CrashAt '' `
+            -ExpectSuccess:$true `
+            -SelfUninstall:$true `
+            -StaleIPCSocket:$true
+        Invoke-HarnessUninstallCase `
             -Name 'crash-after-complete-retry-retirement' `
             -CrashAt '' `
             -ExpectSuccess:$true `
@@ -8417,6 +8550,175 @@ targets:
             -Message "committed install-tree retirement refused an installed payload: $retirementFailure"
         $layoutInventoryResults.Add([pscustomobject]@{
             name = 'retirement-state-accepts-installed-payload'
+        })
+
+        # A socket left by an unclean gateway stop fails the per-item reparse
+        # check of the retirement ACL pass, so uninstall deletes exactly that
+        # leaf first, and only once the gateway service is gone.
+        $script:HarnessInventoryGatewayExists = $false
+        function script:Test-DefenseClawServiceExists {
+            param([Parameter(Mandatory)][string]$Name)
+            return [bool]$script:HarnessInventoryGatewayExists
+        }
+        $staleLayout = New-HarnessInventoryLayout `
+            -Root (Microsoft.PowerShell.Management\Join-Path $TestRoot 'inv-stale')
+        $staleKind = New-HarnessStaleIPCSocket `
+            -Path $staleLayout.ManagedIPCSocketPath
+        $staleItemFailure = ''
+        try {
+            & $script:HarnessRealNoReparsePath `
+                -Path $staleLayout.ManagedIPCSocketPath
+        }
+        catch {
+            $staleItemFailure = [string]$_.Exception.Message
+        }
+        if ($staleKind -ceq 'af_unix') {
+            Assert-Harness `
+                -Condition ($staleItemFailure -like '*reparse points are not allowed*') `
+                -Message "stale AF_UNIX socket passed the per-item reparse check: $staleItemFailure"
+        }
+        $script:HarnessInventoryGatewayExists = $true
+        $liveGatewayFailure = ''
+        try {
+            [void](Remove-DefenseClawStaleManagedIPCSocket `
+                -Layout $staleLayout `
+                -GatewayServiceName 'DefenseClawGateway')
+        }
+        catch {
+            $liveGatewayFailure = [string]$_.Exception.Message
+        }
+        $script:HarnessInventoryGatewayExists = $false
+        Assert-Harness `
+            -Condition (
+                $liveGatewayFailure -like '*while the gateway service exists*' -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $staleLayout.ManagedIPCSocketPath)
+            ) `
+            -Message "stale IPC socket removal ran while the gateway service existed: $liveGatewayFailure"
+        $staleRemoved = Remove-DefenseClawStaleManagedIPCSocket `
+            -Layout $staleLayout `
+            -GatewayServiceName 'DefenseClawGateway'
+        Assert-Harness `
+            -Condition (
+                [bool]$staleRemoved -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $staleLayout.ManagedIPCSocketPath) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $staleLayout.ManagedIPCDirectory `
+                    -PathType Container)
+            ) `
+            -Message 'stale IPC socket removal did not delete exactly the socket leaf'
+        foreach ($item in @(
+            Microsoft.PowerShell.Management\Get-ChildItem `
+                -LiteralPath $staleLayout.InstallRoot `
+                -Recurse `
+                -Force
+        )) {
+            & $script:HarnessRealNoReparsePath -Path $item.FullName
+        }
+        $staleRepeat = Remove-DefenseClawStaleManagedIPCSocket `
+            -Layout $staleLayout `
+            -GatewayServiceName 'DefenseClawGateway'
+        Assert-Harness `
+            -Condition (-not [bool]$staleRepeat) `
+            -Message 'stale IPC socket removal reported a removal with no socket present'
+
+        # A directory at the socket path is not a socket; leave it for the
+        # inventory checks to refuse.
+        $socketDirectoryLayout = New-HarnessInventoryLayout `
+            -Root (Microsoft.PowerShell.Management\Join-Path $TestRoot 'inv-sockdir')
+        Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $socketDirectoryLayout.ManagedIPCSocketPath `
+            -Force | Microsoft.PowerShell.Core\Out-Null
+        $socketDirectoryRemoved = Remove-DefenseClawStaleManagedIPCSocket `
+            -Layout $socketDirectoryLayout `
+            -GatewayServiceName 'DefenseClawGateway'
+        Assert-Harness `
+            -Condition (
+                -not [bool]$socketDirectoryRemoved -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $socketDirectoryLayout.ManagedIPCSocketPath `
+                    -PathType Container)
+            ) `
+            -Message 'stale IPC socket removal deleted a directory at the socket path'
+
+        # Deleting the leaf removes a link itself and never its target.
+        $socketLinkLayout = New-HarnessInventoryLayout `
+            -Root (Microsoft.PowerShell.Management\Join-Path $TestRoot 'inv-socklink')
+        $socketLinkTarget = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'inv-socklink-target.txt'
+        [IO.File]::WriteAllText(
+            $socketLinkTarget,
+            'keep',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $socketLinkCase = 'unavailable'
+        $socketLinkCreated = $false
+        try {
+            Microsoft.PowerShell.Management\New-Item `
+                -ItemType SymbolicLink `
+                -Path $socketLinkLayout.ManagedIPCSocketPath `
+                -Value $socketLinkTarget `
+                -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
+            $socketLinkCreated = $true
+        }
+        catch {
+            $socketLinkCreated = $false
+        }
+        if ($socketLinkCreated) {
+            $socketLinkRemoved = Remove-DefenseClawStaleManagedIPCSocket `
+                -Layout $socketLinkLayout `
+                -GatewayServiceName 'DefenseClawGateway'
+            Assert-Harness `
+                -Condition (
+                    [bool]$socketLinkRemoved -and
+                    -not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $socketLinkLayout.ManagedIPCSocketPath) -and
+                    [IO.File]::ReadAllText($socketLinkTarget) -ceq 'keep'
+                ) `
+                -Message 'stale IPC socket removal followed a link at the socket path'
+            $socketLinkCase = 'exercised'
+        }
+        $layoutInventoryResults.Add([pscustomobject]@{
+            name = 'stale-ipc-socket-removed-once-gateway-is-gone'
+            socket_kind = $staleKind
+            link_case = $socketLinkCase
+        })
+
+        # Fresh-install root cleanup exempts the same leaf for InstallRoot
+        # and then removes the tree recursively.
+        $freshLayout = New-HarnessInventoryLayout `
+            -Root (Microsoft.PowerShell.Management\Join-Path $TestRoot 'inv-fresh')
+        $freshKind = New-HarnessStaleIPCSocket `
+            -Path $freshLayout.ManagedIPCSocketPath
+        $freshStrictFailure = ''
+        try {
+            Assert-DefenseClawManagedTreeNoReparse -Root $freshLayout.InstallRoot
+        }
+        catch {
+            $freshStrictFailure = [string]$_.Exception.Message
+        }
+        if ($freshKind -ceq 'af_unix') {
+            Assert-Harness `
+                -Condition ($freshStrictFailure -like '*managed tree contains a reparse point*') `
+                -Message "strict tree check accepted a stale AF_UNIX socket: $freshStrictFailure"
+        }
+        Assert-DefenseClawManagedTreeNoReparse `
+            -Root $freshLayout.InstallRoot `
+            -AllowAFUnixSocketAt $freshLayout.ManagedIPCSocketPath
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $freshLayout.InstallRoot `
+            -Recurse `
+            -Force
+        Assert-Harness `
+            -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $freshLayout.InstallRoot)) `
+            -Message 'install tree with a stale IPC socket survived recursive removal'
+        $layoutInventoryResults.Add([pscustomobject]@{
+            name = 'fresh-install-root-cleanup-exempts-stale-ipc-socket'
+            socket_kind = $freshKind
         })
 
         return [pscustomobject]@{

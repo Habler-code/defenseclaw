@@ -10911,7 +10911,18 @@ function Complete-DefenseClawInstallRollbackIntent {
             -GatewayServiceSID $rollbackGatewaySID `
             -AllowPostManagedAcl:($creationState -ceq 'canonical' -and
                 $transactionAuthorityBound -and $serviceSIDBound)
-        Assert-DefenseClawManagedTreeNoReparse -Root $path
+        # A gateway that stopped uncleanly during the failed install can
+        # leave its AF_UNIX socket, an NTFS reparse point, in the IPC
+        # directory under InstallRoot. Exempt exactly that leaf; the
+        # recursive removal deletes the reparse point itself.
+        $socketExemption = if ([string]$claim[0] -ceq 'InstallRoot') {
+            [string]$Layout.ManagedIPCSocketPath
+        }
+        else {
+            ''
+        }
+        Assert-DefenseClawManagedTreeNoReparse -Root $path `
+            -AllowAFUnixSocketAt $socketExemption
         $quarantineAcl = New-DefenseClawCanonicalPathAcl `
             -IsDirectory $true `
             -Kind AdminDirectory `
@@ -10954,11 +10965,13 @@ function Complete-DefenseClawInstallRollbackIntent {
                 0
             )) `
             -Expected $quarantineAcl
-        Assert-DefenseClawManagedTreeNoReparse -Root $path
+        Assert-DefenseClawManagedTreeNoReparse -Root $path `
+            -AllowAFUnixSocketAt $socketExemption
         Remove-DefenseClawManagedTree `
             -Path $path `
             -RequiredBase ([string]$claim[3]) `
-            -Label ([string]$claim[0])
+            -Label ([string]$claim[0]) `
+            -AllowAFUnixSocketAt $socketExemption
         if ($null -ne
             $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
                 $path
@@ -16983,6 +16996,50 @@ function Assert-DefenseClawManagedTreeNoReparse {
     }
 }
 
+function Remove-DefenseClawStaleManagedIPCSocket {
+    # The gateway deletes its AF_UNIX socket when it stops cleanly. After an
+    # unclean stop the socket file stays at ManagedIPCSocketPath, and Windows
+    # backs it with an NTFS reparse point. The install-tree retirement ACL
+    # pass and the retirement checks run the no-reparse check on every item,
+    # so uninstall deletes that exact leaf once the gateway service is gone.
+    # Only a non-directory entry at the exact socket path is deleted.
+    # File.Delete removes the reparse point itself and never follows it. A
+    # directory at that path is left for the inventory checks to refuse.
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if ([string]::IsNullOrWhiteSpace([string]$Layout.ManagedIPCSocketPath)) {
+        throw 'managed IPC socket path is not configured'
+    }
+    $socket = [IO.Path]::GetFullPath(
+        [string]$Layout.ManagedIPCSocketPath
+    ).TrimEnd('\')
+    try {
+        # GetAttributes reads the directory entry without opening or
+        # following a reparse point.
+        $attributes = [IO.File]::GetAttributes($socket)
+    }
+    catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+        return $false
+    }
+    if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+        return $false
+    }
+    if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
+        throw "refusing to remove the managed IPC socket while the gateway service exists: $GatewayServiceName"
+    }
+    Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($socket))
+    [IO.File]::Delete($socket)
+    try {
+        [void][IO.File]::GetAttributes($socket)
+    }
+    catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+        return $true
+    }
+    throw "stale managed IPC socket survived removal: $socket"
+}
+
 function Set-DefenseClawPreservedStateAcls {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -21551,6 +21608,12 @@ function Invoke-DefenseClawUninstallLifecycle {
         Set-DefenseClawPreservedStateAcls `
             -Layout $Layout `
             -GatewayServiceSID $gatewaySID
+        # Every managed service is deleted now. A socket still at the
+        # managed IPC path was left by an unclean gateway stop, and the
+        # retirement ACL pass refuses reparse points on every item.
+        [void](Remove-DefenseClawStaleManagedIPCSocket `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName)
         Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout
         if ($null -ne $selfUninstallCallerIdentity) {
             $selfUninstallReceipt =

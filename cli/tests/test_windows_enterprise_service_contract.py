@@ -2823,6 +2823,46 @@ def test_retired_install_tree_allowlist_covers_every_bin_payload() -> None:
         assert f"'bin\\{payload}'" in allowlist, payload
 
 
+def test_uninstall_removes_stale_ipc_socket_before_retirement_acls() -> None:
+    module = read(MODULE)
+    helper = module[
+        module.index("function Remove-DefenseClawStaleManagedIPCSocket") : module.index(
+            "function Set-DefenseClawPreservedStateAcls"
+        )
+    ]
+    # Only a non-directory entry at the exact socket path, and only once the
+    # gateway service is gone.
+    assert "[IO.FileAttributes]::Directory" in helper
+    service_check = helper.index("Test-DefenseClawServiceExists -Name $GatewayServiceName")
+    parent_check = helper.index("Assert-DefenseClawNoReparsePath", service_check)
+    delete = helper.index("[IO.File]::Delete($socket)", parent_check)
+    assert "stale managed IPC socket survived removal" in helper[delete:]
+    lifecycle = module[
+        module.index("function Invoke-DefenseClawUninstallLifecycle") : module.index(
+            "function Invoke-DefenseClawReconcileLifecycle"
+        )
+    ]
+    gateway_removal = lifecycle.index("Remove-DefenseClawService -Name $GatewayServiceName")
+    socket_removal = lifecycle.index("Remove-DefenseClawStaleManagedIPCSocket `", gateway_removal)
+    retirement_acls = lifecycle.index("Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout", socket_removal)
+    assert lifecycle.index("Complete-DefenseClawTransaction -SnapshotPath $snapshot", retirement_acls)
+
+
+def test_fresh_install_root_cleanup_exempts_only_the_install_root_ipc_socket() -> None:
+    module = read(MODULE)
+    cleanup = module[
+        module.index("function Complete-DefenseClawInstallRollbackIntent") : module.index(
+            "function Set-DefenseClawInstallRollbackIntentCommitState"
+        )
+    ]
+    assert "$socketExemption = if ([string]$claim[0] -ceq 'InstallRoot') {" in cleanup
+    exempt_check = "Assert-DefenseClawManagedTreeNoReparse -Root $path `\n            -AllowAFUnixSocketAt $socketExemption"
+    assert cleanup.count(exempt_check) == 2
+    assert cleanup.count("Assert-DefenseClawManagedTreeNoReparse -Root $path\n") == 0
+    removal = cleanup[cleanup.index("Remove-DefenseClawManagedTree `") :].split("\n\n", 1)[0]
+    assert "-AllowAFUnixSocketAt $socketExemption" in removal
+
+
 def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -> None:
     harness = read(HARNESS)
     proof = harness[
