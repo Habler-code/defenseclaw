@@ -2399,8 +2399,8 @@ function Get-DefenseClawCertificateCommonName {
     # PrintableString, IA5String, or BMPString. GetNameInfo(SimpleName) is
     # not used: for a subject without a CN, Windows returns its OU, O, or
     # e-mail address instead, so OU=Cisco Systems, Inc. would pass as the
-    # publisher. The CMID broker applies the same rule
-    # (internal/managed/cmidbroker/library_trust.go).
+    # publisher. The Go signer checks, the CMID broker and the Secure Client
+    # IPC peer check, apply the same rule (internal/authenticode/subject.go).
     param(
         [Parameter(Mandatory)]
         [Security.Cryptography.X509Certificates.X509Certificate2]$Certificate

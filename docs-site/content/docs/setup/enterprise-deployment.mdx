@@ -1426,14 +1426,26 @@ script. Approve only handlers whose command is an absolute path to an
 executable that standard users cannot modify. The denial shown to the user
 includes the handler's command so it can be reviewed before approval; the
 message returned to the agent leaves it out. An endpoint that used per-user
-DefenseClaw setup for Cursor before it moved to the managed deployment still
-has that setup's entry in `%USERPROFILE%\.cursor\hooks.json`: a command that
-runs `cursor-hook.ps1` from the user's `.defenseclaw\hooks` folder, or
-`defenseclaw.exe hook --connector cursor` from earlier releases. The managed
-deployment does not remove it, and the hook denies it like any other
-unapproved user-level hook. Run the per-user teardown
-(`defenseclaw setup guardrail --disable`) as that user before installing the
-enterprise deployment, or delete those entries from the file afterwards. Do
+DefenseClaw setup for Cursor before it moved to the managed deployment has
+that setup's entries in `%USERPROFILE%\.cursor\hooks.json`: a command that
+runs `cursor-hook.ps1` from the user's `.defenseclaw\hooks` folder, or an
+older direct `defenseclaw-hook.exe` or `defenseclaw-gateway.exe`
+`hook --connector cursor` command from one of the user's DefenseClaw folders
+(`%LOCALAPPDATA%\DefenseClaw\HookRuntime`, `%LOCALAPPDATA%\Programs\DefenseClaw\bin`
+or `%USERPROFILE%\.local\bin`). When the guardian installs or repairs Cursor
+for that user, it removes those entries as that user and leaves the rest of
+the file unchanged. It keeps the previous file as
+`hooks.json.defenseclaw-backup` in the same folder and records the removal in
+the guardian log (by default
+`C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs\guardian\hook-guardian.log`).
+If it cannot edit the file, for example
+because the file is a link or is not valid JSON, it leaves the file as it was
+and records a warning in the same log, and the hook denies the entries like
+any other unapproved user-level hook. Endpoints
+moved with an earlier release keep the entries until the guardian next
+installs or repairs Cursor for that user. In either case, run the per-user
+teardown (`defenseclaw setup guardrail --disable`) as that user, or delete
+those entries from the file. `Uninstall` does not put the entries back. Do
 not approve their digests: they run the per-user hook, which the user can
 reconfigure. Earlier releases do not recognize
 the allowlist in the protected Cursor machine state and refuse that state once

@@ -42,7 +42,7 @@ function Get-CiscoSignatureCommonName {
     # e-mail address instead, so OU=Cisco Systems, Inc. would pass as the
     # publisher. The endpoint pins apply the same rule: the lifecycle module
     # (Get-DefenseClawCertificateCommonName), the installer bootstrap, and the
-    # CMID broker (internal/managed/cmidbroker/library_trust.go).
+    # Go signer checks (internal/authenticode/subject.go).
     param(
         [Parameter(Mandatory)]
         [Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
