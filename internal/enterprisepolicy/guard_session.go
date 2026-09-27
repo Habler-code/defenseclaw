@@ -114,6 +114,26 @@ func ForeignHookStateHash(findings []Finding) string {
 	return "sha256:" + sha256Hex([]byte(strings.Join(lines, "\n")))
 }
 
+// isBlockableFinding reports whether a finding is an unapproved hook entry
+// or plugin, as opposed to a source the scan could not verify (a file it
+// cannot read or parse, or a scan limit; see unreadableFinding). An
+// unverifiable source denies the call but does not block the session.
+// Plugin findings name no event, so the reason tells them apart.
+func isBlockableFinding(f Finding) bool {
+	return !f.Allowed && !strings.HasPrefix(f.Reason, "cannot verify")
+}
+
+// hasBlockableFindings reports whether a decision holds a finding that
+// blocks the session.
+func hasBlockableFindings(decision GuardDecision) bool {
+	for _, f := range decision.Findings {
+		if isBlockableFinding(f) {
+			return true
+		}
+	}
+	return false
+}
+
 // SessionUpdate is one hook invocation's input to the session state.
 type SessionUpdate struct {
 	// AccountHome is the account's home from the system account database.
@@ -226,12 +246,14 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		sticky = &process.record
 	}
 	if sticky == nil && session.exists && session.record.Blocked {
-		// Another agent process starting this session (a restarted agent
-		// resuming it) loaded its hooks from the files the scan just
-		// checked, so its snapshot replaces the session's. The process
-		// that held the old hooks stays blocked through its own record.
-		restarted := update.SessionStart && session.record.Process != "" && key.Process != "" &&
-			session.record.Process != key.Process
+		// A session start of another agent process (a restarted agent
+		// resuming the session), or of a process that cannot be named,
+		// loaded its hooks from the files the scan just checked, so its
+		// snapshot replaces the session's. Only the same process continuing
+		// keeps the block. The process that held the old hooks stays
+		// blocked through its own record.
+		sameProcessContinuing := key.Process != "" && session.record.Process == key.Process
+		restarted := update.SessionStart && !sameProcessContinuing
 		if restarted {
 			session.exists = false
 		} else {
@@ -250,7 +272,7 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		return record
 	}
 
-	if decision.Deny {
+	if decision.Deny && hasBlockableFindings(decision) {
 		blocked := func(existing loaded) SessionRecord {
 			record := fresh(existing)
 			record.Blocked, record.BlockedAt = true, stamp
@@ -517,7 +539,23 @@ func pruneSessionRecords(dir string, now time.Time) {
 		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		if now.Sub(info.ModTime()) > sessionRecordTTL {
+		// For blocked records, use the original block time for TTL calculation.
+		// This prevents repeated denials from extending expiry beyond the 7-day window.
+		var expired bool
+		record, recordExists, readErr := readSessionRecord(path)
+		if readErr == nil && recordExists && record.Blocked && record.BlockedAt != "" {
+			// Use BlockedAt for blocked records.
+			if blockedAt, parseErr := time.Parse(time.RFC3339, record.BlockedAt); parseErr == nil {
+				expired = now.Sub(blockedAt) > sessionRecordTTL
+			} else {
+				// BlockedAt is malformed, fall back to mtime.
+				expired = now.Sub(info.ModTime()) > sessionRecordTTL
+			}
+		} else {
+			// Use mtime for non-blocked records or read errors.
+			expired = now.Sub(info.ModTime()) > sessionRecordTTL
+		}
+		if expired {
 			_ = os.Remove(path)
 			continue
 		}

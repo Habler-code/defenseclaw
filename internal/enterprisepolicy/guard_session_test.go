@@ -142,10 +142,11 @@ func TestSessionStateFollowsTheAgentProcess(t *testing.T) {
 	if call := h.apply("s-1", false, GuardDecision{}); !call.Deny {
 		t.Fatalf("a blocked session is reset only at a session start: %+v", call)
 	}
-	// And a session start whose process cannot be named keeps the block.
+	// At a session start with unknown process, the session is reset and
+	// the current scan is trusted (the agent loaded hooks from current files).
 	h.process = ""
-	if start := h.apply("s-1", true, GuardDecision{}); !start.Deny {
-		t.Fatalf("without a process identity the session record holds: %+v", start)
+	if start := h.apply("s-1", true, GuardDecision{}); start.Deny {
+		t.Fatalf("session start with unknown process must trust current scan: %+v", start)
 	}
 }
 
@@ -313,5 +314,89 @@ func TestGatewaySessionStateDeniesWhenRecordCannotBeWrittenOrRead(t *testing.T) 
 	}
 	if decision := ApplyForeignHookSession(update); !decision.Deny || !strings.Contains(decision.Reason, "cannot verify") {
 		t.Fatalf("incomplete gateway record must deny: %+v", decision)
+	}
+}
+
+// A hook file DefenseClaw cannot read or parse denies the call, but it is
+// not a foreign hook: no session block is recorded, and once the file reads
+// cleanly the next call of the same session is allowed.
+func TestSessionStateFileErrorsDoNotBlock(t *testing.T) {
+	h := newSessionHarness(t)
+	h.process = runtime.GOOS + "::111:1"
+	unreadable := GuardDecision{
+		Deny:   true,
+		Reason: "enterprise_foreign_hook_blocked: the project file /r/.claude/settings.json cannot be verified",
+		Findings: []Finding{{
+			Connector: "claudecode",
+			Scope:     ScopeProject,
+			Path:      "/r/.claude/settings.json",
+			Digest:    "unverifiable",
+			Reason:    "cannot verify hook file: file truncated",
+		}},
+	}
+	if result := h.apply("s-1", true, unreadable); !result.Deny {
+		t.Fatalf("an unreadable hook file must deny the call: %+v", result)
+	}
+	record, exists, err := readSessionRecord(SessionPath(h.home, "claudecode", sessionKindSession, "s-1"))
+	if err != nil || !exists {
+		t.Fatalf("the session snapshot must be recorded at session start: exists=%v err=%v", exists, err)
+	}
+	if record.Blocked {
+		t.Fatalf("an unreadable file must not block the session: %+v", record)
+	}
+	if later := h.apply("s-1", false, GuardDecision{}); later.Deny {
+		t.Fatalf("once the file reads cleanly the session must be allowed: %+v", later)
+	}
+}
+
+// An unapproved plugin names no event, and still blocks the session (OpenCode
+// and Amp load plugins once per process).
+func TestSessionStateBlocksForAnUnapprovedPlugin(t *testing.T) {
+	h := newSessionHarness(t)
+	h.process = runtime.GOOS + "::121:1"
+	plugin := GuardDecision{
+		Deny:     true,
+		Reason:   "enterprise_foreign_hook_blocked: the project file /r/.opencode/plugins/x.js added a plugin.",
+		Findings: []Finding{{Connector: "claudecode", Scope: ScopeProject, Path: "/r/.opencode/plugins/x.js", Digest: "dd44", Reason: "plugin"}},
+	}
+	h.apply("s-1", true, plugin)
+	if record := h.record(sessionKindProcess, h.process); !record.Blocked || record.Reason != "plugin" {
+		t.Fatalf("an unapproved plugin must block the agent process: %+v", record)
+	}
+	if later := h.apply("s-1", false, GuardDecision{}); !later.Deny || !strings.Contains(later.Reason, "added a plugin") {
+		t.Fatalf("the process that loaded the plugin must stay blocked: %+v", later)
+	}
+}
+
+// A session start whose agent process cannot be named resets the session:
+// the agent loaded its hooks from the files DefenseClaw just checked.
+func TestSessionStateResetsAtSessionStartWithUnknownProcess(t *testing.T) {
+	h := newSessionHarness(t)
+	h.process = runtime.GOOS + "::222:2"
+	h.apply("s-1", true, sessionDeny("/r/.claude/hooks.json", "bb22"))
+	h.process = ""
+	if result := h.apply("s-1", true, GuardDecision{}); result.Deny {
+		t.Fatalf("a session start without a process identity must trust the current scan: %+v", result)
+	}
+	if record := h.record(sessionKindSession, "s-1"); record.Blocked {
+		t.Fatalf("the session record must be reset at the session start: %+v", record)
+	}
+}
+
+// Repeated denials of a blocked session keep the time of the block.
+func TestSessionStateBlockedAtDoesNotChangeOnRepeatedDenials(t *testing.T) {
+	h := newSessionHarness(t)
+	h.process = runtime.GOOS + "::333:3"
+	h.apply("s-1", true, sessionDeny("/r/.claude/hooks.json", "cc33"))
+	blockedAt := h.record(sessionKindSession, "s-1").BlockedAt
+	if blockedAt == "" {
+		t.Fatal("a blocked session must record when it was blocked")
+	}
+	for i := 0; i < 20; i++ {
+		h.now = h.now.Add(6 * time.Hour)
+		h.apply("s-1", false, GuardDecision{})
+	}
+	if later := h.record(sessionKindSession, "s-1").BlockedAt; later != blockedAt {
+		t.Fatalf("repeated denials must keep the block time: was %s, now %s", blockedAt, later)
 	}
 }
