@@ -2088,6 +2088,25 @@
       "security_note": "Private paired Setup binding only. This is not a public path override and must be accepted only when it names the packaged Setup process above the custody-bound installed launcher."
     },
     {
+      "name": "DEFENSECLAW_IPC_PEERAUTH_HELPER_SOCKET",
+      "category": "test_fixture",
+      "purpose": "Passes the Secure Client IPC socket path to the re-executed test binary that plays the unsigned GUI client in the Windows peer-authentication test.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute named-pipe or socket path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/ipc/peerauth_windows_test.go",
+          "description": "Native Windows peer-authentication helper process; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.11"
+    },
+    {
       "name": "DEFENSECLAW_IPC_SOCKET",
       "category": "runtime_path",
       "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable. Linux and macOS administrators can use managed.socket_path; managed Windows fixes the socket under trusted Program Files for the Cisco Secure Client peer.",
@@ -2513,6 +2532,24 @@
         {
           "location": "cmd/defenseclaw/service_windows_test.go",
           "description": "Anchors the semantic-ledger StateRoot in the guardian-semantic tests"
+        }
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_LISTENER_REASON",
+      "category": "hook_internal",
+      "purpose": "Shell variable, not an environment input. defenseclaw_verify_gateway_listener in the hook hardening helper resets it at the start of every check and, when it refuses to send to the gateway listener, sets it to the reason, which the hook passes to its fail-mode handling. A value inherited from the environment is discarded.",
+      "default": "empty",
+      "accepted_values": [
+        "set by the hook helper; not read as input"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Gateway listener-owner check; the connector hook scripts report its value when they refuse to send"
         }
       ],
       "since": "0.8.11"
@@ -4470,6 +4507,25 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_TEST_FOREIGN_UID",
+      "category": "test_fixture",
+      "purpose": "Names an unprivileged uid that holds a loopback listener in the root-only hook listener-owner test.",
+      "default": "unset",
+      "accepted_values": [
+        "numeric uid of an unprivileged test account",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hook_listener_owner_test.go",
+          "description": "Root-only listener-owner test on disposable hosts; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.11"
+    },
+    {
       "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER",
       "category": "test_fixture",
       "purpose": "Carries the marker used by the authenticated graceful-stop daemon fixture.",
@@ -4602,6 +4658,25 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_OTHER_UID",
+      "category": "test_fixture",
+      "purpose": "Names a second unprivileged uid that must refuse the foreign listener in the root-only hook listener-owner test.",
+      "default": "unset",
+      "accepted_values": [
+        "numeric uid of an unprivileged test account",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hook_listener_owner_test.go",
+          "description": "Root-only listener-owner test on disposable hosts; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.11"
+    },
+    {
       "name": "DEFENSECLAW_TEST_PHASE1_ACTIVE_SEAL_CRASH",
       "category": "test_fixture",
       "purpose": "Injects a process kill after the authenticated POSIX phase-one active manifest is durable but before its digest is committed to the outer recovery journal.",
@@ -4732,6 +4807,63 @@
         {
           "location": "internal/cli/windows_enterprise_payload_test.go",
           "description": "Marker the re-execed staging helper reads to select the restricted-environment payload-staging path under test"
+        }
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_TARGET_UID",
+      "category": "test_fixture",
+      "purpose": "Names the non-root target user for the enterprise hook repair target-worker tests when SUDO_UID is not set.",
+      "default": "unset",
+      "accepted_values": [
+        "numeric non-root uid",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/target_worker_unix_test.go",
+          "description": "Root-only target-worker tests; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_TARGET_WORKER_SWAP",
+      "category": "test_fixture",
+      "purpose": "Tells a target worker started by the repair tests to swap a path for a symlink just before a repair helper changes it, simulating a racing target user. Only the test binary reads it, and only the tests add it to the worker environment allowlist.",
+      "default": "unset",
+      "accepted_values": [
+        "JSON swap description written by the test",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/target_worker_unix_test.go",
+          "description": "Target-worker race fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_UNLISTED_SECRET",
+      "category": "test_fixture",
+      "purpose": "Sentinel set by the target-worker tests to prove that a DEFENSECLAW_* variable missing from the worker allowlist is not passed to the worker.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/target_worker_unix_test.go",
+          "description": "Worker environment allowlist test; never read by production runtime paths"
         }
       ],
       "since": "0.8.11"
