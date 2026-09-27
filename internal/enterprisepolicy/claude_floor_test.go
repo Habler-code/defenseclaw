@@ -134,7 +134,10 @@ func TestClaudeVersionFloorKeepsAnAdministratorValue(t *testing.T) {
 	}{
 		{name: "base file", file: "managed-settings.json"},
 		{name: "later drop-in", file: "managed-settings.d/10-company.json"},
-		{name: "earlier drop-in", file: "managed-settings.d/000-company.json"},
+		{name: "later numbered drop-in", file: "managed-settings.d/000-company.json"},
+		// "00-company.json" sorts before 00-defenseclaw-version-floor.json:
+		// DefenseClaw's drop-in would replace its value, so it is withdrawn.
+		{name: "earlier drop-in", file: "managed-settings.d/00-company.json"},
 		{name: "higher-precedence source", higher: true},
 	}
 	for _, tc := range cases {
@@ -190,6 +193,11 @@ func TestClaudeVersionFloorKeepsAnAdministratorValue(t *testing.T) {
 	}
 }
 
+// A version below the floor is the administrator's choice: it is kept and
+// reported. A value that is not a version is ignored by Claude Code, so it
+// never counts as a floor: in a file that merges before DefenseClaw's
+// drop-in, the drop-in stays (its later value applies) and the administrator
+// file is untouched.
 func TestClaudeVersionFloorReportsBelowFloorAndInvalidValues(t *testing.T) {
 	for _, tc := range []struct {
 		value   string
@@ -198,26 +206,74 @@ func TestClaudeVersionFloorReportsBelowFloorAndInvalidValues(t *testing.T) {
 		note    string
 	}{
 		{value: `"2.1.100"`, below: true, note: "below 2.1.154"},
-		{value: `"latest"`, invalid: true, note: "not a major.minor.patch version"},
-		{value: `5`, invalid: true, note: "not a major.minor.patch version"},
+		{value: `"latest"`, invalid: true, note: "Claude Code ignores it and applies DefenseClaw's value"},
+		{value: `5`, invalid: true, note: "Claude Code ignores it and applies DefenseClaw's value"},
 		{value: `"3.0.0"`, note: "keeps the administrator's value"},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			withHigherSources(t)
 			opts := testOptions(t)
-			writeFile(t, filepath.Join(claudeDir(t, opts), "managed-settings.json"), `{"requiredMinimumVersion": `+tc.value+`}`)
+			base := path.Join(claudeDir(t, opts), "managed-settings.json") // the rooted tree's own join
+			admin := `{"requiredMinimumVersion": ` + tc.value + `}`
+			writeFile(t, base, admin)
 			state := reconcileClaude(t, opts)
 			floor := state.VersionFloor
-			if floor == nil || floor.Owner != VersionFloorOwnerAdministrator || floor.BelowFloor != tc.below || floor.Invalid != tc.invalid {
-				t.Fatalf("floor state: %+v", floor)
-			}
 			if !hasDetail(state, tc.note) || len(floorConflicts(state)) != 0 {
 				t.Fatalf("details %v conflicts %v", state.Details, state.Conflicts)
 			}
+			if readFile(t, base) != admin {
+				t.Fatal("the administrator's file must be untouched")
+			}
+			if tc.invalid {
+				if floor == nil || floor.Owner != VersionFloorOwnerDefenseClaw || floor.Value != "2.1.154" || floor.OverriddenSource != base || floor.Overridden == "" {
+					t.Fatalf("an invalid administrator value merged first must not remove the floor: %+v", floor)
+				}
+				if readFile(t, claudeFloorFile(t, opts)) != wantClaudeFloorBytes {
+					t.Fatal("DefenseClaw's floor drop-in must stay in place")
+				}
+				if verify, err := (claudeTarget{}).Verify(opts); err != nil || len(floorConflicts(verify)) != 0 {
+					t.Fatalf("verify: %v %v", err, verify.Conflicts)
+				}
+				return
+			}
+			if floor == nil || floor.Owner != VersionFloorOwnerAdministrator || floor.BelowFloor != tc.below || floor.Invalid {
+				t.Fatalf("floor state: %+v", floor)
+			}
 			if fileExists(claudeFloorFile(t, opts)) {
-				t.Fatal("an administrator value, even a low or invalid one, is never overridden")
+				t.Fatal("an administrator version, even a low one, is never overridden")
 			}
 		})
+	}
+}
+
+// A value that is not a version in a drop-in that merges after DefenseClaw's
+// replaces the floor, and Claude Code then ignores it: no floor applies.
+// Under enforce and merge that fails verify; DefenseClaw never edits the file.
+func TestClaudeVersionFloorInvalidValueAfterTheDropInFailsVerify(t *testing.T) {
+	withHigherSources(t)
+	opts := testOptions(t)
+	reconcileClaude(t, opts)
+	later := path.Join(claudeDir(t, opts), "managed-settings.d", "10-company.json")
+	admin := `{"requiredMinimumVersion": "latest"}`
+	writeFile(t, later, admin)
+	state := reconcileClaude(t, opts)
+	floor := state.VersionFloor
+	if floor == nil || floor.Owner != VersionFloorOwnerAdministrator || !floor.Invalid || floor.Source != later {
+		t.Fatalf("floor state: %+v", floor)
+	}
+	if fileExists(claudeFloorFile(t, opts)) || readFile(t, later) != admin {
+		t.Fatal("the administrator drop-in wins and stays untouched; DefenseClaw's drop-in is withdrawn")
+	}
+	verify, err := claudeTarget{}.Verify(opts)
+	if err != nil || len(floorConflicts(verify)) != 1 || !hasConflict(verify, "not a major.minor.patch version") || verify.Covered {
+		t.Fatalf("an invalid administrator floor that outranks DefenseClaw's must fail verify: %v %v", err, verify.Conflicts)
+	}
+
+	report := testOptions(t)
+	report.ClaudeVersionFloor = config.ClaudeVersionFloorReport
+	writeFile(t, path.Join(claudeDir(t, report), "managed-settings.d", "10-company.json"), admin)
+	if state := reconcileClaude(t, report); len(floorConflicts(state)) != 0 || !hasDetail(state, "not a major.minor.patch version") {
+		t.Fatalf("report only reports: %v %v", state.Conflicts, state.Details)
 	}
 }
 
@@ -374,14 +430,61 @@ func TestClaudeVersionFloorOnDarwinAndItsPlist(t *testing.T) {
 	}
 }
 
-// A higher-precedence source without merge makes Claude Code ignore the
-// files, so DefenseClaw's floor there does not apply: say so.
-func TestClaudeVersionFloorNamesAReplacingSource(t *testing.T) {
+// Claude Code builds older than 2.1.242 read only a higher-precedence source
+// (HKLM Settings, the managed preferences plist) and ignore the files, and
+// every build the floor is meant to stop is older than that, with or without
+// managedSourcesBehavior: merge. While such a source is in force without the
+// key, no floor reaches those builds: verify fails (a warning under
+// higher_precedence_sources: warn) even when that source embeds DefenseClaw's
+// hooks.
+func TestClaudeVersionFloorIsNotAppliedUnderAHigherPrecedenceSource(t *testing.T) {
+	const source = `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`
+	hooks, err := renderClaudeDropIn(testOptions(t), testOptions(t).PolicyFor("claudecode"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withMerge := strings.Replace(string(hooks), "{", `{"managedSourcesBehavior": "merge",`, 1)
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "no merge", raw: `{"model": "opus"}`},
+		{name: "embeds DefenseClaw's hooks", raw: string(hooks)},
+		{name: "merge", raw: withMerge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t)
+			withHigherSources(t, higherSource(t, source, tc.raw))
+			reconcileClaude(t, opts)
+			verify, err := claudeTarget{}.Verify(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasConflict(verify, "outranks the managed settings files and does not set requiredMinimumVersion") || verify.VersionFloor.IgnoredBy != source {
+				t.Fatalf("a higher-precedence source without the key must fail the floor: %v %+v", verify.Conflicts, verify.VersionFloor)
+			}
+			if !strings.Contains(verify.VersionFloor.Summary(), "not applied: "+source) {
+				t.Fatalf("summary: %s", verify.VersionFloor.Summary())
+			}
+			if tc.name != "no merge" && hasConflict(verify, "does not include DefenseClaw's hooks") {
+				t.Fatalf("the hooks are covered by that source: %v", verify.Conflicts)
+			}
+
+			warn := withPolicy(testOptions(t), "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.HigherPrecedenceSources = "warn" })
+			reconcileClaude(t, warn)
+			verify, err = claudeTarget{}.Verify(warn)
+			if err != nil || len(floorConflicts(verify)) != 0 || !hasDetail(verify, "outranks the managed settings files and does not set requiredMinimumVersion") {
+				t.Fatalf("higher_precedence_sources: warn only warns: %v %v", err, verify.Conflicts)
+			}
+		})
+	}
+
+	// The key in that source is the administrator's floor.
 	opts := testOptions(t)
-	withHigherSources(t, higherSource(t, `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`, `{"model": "opus"}`))
-	state := reconcileClaude(t, opts)
-	if !hasDetail(state, "outranks the managed settings files, so Claude Code ignores requiredMinimumVersion there") {
-		t.Fatalf("details: %v", state.Details)
+	withHigherSources(t, higherSource(t, source, `{"requiredMinimumVersion": "2.1.200"}`))
+	reconcileClaude(t, opts)
+	if verify, err := (claudeTarget{}).Verify(opts); err != nil || len(floorConflicts(verify)) != 0 || verify.VersionFloor.IgnoredBy != "" || verify.VersionFloor.Owner != VersionFloorOwnerAdministrator {
+		t.Fatalf("verify: %v %v %+v", err, verify.Conflicts, verify.VersionFloor)
 	}
 }
 

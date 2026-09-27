@@ -37,7 +37,16 @@ import (
 // preferences plist) sets the key, and withdraws it at the next reconcile
 // once one does: managed-settings.json merges before every drop-in, so
 // leaving the floor in place would override an administrator value there.
-// The name sorts first, so any administrator drop-in overrides it anyway.
+// An administrator value that is not a version does not count when it merges
+// before the drop-in: Claude Code ignores it, so the drop-in stays and its
+// later value applies. Administrator drop-ins whose names sort after
+// 00-defenseclaw-version-floor.json override it anyway.
+//
+// A higher-precedence source (HKLM Settings, the managed preferences plist)
+// replaces the files for every Claude Code build older than 2.1.242, which
+// honors managedSourcesBehavior: merge, and every build the floor is meant to
+// stop is older than that. While such a source is in force without the key,
+// the floor in the files does not apply; verify says so.
 const ClaudeVersionFloorDropInName = "00-defenseclaw-version-floor.json"
 
 const (
@@ -81,13 +90,30 @@ type VersionFloorState struct {
 	// is not a version, which Claude Code ignores.
 	BelowFloor bool `json:"below_floor,omitempty"`
 	Invalid    bool `json:"invalid,omitempty"`
+	// IgnoredBy names a higher-precedence source (HKLM Settings, the
+	// managed preferences plist) that does not set requiredMinimumVersion.
+	// The Claude Code builds the floor is meant to stop read only that
+	// source, so a value in the managed settings files does not reach them.
+	IgnoredBy string `json:"ignored_by,omitempty"`
+	// Overridden is an administrator value DefenseClaw's drop-in replaces:
+	// one that is not a version, in a file that merges before the drop-in.
+	Overridden       string `json:"overridden,omitempty"`
+	OverriddenSource string `json:"overridden_source,omitempty"`
 }
 
 // Summary is the one-line form `enterprise policy show` prints.
 func (s VersionFloorState) Summary() string {
+	ignored := ""
+	if s.IgnoredBy != "" {
+		ignored = "; not applied: " + s.IgnoredBy + " outranks the managed settings files"
+	}
 	switch s.Owner {
 	case VersionFloorOwnerDefenseClaw:
-		return fmt.Sprintf("requiredMinimumVersion %s set by DefenseClaw (%s), version_floor=%s", s.Value, s.Source, s.Mode)
+		note := ""
+		if s.Overridden != "" {
+			note = fmt.Sprintf("; replaces %s from %s, which is not a version", s.Overridden, s.OverriddenSource)
+		}
+		return fmt.Sprintf("requiredMinimumVersion %s set by DefenseClaw (%s%s%s), version_floor=%s", s.Value, s.Source, note, ignored, s.Mode)
 	case VersionFloorOwnerAdministrator:
 		note := ""
 		switch {
@@ -96,7 +122,7 @@ func (s VersionFloorState) Summary() string {
 		case s.BelowFloor:
 			note = "; below DefenseClaw's floor " + s.Floor
 		}
-		return fmt.Sprintf("requiredMinimumVersion %s set by the administrator (%s%s), version_floor=%s", s.Value, s.Source, note, s.Mode)
+		return fmt.Sprintf("requiredMinimumVersion %s set by the administrator (%s%s%s), version_floor=%s", s.Value, s.Source, note, ignored, s.Mode)
 	default:
 		return fmt.Sprintf("requiredMinimumVersion not set (DefenseClaw's floor is %s), version_floor=%s", dashIfBlank(s.Floor), s.Mode)
 	}
@@ -174,10 +200,25 @@ type claudeFloorPlan struct {
 	owned bool
 	// admin is the effective administrator setting; nil when none sets it.
 	admin *claudeFloorSetting
-	// replacing names a higher-precedence source without
-	// managedSourcesBehavior: merge, which makes Claude Code ignore the
-	// managed settings files, the floor drop-in included.
-	replacing string
+	// adminInvalid: admin's value is not a major.minor.patch version, which
+	// Claude Code ignores. adminOutranks: admin merges after DefenseClaw's
+	// drop-in (a higher-precedence source, or a drop-in whose name sorts
+	// after it), so its value replaces the floor.
+	adminInvalid  bool
+	adminOutranks bool
+	// ignoredBy names the first higher-precedence source when none of them
+	// sets the key. Claude Code honors managedSourcesBehavior: merge only
+	// from 2.1.242, and every build the floor is meant to stop is older:
+	// those builds read only the higher-precedence source, so a floor in
+	// the managed settings files never reaches them.
+	ignoredBy string
+}
+
+// effectiveAdmin reports whether the administrator's value is the one
+// Claude Code applies. An invalid value that merges before DefenseClaw's
+// drop-in is not: Claude Code takes the drop-in's later, valid value.
+func (p claudeFloorPlan) effectiveAdmin() bool {
+	return p.admin != nil && !(p.adminInvalid && !p.adminOutranks)
 }
 
 func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []higherClaudeSource) (claudeFloorPlan, error) {
@@ -202,20 +243,49 @@ func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []highe
 			plan.admin = &claudeFloorSetting{source: source.name, value: value}
 		}
 	}
+	anyHigherSetsKey := false
 	for _, source := range higher {
-		if behavior, _ := source.doc.get("managedSourcesBehavior"); behavior != "merge" && plan.replacing == "" {
-			plan.replacing = source.name
+		if plan.ignoredBy == "" {
+			plan.ignoredBy = source.name
 		}
-		if value, ok := source.doc.get(claudeVersionFloorKey); ok && value != nil && (plan.admin == nil || !plan.admin.higher) {
-			plan.admin = &claudeFloorSetting{source: source.name, value: value, higher: true}
+		if value, ok := source.doc.get(claudeVersionFloorKey); ok && value != nil {
+			anyHigherSetsKey = true
+			if plan.admin == nil || !plan.admin.higher {
+				plan.admin = &claudeFloorSetting{source: source.name, value: value, higher: true}
+			}
 		}
+	}
+	if anyHigherSetsKey {
+		plan.ignoredBy = ""
+	}
+	if plan.admin != nil {
+		version, _ := plan.admin.value.(string)
+		plan.adminInvalid = !claudeVersionPattern.MatchString(strings.TrimSpace(version))
+		plan.adminOutranks = plan.admin.higher || claudeDropInSortsAfterFloor(opts, plan.admin.source)
 	}
 	return plan, nil
 }
 
-// wanted reports whether DefenseClaw's floor drop-in should be in place.
+// claudeDropInSortsAfterFloor reports whether source is a managed-settings.d
+// drop-in that Claude Code merges after DefenseClaw's floor drop-in (drop-ins
+// merge in name order, the same order readClaudeFileSources reads them).
+// The base managed-settings.json merges before every drop-in.
+func claudeDropInSortsAfterFloor(opts Options, source string) bool {
+	dir, err := ClaudeManagedDir(opts)
+	if err != nil || source == joinFor(opts, dir, "managed-settings.json") {
+		return false
+	}
+	name := source[strings.LastIndexAny(source, `/\`)+1:]
+	return name > ClaudeVersionFloorDropInName
+}
+
+// wanted reports whether DefenseClaw's floor drop-in should be in place:
+// under enforce and merge, while no administrator value applies. An
+// administrator value that is not a version and merges before the drop-in
+// does not count: Claude Code ignores it, and the drop-in's later value
+// replaces it.
 func (p claudeFloorPlan) wanted(policy config.ResolvedConnectorPolicy) bool {
-	return p.mode == config.ClaudeVersionFloorEnforce && p.floor != "" && p.admin == nil &&
+	return p.mode == config.ClaudeVersionFloorEnforce && p.floor != "" && !p.effectiveAdmin() &&
 		policy.Ownership == config.MachinePolicyOwnershipMerge
 }
 
@@ -396,8 +466,12 @@ func removeClaudeVersionFloorWith(opts Options, transaction claudeFloorTransacti
 }
 
 // inspectClaudeVersionFloor reports requiredMinimumVersion and who sets it.
-// Only a missing DefenseClaw floor that DefenseClaw is supposed to write is a
-// conflict; an administrator value always wins and is reported.
+// Under version_floor: enforce with ownership: merge, a state in which no
+// floor reaches the builds it is meant to stop is a conflict: DefenseClaw's
+// drop-in missing, an administrator value that is not a version and that
+// DefenseClaw's drop-in cannot replace, or a higher-precedence source without
+// the key (unless higher_precedence_sources: warn). An administrator version,
+// even one below the floor, always wins and is reported.
 func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPolicy, sources []claudeSource, higher []higherClaudeSource, state *State) error {
 	plan, err := planClaudeVersionFloor(opts, sources, higher)
 	if err != nil {
@@ -409,17 +483,23 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 		state.detail("Claude Code version floor: no verified hook contract has a lower bound, so DefenseClaw sets no requiredMinimumVersion")
 		return nil
 	}
+	promised := plan.mode == config.ClaudeVersionFloorEnforce && policy.Ownership == config.MachinePolicyOwnershipMerge
 	switch {
-	case plan.admin != nil:
+	case plan.effectiveAdmin():
 		floor.Owner = VersionFloorOwnerAdministrator
 		floor.Source = plan.admin.source
 		floor.Value = claudeFloorValueText(plan.admin.value)
 		version, _ := plan.admin.value.(string)
 		version = strings.TrimSpace(version)
 		switch {
-		case !claudeVersionPattern.MatchString(version):
+		case plan.adminInvalid:
 			floor.Invalid = true
-			state.detail("Claude Code version floor: %s sets requiredMinimumVersion to %s, which is not a major.minor.patch version; Claude Code ignores an invalid value, so builds below %s may start", plan.admin.source, floor.Value, plan.floor)
+			message := fmt.Sprintf("Claude Code version floor: %s sets requiredMinimumVersion to %s, which is not a major.minor.patch version, and it merges after DefenseClaw's %s; Claude Code ignores an invalid value, so builds below %s can start; set a version such as %q there or remove the key", plan.admin.source, floor.Value, plan.path, plan.floor, plan.floor)
+			if promised {
+				state.conflict("%s", message)
+			} else {
+				state.detail("%s", message)
+			}
 		case compareVersions(version, plan.floor) < 0:
 			floor.BelowFloor = true
 			state.detail("Claude Code version floor: %s sets requiredMinimumVersion %s, below %s, the lowest Claude Code version with a verified DefenseClaw hook contract; builds from %s up to %s start without one", plan.admin.source, version, plan.floor, version, plan.floor)
@@ -434,6 +514,11 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 		floor.Source = plan.path
 		floor.Value = claudeVersionFloorFileValue(plan.current)
 		state.detail("Claude Code version floor: DefenseClaw's %s sets requiredMinimumVersion %s; Claude Code builds below it refuse to start from their next session (builds that predate the setting ignore it)", plan.path, floor.Value)
+		if plan.admin != nil {
+			floor.Overridden = claudeFloorValueText(plan.admin.value)
+			floor.OverriddenSource = plan.admin.source
+			state.detail("Claude Code version floor: %s sets requiredMinimumVersion to %s, which is not a major.minor.patch version; Claude Code ignores it and applies DefenseClaw's value, which merges later", plan.admin.source, floor.Overridden)
+		}
 		switch {
 		case plan.wanted(policy) && floor.Value != plan.floor:
 			state.detail("Claude Code version floor: the next reconcile raises it to %s", plan.floor)
@@ -441,19 +526,29 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 			state.detail("Claude Code version floor: the next reconcile removes it (version_floor: %s)", plan.mode)
 		}
 	default:
+		unset := "no managed settings source sets requiredMinimumVersion"
+		if plan.admin != nil {
+			unset = fmt.Sprintf("%s sets requiredMinimumVersion to %s, which is not a major.minor.patch version and which Claude Code ignores", plan.admin.source, claudeFloorValueText(plan.admin.value))
+		}
 		switch {
-		case plan.mode == config.ClaudeVersionFloorEnforce && policy.Ownership == config.MachinePolicyOwnershipMerge:
-			state.conflict("Claude Code version floor: no managed settings source sets requiredMinimumVersion and DefenseClaw's %s is missing, so Claude Code builds below %s can start; the next reconcile writes it", plan.path, plan.floor)
+		case promised:
+			state.conflict("Claude Code version floor: %s and DefenseClaw's %s is missing, so Claude Code builds below %s can start; the next reconcile writes it", unset, plan.path, plan.floor)
 		case plan.mode == config.ClaudeVersionFloorEnforce:
-			state.detail("Claude Code version floor: no managed settings source sets requiredMinimumVersion; deploy the output of `defenseclaw-gateway enterprise policy export --connector claudecode --format version-floor` through your policy tool, or set the key yourself, so Claude Code builds below %s refuse to start", plan.floor)
+			state.detail("Claude Code version floor: %s; deploy the output of `defenseclaw-gateway enterprise policy export --connector claudecode --format version-floor` through your policy tool, or set the key yourself, so Claude Code builds below %s refuse to start", unset, plan.floor)
 		case plan.mode == config.ClaudeVersionFloorReport:
-			state.detail("Claude Code version floor: no managed settings source sets requiredMinimumVersion, so Claude Code builds below %s can start (version_floor: report)", plan.floor)
+			state.detail("Claude Code version floor: %s, so Claude Code builds below %s can start (version_floor: report)", unset, plan.floor)
 		default:
 			state.detail("Claude Code version floor: version_floor: off; DefenseClaw does not manage requiredMinimumVersion")
 		}
 	}
-	if plan.replacing != "" && (plan.admin == nil || !plan.admin.higher) && (floor.Owner != VersionFloorOwnerNone || plan.mode != config.ClaudeVersionFloorOff) {
-		state.detail("Claude Code version floor: %s outranks the managed settings files, so Claude Code ignores requiredMinimumVersion there; set it in %s", plan.replacing, plan.replacing)
+	if plan.ignoredBy != "" && (floor.Owner != VersionFloorOwnerNone || plan.mode != config.ClaudeVersionFloorOff) {
+		floor.IgnoredBy = plan.ignoredBy
+		message := fmt.Sprintf("Claude Code version floor: %s outranks the managed settings files and does not set requiredMinimumVersion; Claude Code builds below %s predate managedSourcesBehavior: merge (%s), read only that source and ignore requiredMinimumVersion in the files, so no floor stops them; add \"requiredMinimumVersion\": %q to %s", plan.ignoredBy, plan.floor, claudeMergeMinimumVersion, plan.floor, plan.ignoredBy)
+		if promised && policy.HigherPrecedenceSources != config.HigherPrecedenceWarn {
+			state.conflict("%s", message)
+		} else {
+			state.detail("%s", message)
+		}
 	}
 	return nil
 }
