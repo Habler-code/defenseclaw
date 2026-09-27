@@ -71,7 +71,9 @@ var hookForeignGuardExchange = exchangeForeignHookSession
 // started). It covers machine-policy (--enterprise-managed) and per-user
 // registrations alike. The denial reuses hookexec's managed fail-closed
 // path, so each connector gets its native block response carrying the
-// reason (file, digest and allowlist key).
+// reason (file, digest and allowlist key). A stop or session-end event is
+// still evaluated and recorded, but hookexec answers it with the connector's
+// neutral allow: a block there would keep the agent running, not stop it.
 func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	startedAt := time.Now()
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {

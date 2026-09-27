@@ -102,6 +102,14 @@ rest of this session: after removing the hook, restart the agent.
 An approval an administrator adds while a session is blocked applies to the
 next agent session; the running one stays blocked.
 
+The block applies to tool calls and, where the agent lets a hook block them,
+to prompts and session starts. Stop and session-end events get the agent's
+normal allow, so a blocked agent can still end its turn and exit. A block
+there would not stop the agent; it would keep it going: Claude Code, Codex,
+Devin and Copilot continue the turn, and Cursor sends the message back as a
+new prompt, so the session would loop until the agent restarts. The hook
+still records those events as blocks for the guardian.
+
 ## Approving hooks
 
 Approve a specific hook by its digest, or relax a connector:

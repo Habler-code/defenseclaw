@@ -946,12 +946,14 @@ const ForeignHookBlockedReasonPrefix = "enterprise_foreign_hook_blocked:"
 // failForeignHookBlocked delivers the enterprise foreign-hook guard's
 // denial as the connector's native block with the guard's reason as the
 // message, so the user sees which file to remove and which allowlist key an
-// administrator would use. Only the standalone guard sets this reason; the
-// response is never an allow. Commands that do not bind their event (the
-// Cursor and Claude machine hooks) take it from the payload, which carries
-// no authority here: every shape rendered is a block.
+// administrator would use. Only the standalone guard sets this reason. A
+// stop or session-end event (foreignHookStopEvent) gets the connector's
+// neutral allow instead, because a block there would keep the agent running;
+// the block is still logged. Every other event gets a block. Commands that do
+// not bind their event (the Cursor, Claude Code and Devin hooks) take it from
+// the payload, as their gateway path does; an event the payload does not
+// name unambiguously is blocked.
 func failForeignHookBlocked(opts Options, sp spec, reason string) int {
-	logHookFailure(opts, sp, reason, "policy", "closed")
 	switch sp.connector {
 	case "codex", "copilot", "antigravity":
 		// These commands bind the reviewed event out of band.
@@ -962,6 +964,12 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 			}
 		}
 	}
+	if foreignHookStopEvent(sp.connector, opts.Event) {
+		logHookFailure(opts, sp, reason, "policy", "open")
+		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (a block would keep the agent running); tool calls stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
+		return emitHookResult(opts, sp, sp.openAllow)
+	}
+	logHookFailure(opts, sp, reason, "policy", "closed")
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
@@ -994,6 +1002,49 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 	// Claude Code shows stderr on its exit-2 block; the rest keep their
 	// strict failure response.
 	return emitHookResult(opts, sp, sp.unreachableStrict)
+}
+
+// foreignHookStopEvent reports the stop and session-end events of the
+// connectors the foreign-hook guard covers. A block on a stop event denies
+// nothing; it makes the agent go on: Claude Code (Stop, SubagentStop, and
+// TeammateIdle for an agent-team teammate), Codex (Stop, SubagentStop),
+// Devin (Stop) and Copilot (agentStop, subagentStop) continue the turn, and
+// Cursor submits a stop hook's followup_message as the next prompt. So a
+// session the guard blocks would loop until the agent restarts. The
+// session-end events, and Claude Code's StopFailure, cannot be blocked at
+// all. The names are the vendors' exact event names; Cursor's match
+// case-insensitively, like its responses (cursorActionOutput). OpenCode and
+// Amp run the guard on tool calls only.
+func foreignHookStopEvent(connector, event string) bool {
+	event = strings.TrimSpace(event)
+	switch connector {
+	case "claudecode":
+		switch event {
+		case "Stop", "SubagentStop", "TeammateIdle", "StopFailure", "SessionEnd":
+			return true
+		}
+	case "codex":
+		switch event {
+		case "Stop", "SubagentStop", "SessionEnd":
+			return true
+		}
+	case "cursor":
+		switch strings.ToLower(event) {
+		case "stop", "subagentstop", "sessionend":
+			return true
+		}
+	case "devin":
+		switch event {
+		case "Stop", "SessionEnd":
+			return true
+		}
+	case "copilot":
+		switch event {
+		case "agentStop", "subagentStop", "sessionEnd":
+			return true
+		}
+	}
+	return false
 }
 
 // managedCopilotDenyMessage is the text Copilot shows for a managed local
