@@ -3,7 +3,10 @@
 
 #Requires -Version 5.1
 
-# Function-level regression for the standalone managed-hook rollback restart.
+# Function-level regression for the standalone sensor helper around uninstall.
+# Uninstall quiesces it for the servicing boundary (it failed every uninstall
+# of a running deployment with "startup mode drift: 2, expected 4"), and the
+# managed-hook rollback restart brings it back.
 # Restore-DefenseClawTransaction quiesces the standalone sensor helper, which
 # transaction snapshots do not record. When the managed-hook teardown had to
 # be rolled back, Restore-DefenseClawTransactionWithManagedHooksRollback
@@ -55,6 +58,9 @@ $failures = & $module {
 
     $originalProfile = Get-DefenseClawEnterpriseProfile
     $failures = [Collections.Generic.List[string]]::new()
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$parseErrors)
     try {
         $layout = @{}
         $helper = Get-DefenseClawSensorHelperServiceName -GatewayServiceName 'DefenseClawGateway'
@@ -106,11 +112,39 @@ $failures = & $module {
             $failures.Add('Secure Client rollback touched the standalone sensor helper')
         }
 
+        # Uninstall quiesces the helper for the servicing boundary (standalone only).
+        $layout['SensorHelperServiceName'] = $helper
+        $script:TestServices[$helper] = $true
+        $script:TestCalls.Clear()
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        function Stop-DefenseClawService {
+            param([string]$Name)
+            $script:TestCalls.Add("stop:$Name")
+        }
+        if (-not (Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $layout) -or
+            (@($script:TestCalls) -join '|') -cne ("owned:$helper|mode:$helper=4|stop:$helper")) {
+            $failures.Add("uninstall quiesce: got $(@($script:TestCalls) -join ', ')")
+        }
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+        $script:TestCalls.Clear()
+        if ((Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $layout) -or $script:TestCalls.Count -ne 0) {
+            $failures.Add('Secure Client uninstall quiesced the standalone sensor helper')
+        }
+        $uninstall = $ast.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-DefenseClawUninstallLifecycle'
+        }, $true).Body.Extent.Text
+        $open = $uninstall.IndexOf('$snapshot = New-DefenseClawTransaction')
+        $suspend = $uninstall.IndexOf('Suspend-DefenseClawStandaloneSensorHelperForServicing')
+        $servicing = $uninstall.IndexOf('-ServicingTransaction')
+        if ($open -lt 0 -or $suspend -lt 0 -or $servicing -lt 0 -or
+            -not ($open -lt $suspend -and $suspend -lt $servicing)) {
+            $failures.Add('uninstall does not quiesce the sensor helper between transaction open and the servicing assertion')
+        }
+
         # Wiring: the deferred managed-hook rollback restart starts the helper
         # before the restored services and then applies its boot policy.
-        $tokens = $null
-        $parseErrors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$parseErrors)
         $definition = $ast.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and

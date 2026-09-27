@@ -21834,6 +21834,33 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     return $result
 }
 
+function Suspend-DefenseClawStandaloneSensorHelperForServicing {
+    <#
+        Standalone uninstall: New-DefenseClawTransaction disables and stops
+        the services it records (gateway, guardian, enumerator), not the
+        sensor helper, which a healthy deployment keeps automatic. The
+        servicing assertion before the services are deleted requires every
+        managed service disabled, so a standalone uninstall of a running
+        deployment failed there ("service DefenseClawSensorHelper startup
+        mode drift: 2, expected 4") and rolled back. Disable and stop the
+        helper once the gateway that depends on it is stopped. A rollback
+        brings it back with the restored gateway.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $name = [string]$Layout.SensorHelperServiceName
+    if ([string]::IsNullOrWhiteSpace($name) -or
+        -not (Test-DefenseClawServiceExists -Name $name)) {
+        return $false
+    }
+    Assert-DefenseClawStandaloneSensorHelperOwned -Name $name -Layout $Layout
+    Set-DefenseClawServiceStartMode -Name $name -StartMode 4
+    Stop-DefenseClawService -Name $name
+    return $true
+}
+
 function Invoke-DefenseClawUninstallLifecycle {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -21920,6 +21947,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             -PriorDeploymentActive `
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
             -PreserveManagedHooksTeardownJournal
+        [void](Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $Layout)
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
