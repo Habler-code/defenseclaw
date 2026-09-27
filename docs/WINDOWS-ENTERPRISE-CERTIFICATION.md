@@ -353,8 +353,14 @@ project precedence. Only after that succeeds does it run `Repair` with
 `-AttestClaudeEffectivePolicy`; the protected schema-v3 evidence binds that
 proof to the Claude policy identity it exercised: the SHA-256 of the
 DefenseClaw `90-defenseclaw.json` machine policy (which must match its
-DefenseClaw ownership sidecar) and of the installed `defenseclaw-hook.exe`.
-Only that second transaction may make aggregate `security_complete=true`.
+DefenseClaw ownership sidecar) and of the `defenseclaw-hook.exe` installed
+when that transaction finishes. The module cannot check which bytes the proof
+ran against, so the harness runs the proof and the attested Repair against the
+same staged payload. `Upgrade` also accepts `-AttestClaudeEffectivePolicy`, and
+an attested Upgrade binds whatever policy and hook binary it installs, so a
+release that changes either needs the proof repeated against that release and
+an attested Repair, not an attested Upgrade. In this harness only that second
+transaction makes aggregate `security_complete=true`.
 Enrollment changes that only rewrite `targets.yaml` keep the evidence current.
 A different policy fragment or hook binary, or schema-v2 evidence from an
 older release, reports `claude_effective_policy_verified=false` with

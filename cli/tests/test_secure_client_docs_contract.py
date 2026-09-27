@@ -160,3 +160,86 @@ def test_certification_doc_matches_the_harness_upgrade_and_service_sets() -> Non
     assert "$script:SensorHelperServiceName" in tokens
     for row in ("Actual service tokens", "Recovery semantics"):
         assert "sensor helper" in _certification_row(row), row
+
+
+def test_codex_requirements_doc_names_the_guardian_reconcile() -> None:
+    module = _read(MODULE)
+    assert re.search(r"enterprise hooks watch --manifest \"\{1\}\" --interval 1m'", module)
+
+    doc = _flat(_read(DEPLOYMENT_DOC))
+    section = doc[doc.index("## Native Windows Codex managed hooks") :]
+    section = section[: section.index("## ", 3)]
+    assert "the guardian checks the file every minute" in section
+    assert "an edit is therefore recorded as the DefenseClaw version within about a minute" in section
+    assert "Repairing a changed `requirements.toml` does not revert an administrator's edit" in section
+    assert "Reconcile runs on install and repair, and each time a Codex user is enrolled." not in section
+
+
+def test_unavailable_action_docs_cover_single_request_fail_open() -> None:
+    doc = _flat(_read(DEPLOYMENT_DOC))
+    start = doc.index("In `managed_enterprise`, AI Defense is the only decision-maker.")
+    paragraph = doc[start : doc.index("Set ownership and start the service", start)]
+    assert "When it returns no verdict for a request, the request is allowed by default" in paragraph
+    assert "rate limited" in paragraph
+    assert "The default therefore fails open per request" in paragraph
+    assert "(Cloud Management not enrolled or offline, the identity library missing, or the service not answering)" not in paragraph
+
+    threat = _flat(_read(THREAT_MODEL))
+    residuals = threat[threat.index("## Residual risks and deployment dependencies") : threat.index("## Certification gate")]
+    assert "`cisco_ai_defense.unavailable_action: allow`" in residuals
+    assert "must set `unavailable_action: block`" in residuals
+
+
+def test_claude_attestation_docs_match_the_actions_the_module_accepts() -> None:
+    module = _read(MODULE)
+    guard = re.search(
+        r"if \(\$AttestClaudeEffectivePolicy -and\s+\$Action -notin @\(([^)]*)\)\)",
+        module,
+    )
+    assert guard, "module -AttestClaudeEffectivePolicy action guard not found"
+    accepted = set(re.findall(r"'(\w+)'", guard.group(1)))
+    assert "Install" not in accepted
+    assert "Repair" in accepted
+
+    deployment = _flat(_read(DEPLOYMENT_DOC))
+    certification = _flat(_read(CERTIFICATION_DOC))
+    w34 = _threat_row("W-34")
+    if "Upgrade" in accepted:
+        # The docs must not promise that only Repair can persist evidence.
+        for text in (deployment, certification, w34):
+            assert "Only production `Repair -AttestClaudeEffectivePolicy`" not in text
+        assert "an attested Upgrade to a release whose hook binary or Claude policy changed records verified evidence" in deployment
+        assert "an attested Upgrade binds whatever policy and hook binary it installs" in certification
+        assert "Production `Upgrade` or `Repair` with `-AttestClaudeEffectivePolicy`" in w34
+    else:
+        assert "`Upgrade` also accepts the flag" not in deployment
+        assert "`Upgrade` also accepts `-AttestClaudeEffectivePolicy`" not in certification
+        assert "Production `Upgrade` or `Repair`" not in w34
+    assert "DefenseClaw cannot check which bytes the proof ran against" in deployment
+
+
+def test_cursor_foreign_hook_approval_doc_states_what_a_digest_trusts() -> None:
+    doc = _flat(_read(DEPLOYMENT_DOC))
+    assert "not the script or program the command runs" in doc
+    assert "Approving a digest trusts whatever that command runs" in doc
+    assert "Approve only handlers whose command is an absolute path to an executable" in doc
+
+
+def test_threat_model_covers_the_secure_client_gui_ipc_boundary() -> None:
+    assert (ROOT / "internal/ipc/winpeer_auth.go").is_file()
+    row = [
+        line
+        for line in _read(THREAT_MODEL).splitlines()
+        if line.startswith("| W-") and "defenseclaw_ipc.sock" in line
+    ]
+    assert len(row) == 1, row
+    assert "Admission authenticates the executable, not the user" in row[0]
+
+    threat = _flat(_read(THREAT_MODEL))
+    residuals = threat[threat.index("## Residual risks and deployment dependencies") : threat.index("## Certification gate")]
+    assert "Secure Client GUI IPC admission" in residuals
+    assert "with no session or SID filter" in residuals
+    assert "it is not a boundary against the signed-in user or between sessions" in residuals
+
+    deployment = _flat(_read(DEPLOYMENT_DOC))
+    assert "on a multi-session host each user's GUI also sees other sessions' approval notifications" in deployment

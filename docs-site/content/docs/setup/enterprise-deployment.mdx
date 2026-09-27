@@ -275,7 +275,7 @@ The AI Defense endpoint (`cisco_ai_defense.endpoint` in the emitted `config.yaml
 
 `install.sh` reads only the `cisco_ai_defense_endpoint` field; extra keys are ignored for forward compatibility. The file must be root-owned with no group/other write bits and no write-capable macOS ACL — the installer walks every ancestor and applies the same checks before reading. Override with `--config-file PATH` (fleet-specific staging) or `--override-endpoint URL` (adhoc / preview testing). If the default `env_config.json` is missing or malformed, the installer emits a warning and falls back to the US-production AI Defense endpoint so the enrollment is not blocked; only failed ownership, permission, or ACL trust checks on a present file still fail the installer closed.
 
-In `managed_enterprise`, AI Defense is the only decision-maker. When it cannot inspect a request (Cloud Management not enrolled or offline, the identity library missing, or the service not answering), the request is allowed by default and the condition is reported: `/health` shows `managed_inspection.available: false` and the guardrail `inspection_available`, `inspection_error`, and `inspection_unavailable_action` details, and the Secure Client GUI shows `DEGRADED` with an `availability_reason` of `inspection_unavailable_allowing`. To block those requests instead, set `cisco_ai_defense.unavailable_action: block` in the administrator-owned `config.yaml`. Connectors in `action` mode then deny what AI Defense could not inspect, `observe` mode records it as would-block, and the GUI reason becomes `inspection_unavailable_blocking`. Requests with nothing to inspect are always allowed. Inspection counts as available only while AI Defense returns verdicts: a valid token alone does not clear the state after a failed inspection, and the next inspection that gets a verdict does. While the guardrail is disabled nothing is inspected, so the GUI does not report inspection availability. A guardrail in the error state, including a build without managed-cloud support, also shows `DEGRADED` (`guardrail_error`); such a build can never inspect, so it blocks hook requests that need inspection whatever `unavailable_action` says.
+In `managed_enterprise`, AI Defense is the only decision-maker. When it returns no verdict for a request, the request is allowed by default and the condition is reported. That covers outages (Cloud Management not enrolled or offline, the identity library missing, the service not answering or timing out) and also a request the service answers without a verdict: an HTTP error for that one request (for example a request that is too large or is rate limited), or a response DefenseClaw cannot read. In each case `/health` shows `managed_inspection.available: false` and the guardrail `inspection_available`, `inspection_error`, and `inspection_unavailable_action` details, and the Secure Client GUI shows `DEGRADED` with an `availability_reason` of `inspection_unavailable_allowing`. The default therefore fails open per request: a user or an agent that can make AI Defense reject one request, for example by sending tool input larger than AI Defense accepts or by sending requests fast enough to be rate limited, gets that request through uninspected and switches the machine-wide Secure Client state to `DEGRADED` until the next verdict. To block those requests instead, set `cisco_ai_defense.unavailable_action: block` in the administrator-owned `config.yaml`; do that wherever an uninspected tool call is not acceptable. Connectors in `action` mode then deny what AI Defense could not inspect, `observe` mode records it as would-block, and the GUI reason becomes `inspection_unavailable_blocking`. Requests with nothing to inspect are always allowed. Inspection counts as available only while AI Defense returns verdicts: a valid token alone does not clear the state after a failed inspection, and the next inspection that gets a verdict does. While the guardrail is disabled nothing is inspected, so the GUI does not report inspection availability. A guardrail in the error state, including a build without managed-cloud support, also shows `DEGRADED` (`guardrail_error`); such a build can never inspect, so it blocks hook requests that need inspection whatever `unavailable_action` says.
 
 Set ownership and start the service:
 
@@ -333,7 +333,7 @@ The default managed layout is:
 | Broker, gateway/guardian/enumerator host, sensor helper, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
 | Managed config | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
 | Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
-| Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. Signed-in users can open the socket, but the gateway serves a connection only when the connecting process is `UI\csc_ui.exe` under `Cisco\Cisco Secure Client` in Program Files (x86) or Program Files, and its embedded Authenticode signature is valid and signed by `Cisco Systems, Inc.` Administrators can change either list with `managed.allowed_windows_images` and `managed.allowed_windows_signers` in the managed config. |
+| Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. Signed-in users can open the socket, but the gateway serves a connection only when the connecting process is `UI\csc_ui.exe` under `Cisco\Cisco Secure Client` in Program Files (x86) or Program Files, and its embedded Authenticode signature is valid and signed by `Cisco Systems, Inc.` Administrators can change either list with `managed.allowed_windows_images` and `managed.allowed_windows_signers` in the managed config. The check identifies the executable, not the user or the code running in it, and every admitted GUI receives the same machine-wide health, stats, and notification stream; on a multi-session host each user's GUI also sees other sessions' approval notifications. |
 | Sensor-helper IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\sensor-helper.sock` | Installer-owned fixed path. The socket DACL admits LocalSystem, Administrators, and the exact gateway service SID; managed mode ignores `DEFENSECLAW_SENSOR_HELPER_SOCKET`. |
 | Sensor-helper service log | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs\sensor-helper\sensor-helper.log` | Administrator-only directory created by the lifecycle; the path comes from the protected service environment (`DEFENSECLAW_WINDOWS_SERVICE_LOG`). The helper appends its build version and exit error, falls back to stderr when the file cannot be opened safely, and does not rotate the file. |
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
@@ -629,12 +629,21 @@ The equivalent post-proof CLI transaction is:
 ```
 
 That Repair revalidates the structural attestations, then
-binds the live Claude proof to the Claude policy identity it exercised: the
-DefenseClaw `90-defenseclaw.json` machine policy and the installed
-`defenseclaw-hook.exe`. Enrollment changes that only rewrite `targets.yaml` keep
-it current. A different policy or hook binary reports it unverified until the
-proof and this Repair are repeated. The Repair still rebinds it when it first
-recovers an interrupted transaction. Install refuses
+binds the live Claude proof to a Claude policy identity: the DefenseClaw
+`90-defenseclaw.json` machine policy and the `defenseclaw-hook.exe` installed
+when the attested transaction finishes. DefenseClaw cannot check which bytes
+the proof ran against, so the attestation is the administrator's statement
+that the proof exercised those files. Pass `-AttestClaudeEffectivePolicy` (or
+`--attest-claude-effective-policy`) only with the same release payload the
+proof ran against. `Upgrade` also
+accepts the flag, but an attested Upgrade to a release whose hook binary or
+Claude policy changed records verified evidence for files no proof has
+exercised. Upgrade without the flag, repeat the proof against the upgraded
+release, and then run the attested Repair. Enrollment changes that only
+rewrite `targets.yaml` keep the evidence current. A later transaction without
+the flag that installs a different policy or hook binary reports it unverified
+until the proof and the attested Repair are repeated. The Repair still rebinds
+it when it first recovers an interrupted transaction. Install refuses
 `-AttestClaudeEffectivePolicy` up front, because no DefenseClaw Claude policy
 exists yet for a live proof to have exercised. Application-control evidence, a
 healthy Program Files policy, or a prior run against another policy is never
@@ -1185,10 +1194,16 @@ Uninstall works in one of two ways:
 
 Every DefenseClaw reconcile records the current file as that version,
 including any edits an administrator has made. Reconcile runs on install and
-repair, and each time a Codex user is enrolled. Once a reconcile has run after
-an edit, uninstall restores the pre-install file and the edit is lost. Make
-lasting changes in the source template (Intune, GPO, or configuration
-management), or re-apply them after uninstall.
+repair, each time a Codex user is enrolled, and automatically from the
+guardian: the guardian checks the file every minute, treats any byte change as
+drift, and repairs it with the same reconcile. While an enrolled Codex user is
+signed in, an edit is therefore recorded as the DefenseClaw version within
+about a minute. With no enrolled Codex user signed in, the guardian defers that
+repair, and the edit is recorded at the next sign-in, install, or repair. Once
+a reconcile has run after an edit, uninstall restores the pre-install file and
+the edit is lost, so in practice uninstall almost always restores the
+pre-install file. Make lasting changes in the source template (Intune, GPO, or
+configuration management), or re-apply them after uninstall.
 
 The hidden installed-binary commands are lifecycle internals and read-only
 operator diagnostics except for service-mediated reconcile/removal:
@@ -1214,6 +1229,11 @@ the shared `defenseclaw-hook.exe` and is verified by the guardian.
 The guardian verifies and repairs exact policy bytes, event coverage,
 ownership, DACL, enrollment state, and preimage records. A missing event,
 deleted policy/state, or DACL drift makes status/verify non-zero until repair.
+Repairing a changed `requirements.toml` does not revert an administrator's
+edit: it re-adds any missing DefenseClaw entries, keeps the other bytes, and
+records the result as the DefenseClaw version, as described for uninstall
+above. An edit that DefenseClaw cannot extend without rewriting the file makes
+the repair fail and report the table instead.
 An unregistered SID invoking the installed managed hook fails closed; normal
 unmanaged Codex setup and its existing per-user auto-heal are unaffected.
 
@@ -1296,6 +1316,15 @@ the file and the handler's `sha256` digest. Files that cannot be verified
 (links, files over 1 MiB, invalid JSON) also deny. To approve a handler, add its
 digest to `connector_hooks.cursor.approved_foreign_hooks` and let the guardian
 reconcile; the allowlist is published in the protected Cursor machine state.
+
+The digest covers the registration text DefenseClaw reads from the hooks
+file, not the script or program the command runs. Approving a digest trusts
+whatever that command runs. A handler such as `node .cursor/hooks/lint.js`
+runs whatever script sits at that relative path, so approving it for
+workspace-level hooks approves each repository's own copy of the script, and a
+script in a user-writable location can be changed after approval. Approve only
+handlers whose command is an absolute path to an executable (and any script it
+loads) that only administrators can write.
 
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
