@@ -59,9 +59,10 @@ type helperService struct {
 	logger *slog.Logger
 }
 
-// logExit records why serve returned. It runs before the handler reports
-// StopPending, because once SCM sees the service stopped the process can end
-// at any time, and the exit code SCM shows (1) carries no reason.
+// logExit records why serve returned. It runs before Execute returns, while
+// SCM still sees the service running or stopping: once SCM sees it stopped
+// the process can end at any time, and the exit code SCM shows (1) carries no
+// reason.
 func (s *helperService) logExit(err error) {
 	if err == nil || s.logger == nil {
 		return
