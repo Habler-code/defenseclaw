@@ -418,9 +418,41 @@ def test_enterprise_module_install_is_idempotent_over_active_metadata() -> None:
 
     # Structural: verify branch ownership directly — the reconcile clause must
     # hold the $reconcileInstall = $true assignment AND the DeferredConfig
-    # refusal, and its elseif clause must hold the tombstone-teardown call. A
-    # regex over the parsed structure keeps the assertion from passing on an
-    # unrelated `elseif ($null -ne $metadata)` elsewhere in the module.
+    # refusal, and its elseif clause must hold the tombstone-teardown call.
+    # Anchor the search inside an `if ($Action -eq 'Install')` block so a
+    # future refactor cannot silently move the reconcile branch under a
+    # different action (Upgrade / Repair / Reconcile) and keep the tests
+    # green while Install regresses to the old throw.
+    # The public lifecycle has multiple `if ($Action -eq 'Install')` sites; the
+    # one that carries the reconcile branch is the one whose body gates on
+    # Test-DefenseClawMetadataInstalled. Walk each candidate with a balanced-
+    # brace scan so nested `{...}` blocks (there are many in the Install body)
+    # don't confuse a naïve regex.
+    install_body = None
+    for m in re.finditer(
+        r"if\s*\(\s*\$Action\s+-eq\s+'Install'\s*\)\s*\{",
+        body,
+    ):
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(body) and depth > 0:
+            ch = body[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        candidate = body[start:i - 1]
+        if "Test-DefenseClawMetadataInstalled" in candidate:
+            install_body = candidate
+            break
+    assert install_body is not None, (
+        "psm1 must contain an `if ($Action -eq 'Install')` block whose body "
+        "gates on Test-DefenseClawMetadataInstalled — reconcile-Install must "
+        "be bound to the Install dispatch, not siphoned to another action"
+    )
+
     branch = re.search(
         r"""if\s*\(
             \s*\$null\s+-ne\s+\$metadata\s+-and\s+
@@ -431,14 +463,16 @@ def test_enterprise_module_install_is_idempotent_over_active_metadata() -> None:
         elseif\s*\(\s*\$null\s+-ne\s+\$metadata\s*\)\s*\{
             (?P<tombstone>(?:[^{}]|\{[^{}]*\})*)
         \}""",
-        body,
+        install_body,
         re.S | re.X,
     )
     assert branch is not None, (
-        "psm1 must have an if/elseif pair rooted at "
-        "`if ($null -ne $metadata -and (Test-DefenseClawMetadataInstalled ...))` "
-        "followed by `elseif ($null -ne $metadata)` — reconcile-Install and "
-        "tombstone-teardown must be sibling clauses of that same construct"
+        "the `if ($Action -eq 'Install')` block must have an if/elseif pair "
+        "rooted at `if ($null -ne $metadata -and "
+        "(Test-DefenseClawMetadataInstalled ...))` followed by "
+        "`elseif ($null -ne $metadata)` — reconcile-Install and "
+        "tombstone-teardown must be sibling clauses of the same construct, "
+        "and that construct must live inside the Install dispatch"
     )
     reconcile_clause = branch.group("reconcile")
     tombstone_clause = branch.group("tombstone")

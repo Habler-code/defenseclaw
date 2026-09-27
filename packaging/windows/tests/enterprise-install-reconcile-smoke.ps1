@@ -112,7 +112,33 @@ function Test-BranchClause {
     }
 }
 
-$ifCandidates = $moduleAst.FindAll(
+# Locate the `if ($Action -eq 'Install')` dispatch that carries the reconcile
+# branch. There are several `if ($Action -eq 'Install')` sites across the
+# module; the reconcile one is uniquely identified by its body containing
+# Test-DefenseClawMetadataInstalled. Anchoring the search here means a future
+# refactor can't move the reconcile branch under a different action (Upgrade,
+# Repair, Reconcile) without failing this test.
+$installDispatch = $null
+foreach ($ifNode in $moduleAst.FindAll(
+    { param($node) $node -is [Management.Automation.Language.IfStatementAst] },
+    $true
+)) {
+    if ($ifNode.Clauses.Count -lt 1) { continue }
+    $cond = $ifNode.Clauses[0].Item1.Extent.Text
+    if ($cond -notmatch '^\s*\$Action\s+-eq\s+''Install''\s*$') { continue }
+    $bodyText = $ifNode.Clauses[0].Item2.Extent.Text
+    if ($bodyText -notmatch 'Test-DefenseClawMetadataInstalled') { continue }
+    $installDispatch = $ifNode
+    break
+}
+if ($null -eq $installDispatch) {
+    throw 'enterprise-install-reconcile-smoke: could not locate the `if ($Action -eq ''Install'')` dispatch whose body gates on Test-DefenseClawMetadataInstalled'
+}
+
+# Only look for the reconcile if/elseif INSIDE that dispatch block so the
+# assertion cannot pass on a hypothetical Upgrade/Repair reconcile branch.
+$installBodyAst = $installDispatch.Clauses[0].Item2
+$ifCandidates = $installBodyAst.FindAll(
     {
         param($node)
         if ($node -isnot [Management.Automation.Language.IfStatementAst]) { return $false }
@@ -137,7 +163,7 @@ foreach ($candidate in $ifCandidates) {
     break
 }
 if ($null -eq $reconcileIf) {
-    throw 'enterprise-install-reconcile-smoke: could not locate an if/elseif rooted at (Test-DefenseClawMetadataInstalled) whose reconcile clause sets $reconcileInstall = $true and emits the reconcile warning'
+    throw 'enterprise-install-reconcile-smoke: could not locate an if/elseif rooted at (Test-DefenseClawMetadataInstalled) WITHIN the `if ($Action -eq ''Install'')` dispatch whose reconcile clause sets $reconcileInstall = $true and emits the reconcile warning'
 }
 
 $reconcileClauseCond = $reconcileIf.Clauses[0].Item1.Extent.Text
