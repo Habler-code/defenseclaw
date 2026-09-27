@@ -187,7 +187,15 @@ func copilotEnterpriseProfileDecode(payload map[string]interface{}) HookProfileR
 		req.Content = hookFirstString(payload, "prompt", "userPrompt")
 		req.Direction = "input"
 	case "posttooluse", "posttoolusefailure":
-		req.Content = hookFirstString(payload, "toolResult", "result", "output", "content")
+		// GitHub's v2 hook schema carries model-facing tool output in the
+		// nested toolResult.textResultForLlm field. Inspect that exact string;
+		// never stringify the surrounding attacker-influenced result object.
+		if toolResult, ok := payload["toolResult"].(map[string]interface{}); ok {
+			req.Content = hookFirstString(toolResult, "textResultForLlm")
+		}
+		if req.Content == "" {
+			req.Content = hookFirstString(payload, "result", "output", "content")
+		}
 		req.Direction = "output"
 	}
 	return req

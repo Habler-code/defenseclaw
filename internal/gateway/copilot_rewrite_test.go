@@ -143,6 +143,135 @@ func TestManagedCopilotProfileRequiresTrustedDeploymentAndBoundHeaders(t *testin
 	}
 }
 
+func TestManagedCopilotAuthenticatedHTTPBlocksUseV2ResponseContract(t *testing.T) {
+	const gatewayToken = "managed-copilot-http-test-token"
+
+	tests := []struct {
+		name             string
+		event            string
+		payload          map[string]interface{}
+		wantContent      string
+		assertHookOutput func(*testing.T, map[string]interface{})
+	}{
+		{
+			name:  "transformed prompt is inspected and replaced",
+			event: "userPromptTransformed",
+			payload: map[string]interface{}{
+				"transformedPrompt": "model-facing transformed prompt",
+				"prompt":            "untransformed prompt",
+			},
+			wantContent: "model-facing transformed prompt",
+			assertHookOutput: func(t *testing.T, output map[string]interface{}) {
+				t.Helper()
+				if replacement, _ := output["modifiedTransformedPrompt"].(string); replacement == "" {
+					t.Fatalf("hook_output=%+v, want modifiedTransformedPrompt", output)
+				}
+			},
+		},
+		{
+			name:  "nested tool result is inspected and replaced",
+			event: "postToolUse",
+			payload: map[string]interface{}{
+				"toolName": "shell",
+				"toolResult": map[string]interface{}{
+					"resultType":       "success",
+					"textResultForLlm": "model-facing nested tool output",
+					"metadata":         "must not be scanned as model content",
+				},
+			},
+			wantContent: "model-facing nested tool output",
+			assertHookOutput: func(t *testing.T, output map[string]interface{}) {
+				t.Helper()
+				modified, ok := output["modifiedResult"].(map[string]interface{})
+				if !ok {
+					t.Fatalf("hook_output=%+v, want modifiedResult object", output)
+				}
+				if replacement, _ := modified["textResultForLlm"].(string); replacement == "" {
+					t.Fatalf("modifiedResult=%+v, want textResultForLlm replacement", modified)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inspector := &stubAIDInspector{verdict: blockVerdict()}
+			cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			cfg.Gateway.Token = gatewayToken
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "copilot"
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			api.SetCiscoInspector(inspector)
+
+			body, err := json.Marshal(test.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(string(body)))
+			req.Header.Set("Authorization", "Bearer "+gatewayToken)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(connector.CopilotEnterpriseHookEventHeader, test.event)
+			req.Header.Set(connector.CopilotEnterpriseHookContractHeader, connector.CopilotEnterpriseHookContractID)
+			req.Header.Set(connector.CopilotEnterpriseManagedHeader, "true")
+
+			recorder := httptest.NewRecorder()
+			api.tokenAuth(api.handleAgentHook("copilot")).ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if inspector.calls != 1 || len(inspector.messages) != 1 || inspector.messages[0].Content != test.wantContent {
+				t.Fatalf("inspector calls/messages=%d/%+v, want exact content %q", inspector.calls, inspector.messages, test.wantContent)
+			}
+
+			var response map[string]interface{}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v (body=%s)", err, recorder.Body.String())
+			}
+			if response["action"] != "allow" || response["raw_action"] != "block" || response["would_block"] != true {
+				t.Fatalf("response accounting=%+v, want allow/block/would_block", response)
+			}
+			output, ok := response["hook_output"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("response=%+v, want managed v2 hook_output", response)
+			}
+			test.assertHookOutput(t, output)
+		})
+	}
+}
+
+func TestManagedCopilotAuthenticatedHTTPPreToolUseReturnsNativeDeny(t *testing.T) {
+	const gatewayToken = "managed-copilot-tool-deny-test-token"
+	inspector := &stubAIDInspector{verdict: blockVerdict()}
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Gateway.Token = gatewayToken
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "copilot"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	api.SetCiscoInspector(inspector)
+
+	body := `{"toolName":"shell","toolInput":{"command":"dangerous command"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+gatewayToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(connector.CopilotEnterpriseHookEventHeader, "preToolUse")
+	req.Header.Set(connector.CopilotEnterpriseHookContractHeader, connector.CopilotEnterpriseHookContractID)
+	req.Header.Set(connector.CopilotEnterpriseManagedHeader, "true")
+
+	recorder := httptest.NewRecorder()
+	api.tokenAuth(api.handleAgentHook("copilot")).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, recorder.Body.String())
+	}
+	output, ok := response["hook_output"].(map[string]interface{})
+	if response["action"] != "block" || !ok || output["permissionDecision"] != "deny" {
+		t.Fatalf("response=%+v, want action=block and native permissionDecision=deny", response)
+	}
+}
+
 func connectorSafeJSONForTest(value interface{}) string {
 	// The production encoder is exercised by hookexec tests. This compact test
 	// helper intentionally uses the same JSON-safe values without involving I/O.

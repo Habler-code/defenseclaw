@@ -1777,6 +1777,15 @@ func inferAgentHookEvent(payload map[string]interface{}) string {
 var hookEvaluatorPanicHook func()
 
 func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest) agentHookResponse {
+	return a.evaluateAgentHookWithProfile(ctx, req, a.hookProfileForConnector(req.ConnectorName))
+}
+
+// evaluateAgentHookWithProfile keeps evaluation bound to the exact profile
+// selected at the authenticated HTTP boundary. This matters for managed hook
+// contracts whose decoder, capability matrix, verdict mapper, or response
+// shaper differs from the connector's ordinary profile. Re-resolving by name
+// here would silently discard that trusted request binding.
+func (a *APIServer) evaluateAgentHookWithProfile(ctx context.Context, req agentHookRequest, profile connector.HookProfile) agentHookResponse {
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
 	}
@@ -1788,7 +1797,6 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
-	profile := a.hookProfileForConnector(req.ConnectorName)
 	toolCallRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 	structuredToolEvent := toolCallRoute == connector.ToolEventRouteStructuredAction ||
 		(profile.ToolCallLifecycle.Version == 0 &&
@@ -2465,7 +2473,7 @@ func isGenericToolInspectionEvent(event string) bool {
 
 func isPromptLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
-	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "subagentstart",
+	case "userpromptsubmit", "userpromptsubmitted", "userprompttransformed", "beforesubmitprompt", "preuserprompt", "subagentstart",
 		"prellmcall", "beforeagent", "beforemodel",
 		// Amp agent.start carries the exact user prompt and stable message ID.
 		"agentstart",

@@ -117,3 +117,19 @@ func TestCopilotManagedProfilePrefersTransformedPrompt(t *testing.T) {
 		t.Fatalf("decoded request = %+v", req)
 	}
 }
+
+func TestCopilotManagedProfileExtractsNestedToolResultForModel(t *testing.T) {
+	profile := NewCopilotEnterpriseConnector().HookProfile(managedCopilotTestOptions())
+	req := profile.Decode(map[string]interface{}{
+		"hookEventName": "postToolUse",
+		"toolResult": map[string]interface{}{
+			"resultType":       "success",
+			"textResultForLlm": "model-facing tool result",
+			"metadata":         "must not be inspected as content",
+		},
+		"result": "legacy fallback",
+	})
+	if req.Content != "model-facing tool result" || req.Direction != "output" {
+		t.Fatalf("decoded request = %+v", req)
+	}
+}
