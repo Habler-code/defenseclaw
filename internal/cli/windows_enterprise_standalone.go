@@ -380,6 +380,7 @@ func applyWindowsEnterpriseInstallerReport(
 				result.Inspection.AIDefense = "ok"
 			}
 		}
+		applyWindowsEnterpriseUnprotectedAgents(result)
 	}
 	messages := append([]string{}, report.Errors...)
 	if len(messages) == 0 && strings.TrimSpace(report.Error) != "" {
@@ -398,6 +399,45 @@ func applyWindowsEnterpriseInstallerReport(
 			code = "not_installed"
 		}
 		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
+	}
+}
+
+// windowsEnterpriseUnprotectedAgentsReader reads the enumerator's
+// unprotected-agents record; tests replace it.
+var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.UnprotectedAgent, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	return enterprisehooks.ReadWindowsUnprotectedAgents(layout.ManifestPath)
+}
+
+// applyWindowsEnterpriseUnprotectedAgents names every agent the enumerator
+// found installed for an eligible user but could not enroll (no verified
+// hook contract, below the platform minimum, an install the guardian cannot
+// manage, or an unreadable version) and marks the deployment
+// security-incomplete. Verify fails on them; the other actions warn, so
+// ensure never loops on a state only the user or administrator can change.
+func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
+	report := func(code, message string) {
+		if result.Action == "verify" {
+			result.AddError(code, message)
+		} else {
+			result.AddWarning(code, message)
+		}
+		result.SecurityComplete = false
+	}
+	agents, err := windowsEnterpriseUnprotectedAgentsReader()
+	if err != nil {
+		// A token that cannot read the protected record reports nothing
+		// about it, as for the manifest summary.
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
+			report(enterprisehooks.UnprotectedCodeAgentUnprotected, "the enumerator's unprotected-agents record is unreadable: "+err.Error())
+		}
+		return
+	}
+	for _, agent := range agents {
+		report(agent.Code, agent.Message())
 	}
 }
 

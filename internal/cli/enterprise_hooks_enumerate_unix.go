@@ -186,6 +186,7 @@ func runEnterpriseHooksEnumerateCycle(
 		MachinePolicyConnectors: machinePolicy,
 		SessionUIDs:             enterpriseHookSessionUIDs,
 		Discover:                enterpriseHooksEnumerateDiscover,
+		DiscoverStatic:          enterpriseHooksEnumerateDiscoverStatic,
 		MachineVersion:          enterprisehooks.DiscoverUnixMachineAgentVersion,
 		State:                   state,
 		Logger: func(subject, reason string) {
@@ -204,7 +205,7 @@ func runEnterpriseHooksEnumerateCycle(
 		fmt.Fprintf(stderr, "%s", data)
 		return report, nil
 	}
-	report.Changed, err = enterprisehooks.WriteUnixTargetsManifestAtomic(manifestPath, manifest)
+	report.Changed, err = enterpriseHooksEnumerateManifestWriter(manifestPath, manifest)
 	if err != nil {
 		return report, err
 	}
@@ -214,11 +215,24 @@ func runEnterpriseHooksEnumerateCycle(
 	// The guardian runs the per-user foreign-hook cleanup for every eligible
 	// account, including users whose connectors are all machine policy and
 	// who therefore have no manifest rows.
-	if err := enterprisehooks.WriteUnixEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifestPath), cycle.EligibleAccounts); err != nil {
+	if err := enterpriseHooksEnumerateEligibleWriter(enterprisehooks.UnixEligibleAccountsPath(manifestPath), cycle.EligibleAccounts); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the eligible accounts: %v\n", err)
+	}
+	// Status and verify report agents found installed but not enrollable,
+	// so an unprotected agent is never a silent gap.
+	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
 	}
 	return report, nil
 }
+
+// The cycle's root-only publications; tests replace them, since only root
+// can satisfy their root-owned directory chain.
+var (
+	enterpriseHooksEnumerateManifestWriter    = enterprisehooks.WriteUnixTargetsManifestAtomic
+	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEligibleAccounts
+	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgents
+)
 
 // enterpriseHooksEnumerateResolver is replaceable in tests.
 var enterpriseHooksEnumerateResolver = func(ctx context.Context) unixidentity.Resolver {
@@ -256,12 +270,22 @@ func enterpriseHooksEnumerateMachinePolicyConnectors(descriptorPath string) ([]s
 // installed agent versions. The worker's answer is user-influenced, so
 // every version is re-validated here.
 func enterpriseHooksEnumerateDiscover(ctx context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
+	return enterpriseHooksEnumerateDiscoverWith(ctx, account, connectors, false)
+}
+
+// enterpriseHooksEnumerateDiscoverStatic is enterpriseHooksEnumerateDiscover
+// for an untrusted home: the worker executes nothing there.
+func enterpriseHooksEnumerateDiscoverStatic(ctx context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
+	return enterpriseHooksEnumerateDiscoverWith(ctx, account, connectors, true)
+}
+
+func enterpriseHooksEnumerateDiscoverWith(ctx context.Context, account unixidentity.Account, connectors []string, static bool) (map[string]string, map[string]string, error) {
 	response, err := enterpriseHookWorkerRunner(ctx, enterpriseHookWorkerAccount{
 		UID:  account.UID,
 		GID:  account.GID,
 		User: account.Name,
 		Home: filepath.Clean(account.Home),
-	}, enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpDiscover, Standalone: true, Connectors: connectors})
+	}, enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpDiscover, Standalone: true, Connectors: connectors, StaticDiscovery: static})
 	if err != nil {
 		return nil, nil, err
 	}

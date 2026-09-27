@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
@@ -96,12 +97,29 @@ var enterpriseHookWindowsForeignCleanupInterval = 5 * time.Minute
 var enterpriseHookWindowsGuardianOptions = windowsStandaloneGuardianOptions
 
 // enterpriseHookWindowsEligibleProfiles lists the profiles enrollment admits
-// (exclude_users and exempt_users, as the enumerator applies them;
-// include_users is additive), so users without a per-user manifest row are
-// cleaned too.
+// (exclude_users, exempt_users and the group filters, as the enumerator
+// applies them; include_users is additive), so users without a per-user
+// manifest row are cleaned too. The group filters read the enumerator's
+// membership cache; a profile whose membership is unknown is skipped.
 var enterpriseHookWindowsEligibleProfiles = func(ctx context.Context) ([]enterprisehooks.TargetCredentials, error) {
-	opts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{})
-	return enterprisehooks.WindowsStandaloneEligibleProfiles(ctx, opts.ExcludeUsers, opts.ExemptUsers)
+	return enterpriseHookWindowsEligibleProfilesFor(ctx, cfg, enterpriseHookManifest)
+}
+
+// The membership cache reader and the profile decision; tests replace them.
+var (
+	enterpriseHookWindowsGroupCacheLoader       = enterprisehooks.LoadWindowsEnrollmentGroupCache
+	enterpriseHookWindowsStandaloneEligibleList = enterprisehooks.WindowsStandaloneEligibleProfilesFor
+)
+
+func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *config.Config, manifestPath string) ([]enterprisehooks.TargetCredentials, error) {
+	opts := standaloneWindowsEnumerateOptions(current, enterprisehooks.EnumerateOptions{})
+	if len(opts.IncludeGroups)+len(opts.ExcludeGroups) > 0 {
+		// An unreadable cache decides from the signed-in sessions alone.
+		if cache, err := enterpriseHookWindowsGroupCacheLoader(enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath)); err == nil {
+			opts.GroupCache = cache
+		}
+	}
+	return enterpriseHookWindowsStandaloneEligibleList(ctx, opts)
 }
 
 // enterpriseHookStandalonePlatformFinish removes unapproved foreign hooks

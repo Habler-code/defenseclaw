@@ -1028,10 +1028,26 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 			return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
 		}
 		if connector.HookContractLockDrifted(previous, current) {
+			if standaloneAcceptsAgentVersionChange(resolution) {
+				return nil
+			}
 			return fmt.Errorf("enterprise hooks: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 		}
 	}
 	return nil
+}
+
+// standaloneAcceptsAgentVersionChange reports whether an install may follow
+// an agent version that changed since its hooks were rendered. The standalone
+// enumerator re-discovers every enrolled user's agent version each cycle, and
+// the standalone guardian re-renders and re-verifies the hooks when the new
+// version resolves to a known, verified hook contract; the install then writes
+// a new contract lock. A version without a verified contract never gets here:
+// validateHookContract refuses it first, and status and verify report it as
+// hook_contract_unverified. The Secure Client profile keeps refusing every
+// change, because its versions come from an administrator-authored manifest.
+func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolution) bool {
+	return standaloneProfileProcess() && resolution.Status == connector.HookCompatibilityKnown
 }
 
 func pathInside(root, path string) bool {

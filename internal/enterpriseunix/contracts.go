@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
 // codeHookContractUnverified names a guardian target whose agent version
@@ -90,6 +92,33 @@ func (l *lifecycle) describeHookContracts() {
 		r.AddWarning(codeGuardianTargetFailed, message)
 	}
 	r.SecurityComplete = false
+}
+
+// codeAgentUnprotected names an agent the enumerator found installed for an
+// eligible user but could not enroll; it runs without DefenseClaw hooks.
+const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
+
+// describeUnprotectedAgents reports the agents the enumerator found
+// installed but could not enroll (its unprotected-agents record next to the
+// manifest) and marks the deployment security-incomplete.
+func (l *lifecycle) describeUnprotectedAgents() {
+	env, r := l.env, l.result
+	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
+	if err != nil {
+		return
+	}
+	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
+	if err != nil {
+		r.AddWarning(codeAgentUnprotected, "the enumerator's unprotected-agents record is unreadable: "+err.Error())
+		r.SecurityComplete = false
+		return
+	}
+	for _, agent := range agents {
+		r.AddWarning(agent.Code, agent.Message())
+	}
+	if len(agents) > 0 {
+		r.SecurityComplete = false
+	}
 }
 
 func unverifiedHookContractError(message string) bool {

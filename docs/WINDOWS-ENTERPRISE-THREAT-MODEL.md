@@ -753,7 +753,31 @@ authority.
     legitimate project hook; administrators approve those by hash in
     `enterprise.machine_policy.connectors.<connector>.allowed_hooks` or relax the connector to
     `report`.
-15. The cross-platform vendor residuals in the
+15. Standalone agent discovery covers the per-user package locations,
+    nvm-windows, fnm, Volta, pnpm, yarn, the in-profile `.npmrc` prefix, the
+    native installers and machine-scope WinGet packages. An agent found there
+    that cannot be enrolled is reported by status and verify
+    (`hook_contract_unverified`, `agent_unprotected`); an agent CLI installed
+    anywhere else in a profile is not found and not reported. A user controls
+    the version their own install reports: while signed in they can move
+    their rows between verified hook contracts, and an upgrade to an
+    unverified version keeps the row at its last verified version, reported
+    as `hook_contract_unverified`. An enrolled Claude Code row never moves to
+    an older contract, since the shared Claude Code policy is rendered from
+    the oldest enrolled one; the downgrade is reported as
+    `agent_unprotected`. A user enrolled for the first time with an older
+    Claude Code still sets that contract for every user.
+16. `include_groups` and `exclude_groups` decide a signed-out user from the
+    group SIDs cached at their last sign-in, so a membership change applies
+    at the next sign-in. A directory user with no cached membership (not
+    signed in since installation) is pending: existing rows are kept, none
+    are added, nothing is revoked. Well-known groups other than Everyone are
+    decided from tokens only, so they leave such a user pending too. A group
+    name that never resolved excludes no one in `exclude_groups` and leaves
+    users no other entry admits pending in `include_groups`; a signed-in
+    pending user's installed agents are reported. Entra ID groups are matched
+    by SID only.
+17. The cross-platform vendor residuals in the
     [enterprise threat model](ENTERPRISE-THREAT-MODEL.md#residual-risks)
     (Claude Code `--bare`, Amp plugin order, OpenCode plugin order, Hermes and
     Copilot fail-open behavior, higher-precedence cloud policy) apply to

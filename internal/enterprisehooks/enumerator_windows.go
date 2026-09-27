@@ -117,6 +117,21 @@ type EnumerateOptions struct {
 	IncludeUsers []string
 	ExcludeUsers []string
 	ExemptUsers  []string
+
+	// IncludeGroups and ExcludeGroups carry enterprise.enrollment's group
+	// filters for the standalone profile (enrollment_groups_windows.go):
+	// exclusion wins, include_groups admits only members, and a profile
+	// whose membership is unknown (a directory user who has not signed in
+	// since DefenseClaw was installed) is left undecided, like a failed
+	// account-name lookup: pending, never revoked.
+	IncludeGroups []string
+	ExcludeGroups []string
+	// GroupCache is the membership cache the caller keeps between cycles;
+	// the standalone enumerator updates it in place. Nil starts empty.
+	GroupCache *WindowsEnrollmentGroupCache
+	// ReportUnprotected receives each agent the standalone enumerator found
+	// installed for an eligible profile but could not enroll.
+	ReportUnprotected func(UnprotectedAgent)
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -220,6 +235,25 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	}
 
 	lookupAccount := newWindowsEnrollmentAccountLookup()
+	// The standalone profile reads each active session's token once per
+	// cycle: it tells which users can have a changed agent version followed
+	// now, and carries their group membership.
+	var sessions map[string][]string
+	var groups *windowsEnrollmentGroups
+	if standalone {
+		var sessionErr error
+		sessions, sessionErr = windowsActiveSessionGroups()
+		if sessionErr != nil {
+			logfSafely(opts.Logger, "sessions", fmt.Sprintf("active sessions are unreadable; known rows keep their agent versions and group membership comes from the cache this cycle: %v", sessionErr))
+			sessions = map[string][]string{}
+		}
+		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, opts.GroupCache, opts.Logger)
+		listed := make(map[string]struct{}, len(profiles))
+		for _, profile := range profiles {
+			listed[canonicalManifestTargetSID(profile.SID)] = struct{}{}
+		}
+		groups.pruneCache(listed)
+	}
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
@@ -235,12 +269,23 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			continue
 		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
+		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
+			if groupDecision, groupReason := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
+				decision, reason = groupDecision, groupReason
+			}
+		}
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
 			continue
 		}
 		if decision != windowsEnrollmentEnrolled {
 			logfSafely(opts.Logger, profile.SID, reason)
+		}
+		_, sessionActive := sessions[canonicalManifestTargetSID(profile.SID)]
+		rowContext := windowsStandaloneRowContext{
+			sessionActive: sessionActive,
+			user:          filepath.Base(filepath.Clean(profile.Home)),
+			report:        opts.ReportUnprotected,
 		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
@@ -251,9 +296,6 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			if decision == windowsEnrollmentExempt && !windowsStandaloneMachinePolicyConnector(conn) && !known {
 				continue
 			}
-			if decision == windowsEnrollmentUndecided && !known {
-				continue
-			}
 			dataDir := filepath.Join(filepath.Clean(profile.Home), ".defenseclaw")
 			row := ManifestTarget{
 				SID:       profile.SID,
@@ -261,9 +303,17 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				Connector: conn,
 				DataDir:   dataDir,
 			}
+			if decision == windowsEnrollmentUndecided && !known {
+				// Pending: no new row. A signed-in user can run an agent
+				// already installed, so it is reported, never a silent gap.
+				if standalone {
+					rowContext.pending(&row, reason)
+				}
+				continue
+			}
 			emit := false
 			if standalone {
-				emit = applyStandaloneRowState(&row, previous, opts.Logger)
+				emit = applyStandaloneRowStateFor(&row, previous, opts.Logger, rowContext)
 			} else {
 				emit = applyPreviousRowState(&row, previous, opts.Logger)
 			}
@@ -727,6 +777,14 @@ type windowsUserProfile struct {
 // be evaluated (the account lookup failed) is skipped this pass, so a
 // directory outage never touches a user who may be excluded.
 func WindowsStandaloneEligibleProfiles(ctx context.Context, exclude, exempt []string) ([]TargetCredentials, error) {
+	return WindowsStandaloneEligibleProfilesFor(ctx, EnumerateOptions{ExcludeUsers: exclude, ExemptUsers: exempt})
+}
+
+// WindowsStandaloneEligibleProfilesFor is WindowsStandaloneEligibleProfiles
+// with opts' user lists and group filters, decided as EnumerateWindows
+// decides them. opts.GroupCache is read, never changed: the enumerator is
+// its only writer.
+func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOptions) ([]TargetCredentials, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -734,13 +792,35 @@ func WindowsStandaloneEligibleProfiles(ctx context.Context, exclude, exempt []st
 	if err != nil {
 		return nil, err
 	}
+	var groups *windowsEnrollmentGroups
+	if len(opts.IncludeGroups)+len(opts.ExcludeGroups) > 0 {
+		sessions, sessionErr := windowsActiveSessionGroups()
+		if sessionErr != nil {
+			sessions = map[string][]string{}
+		}
+		cache := NewWindowsEnrollmentGroupCache()
+		if opts.GroupCache != nil {
+			for sid, members := range opts.GroupCache.Users {
+				cache.Users[sid] = append([]string(nil), members...)
+			}
+			for name, sid := range opts.GroupCache.Names {
+				cache.Names[name] = sid
+			}
+		}
+		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, cache, nil)
+	}
 	lookupAccount := newWindowsEnrollmentAccountLookup()
 	out := make([]TargetCredentials, 0, len(profiles))
 	for _, profile := range profiles {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		decision, _ := windowsProfileEnrollmentDecision(profile, exclude, exempt, lookupAccount)
+		decision, _ := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
+		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
+			if groupDecision, _ := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
+				decision = groupDecision
+			}
+		}
 		if decision != windowsEnrollmentEnrolled && decision != windowsEnrollmentExempt {
 			continue
 		}

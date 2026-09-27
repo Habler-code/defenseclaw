@@ -92,21 +92,56 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 	if err := requireWindowsEnterpriseStandaloneAgentFloor(opts.ConnectorName, opts.AgentVersion); err != nil {
 		return InstallResult{}, true, err
 	}
-	var result InstallResult
-	var err error
-	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
-	case "claudecode":
-		result, err = verifyWindowsClaudeManagedResult(ctx, opts)
-	case "codex":
-		result, err = verifyWindowsCodexManagedResult(ctx, opts)
-	case "cursor":
-		result, err = verifyWindowsCursorManagedResult(ctx, opts)
-	case "copilot":
-		result, err = verifyWindowsRuntimeOnlyManagedResult(ctx, opts)
-	default:
-		result, err = verifyWindowsGenericManagedResult(ctx, opts)
+	result, err := windowsManagedVerify(ctx, opts)
+	if err == nil {
+		err = requireWindowsStandaloneAgentVersionUnchanged(opts, result)
 	}
 	return result, true, err
+}
+
+// windowsManagedVerify verifies one connector's managed install; tests
+// replace it to drive platformVerify without machine policy in force.
+var windowsManagedVerify = verifyWindowsManagedResult
+
+func verifyWindowsManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
+	case "claudecode":
+		return verifyWindowsClaudeManagedResult(ctx, opts)
+	case "codex":
+		return verifyWindowsCodexManagedResult(ctx, opts)
+	case "cursor":
+		return verifyWindowsCursorManagedResult(ctx, opts)
+	case "copilot":
+		return verifyWindowsRuntimeOnlyManagedResult(ctx, opts)
+	default:
+		return verifyWindowsGenericManagedResult(ctx, opts)
+	}
+}
+
+// requireWindowsStandaloneAgentVersionUnchanged fails a standalone verify
+// whose hooks were rendered for another agent version than the row now
+// records. The Codex, Cursor and Copilot runtimes verify against their
+// stored contract lock alone, so without this an upgrade the enumerator
+// recorded (to a version with a verified contract) would never be
+// re-rendered: the failed verify makes the guardian's repair render the
+// hooks for the new version. The Secure Client profile is unchanged.
+func requireWindowsStandaloneAgentVersionUnchanged(opts InstallOptions, result InstallResult) error {
+	if !standaloneProfileProcess() {
+		return nil
+	}
+	rendered := strings.TrimSpace(result.AgentVersion)
+	enrolled := strings.TrimSpace(opts.AgentVersion)
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	if rendered == "" || enrolled == "" ||
+		connector.AgentUnchangedSinceLock(connector.HookContractLockEntry{Connector: name, RawAgentVersion: rendered}, enrolled) {
+		return nil
+	}
+	return fmt.Errorf(
+		"enterprise hooks: connector %s hooks were rendered for agent version %q, and the enrolled version is now %q; repair re-renders them",
+		name,
+		rendered,
+		enrolled,
+	)
 }
 
 func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) error {

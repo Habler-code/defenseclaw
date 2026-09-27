@@ -286,14 +286,63 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 	if !allowExec {
 		return "", fmt.Sprintf("no %s package metadata under this home", connector)
 	}
-	for _, binary := range probe.binaries {
+	installedAt := ""
+	for index, binary := range probe.binaries {
 		for _, candidate := range unixAgentBinaryCandidates(home, binary) {
 			if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
 				return version, ""
 			}
+			// Only the connector's own CLI name counts as evidence of an
+			// install; a generic alias ("agent") could be anything.
+			if index == 0 && installedAt == "" && unixAgentExecutablePresent(candidate) {
+				installedAt = candidate
+			}
 		}
 	}
+	if installedAt != "" {
+		return "", UnixAgentUnversionedReasonPrefix + installedAt
+	}
 	return "", fmt.Sprintf("no %s installation found for this user", connector)
+}
+
+// UnixAgentUnversionedReasonPrefix starts the discovery reason for an agent
+// whose CLI exists for the user but printed no usable version. The
+// enumerator cannot select a hook contract for it, so it reports the agent
+// as unprotected instead of skipping it silently.
+const UnixAgentUnversionedReasonPrefix = "installed, but its version could not be read: "
+
+// UnixAgentInstalledWithoutVersion reports whether a discovery reason names
+// an installed agent whose version could not be read.
+func UnixAgentInstalledWithoutVersion(reason string) bool {
+	return strings.HasPrefix(reason, UnixAgentUnversionedReasonPrefix)
+}
+
+// DiscoverUnixAgentVersionStatically is DiscoverUnixAgentVersion without
+// the `--version` fallback: it reads package metadata and, when there is
+// none, reports the connector's own CLI found in the user's install
+// locations as installed without a readable version. Nothing is executed,
+// so it is safe in a home other users can write, where a CLI could have
+// been planted.
+func DiscoverUnixAgentVersionStatically(ctx context.Context, home, connector string) (string, string) {
+	version, reason := DiscoverUnixAgentVersion(ctx, home, connector, false)
+	if version != "" {
+		return version, ""
+	}
+	probe, ok := unixAgentProbes[strings.ToLower(strings.TrimSpace(connector))]
+	if !ok || len(probe.binaries) == 0 {
+		return "", reason
+	}
+	for _, candidate := range unixAgentBinaryCandidates(filepath.Clean(home), probe.binaries[0]) {
+		if unixAgentExecutablePresent(candidate) {
+			return "", UnixAgentUnversionedReasonPrefix + candidate
+		}
+	}
+	return "", reason
+}
+
+func unixAgentExecutablePresent(candidate string) bool {
+	info, err := os.Stat(candidate)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 // DiscoverUnixMachineAgentVersion reads only root-owned, non-writable

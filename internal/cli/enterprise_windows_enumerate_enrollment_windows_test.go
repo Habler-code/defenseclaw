@@ -99,11 +99,87 @@ func TestEnterpriseWindowsEnumerateIdlesInManifestMode(t *testing.T) {
 	}
 }
 
-func TestEnterpriseWindowsEnumerateWarnsAboutGroupFilters(t *testing.T) {
-	log, _ := runStandaloneWindowsEnumerateCycleForTest(t, standaloneWindowsEnrollmentConfig(
-		config.EnterpriseEnrollmentConfig{ExcludeGroups: []string{"Administrators"}},
-	))
-	if !strings.Contains(log, "WARN enterprise.enrollment.include_groups and exclude_groups are not applied on Windows") {
-		t.Fatalf("group filters must not be ignored silently; log:\n%s", log)
+// include_groups and exclude_groups reach the Windows enumerator (they were
+// only warned about), with the membership cache it keeps between cycles, and
+// every agent it reports as unprotected is published for status and verify.
+func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAgents(t *testing.T) {
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{
+		IncludeGroups: []string{"Developers"},
+		ExcludeGroups: []string{"Administrators"},
+	})
+	previousConfig := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousCacheLoader := enterpriseWindowsEnumerateGroupCacheLoader
+	previousCacheWriter := enterpriseWindowsEnumerateGroupCacheWriter
+	previousRecordWriter := enterpriseWindowsEnumerateUnprotectedWriter
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfig
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsEnumerateGroupCacheLoader = previousCacheLoader
+		enterpriseWindowsEnumerateGroupCacheWriter = previousCacheWriter
+		enterpriseWindowsEnumerateUnprotectedWriter = previousRecordWriter
+	})
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	cached := enterprisehooks.NewWindowsEnrollmentGroupCache()
+	cached.Names["developers"] = "S-1-5-32-545"
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	enterpriseWindowsEnumerateGroupCacheLoader = func(path string) (*enterprisehooks.WindowsEnrollmentGroupCache, error) {
+		if path != enterprisehooks.WindowsEnrollmentGroupsCachePath(manifest) {
+			t.Errorf("cache path = %s", path)
+		}
+		return cached, nil
+	}
+	var seen enterprisehooks.EnumerateOptions
+	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		seen = opts
+		if opts.ReportUnprotected != nil {
+			opts.ReportUnprotected(enterprisehooks.UnprotectedAgent{User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "cursor", Version: "4.1.0", Reason: "version 4.1.0 is not verified against a known hook contract"})
+		}
+		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return false, nil }
+	var savedCache *enterprisehooks.WindowsEnrollmentGroupCache
+	enterpriseWindowsEnumerateGroupCacheWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache) (bool, error) {
+		savedCache = cache
+		return true, nil
+	}
+	var published []enterprisehooks.UnprotectedAgent
+	enterpriseWindowsEnumerateUnprotectedWriter = func(path string, agents []enterprisehooks.UnprotectedAgent) (bool, error) {
+		if path != manifest {
+			t.Errorf("record manifest path = %s", path)
+		}
+		published = agents
+		return true, nil
+	}
+	stderr := new(bytes.Buffer)
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest, true); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if strings.Join(seen.IncludeGroups, ",") != "Developers" || strings.Join(seen.ExcludeGroups, ",") != "Administrators" {
+		t.Fatalf("group filters not passed: %+v", seen)
+	}
+	if seen.GroupCache != cached || savedCache != cached {
+		t.Fatal("the loaded membership cache must be handed to the enumerator and saved after the cycle")
+	}
+	if len(published) != 1 || published[0].Connector != "cursor" {
+		t.Fatalf("published = %+v", published)
+	}
+	if log := stderr.String(); strings.Contains(log, "are not applied on Windows") || !strings.Contains(log, "cursor 4.1.0 for user alice") {
+		t.Fatalf("log:\n%s", log)
+	}
+
+	// Secure Client keeps its enumeration exactly: no group filters, no
+	// cache, no record.
+	secureClient := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	secureClient.Enterprise.Enrollment = cfg.Enterprise.Enrollment
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return secureClient, nil }
+	published, savedCache, seen = nil, nil, enterprisehooks.EnumerateOptions{}
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest, true); err != nil {
+		t.Fatalf("Secure Client cycle: %v", err)
+	}
+	if len(seen.IncludeGroups)+len(seen.ExcludeGroups) != 0 || seen.GroupCache != nil || seen.ReportUnprotected != nil || savedCache != nil || published != nil {
+		t.Fatalf("Secure Client enumeration changed: %+v", seen)
 	}
 }

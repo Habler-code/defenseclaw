@@ -89,6 +89,12 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 		return "", "not installed"
 	}
+	enterpriseHookWorkerDiscoverStaticVersion = func(_ context.Context, home, connector string) (string, string) {
+		if connector == "codex" {
+			return "", enterprisehooks.UnixAgentUnversionedReasonPrefix + filepath.Join(home, ".local", "bin", "codex")
+		}
+		return "", "not installed"
+	}
 	os.Exit(enterpriseHookWorkerMain(context.Background(), os.Stdin, os.Stdout, os.Stderr))
 }
 
@@ -211,6 +217,24 @@ func TestEnterpriseHookWorkerDiscoverRunsAsTheUser(t *testing.T) {
 	}
 	if response.Versions["codex"] != "0.142.0" || response.Reasons["claudecode"] == "" {
 		t.Fatalf("discover response = %+v", response)
+	}
+}
+
+// For an untrusted home the parent asks for a static discovery, and the
+// worker then never takes the executing path.
+func TestEnterpriseHookWorkerStaticDiscoverExecutesNothing(t *testing.T) {
+	useEnterpriseHookWorkerHelper(t, "ok")
+	account := selfWorkerAccount(t)
+	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+		Operation:       enterpriseHookWorkerOpDiscover,
+		Connectors:      []string{"codex"},
+		StaticDiscovery: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, executed := response.Versions["codex"]; executed || !enterprisehooks.UnixAgentInstalledWithoutVersion(response.Reasons["codex"]) {
+		t.Fatalf("static discover response = %+v, want the static finding only", response)
 	}
 }
 

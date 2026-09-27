@@ -227,4 +227,20 @@ access. Status shows presence, modification time and a digest prefix only.
    DefenseClaw hooks (the guardian refuses hooks it cannot parse). Status
    and verify report them as `hook_contract_unverified` with
    `security_complete: false`; the administrator pins a verified version or
-   upgrades DefenseClaw.
+   upgrades DefenseClaw. An enrolled user who upgrades to such a version
+   keeps a row at the last verified one, so the guardian keeps repairing
+   those hooks, and the new version is reported the same way; an upgrade to
+   another verified version is re-rendered.
+9. Agent discovery covers the per-user install locations, the Node version
+   managers (nvm, fnm, Volta, asdf, mise), pnpm and yarn global directories,
+   the `~/.npmrc` prefix, the machine prefixes and `agent_prefixes`. An agent
+   found there that cannot be enrolled is reported as `agent_unprotected`.
+   An agent CLI a user installs or copies anywhere else in their home (a
+   custom `NVM_DIR`, `XDG_DATA_HOME` or `PNPM_HOME`, a command-line
+   `--prefix`, an arbitrary directory) is not found: it is neither enrolled
+   nor reported, and a per-user connector run from there has no DefenseClaw
+   hooks. Closing it needs application control over where users run agents
+   from. A user who has never been enrolled and whose home is untrusted
+   (for example group-writable) is not enrolled; the agents found for them
+   by a discovery that runs nothing in that home are reported as
+   `agent_unprotected` until the home is fixed.

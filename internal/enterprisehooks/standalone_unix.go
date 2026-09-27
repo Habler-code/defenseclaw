@@ -47,6 +47,13 @@ func StandaloneUnix() bool {
 	return standaloneUnixMode.Load()
 }
 
+// standaloneProfileProcess reports whether this process serves the
+// standalone profile: the standalone guardian, enumerator and per-user
+// worker set the mode; the Secure Client macOS guardian never does.
+func standaloneProfileProcess() bool {
+	return StandaloneUnix()
+}
+
 // SetStandaloneResolver replaces the NSS/Directory Services resolver used
 // by the standalone rules. Tests and the CLI use it to share one cached
 // resolver per cycle.

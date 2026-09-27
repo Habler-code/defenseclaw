@@ -235,15 +235,25 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		}
 		return nil
 	}
-	for _, warning := range standaloneWindowsEnumerateWarnings(cfg) {
-		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s\n", warning)
-	}
-
 	logf := enumerationLoggerForStderr(stderr)
-	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
+	enumerateOpts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		Logger:               logf,
-	}))
+	})
+	standalone := cfg.StandaloneEnterprise()
+	var unprotected []enterprisehooks.UnprotectedAgent
+	if standalone {
+		cache, cacheErr := enterpriseWindowsEnumerateGroupCacheLoader(enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath))
+		if cacheErr != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN enrollment group cache is unreadable; starting from signed-in sessions only: %v\n", cacheErr)
+			cache = enterprisehooks.NewWindowsEnrollmentGroupCache()
+		}
+		enumerateOpts.GroupCache = cache
+		enumerateOpts.ReportUnprotected = func(agent enterprisehooks.UnprotectedAgent) {
+			unprotected = append(unprotected, agent)
+		}
+	}
+	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: walk profiles: %w", err)
 	}
@@ -251,6 +261,20 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	changed, err := enterpriseWindowsEnumerateManifestWriter(manifestPath, manifest)
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
+	}
+	if standalone {
+		// The cache keeps signed-out users' last seen group membership;
+		// the record lets status and verify name every agent found
+		// installed but not enrollable, so none is a silent gap.
+		if _, cacheErr := enterpriseWindowsEnumerateGroupCacheWriter(enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath), enumerateOpts.GroupCache); cacheErr != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the enrollment group cache: %v\n", cacheErr)
+		}
+		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
+		}
+		for _, agent := range unprotected {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
+		}
 	}
 	// Sibling pass: ensure the CertGateway service SID has Read+Execute on
 	// each enrolled user's inventory dotdirs (~/.claude, ~/.codex, …). The
@@ -488,6 +512,11 @@ var (
 	enterpriseWindowsEnumerateManifestLoader    = loadWindowsTargetRuntimeManifest
 	enterpriseWindowsEnumerateProfileEnumerator = enterprisehooks.EnumerateWindows
 	enterpriseWindowsEnumerateManifestWriter    = enterprisehooks.WriteTargetsManifestAtomic
+	// Standalone only: the enrollment group cache and the unprotected-agents
+	// record beside the manifest.
+	enterpriseWindowsEnumerateGroupCacheLoader  = enterprisehooks.LoadWindowsEnrollmentGroupCache
+	enterpriseWindowsEnumerateGroupCacheWriter  = enterprisehooks.SaveWindowsEnrollmentGroupCache
+	enterpriseWindowsEnumerateUnprotectedWriter = enterprisehooks.WriteWindowsUnprotectedAgents
 )
 
 // isEnterpriseWindowsEnumerateConfigMissing recognises the specific
@@ -531,6 +560,8 @@ func standaloneWindowsEnumerateOptions(cfg *config.Config, opts enterprisehooks.
 	opts.IncludeUsers = append([]string(nil), enrollment.IncludeUsers...)
 	opts.ExcludeUsers = append([]string(nil), enrollment.ExcludeUsers...)
 	opts.ExemptUsers = append([]string(nil), enrollment.ExemptUsers...)
+	opts.IncludeGroups = append([]string(nil), enrollment.IncludeGroups...)
+	opts.ExcludeGroups = append([]string(nil), enrollment.ExcludeGroups...)
 	return opts
 }
 
@@ -545,18 +576,4 @@ func standaloneWindowsEnumerateIdleReason(cfg *config.Config) string {
 		return "enterprise.enrollment.mode is manifest; the administrator publishes targets"
 	}
 	return ""
-}
-
-// standaloneWindowsEnumerateWarnings lists enrollment settings the Windows
-// enumerator does not apply, so they are never ignored silently.
-func standaloneWindowsEnumerateWarnings(cfg *config.Config) []string {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return nil
-	}
-	enrollment := cfg.Enterprise.Enrollment
-	var warnings []string
-	if len(enrollment.IncludeGroups) != 0 || len(enrollment.ExcludeGroups) != 0 {
-		warnings = append(warnings, "enterprise.enrollment.include_groups and exclude_groups are not applied on Windows; select users with exclude_users")
-	}
-	return warnings
 }

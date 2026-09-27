@@ -5,6 +5,7 @@
 package enterprisehooks
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -28,8 +29,11 @@ func claudeHookContractOrder(contractID string) int {
 // row's agent version is a claim its user controls; rendering the shared body
 // from each row's own version let one user switch the hook contract for every
 // user, and made rows on different contracts rewrite the body in turn. The
-// oldest contract is valid for every enrolled client and changes only with the
-// enrolled set. Empty when no enabled row resolves to a known contract.
+// oldest contract is valid for every enrolled client. It changes with the
+// enrolled set, and rises as enrolled users upgrade; it never falls because
+// an enrolled user downgrades, since a known row never follows a change to
+// an older contract (claudeMachineContractLowered). Empty when no enabled
+// row resolves to a known contract.
 func WindowsStandaloneClaudeMachinePolicyContract(manifest Manifest) string {
 	contracts := connector.KnownHookContracts("claudecode")
 	best := -1
@@ -69,4 +73,32 @@ func claudeMachinePolicySetup(rowSetup connector.SetupOpts, machineContractID st
 	policy := rowSetup
 	policy.HookContractID = machineContractID
 	return policy
+}
+
+// claudeMachineContractLowered explains why a known Claude Code row must not
+// follow its user's change from version from to version to: to resolves to
+// an older hook contract than from. The standalone Windows deployment renders
+// the one machine-wide Claude policy from the oldest enrolled contract, so a
+// row that followed the change would move every user's policy to the older
+// contract, which lacks hooks the newer one has. Empty when the change may
+// be followed: another connector, a contract that is the same or newer, or
+// a from version with no known contract.
+func claudeMachineContractLowered(connectorName, from, to string) string {
+	if !strings.EqualFold(strings.TrimSpace(connectorName), "claudecode") {
+		return ""
+	}
+	current := connector.ResolveHookContract("claudecode", from)
+	next := connector.ResolveHookContract("claudecode", to)
+	if current.Status != connector.HookCompatibilityKnown || next.Status != connector.HookCompatibilityKnown {
+		return ""
+	}
+	currentOrder := claudeHookContractOrder(current.Contract.ContractID)
+	nextOrder := claudeHookContractOrder(next.Contract.ContractID)
+	if currentOrder < 0 || nextOrder < 0 || nextOrder >= currentOrder {
+		return ""
+	}
+	return fmt.Sprintf(
+		"version %s has an older hook contract (%s) than the enrolled %s (%s), and the one machine-wide Claude Code policy every user shares is rendered from the oldest enrolled contract",
+		strings.TrimSpace(to), next.Contract.ContractID, strings.TrimSpace(from), current.Contract.ContractID,
+	)
 }

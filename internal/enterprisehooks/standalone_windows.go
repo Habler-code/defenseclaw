@@ -15,3 +15,9 @@ package enterprisehooks
 // refuseStandaloneRootInProcess is Unix-only; Windows guardians already
 // mutate profiles under the exact target token.
 func refuseStandaloneRootInProcess(string) error { return nil }
+
+// standaloneProfileProcess reports whether this process serves the
+// standalone profile (the protected profile pin in its environment).
+func standaloneProfileProcess() bool {
+	return windowsEnterpriseStandaloneProcess()
+}

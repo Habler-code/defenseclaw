@@ -95,6 +95,12 @@ type UnixEnumerateOptions struct {
 	// SessionUIDs lists uids with a live login session.
 	SessionUIDs func() []int
 	Discover    UnixDiscoverFunc
+	// DiscoverStatic finds agents without executing anything (package
+	// metadata and the presence of the agent CLIs), with the account's
+	// credentials. It runs for an eligible user whose home is untrusted
+	// and who has no rows, so the agents they can run there are reported
+	// even though they are not enrolled.
+	DiscoverStatic UnixDiscoverFunc
 	// MachineVersion reads root-owned machine-scoped metadata.
 	MachineVersion func(connector string) string
 	State          *UnixEnumeratorState
@@ -113,6 +119,10 @@ type UnixEnumerationReport struct {
 	Revoked    int      `json:"revoked"`
 	Skipped    []string `json:"skipped,omitempty"`
 	Connectors []string `json:"connectors"`
+	// Unprotected lists agents found installed for an eligible user that
+	// could not be enrolled (their version could not be read). The
+	// lifecycle's status and verify report them.
+	Unprotected []UnprotectedAgent `json:"unprotected,omitempty"`
 	// EligibleAccounts are the accounts that passed every enrollment filter
 	// and whose home is available this cycle, including users with only
 	// machine-policy connectors (no manifest rows). The guardian runs the
@@ -417,6 +427,9 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				continue
 			}
 			skip(check.Reason)
+			// Nor may a user hide the agents they run by loosening their
+			// home before they are first enrolled: report them.
+			report.Unprotected = append(report.Unprotected, unixUntrustedHomeAgents(ctx, opts, account, perUser, machinePolicy, check)...)
 			continue
 		}
 		report.Eligible++
@@ -458,8 +471,21 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				row.AgentVersion = prev.AgentVersion
 				row.Enabled = prev.Enabled
 				if check.State == HomeAvailable {
-					if version := versions[conn]; version != "" && prev.IsEnabled() {
-						row.AgentVersion = version
+					if version := versions[conn]; version != "" && version != prev.AgentVersion && prev.IsEnabled() {
+						if refused := unixKnownRowVersionRefused(conn, prev.AgentVersion, version); refused == "" {
+							row.AgentVersion = version
+						} else {
+							logfSafely(opts.Logger, name, fmt.Sprintf("(%s, %s) agent version changed from %s to %s, which is not followed (%s); keeping the row at its last verified version", name, conn, prev.AgentVersion, version, refused))
+							report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+								User:      name,
+								UID:       intPointer(account.UID),
+								Connector: conn,
+								Version:   version,
+								Code:      UnprotectedCodeForReason(refused),
+								Reason: fmt.Sprintf("%s; the row stays enrolled at %s, so the guardian keeps repairing this user's hooks as rendered for %s, not for the installed version",
+									refused, prev.AgentVersion, prev.AgentVersion),
+							})
+						}
 					}
 					row.Deferred = false
 				} else {
@@ -483,6 +509,18 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				}
 				if check.State != HomeAvailable {
 					reason = check.Reason
+				} else if UnixAgentInstalledWithoutVersion(reason) {
+					consequence := "it runs without DefenseClaw hooks"
+					if _, isMachine := machinePolicy[conn]; isMachine {
+						consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+					}
+					report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+						User:      name,
+						UID:       intPointer(account.UID),
+						Connector: conn,
+						Code:      UnprotectedCodeAgentUnprotected,
+						Reason:    reason + "; DefenseClaw cannot select a hook contract without a version, so " + consequence,
+					})
 				}
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, reason))
 				continue
@@ -657,6 +695,66 @@ func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrol
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].account.Name < out[j].account.Name })
 	return out, transient
+}
+
+// unixKnownRowVersionRefused explains why a known row must not follow its
+// user's agent from version from to version to: to has no verified hook
+// contract while from has one. The guardian's install refuses a version
+// without a verified contract, so recording it would stop every repair of
+// the user's hooks, and the user could then remove them for good; the row
+// keeps its last verified version and the new one is reported
+// (hook_contract_unverified). Empty when the change is followed.
+func unixKnownRowVersionRefused(connectorName, from, to string) string {
+	if connector.ResolveHookContract(connectorName, to).Status == connector.HookCompatibilityKnown {
+		return ""
+	}
+	if connector.ResolveHookContract(connectorName, from).Status != connector.HookCompatibilityKnown {
+		return "" // nothing verified to keep
+	}
+	return fmt.Sprintf("version %s is not verified against a known hook contract", strings.TrimSpace(to))
+}
+
+// unixUntrustedHomeAgents reports the agents an eligible user without rows
+// can run from a home the enumerator does not enroll because it is
+// untrusted (group/other writable, a symlink, owned by another account, or
+// covered by a user mount). Discovery there is static: it reads package
+// metadata and checks for the CLIs as the user, and executes nothing in a
+// home others may have written to.
+func unixUntrustedHomeAgents(ctx context.Context, opts UnixEnumerateOptions, account unixidentity.Account, perUser []string, machinePolicy map[string]struct{}, check HomeCheck) []UnprotectedAgent {
+	if opts.DiscoverStatic == nil || len(perUser) == 0 {
+		return nil
+	}
+	versions, reasons, err := opts.DiscoverStatic(ctx, account, perUser)
+	if err != nil {
+		logfSafely(opts.Logger, account.Name, fmt.Sprintf("agents in the untrusted home could not be listed: %v", err))
+		return nil
+	}
+	remedy := ""
+	if check.LooseMode {
+		remedy = "; remove group and other write from the home to enroll it"
+	}
+	var out []UnprotectedAgent
+	for _, conn := range perUser {
+		version := versions[conn]
+		if version == "" && !UnixAgentInstalledWithoutVersion(reasons[conn]) {
+			continue
+		}
+		consequence := "it runs without DefenseClaw hooks"
+		if _, isMachine := machinePolicy[conn]; isMachine {
+			// Machine-policy connectors are enrolled per user only
+			// with unenrolled_users: deny.
+			consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+		}
+		out = append(out, UnprotectedAgent{
+			User:      account.Name,
+			UID:       intPointer(account.UID),
+			Connector: conn,
+			Version:   version,
+			Code:      UnprotectedCodeAgentUnprotected,
+			Reason:    check.Reason + "; DefenseClaw does not enroll agents in an untrusted home, so " + consequence + remedy,
+		})
+	}
+	return out
 }
 
 // groupFilterAllows applies include/exclude groups (exclude wins). A

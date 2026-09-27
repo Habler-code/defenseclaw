@@ -150,6 +150,11 @@ A CLI-replacing upgrade must run from the new release's staged CLI, not the
 installed one. Uninstall on a host without DefenseClaw succeeds and changes
 nothing.
 
+`status` and `verify` also name every agent the enumerator found installed
+but could not enroll (`hook_contract_unverified`, `agent_unprotected`); see
+[Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled).
+`include_groups` and `exclude_groups` apply on Windows as described there.
+
 Uninstall revokes every per-user enrollment but does not edit the agent
 configuration inside users' profiles. The OpenCode and Amp plugins it
 installed stop enforcing once uninstall removes

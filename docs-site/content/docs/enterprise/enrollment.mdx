@@ -26,6 +26,14 @@ A connector row is added automatically when that user has a supported
 version of the agent. On Linux and macOS the version is discovered by a
 worker running as the user, never by root.
 
+Discovery looks in the usual per-user install locations and in the layouts
+of the common Node version managers and package managers:
+
+| Platform | Also searched |
+| --- | --- |
+| Linux and macOS | nvm, fnm, Volta, asdf and mise Node installs, pnpm and yarn global directories, the npm prefix set in the user's `~/.npmrc`, Linuxbrew, the machine prefixes `/usr/local`, `/usr` and `/opt/homebrew`, and `agent_prefixes` |
+| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, and the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile (read by the enumerator as static files; nothing is executed) |
+
 ## Filters
 
 ```yaml
@@ -70,6 +78,90 @@ enterprise:
   else is not enrolled, so its per-user connector gets no hooks, and with
   `unenrolled_users: deny` its machine-policy connector refuses that user.
   Paths under homes and temporary directories are rejected.
+
+Group filters on Windows cover local groups, Active Directory groups and
+Microsoft Entra ID groups. Name a group by SID (`S-1-5-32-544`,
+`S-1-12-1-...`) or by name (`Administrators`, `CONTOSO\Developers`); list
+Entra ID groups by SID, because the device cannot resolve their names.
+Membership comes from:
+
+- the signed-in user's session token, which lists every group they belong
+  to. The enumerator caches it, so a signed-out user is decided from the
+  membership seen at their last sign-in, and a change made while they are
+  signed out applies when they next sign in;
+- for local groups, the local account database, which lists direct members
+  at any time, so local accounts are always decided.
+
+A directory user whose membership is not known this way (they have not
+signed in since DefenseClaw was installed) is **pending**: their existing
+rows are kept, no new rows are added, and nothing is revoked until they next
+sign in. Well-known groups other than Everyone (Authenticated Users,
+INTERACTIVE and the like) are added to a token at sign-in and listed by no
+account database, so for them a signed-out user without a cached token is
+pending too.
+
+A group name that does not resolve and never resolved before (a
+misspelling, a group of another platform such as `wheel` in a config shared
+with Linux, or a directory group on a laptop that has been off the corporate
+network since installation) cannot be evaluated. In `exclude_groups` it
+excludes no one, as on Linux and macOS. In `include_groups` it leaves every
+user that no other entry admits pending, so it never revokes anyone. The
+enumerator logs the entry every cycle, and a signed-in user left pending has
+their installed agents reported as `agent_unprotected`. Name groups by SID to
+avoid lookups.
+
+## Agents that cannot be enrolled
+
+When the enumerator finds an agent installed for an eligible user but cannot
+enroll it, it records the agent, and `status` and `verify` report it with
+`security_complete: false`. Status warns; verify fails.
+
+| Code | Meaning |
+| --- | --- |
+| `hook_contract_unverified` | The installed version has no verified DefenseClaw hook contract |
+| `agent_unprotected` | The agent's version could not be read, it is below the platform minimum, its user's home is untrusted (Linux and macOS), its signed-in user's enrollment is pending (Windows), a Claude Code change to an older hook contract was not followed (Windows), or (Windows) it is not installed where the guardian can manage it |
+
+A per-user connector in this state runs without DefenseClaw hooks. A
+machine-policy connector refuses the unenrolled user on Windows, and on
+Linux and macOS with `unenrolled_users: deny`.
+
+On Linux and macOS a user who has never been enrolled and whose home is
+untrusted (group- or other-writable, a symlink, owned by another account, or
+covered by a user mount) gets no rows. The enumerator still lists the agents
+installed for them, as that user and without running anything in that home
+(package metadata and the presence of the agent CLIs), and reports each one.
+Remove group and other write from the home to enroll the user. An enrolled
+user who loosens their home keeps their rows, and their worker removes group
+and other write again before the next repair.
+
+Discovery only covers the locations above. An agent CLI installed anywhere
+else in a user's home (a custom `NVM_DIR`, `XDG_DATA_HOME` or `PNPM_HOME`, an
+`npm --prefix` given on the command line, or a binary copied into an
+arbitrary directory) is not found, so it is neither enrolled nor reported.
+Install shared agents under an `agent_prefixes` path (Linux and macOS), and
+use application control where users must not run agents from arbitrary
+locations.
+
+## Agent upgrades
+
+The enumerator reads each enrolled user's agent version again every cycle
+(on Windows, while the user is signed in, so the guardian can repair their
+hooks at once). When the version changes to one with a verified hook
+contract, the guardian re-renders and re-verifies that user's hooks for it.
+A version without a verified contract is not followed: on every platform the
+row keeps its last verified version, so the guardian keeps repairing the
+hooks rendered for it, and `status` and `verify` report
+`hook_contract_unverified` until the user returns to a verified version or
+DefenseClaw adds the contract.
+
+A user controls the version their own install reports, so they can move
+their own rows between verified contracts, but never to a version without
+one. On Windows the one machine-wide Claude Code policy is rendered from the
+oldest contract among the enrolled Claude Code rows, so an enrolled user's
+change to an older Claude Code contract is not followed either: the row
+stays at its version, the change is reported as `agent_unprotected`, and no
+other user's policy changes. A user enrolled for the first time with an
+older Claude Code still sets the oldest contract.
 
 ## Unavailable homes
 

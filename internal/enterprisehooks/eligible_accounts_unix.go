@@ -47,26 +47,47 @@ func WriteUnixEligibleAccounts(path string, accounts []UnixEligibleAccount) erro
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("enterprise hooks: eligible accounts path must be absolute: %s", path)
 	}
-	dir := filepath.Dir(path)
-	if err := validateRootOwnedDirChain(dir); err != nil {
-		return err
-	}
 	sorted := append([]UnixEligibleAccount{}, accounts...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].User < sorted[j].User })
 	data, err := json.MarshalIndent(unixEligibleAccountsFile{Version: 1, Accounts: sorted}, "", "  ")
 	if err != nil {
 		return err
 	}
-	if current, readErr := readBoundedFile(path, unixEligibleAccountsMaxBytes); readErr == nil && string(current) == string(append(data, '\n')) {
+	return writeUnixRootOnlyRecord(path, append(data, '\n'), ".defenseclaw-eligible-*.new", unixEligibleAccountsMaxBytes)
+}
+
+// WriteUnixUnprotectedAgents publishes the enumerator's unprotected-agents
+// record at path with the same root-only contract as the eligible accounts.
+func WriteUnixUnprotectedAgents(path string, agents []UnprotectedAgent) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("enterprise hooks: unprotected agents path must be absolute: %s", path)
+	}
+	data, err := MarshalUnprotectedAgents(agents)
+	if err != nil {
+		return err
+	}
+	return writeUnixRootOnlyRecord(path, data, ".defenseclaw-unprotected-*.new", UnprotectedAgentsMaxBytes)
+}
+
+// writeUnixRootOnlyRecord writes data at path: root-owned 0600 below a
+// root-owned directory chain, through a same-directory temp file and
+// rename. An identical record is left untouched.
+func writeUnixRootOnlyRecord(path string, data []byte, tempPattern string, limit int64) error {
+	dir := filepath.Dir(path)
+	if err := validateRootOwnedDirChain(dir); err != nil {
+		return err
+	}
+	if current, readErr := readBoundedFile(path, limit); readErr == nil && string(current) == string(data) {
 		return nil
 	}
-	tmp, err := os.CreateTemp(dir, ".defenseclaw-eligible-*.new")
+	tmp, err := os.CreateTemp(dir, tempPattern)
 	if err != nil {
 		return err
 	}
 	tmpPath := tmp.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
 	}

@@ -125,6 +125,10 @@ type enterpriseHookWorkerRequest struct {
 	// user's own home before an apply, so an enrolled user cannot stop
 	// repair of their hooks by loosening their home's mode.
 	TightenHome bool `json:"tighten_home,omitempty"`
+	// StaticDiscovery restricts the discover operation to package metadata
+	// and the presence of the agent CLIs, executing nothing: the parent
+	// asks for it in a home other users may have written to.
+	StaticDiscovery bool `json:"static_discovery,omitempty"`
 }
 
 // enterpriseHookWorkerForeignCleanup is one connector's foreign-hook
@@ -243,7 +247,12 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			if name == "" {
 				continue
 			}
-			version, reason := enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
+			var version, reason string
+			if request.StaticDiscovery {
+				version, reason = enterpriseHookWorkerDiscoverStaticVersion(ctx, request.Home, name)
+			} else {
+				version, reason = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
+			}
 			if version != "" {
 				versions[name] = version
 			} else if reason != "" {
@@ -265,8 +274,12 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	}
 }
 
-// enterpriseHookWorkerDiscoverVersion is replaceable in tests.
-var enterpriseHookWorkerDiscoverVersion = enterprisehooks.DiscoverUnixAgentVersion
+// enterpriseHookWorkerDiscoverVersion and
+// enterpriseHookWorkerDiscoverStaticVersion are replaceable in tests.
+var (
+	enterpriseHookWorkerDiscoverVersion       = enterprisehooks.DiscoverUnixAgentVersion
+	enterpriseHookWorkerDiscoverStaticVersion = enterprisehooks.DiscoverUnixAgentVersionStatically
+)
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {
 	if request.Version != enterpriseHookWorkerProtocolVersion {
