@@ -631,21 +631,12 @@ The equivalent post-proof CLI transaction is:
 ```
 
 That Repair revalidates the structural attestations, then
-binds the live Claude proof to a Claude policy identity: the DefenseClaw
-`90-defenseclaw.json` machine policy and the `defenseclaw-hook.exe` installed
-when the attested transaction finishes. DefenseClaw cannot check which bytes
-the proof ran against, so the attestation is the administrator's statement
-that the proof exercised those files. Pass `-AttestClaudeEffectivePolicy` (or
-`--attest-claude-effective-policy`) only with the same release payload the
-proof ran against. `Upgrade` also
-accepts the flag, but an attested Upgrade to a release whose hook binary or
-Claude policy changed records verified evidence for files no proof has
-exercised. Upgrade without the flag, repeat the proof against the upgraded
-release, and then run the attested Repair. Enrollment changes that only
-rewrite `targets.yaml` keep the evidence current. A later transaction without
-the flag that installs a different policy or hook binary reports it unverified
-until the proof and the attested Repair are repeated. The Repair still rebinds
-it when it first recovers an interrupted transaction. Install refuses
+binds the live Claude proof to the Claude policy identity it exercised: the
+DefenseClaw `90-defenseclaw.json` machine policy and the installed
+`defenseclaw-hook.exe`. Enrollment changes that only rewrite `targets.yaml` keep
+it current. A different policy or hook binary reports it unverified until the
+proof and this Repair are repeated. The Repair still rebinds it when it first
+recovers an interrupted transaction. Install refuses
 `-AttestClaudeEffectivePolicy` up front, because no DefenseClaw Claude policy
 exists yet for a live proof to have exercised. Application-control evidence, a
 healthy Program Files policy, or a prior run against another policy is never

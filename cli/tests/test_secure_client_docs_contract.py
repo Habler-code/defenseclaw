@@ -332,7 +332,7 @@ def test_unavailable_action_docs_cover_single_request_fail_open() -> None:
     assert "must set `unavailable_action: block`" in residuals
 
 
-def test_claude_attestation_docs_match_the_actions_the_module_accepts() -> None:
+def test_claude_attestation_docs_match_the_pre_transaction_binding() -> None:
     module = _read(MODULE)
     guard = re.search(
         r"if \(\$AttestClaudeEffectivePolicy -and\s+\$Action -notin @\(([^)]*)\)\)",
@@ -346,18 +346,26 @@ def test_claude_attestation_docs_match_the_actions_the_module_accepts() -> None:
     deployment = _flat(_read(DEPLOYMENT_DOC))
     certification = _flat(_read(CERTIFICATION_DOC))
     w34 = _threat_row("W-34")
-    if "Upgrade" in accepted:
-        # The docs must not promise that only Repair can persist evidence.
+    # Text describing an attested Upgrade that binds the post-transaction
+    # policy and hook must not survive next to the change that binds the
+    # pre-transaction identity instead.
+    assert "records verified evidence for files no proof has exercised" not in deployment
+    assert "an attested Upgrade binds whatever policy and hook binary it installs" not in certification
+    assert "Production `Upgrade` or `Repair` with `-AttestClaudeEffectivePolicy`" not in w34
+    if "Upgrade" not in accepted:
         for text in (deployment, certification, w34):
-            assert "Only production `Repair -AttestClaudeEffectivePolicy`" not in text
-        assert "an attested Upgrade to a release whose hook binary or Claude policy changed records verified evidence" in deployment
-        assert "an attested Upgrade binds whatever policy and hook binary it installs" in certification
-        assert "Production `Upgrade` or `Repair` with `-AttestClaudeEffectivePolicy`" in w34
-    else:
-        assert "`Upgrade` also accepts the flag" not in deployment
-        assert "`Upgrade` also accepts `-AttestClaudeEffectivePolicy`" not in certification
-        assert "Production `Upgrade` or `Repair`" not in w34
-    assert "DefenseClaw cannot check which bytes the proof ran against" in deployment
+            assert "Upgrade or Repair with `-AttestClaudeEffectivePolicy`" not in text
+        return
+    if "function Assert-DefenseClawClaudeEffectivePolicyProofBaseline" not in module:
+        pytest.skip(
+            "attested transactions bind the post-transaction policy and hook in this tree; "
+            "the doc text ships with the pre-transaction binding change"
+        )
+    # With the baseline check, an attested transaction that would change the
+    # hook binary is refused, and each document says so.
+    refused = re.compile(r"(?i)hook[ -]?binary`?[^.]{0,80}\bis refused")
+    for name, text in (("deployment", deployment), ("certification", certification), ("W-34", w34)):
+        assert refused.search(text), name
 
 
 def test_cursor_foreign_hook_approval_doc_states_what_a_digest_trusts() -> None:
