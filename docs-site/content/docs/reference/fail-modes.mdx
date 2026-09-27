@@ -54,20 +54,22 @@ Codex notify bridge sends its connector-scoped token to a loopback gateway
 address, it checks the owner of every listening socket on the gateway port:
 
 - A per-user install trusts the user the hook runs as, and root.
-- A managed install trusts only the managed gateway: root on macOS (the
-  LaunchDaemon), and root or the `defenseclaw` service account on Linux (the
-  systemd unit's `User=`). A listener that the hook user owns is refused. On
-  Linux, a hook that runs in a nested user namespace is refused, because
-  socket owners are remapped there.
+- A managed install, including a guardian-installed OmniGent policy module,
+  trusts only the managed gateway: root on macOS (the LaunchDaemon), and root
+  or the `defenseclaw` service account on Linux (the systemd unit's `User=`).
+  A listener that the hook user owns is refused. On Linux, a hook that runs in
+  a nested user namespace is refused, because socket owners are remapped
+  there.
 
 A port with no listener, a listener with any other owner, or an owner that
 cannot be determined is a transport failure. Nothing is sent, and the fail
-mode decides. Managed hooks fail closed. The Codex notify bridge skips the
+mode decides. Managed shell hooks fail closed. The OpenCode, Amp, and OmniGent
+bridges apply the connector's fail mode. The Codex notify bridge skips the
 notification. The check reads the socket table just before the request. It
-does not check the connection the request then opens. A different listener
-can receive the request only if the trusted gateway stops listening and
-another user binds the port in that interval. The native Windows managed
-hook verifies the connected peer process instead.
+does not check the connection the request then opens. A different listener can
+receive the request only if the trusted gateway stops listening and another
+user binds the port in that interval. The native Windows managed hook verifies
+the connected peer process instead.
 
 Ordered chains follow the same non-weakening rule. A SQLite timeout, closed
 store, missing canonical session, or integrity conflict can prevent a new
