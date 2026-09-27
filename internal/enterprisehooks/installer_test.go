@@ -1620,12 +1620,17 @@ func TestInstallBootstrapsMissingAntigravityHooksFile(t *testing.T) {
 	}
 }
 
-// OpenHands only creates ~/.openhands/hooks.json when the user writes
-// hooks; a first install creates it as the user and registers DefenseClaw.
+// OpenHands CLI loads ~/.openhands/hooks.json but only creates it when the
+// user writes hooks; a first install creates it as the user and registers
+// the DefenseClaw hooks there.
 func TestInstallBootstrapsMissingOpenHandsHooksFile(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS OpenHands setup also needs the user's executable; covered by TestInstallOpenHandsRecordsTheUsersExecutableOnDarwin")
+	}
 	home := newTestHome(t)
+	cfgPath := filepath.Join(home, ".openhands", "hooks.json")
 	if _, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "openhands",
 		UserHome:      home,
@@ -1639,11 +1644,26 @@ func TestInstallBootstrapsMissingOpenHandsHooksFile(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Install with missing OpenHands hooks file: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".openhands", "hooks.json"))
+	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), "openhands-hook") && !strings.Contains(string(data), "defenseclaw") {
 		t.Fatalf("hooks file lacks the DefenseClaw hook:\n%s", data)
+	}
+}
+
+// Only the user-global OpenHands hooks file is bootstrapped; a pinned
+// workspace keeps the strict must-exist check.
+func TestOpenHandsHookStubOnlyForUserGlobalHooks(t *testing.T) {
+	home := t.TempDir()
+	conn := connector.NewOpenHandsConnector()
+	stub := defaultHookConfigStubForConnector(conn, connector.SetupOpts{}, home)
+	if want := filepath.Join(home, ".openhands", "hooks.json"); stub.ContentPath != want || stub.Mode != 0o600 {
+		t.Fatalf("user-global OpenHands stub = %q mode %o, want %q mode 600", stub.ContentPath, stub.Mode, want)
+	}
+	pinned := connector.SetupOpts{WorkspaceDir: filepath.Join(home, "project")}
+	if stub := defaultHookConfigStubForConnector(conn, pinned, home); stub.ContentPath != "" {
+		t.Fatalf("pinned-workspace OpenHands stub = %q, want none", stub.ContentPath)
 	}
 }

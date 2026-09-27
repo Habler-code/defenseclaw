@@ -47,6 +47,10 @@ type managedHookPeer struct {
 	GID  int
 	PID  int
 	Name string
+	// Home is the caller's home directory from the account database, used
+	// to resolve "~" in the caller's commands. Empty when it could not be
+	// resolved; it is never the gateway service account's home.
+	Home string
 }
 
 type managedHookPeerContextKey struct{}

@@ -991,11 +991,17 @@ func (a *APIServer) Run(ctx context.Context) error {
 	handler = requestIDMiddleware(handler)
 	handler = inboundTraceContextMiddleware(handler)
 
+	baseCtx := ctx
+	if managedHookSocketEnabled(a.scannerCfg) {
+		// Off the verified hook socket a standalone gateway has no trusted
+		// caller identity, so "~" must not resolve to its service account.
+		baseCtx = withServiceAccountGateway(ctx)
+	}
 	srv := &http.Server{
 		Addr:    a.addr,
 		Handler: handler,
 		BaseContext: func(_ net.Listener) context.Context {
-			return ctx
+			return baseCtx
 		},
 	}
 

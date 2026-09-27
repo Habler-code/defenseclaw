@@ -4460,8 +4460,9 @@ func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []strin
 	}
 	if isolateTargets {
 		// A target whose current repair failed keeps its last successful
-		// row, so protected targets lie between the successes and the
-		// successes plus failures.
+		// row (so a user cannot unenroll by breaking their own home), so
+		// protected targets lie between the successes and the successes
+		// plus failures; anything else still fails closed.
 		if authorization.TargetCount < 0 || authorization.SuccessCount < 0 ||
 			authorization.FailureCount < 0 || authorization.PendingCount < 0 ||
 			authorization.SuccessCount+authorization.FailureCount+authorization.PendingCount != authorization.TargetCount ||

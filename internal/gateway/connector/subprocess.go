@@ -47,9 +47,15 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr       string
-	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
-	TokenFileJS   string // absolute token path, escaped for a JavaScript double-quoted string
+	APIAddr     string
+	APIToken    string // gateway bearer token; empty when unconfigured (loopback-allow)
+	TokenFileJS string // absolute token path, escaped for a JavaScript double-quoted string
+	// HookSocketJS is the standalone gateway's unix hook socket, escaped for a
+	// JavaScript double-quoted string; empty keeps the TCP transport.
+	HookSocketJS string
+	// ServiceUID is the standalone gateway's service uid trusted as the
+	// hook socket owner (with root); 0 when unused.
+	ServiceUID    int
 	FailMode      string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
 	Managed       bool
 	TokenFile     string

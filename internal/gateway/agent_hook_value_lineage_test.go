@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -36,6 +37,7 @@ func TestToolValueLineageRuntimeProjectionMatchesSuccessfulSensitiveRead(t *test
 		},
 	}
 	pathDigest, sourceValues := toolValueLineageSuccessfulReadResult(
+		context.Background(),
 		request, connector.ToolLifecycleOutcomeSuccess,
 	)
 	if pathDigest == "" || sourceValues == (guardrail.ToolChainValueJoinDigests{}) {
@@ -100,6 +102,7 @@ func TestToolValueLineageRuntimeProjectionFailsClosed(t *testing.T) {
 		},
 	}
 	if path, values := toolValueLineageSuccessfulReadResult(
+		context.Background(),
 		request, connector.ToolLifecycleOutcomeSuccess,
 	); path != "" || values != (guardrail.ToolChainValueJoinDigests{}) {
 		t.Fatal("ambiguous structured result was accepted")

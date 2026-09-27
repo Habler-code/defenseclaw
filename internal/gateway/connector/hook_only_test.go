@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2625,6 +2626,9 @@ func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
 		APIAddr:      "127.0.0.1:18970",
 		APIToken:     "tok-test",
 	}
+	if runtime.GOOS == "darwin" {
+		opts.AgentExecutable, opts.AgentVersion = seedOpenHandsDarwinSelection(t, opts.DataDir, filepath.Join(dir, "bin"))
+	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -4585,5 +4589,29 @@ func TestHermesAgentPathsDeclareNativeStateOnlyOnWindows(t *testing.T) {
 	}
 	if declared != (runtime.GOOS == "windows") {
 		t.Fatalf("native state declared=%v on %s: %v", declared, runtime.GOOS, paths.PatchedFiles)
+	}
+}
+
+// Setup writes the Hermes direct-native state only on Windows, so only
+// Windows may list it as a patched file; elsewhere the enterprise installer
+// would require a file that is never created and every repair would fail.
+func TestHermesAgentPathsListDirectNativeStateOnlyOnWindows(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	original := HermesConfigPathOverride
+	t.Cleanup(func() { HermesConfigPathOverride = original })
+	HermesConfigPathOverride = filepath.Join(home, ".hermes", "config.yaml")
+	paths := NewHermesConnector().AgentPaths(SetupOpts{DataDir: dataDir})
+	state := filepath.Join(dataDir, "hooks", hermesDirectNativeStateFileName)
+	listed := slices.Contains(paths.PatchedFiles, state)
+	if runtime.GOOS == "windows" && !listed {
+		t.Fatalf("Windows Hermes patched files %v lack %s", paths.PatchedFiles, state)
+	}
+	if runtime.GOOS != "windows" && listed {
+		t.Fatalf("Hermes patched files %v list the Windows-only %s", paths.PatchedFiles, state)
+	}
+	if len(paths.PatchedFiles) == 0 {
+		t.Fatal("Hermes lists no patched files")
 	}
 }

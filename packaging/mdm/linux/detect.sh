@@ -104,12 +104,53 @@ dc_version_ge() {
         }'
 }
 
-dc_json_field() { # <document> <field>: a string field of our compact JSON
-    printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" | head -n 1
+# dc_json_top <document> <field>: the scalar value of a top-level field of the
+# lifecycle result (compact or indented JSON), without quotes. Nested objects
+# and arrays are skipped, so a nested "ok" or "installed" never answers for the
+# top-level one.
+dc_json_top() {
+    printf '%s' "$1" | awk -v want="$2" '
+        BEGIN { RS = "\001" }
+        {
+            s = $0; n = length(s); depth = 0; key = ""; i = 1
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (c == "\"") {
+                    j = i + 1; str = ""
+                    while (j <= n) {
+                        d = substr(s, j, 1)
+                        if (d == "\\") { str = str substr(s, j, 2); j += 2; continue }
+                        if (d == "\"") break
+                        str = str d; j++
+                    }
+                    i = j + 1
+                    if (depth == 1) {
+                        k = i
+                        while (k <= n && substr(s, k, 1) ~ /[ \t\r\n]/) k++
+                        if (substr(s, k, 1) == ":") { key = str; i = k + 1; continue }
+                        if (key != "") { vals[key] = str; key = "" }
+                    }
+                    continue
+                }
+                if (c == "{" || c == "[") { depth++; if (depth == 2) key = ""; i++; continue }
+                if (c == "}" || c == "]") { depth--; i++; continue }
+                if (depth == 1 && key != "" && c ~ /[tfn0-9-]/) {
+                    j = i
+                    while (j <= n && substr(s, j, 1) ~ /[a-z0-9.eE+-]/) j++
+                    vals[key] = substr(s, i, j - i); key = ""; i = j; continue
+                }
+                i++
+            }
+        }
+        END { if (want in vals) print vals[want] }'
 }
 
-dc_json_true() { # <document> <field>
-    printf '%s' "$1" | grep -q "\"$2\":true"
+dc_json_field() { # <document> <field>: a top-level string field
+    dc_json_top "$1" "$2"
+}
+
+dc_json_true() { # <document> <field>: a top-level field is the literal true
+    [ "$(dc_json_top "$1" "$2")" = true ]
 }
 
 dc_report() { # <detected 0|1> <value> <reason>

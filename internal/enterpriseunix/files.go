@@ -98,31 +98,6 @@ func exists(path string) bool {
 // ensureDir creates path (and missing parents with 0755 root-style modes)
 // and forces its exact mode and owner. An existing symlink or non-directory
 // is refused rather than replaced.
-// mkdirAllExact creates path and every missing ancestor with exactly mode.
-// os.MkdirAll applies the process umask, and the package scripts run the
-// lifecycle under umask 077: the vendor policy tree then came out 0700 and
-// the gateway service could not read its rule pack.
-func mkdirAllExact(path string, mode os.FileMode) error {
-	path = filepath.Clean(path)
-	if info, err := os.Lstat(path); err == nil {
-		if !info.IsDir() {
-			return fmt.Errorf("%s exists and is not a directory", path)
-		}
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if parent := filepath.Dir(path); parent != path {
-		if err := mkdirAllExact(parent, mode); err != nil {
-			return err
-		}
-	}
-	if err := os.Mkdir(path, mode); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
-	}
-	return os.Chmod(path, mode)
-}
-
 func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 	info, err := os.Lstat(path)
 	switch {
@@ -134,7 +109,10 @@ func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 			return fmt.Errorf("%s exists and is not a directory", path)
 		}
 	case errors.Is(err, os.ErrNotExist):
-		if err := mkdirAllExact(path, mode); err != nil {
+		if err := mkdirParents(filepath.Dir(path)); err != nil {
+			return err
+		}
+		if err := os.Mkdir(path, mode); err != nil && !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("create %s: %w", path, err)
 		}
 	default:
@@ -145,6 +123,41 @@ func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 	}
 	if err := e.Lchown(path, owner.UID, owner.GID); err != nil {
 		return fmt.Errorf("chown %s: %w", path, err)
+	}
+	return nil
+}
+
+// mkdirParents creates path and its missing ancestors as 0755 directories.
+// os.MkdirAll would give every created ancestor the leaf's mode (0700 for
+// the lifecycle directory) and the caller's umask (the MDM wrapper and
+// the rpm scriptlets run under 077); shared parents such as /opt and /opt/cisco are never re-moded
+// once they exist, so a closed ancestor would stay closed and keep the
+// service account and agent users out of the install tree.
+func mkdirParents(path string) error {
+	path = filepath.Clean(path)
+	// Existing ancestors may be system links (/etc, /var on macOS); follow
+	// them as MkdirAll does. Only directories this function creates get 0755.
+	if info, err := os.Stat(path); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%s exists and is not a directory", path)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if parent := filepath.Dir(path); parent != path {
+		if err := mkdirParents(parent); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		return fmt.Errorf("chmod %s: %w", path, err)
 	}
 	return nil
 }

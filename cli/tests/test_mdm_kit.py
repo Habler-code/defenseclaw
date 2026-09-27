@@ -164,6 +164,21 @@ def test_unix_wrapper_failures_are_schema_results() -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path: Path) -> None:
+    # The wrapper runs under umask 077. On macOS its log parent
+    # /Library/Logs/Cisco also holds the gateway's own log, which launchd opens
+    # as the service account; a 0700 parent kept the gateway from starting.
+    layout = _shell_function(_text(MDM / os_dir / "defenseclaw-enterprise.sh"), "dc_layout")
+    log = tmp_path / "Logs" / "Cisco" / "DefenseClaw" / "mdm-wrapper.log"
+    script = "umask 077\nDC_SCRIPT_OS=darwin\nDC_LOG='%s'\n%s\ndc_layout\n" % (log, layout)
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    for directory in (log.parent.parent, log.parent):
+        assert directory.stat().st_mode & 0o777 == 0o755, directory
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_unix_detect_formats_without_an_installation() -> None:
     if os.geteuid() == 0 and Path("/opt/defenseclaw/bin/defenseclaw-gateway").exists():
         pytest.skip("a deployment is installed on this host")
@@ -173,6 +188,30 @@ def test_unix_detect_formats_without_an_installation() -> None:
     assert _run([detect, "--format", "value"]).stdout == "not-installed\n"
     assert _run([detect, "--format", "jamf"]).stdout == "<result>not-installed</result>\n"
     assert _run([detect, "--format", "yaml"]).returncode == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_reads_top_level_fields_of_the_indented_lifecycle_result() -> None:
+    # The lifecycle prints indented JSON; detect.sh must read the top-level
+    # "installed" and version fields from it, and a nested "ok" must never
+    # answer for the top-level one.
+    text = _text(MDM / "linux" / "detect.sh")
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_json_top", "dc_json_field", "dc_json_true"))
+    indented = json.dumps({
+        "schema_version": 2, "ok": False, "installed": True, "installed_version": "1.2.3",
+        "services": [{"name": "gateway", "ok": True}], "errors": [{"code": "x", "message": "a \"quoted\" : value"}],
+    }, indent=2)
+    script = functions + """
+doc=$(cat)
+dc_json_true "$doc" installed && echo installed
+dc_json_true "$doc" ok && echo ok-true
+echo "version=$(dc_json_field "$doc" installed_version)"
+"""
+    for shell in ("sh", "dash", "bash"):
+        if not shutil.which(shell):
+            continue
+        result = subprocess.run([shell, "-c", script], input=indented, capture_output=True, text=True, check=True)
+        assert result.stdout.splitlines() == ["installed", "version=1.2.3"], (shell, result.stdout)
 
 
 def _shared_region(text: str) -> str:

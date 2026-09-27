@@ -13,6 +13,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +60,7 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		ConfigFile:           opts.config,
 		NoStart:              opts.noStart,
 		AdoptExisting:        opts.adoptExisting,
+		AllowDowngrade:       opts.allowDowngrade,
 		Purge:                opts.purge,
 		RemoveServiceAccount: opts.removeServiceAccount,
 		ProductVersion:       opts.productVersion,
@@ -134,6 +136,9 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 			fmt.Fprintf(cmd.OutOrStdout(), "%-32s sha256:%s… mode %s modified %s\n", state.Name, state.SHA256Prefix, state.Mode, state.ModifiedAt)
 		}
 		return nil
+	}
+	var mutate func(context.Context) error
+	switch action {
 	case "set":
 		if opts.fromStdin == (opts.fromFile != "") {
 			return withExitCode(errors.New("pass exactly one of --from-stdin or --from-file"), enterprisestatus.UnixExitInvalidArgs)
@@ -151,16 +156,13 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err != nil {
 			return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 		}
-		if err := env.WriteSecret(cmd.Context(), opts.name, value); err != nil {
-			return withExitCode(err, enterprisestatus.UnixExitFailure)
-		}
+		mutate = func(ctx context.Context) error { return env.WriteSecret(ctx, opts.name, value) }
 	case "remove":
-		if err := env.RemoveSecret(opts.name); err != nil {
-			return withExitCode(err, enterprisestatus.UnixExitFailure)
-		}
+		mutate = func(context.Context) error { return env.RemoveSecret(opts.name) }
 	}
-	// Apply the change now; the apply path unit would also pick it up.
-	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret"})
+	// Write and apply under one lifecycle lock. The apply watcher the write
+	// wakes then finds the change already applied instead of racing it.
+	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}

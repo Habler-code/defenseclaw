@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,6 +101,40 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		// when it runs without socket activation.
 		{Path: l.HookSocketDir, Mode: 0o755, Owner: service},
 	}
+}
+
+// checkSharedParentsTraversable refuses, before any change, an existing
+// shared parent the lifecycle does not own (External, so it is never
+// re-moded) that other accounts cannot traverse while a managed directory
+// below it must be reachable by the service account or by agent users.
+// launchd opens the gateway's log below /Library/Logs/Cisco as the service
+// account; with that parent closed (a tool running under umask 077 created
+// it first) the gateway never starts and the install would only fail at
+// activation, after the readiness timeout.
+func (e *Env) checkSharedParentsTraversable(dirs []desiredDir) error {
+	for _, parent := range dirs {
+		if !parent.External {
+			continue
+		}
+		info, err := os.Lstat(e.P(parent.Path))
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o001 != 0 {
+			// An absent parent is created with its desired mode; applyDirs
+			// refuses a link or a non-directory.
+			continue
+		}
+		prefix := strings.TrimSuffix(parent.Path, "/") + "/"
+		for _, child := range dirs {
+			if child.External || !strings.HasPrefix(child.Path, prefix) ||
+				(child.Owner == rootOwner() && child.Mode&0o001 == 0) {
+				continue
+			}
+			return fmt.Errorf(
+				"%s is %04o, so the %s service account and agent users cannot reach %s below it; make it traversable (for example: chmod %04o %s) and retry",
+				parent.Path, info.Mode().Perm(), e.Layout.ServiceUser, child.Path, parent.Mode, parent.Path,
+			)
+		}
+	}
+	return nil
 }
 
 // machinePolicyDirs are the vendor machine-policy parents the guardian may
@@ -199,7 +234,12 @@ func (e *Env) unmanagedLeftovers(services ServiceManager, channel string) []stri
 	if channel != ChannelPackage {
 		candidates = append(candidates, filepath.Join(l.BinDir, binGateway))
 	}
+	retained := e.loadRetainedState()
 	for _, dir := range []string{l.DataDir, l.GuardianAuthDir} {
+		if e.retainedByLifecycle(dir, retained) {
+			// State this lifecycle kept on a non-purge uninstall.
+			continue
+		}
 		if entries, err := os.ReadDir(e.P(dir)); err == nil && len(entries) > 0 {
 			candidates = append(candidates, dir)
 		}

@@ -98,7 +98,9 @@ func TestHookProfileForConnector(t *testing.T) {
 		{"hermes", "hermes", "hermes", false, true, true},
 		{"cursor", "cursor", "cursor", true, true, true},
 		{"devin", "devin", "devin", true, true, true},
-		{"openhands", "openhands", "openhands", false, true, true},
+		// openhands Decode maps the SDK stdin event_type to the contract event
+		// names and projects the terminal tool command.
+		{"openhands", "openhands", "openhands", true, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
 	for _, tc := range cases {

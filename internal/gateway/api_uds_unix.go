@@ -96,12 +96,19 @@ func managedHookConnContext(ctx context.Context, conn net.Conn) context.Context 
 		fmt.Fprintf(os.Stderr, "[sidecar-api] hook socket peer credentials unavailable: %v\n", err)
 		return ctx
 	}
-	return withManagedHookPeer(ctx, managedHookPeer{
+	return withManagedHookPeer(ctx, managedHookPeerFor(credentials))
+}
+
+// managedHookPeerFor builds the verified caller identity from kernel
+// credentials: account name for attribution, home for "~" resolution.
+func managedHookPeerFor(credentials peercred.Credentials) managedHookPeer {
+	return managedHookPeer{
 		UID:  credentials.UID,
 		GID:  credentials.GID,
 		PID:  credentials.PID,
 		Name: managedHookPeerName(credentials.UID),
-	})
+		Home: managedHookPeerHome(credentials.UID),
+	}
 }
 
 // bindManagedHookSocket binds the hook socket when the service manager did

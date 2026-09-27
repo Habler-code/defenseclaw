@@ -209,3 +209,42 @@ func TestForeignHookGuardDenialUsesVendorBlockResponse(t *testing.T) {
 		t.Fatalf("the user must see which file to remove or allowlist: %s", stderr.String())
 	}
 }
+
+// Copilot shows only the structured deny reason, not stderr. A repository
+// .github/hooks file (even a sessionStart-only one) makes the managed
+// preToolUse and permissionRequest hooks deny before any gateway contact;
+// the reason must name that file and the allowlist key.
+func TestForeignHookGuardCopilotDenialNamesTheFile(t *testing.T) {
+	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
+	fixture.summary.Connectors["copilot"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: config.ForeignHooksRemove, Guard: true}
+	foreign := filepath.Join(fixture.project, ".github", "hooks", "project.json")
+	fixture.write(t, foreign, `{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"/bin/true"}]}}`)
+	for event, field := range map[string]string{"preToolUse": "permissionDecisionReason", "permissionRequest": "message"} {
+		var stdout, stderr bytes.Buffer
+		opts := hookexec.Options{
+			Connector:         "copilot",
+			Event:             event,
+			ManagedEnterprise: true,
+			FailMode:          "closed",
+			Stdin:             strings.NewReader(`{"timestamp":1,"cwd":"` + fixture.project + `","toolName":"bash","toolArgs":"{\"command\":\"ls\"}"}`),
+			Stdout:            &stdout,
+			Stderr:            &stderr,
+		}
+		applyEnterpriseForeignHookGuard(&opts)
+		if code := hookexec.Run(context.Background(), opts); code != 0 {
+			t.Fatalf("%s: Copilot reads the structured deny on exit 0: code=%d stderr=%s", event, code, stderr.String())
+		}
+		var decision map[string]string
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &decision); err != nil {
+			t.Fatalf("%s: deny body is not JSON: %v: %s", event, err, stdout.String())
+		}
+		if decision["permissionDecision"] != "deny" && decision["behavior"] != "deny" {
+			t.Fatalf("%s: the call must be denied: %s", event, stdout.String())
+		}
+		message := decision[field]
+		if !strings.HasPrefix(message, hookexec.ForeignHookBlockedReasonPrefix) || !strings.Contains(message, foreign) ||
+			!strings.Contains(message, "enterprise.machine_policy.connectors.copilot.allowed_hooks") {
+			t.Fatalf("%s: the deny reason must name %s and the allowlist key: %q", event, foreign, message)
+		}
+	}
+}

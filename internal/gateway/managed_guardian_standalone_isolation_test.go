@@ -79,6 +79,25 @@ func TestStandaloneGuardianCoverageIsolatesPerUserFailures(t *testing.T) {
 		t.Fatalf("a carried-over protected row disabled the standalone guardrail: %s", status)
 	}
 
+	// A previously protected target whose repair now fails stays in the
+	// ledger (the user cannot unenroll by breaking their own home); that
+	// must not disable the guardrail for everyone else.
+	write(fmt.Sprintf(`{
+		"version":1,
+		"updated_at":%q,
+		"ok":false,
+		"target_count":2,
+		"success_count":1,
+		"failure_count":1,
+		"protected_targets":[
+			{"user":"alice","user_home":"/home/alice","connector":"claudecode","ok":true,"uid":1001},
+			{"user":"bob","user_home":"/home/bob","connector":"claudecode","ok":true,"uid":1002}
+		]
+	}`, fresh))
+	if ok, status := managedGuardianStandaloneCoverage("unused"); !ok || !strings.Contains(status, "1 of 2 guardian targets need attention") {
+		t.Fatalf("retained protected row after a repair failure = %v %q", ok, status)
+	}
+
 	// A connector with no enrolled user is not a standalone gap.
 	write(fmt.Sprintf(`{"version":1,"updated_at":%q,"ok":true,"target_count":0,"success_count":0,"failure_count":0,"protected_targets":[]}`, fresh))
 	if ok, status := managedGuardianStandaloneCoverage("unused"); !ok || status != "" {

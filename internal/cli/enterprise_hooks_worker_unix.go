@@ -94,6 +94,8 @@ type enterpriseHookWorkerOptions struct {
 	AllowMissingHookConfigRepair       bool   `json:"allow_missing_hook_config_repair,omitempty"`
 	RecoveryHookContractLockUpdatedAt  string `json:"recovery_hook_contract_lock_updated_at,omitempty"`
 	RecoveryHookContractEntryUpdatedAt string `json:"recovery_hook_contract_entry_updated_at,omitempty"`
+	ManagedHookSocket                  string `json:"managed_hook_socket,omitempty"`
+	ManagedServiceUID                  int    `json:"managed_service_uid,omitempty"`
 }
 
 type enterpriseHookWorkerTarget struct {
@@ -369,6 +371,8 @@ func (o enterpriseHookWorkerOptions) installOptions(registry *connector.Registry
 		AllowMissingHookConfigRepair:       o.AllowMissingHookConfigRepair,
 		RecoveryHookContractLockUpdatedAt:  o.RecoveryHookContractLockUpdatedAt,
 		RecoveryHookContractEntryUpdatedAt: o.RecoveryHookContractEntryUpdatedAt,
+		ManagedHookSocket:                  o.ManagedHookSocket,
+		ManagedServiceUID:                  o.ManagedServiceUID,
 	}
 }
 
@@ -392,6 +396,8 @@ func enterpriseHookWorkerOptionsFrom(opts enterprisehooks.InstallOptions) enterp
 		AllowMissingHookConfigRepair:       opts.AllowMissingHookConfigRepair,
 		RecoveryHookContractLockUpdatedAt:  opts.RecoveryHookContractLockUpdatedAt,
 		RecoveryHookContractEntryUpdatedAt: opts.RecoveryHookContractEntryUpdatedAt,
+		ManagedHookSocket:                  opts.ManagedHookSocket,
+		ManagedServiceUID:                  opts.ManagedServiceUID,
 	}
 }
 

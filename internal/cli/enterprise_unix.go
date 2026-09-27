@@ -26,6 +26,7 @@ type unixLifecycleOptions struct {
 	config               string
 	noStart              bool
 	adoptExisting        bool
+	allowDowngrade       bool
 	purge                bool
 	removeServiceAccount bool
 	productVersion       string
@@ -110,6 +111,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		flags.StringVar(&opts.config, "config", "", "absolute path of the administrator config to install")
 		flags.BoolVar(&opts.noStart, "no-start", false, "install without starting the services")
 		flags.StringVar(&opts.productVersion, "product-version", "", "refuse unless the payload is exactly this version")
+		flags.BoolVar(&opts.allowDowngrade, "allow-downgrade", false, "allow installing a version older than the installed one (deliberate rollback)")
 		if action == "install" || action == "ensure" {
 			flags.BoolVar(&opts.adoptExisting, "adopt-existing", false, "back up and take over an unmanaged DefenseClaw layout")
 		}

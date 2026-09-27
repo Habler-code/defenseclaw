@@ -1,0 +1,124 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build linux || darwin
+
+package gateway
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/peercred"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+)
+
+type fakePeerHomeResolver struct {
+	unixidentity.Resolver
+	accounts map[int]unixidentity.Account
+	calls    int
+}
+
+func (f *fakePeerHomeResolver) LookupUID(uid int) (unixidentity.Account, error) {
+	f.calls++
+	account, ok := f.accounts[uid]
+	if !ok {
+		return unixidentity.Account{}, errors.New("not found")
+	}
+	return account, nil
+}
+
+func TestManagedHookPeerHomeResolvesTheCallersHome(t *testing.T) {
+	resolver := &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{
+		1001: {Name: "alice", UID: 1001, Home: "/home/alice"},
+		1002: {Name: "bob", UID: 1002, Home: "relative/home"},
+		1003: {Name: "root-home", UID: 1003, Home: "/"},
+		1004: {Name: "dotted", UID: 1004, Home: "/home/../etc"},
+		1005: {Name: "mismatch", UID: 4242, Home: "/home/mismatch"},
+		1006: {Name: "trailing", UID: 1006, Home: "/Users/carol/"},
+	}}
+	now := time.Unix(1_000_000, 0)
+	cache := &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver { return resolver },
+		now:         func() time.Time { return now },
+	}
+	for _, test := range []struct {
+		uid  int
+		want string
+	}{
+		{1001, "/home/alice"},
+		{1002, ""},
+		{1003, ""},
+		{1004, ""},
+		{1005, ""},
+		{1006, "/Users/carol"},
+		{1999, ""},
+		{-1, ""},
+	} {
+		if got := cache.lookup(test.uid); got != test.want {
+			t.Fatalf("lookup(%d)=%q want %q", test.uid, got, test.want)
+		}
+	}
+}
+
+func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
+	created := 0
+	now := time.Unix(1_000_000, 0)
+	cache := &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver {
+			created++
+			return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{
+				1001: {Name: "alice", UID: 1001, Home: "/home/alice"},
+			}}
+		},
+		now: func() time.Time { return now },
+	}
+	cache.lookup(1001)
+	cache.lookup(1001)
+	if created != 1 {
+		t.Fatalf("resolver created %d times inside the TTL", created)
+	}
+	now = now.Add(managedHookPeerHomeTTL + time.Second)
+	cache.lookup(1001)
+	if created != 2 {
+		t.Fatalf("resolver not refreshed after the TTL (created %d)", created)
+	}
+}
+
+func TestTrustedActiveHomeUsesTheVerifiedCallerOnTheHookSocket(t *testing.T) {
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "alice", Home: "/home/alice"})
+	if got := trustedActiveHome(ctx); got != "/home/alice" {
+		t.Fatalf("trustedActiveHome(peer)=%q want /home/alice", got)
+	}
+	unresolved := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002})
+	if got := trustedActiveHome(unresolved); got != "" {
+		t.Fatalf("an unresolved caller home must stay empty, not fall back to the gateway home: %q", got)
+	}
+	if got, want := trustedActiveHome(context.Background()), trustedSameHostHome(); got != want {
+		t.Fatalf("per-user path changed: %q want %q", got, want)
+	}
+}
+
+func TestManagedHookConnContextRecordsTheCallersHome(t *testing.T) {
+	previous := managedHookPeerHome
+	managedHookPeerHome = func(uid int) string {
+		if uid == 1001 {
+			return "/home/alice"
+		}
+		return ""
+	}
+	t.Cleanup(func() { managedHookPeerHome = previous })
+	peer := managedHookPeerFor(peercred.Credentials{UID: 1001, GID: 1001, PID: 42})
+	if peer.Home != "/home/alice" || peer.UID != 1001 {
+		t.Fatalf("peer=%+v", peer)
+	}
+}

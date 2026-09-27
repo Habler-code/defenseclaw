@@ -73,6 +73,15 @@ func devinConfigRoot(opts SetupOpts) string {
 			return filepath.Join(filepath.Clean(root), "devin")
 		}
 	}
+	if runtime.GOOS == "darwin" {
+		// The Devin CLI keeps its config under the XDG directory on macOS
+		// too (~/.config/devin/config.json), not ~/Library/Application
+		// Support, which os.UserConfigDir returns there.
+		if root := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); filepath.IsAbs(root) {
+			return filepath.Join(filepath.Clean(root), "devin")
+		}
+		return homePath(".config", "devin")
+	}
 	if root, err := os.UserConfigDir(); err == nil && strings.TrimSpace(root) != "" {
 		return filepath.Join(filepath.Clean(root), "devin")
 	}

@@ -102,6 +102,9 @@ fi
 
 # preinstall refuses before any file lands on a Secure Client host: the two
 # deployments share the gateway port and the lifecycle would refuse anyway.
+# It also refuses a downgrade before the older binaries replace the installed
+# ones, unless the administrator created the root-owned rollback marker
+# /opt/cisco/defenseclaw/lifecycle/allow-downgrade (postinstall consumes it).
 cat >"$SCRIPTS/preinstall" <<'EOF'
 #!/bin/sh
 if [ -e /opt/cisco/secureclient/defenseclaw ] ||
@@ -109,8 +112,41 @@ if [ -e /opt/cisco/secureclient/defenseclaw ] ||
     echo "DefenseClaw is already managed by Cisco Secure Client on this Mac; the standalone package cannot be installed beside it." >&2
     exit 1
 fi
+state=/opt/cisco/defenseclaw/lifecycle
+package_version="@DC_PKG_VERSION@"
+record="$state/deployment.json"
+if [ -f "$record" ] && [ ! -L "$record" ] && [ "$(stat -f %u "$record")" = 0 ]; then
+    installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" | head -n 1)
+    marker="$state/allow-downgrade"
+    if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v b="$installed" '
+        function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
+        BEGIN {
+            a = norm(a); b = norm(b); pa = ""; pb = ""
+            if (index(a, "-")) { pa = substr(a, index(a, "-") + 1); a = substr(a, 1, index(a, "-") - 1) }
+            if (index(b, "-")) { pb = substr(b, index(b, "-") + 1); b = substr(b, 1, index(b, "-") - 1) }
+            na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+            for (i = 1; i <= n; i++) {
+                xi = (i <= na) ? x[i] + 0 : 0; yi = (i <= nb) ? y[i] + 0 : 0
+                if (xi > yi) exit 0
+                if (xi < yi) exit 1
+            }
+            if (pa == pb || pa == "") exit 0
+            if (pb == "") exit 1
+            np = split(pa, u, "."); nq = split(pb, w, "."); m = np > nq ? np : nq
+            for (i = 1; i <= m; i++) {
+                if (u[i] == w[i]) continue
+                if (u[i] ~ /^[0-9]+$/ && w[i] ~ /^[0-9]+$/) exit (u[i] + 0 > w[i] + 0) ? 0 : 1
+                exit (u[i] > w[i]) ? 0 : 1
+            }
+            exit 0
+        }'; then
+        echo "DefenseClaw $installed is installed; refusing to downgrade to $package_version. For a deliberate rollback, create $marker as root first." >&2
+        exit 1
+    fi
+fi
 exit 0
 EOF
+sed -i.bak "s/@DC_PKG_VERSION@/${VERSION}/" "$SCRIPTS/preinstall" && rm -f "$SCRIPTS/preinstall.bak"
 
 # postinstall applies the deployment. A failure has already been rolled back
 # by the lifecycle; it fails the install so the MDM reports it.
@@ -120,9 +156,14 @@ gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
 state=/opt/cisco/defenseclaw/lifecycle
 umask 077
 mkdir -p "$state" && chmod 0700 "$state"
-"$gateway" enterprise macos ensure --from-package --reason package --json \
+downgrade=""
+if [ -f "$state/allow-downgrade" ] && [ ! -L "$state/allow-downgrade" ] && [ "$(stat -f %u "$state/allow-downgrade")" = 0 ]; then
+    downgrade=--allow-downgrade
+fi
+"$gateway" enterprise macos ensure --from-package $downgrade --reason package --json \
     >"$state/last-package-result.json" 2>"$state/last-package-result.log"
 status=$?
+rm -f "$state/allow-downgrade"
 if [ "$status" -ne 0 ]; then
     echo "DefenseClaw: the managed deployment did not apply (exit $status); see $state/last-package-result.json" >&2
 fi

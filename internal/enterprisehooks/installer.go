@@ -63,6 +63,11 @@ type InstallOptions struct {
 	RecoveryHookContractEntryUpdatedAt string
 	WorkspaceDir                       string
 	Registry                           *connector.Registry
+	// ManagedHookSocket and ManagedServiceUID route in-agent plugins through
+	// the standalone gateway's peer-authorized unix hook socket (see
+	// connector.SetupOpts). Empty keeps the TCP transport.
+	ManagedHookSocket string
+	ManagedServiceUID int
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -318,6 +323,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		HILTEnabled:       opts.HILTEnabled,
 		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
+		ManagedHookSocket: strings.TrimSpace(opts.ManagedHookSocket),
+		ManagedServiceUID: opts.ManagedServiceUID,
 	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
 	if requiresScopedHookToken {
@@ -406,6 +413,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
 				}
 				return errors.Join(failures...)
+			}
+			// OpenHands on macOS admits only a protected, setup-selected
+			// executable: record the user's own image before setup.
+			if err := selectManagedAgentExecutable(home, dataDir, conn.Name(), &setupOpts); err != nil {
+				return err
 			}
 			if err := conn.Setup(ctx, setupOpts); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)

@@ -83,6 +83,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 	}
 
 	apiAddr, proxyAddr := enterpriseHookListenAddrs()
+	hookSocket, serviceUID := enterpriseHookStandaloneHookTransport()
 	resolver := enterprisehooks.StandaloneResolver()
 	if caching, ok := resolver.(*unixidentity.CachingResolver); ok {
 		caching.Reset()
@@ -156,6 +157,9 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 			HILTEnabled:   cfg.EffectiveHILTForConnector(target.Connector).Enabled,
 			AgentVersion:  strings.TrimSpace(target.AgentVersion),
 			WorkspaceDir:  cfg.ConnectorWorkspaceDir(),
+
+			ManagedHookSocket: hookSocket,
+			ManagedServiceUID: serviceUID,
 		}
 		index := len(run.Rows)
 		run.Rows = append(run.Rows, row)

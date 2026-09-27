@@ -283,3 +283,23 @@ func TestDevinGlobalSkillWritePathUsesNativeConfigRoot(t *testing.T) {
 		t.Fatalf("global skill write paths = %v, want native user config target", caps.Skills.WritePaths)
 	}
 }
+
+// The Devin CLI reads ~/.config/devin/config.json on macOS as well, so
+// DefenseClaw must register its hooks there rather than under
+// ~/Library/Application Support (seen live on macOS 15).
+func TestDevinConfigRootUsesXDGConfigOnDarwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS path rule")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got, want := devinConfigRoot(SetupOpts{}), filepath.Join(home, ".config", "devin"); got != want {
+		t.Fatalf("devin config root = %q, want %q", got, want)
+	}
+	xdg := filepath.Join(home, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if got, want := devinConfigRoot(SetupOpts{}), filepath.Join(xdg, "devin"); got != want {
+		t.Fatalf("devin config root with XDG_CONFIG_HOME = %q, want %q", got, want)
+	}
+}

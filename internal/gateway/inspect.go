@@ -537,7 +537,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		action.Input = actionfacts.Input{
 			Tool:       req.Tool,
 			Argv:       argv,
-			ActiveHome: trustedSameHostHome(),
+			ActiveHome: trustedActiveHome(ctx),
 		}
 		action.LegacyText = serializeArgvForLegacyScan(argv)
 		action.EnforcementCapable = true

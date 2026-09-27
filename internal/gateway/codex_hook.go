@@ -96,6 +96,26 @@ type codexHookRequest struct {
 	ScanComponents       bool                   `json:"scan_components,omitempty"`
 	Bridge               map[string]interface{} `json:"bridge,omitempty"`
 	Payload              map[string]interface{} `json:"-"`
+
+	// activeHome is the trusted home for "~" resolution, set by the handler
+	// from the request context (never decoded from the body).
+	activeHome         string
+	activeHomeResolved bool
+}
+
+// withTrustedActiveHome records the request's trusted home so helpers that
+// only see the request resolve "~" against the verified caller.
+func (r codexHookRequest) withTrustedActiveHome(ctx context.Context) codexHookRequest {
+	r.activeHome = trustedActiveHome(ctx)
+	r.activeHomeResolved = true
+	return r
+}
+
+func (r codexHookRequest) resolvedActiveHome() string {
+	if r.activeHomeResolved {
+		return r.activeHome
+	}
+	return trustedSameHostHome()
 }
 
 type codexHookResponse struct {
@@ -236,7 +256,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 				Tool:                     actionTool,
 				Args:                     toolArgs,
 				CWD:                      req.CWD,
-				ActiveHome:               trustedSameHostHome(),
+				ActiveHome:               trustedActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,
 				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 			},
@@ -833,6 +853,7 @@ func (a *APIServer) inspectCodexToolResult(
 	req codexHookRequest,
 	mode string,
 ) *ToolInspectVerdict {
+	req = req.withTrustedActiveHome(ctx)
 	content := codexToolResponseString(req.ToolResponse)
 	strictScope := codexToolResultContentScope(req)
 	if mode == "action" || strictScope == ruleContentScopeSource {
@@ -1455,7 +1476,7 @@ func codexToolResultContentScope(req codexHookRequest) ruleContentScope {
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	if len(facts.Network) != 0 {
 		return ruleContentScopeUntrusted
@@ -1499,7 +1520,7 @@ func codexObserveWorkspaceSourceProofForRequest(req codexHookRequest) codexObser
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	if len(facts.Network) != 0 {
 		return codexObserveSourceUntrusted
@@ -1786,7 +1807,7 @@ func codexObserveGitDiffPathspecsForRequest(
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	commandText := codexExactMapString(req.ToolInput, "command", "cmd", "script")
 	if len(facts.Network) != 0 || facts.Parse.Dialect != actionfacts.DialectPOSIX ||
@@ -1998,7 +2019,7 @@ func codexStaticPowerShellReaderFacts(
 		Tool:        "powershell",
 		Command:     command,
 		CWD:         cwd,
-		ActiveHome:  trustedSameHostHome(),
+		ActiveHome:  facts.ActiveHome,
 		DialectHint: actionfacts.DialectPowerShell,
 	}), true
 }

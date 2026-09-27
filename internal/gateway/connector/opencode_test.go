@@ -626,6 +626,8 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 			"{{.APIAddr}}", "127.0.0.1:18970",
 			"{{.TokenFileJS}}", javaScriptStringContent(tokenPath),
 			"{{.FailMode}}", failMode,
+			"{{.HookSocketJS}}", "",
+			"{{.ServiceUID}}", "0",
 		).Replace(string(body))
 		if strings.Contains(text, "{{.") {
 			t.Fatalf("rendered %s plugin retains a template placeholder", failMode)

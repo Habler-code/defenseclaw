@@ -592,6 +592,7 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	}
 	if c.name == "openhands" {
 		profile.NativeOTLP = openhandsNativeOTLPSpecForOS(opts, runtime.GOOS)
+		profile.Decode = openHandsProfileDecode
 	}
 	if c.name == "amp" {
 		// Amp exposes an opaque plugin span ID but no documented W3C
@@ -628,6 +629,85 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	// (declared on the hermes hook contract), and its wire replies are
 	// shaped by the hermes case in hookOnlyProfileRespond.
 	return ApplyHookContract(profile, opts)
+}
+
+// openHandsStdinEventNames maps the OpenHands SDK HookEventType values that
+// the CLI writes to a hook command's stdin (event_type, PascalCase) to the
+// contract's event names. OpenHands reads hooks.json keys in snake_case, and
+// the contract's events, block events and tool-call routing use those names
+// exactly; without this mapping a real OpenHands PreToolUse was never routed
+// to tool-call inspection and was never enforceable.
+var openHandsStdinEventNames = map[string]string{
+	"PreToolUse":       "pre_tool_use",
+	"PostToolUse":      "post_tool_use",
+	"UserPromptSubmit": "user_prompt_submit",
+	"Stop":             "stop",
+	"SessionStart":     "session_start",
+	"SessionEnd":       "session_end",
+}
+
+// openHandsProfileDecode supplies the contract event name and the terminal
+// tool's command projection; content, tool name and every other tool input
+// use the generic decoding (tool_name, tool_input).
+func openHandsProfileDecode(payload map[string]interface{}) HookProfileRequest {
+	req := HookProfileRequest{ConnectorName: "openhands"}
+	if event, ok := openHandsStdinEventNames[hookFirstString(payload, "event_type")]; ok {
+		req.HookEventName = event
+	}
+	if args, ok := openHandsTerminalCommandArgs(payload); ok {
+		req.ToolArgs = args
+		req.ToolArgsAuthoritative = true
+	}
+	return req
+}
+
+// openHandsTerminalCommandArgs projects the OpenHands terminal tool's
+// TerminalAction (command, is_input, timeout, reset and the kind
+// discriminator) to the closed shell argument schema the command-fact parser
+// proves. The other fields are execution controls, not command text; without
+// the projection they left every real OpenHands command unproven, so a
+// CRITICAL command finding was still allowed. Text sent to a running process
+// (is_input) is inspected as a command too, because it may be typed into an
+// interactive shell. Any other tool, field or type keeps the generic
+// projection.
+func openHandsTerminalCommandArgs(payload map[string]interface{}) (json.RawMessage, bool) {
+	if hookFirstString(payload, "tool_name") != "terminal" {
+		return nil, false
+	}
+	input, ok := payload["tool_input"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	command, ok := input["command"].(string)
+	if !ok || strings.TrimSpace(command) == "" {
+		return nil, false
+	}
+	for key, value := range input {
+		switch key {
+		case "command":
+		case "is_input", "reset":
+			if _, ok := value.(bool); !ok {
+				return nil, false
+			}
+		case "timeout":
+			switch value.(type) {
+			case nil, float64, json.Number:
+			default:
+				return nil, false
+			}
+		case "kind":
+			if value != "TerminalAction" {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+	raw, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
 }
 
 func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
@@ -1705,6 +1785,22 @@ func geminiManagedHookGroupCurrent(raw interface{}, expectedCommand string) bool
 	}
 }
 
+// managedPluginHookSocket returns the unix hook socket and trusted service
+// uid an in-agent plugin must use, or ("", 0) to keep the TCP transport. Only
+// a managed install on a unix host with an absolute socket path switches
+// transports; Windows plugins keep TCP.
+func managedPluginHookSocket(opts SetupOpts) (string, int) {
+	socket := strings.TrimSpace(opts.ManagedHookSocket)
+	if !opts.ManagedEnterprise || socket == "" || runtime.GOOS == "windows" || !filepath.IsAbs(socket) {
+		return "", 0
+	}
+	uid := opts.ManagedServiceUID
+	if uid < 0 {
+		uid = 0
+	}
+	return filepath.Clean(socket), uid
+}
+
 // setupPluginArtifact renders the embedded bridge-plugin template
 // (APIAddr / stable token-sidecar path / FailMode substituted) and writes it
 // to the host agent's auto-load plugin directory at 0o600. The scoped token is
@@ -1730,11 +1826,14 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
 		failMode = "open"
 	}
+	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:     opts.APIAddr,
-		TokenFileJS: javaScriptStringContent(tokenPath),
-		FailMode:    failMode,
-		Managed:     opts.ManagedEnterprise,
+		APIAddr:      opts.APIAddr,
+		TokenFileJS:  javaScriptStringContent(tokenPath),
+		HookSocketJS: javaScriptStringContent(hookSocket),
+		ServiceUID:   serviceUID,
+		FailMode:     failMode,
+		Managed:      opts.ManagedEnterprise,
 	})
 	if err != nil {
 		return fmt.Errorf("%s render plugin template: %w", c.name, err)
@@ -2356,7 +2455,8 @@ func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
 		}
 		// Setup writes the direct-native state only on Windows; listing it
 		// elsewhere made the enterprise installer refuse every POSIX Hermes
-		// install for a file that is never written.
+		// install and every managed Hermes repair fail on a file that is
+		// never created (seen live on Linux and macOS).
 		if runtime.GOOS == "windows" {
 			patched = append(patched, filepath.Join(opts.DataDir, "hooks", hermesDirectNativeStateFileName))
 		}

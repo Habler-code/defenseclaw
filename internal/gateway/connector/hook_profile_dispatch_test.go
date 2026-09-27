@@ -49,7 +49,9 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, true, true, true},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, true, true, true},
-		{"openhands", func() Connector { return NewOpenHandsConnector() }, false, true, true},
+		// OpenHands uses Decode to map the SDK stdin event_type (PascalCase) to
+		// the contract event names and to project the terminal tool command.
+		{"openhands", func() Connector { return NewOpenHandsConnector() }, true, true, true},
 		// Antigravity uses Decode because agy v1 ships a nested
 		// `toolCall` wire shape that the generic normalizer cannot read.
 		// Cursor and Windsurf use Decode only for their connector-native

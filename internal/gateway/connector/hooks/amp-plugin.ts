@@ -16,11 +16,20 @@
 // does not read secrets or policy from process environment variables.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
+import { lstat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
+import { dirname } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
 const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
+// Standalone managed installs talk to the gateway's peer-authorized unix hook
+// socket instead of the TCP API: the gateway identifies the caller by
+// kernel-verified uid, so no bearer token leaves this process, and a user who
+// binds the TCP port during a gateway restart receives nothing. Empty keeps
+// the TCP transport (per-user installs).
+const DC_HOOK_SOCKET: string = "{{.HookSocketJS}}"
+const DC_SERVICE_UID = Number("{{.ServiceUID}}")
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
@@ -96,6 +105,39 @@ function utf8Bytes(value: string): number {
 function safeError(error: unknown): string {
 	if (error instanceof Error && error.message) return error.message
 	return String(error)
+}
+
+function trustedSocketOwner(uid: number): boolean {
+	return uid === 0 || (DC_SERVICE_UID > 0 && uid === DC_SERVICE_UID)
+}
+
+// verifyHookSocket refuses a hook socket (or its directory, or the directory's
+// parent) that root or the gateway service account does not own, or that
+// another account could write. Only root or the service account can create a
+// socket there, so a verified path cannot be an impostor listener.
+async function verifyHookSocket(): Promise<void> {
+	const dir = dirname(DC_HOOK_SOCKET)
+	for (const path of [dirname(dir), dir]) {
+		const info = await lstat(path)
+		if (!info.isDirectory() || !trustedSocketOwner(info.uid) || (info.mode & 0o022) !== 0) {
+			throw new Error("the DefenseClaw hook socket directory is not trusted")
+		}
+	}
+	const socket = await lstat(DC_HOOK_SOCKET)
+	if (!socket.isSocket() || !trustedSocketOwner(socket.uid)) {
+		throw new Error("the DefenseClaw hook socket is not trusted")
+	}
+}
+
+// gatewayFetch posts over the verified managed hook socket when one is
+// configured (Bun's unix fetch option), and over TCP otherwise.
+async function gatewayFetch(path: string, init: RequestInit): Promise<Response> {
+	if (!DC_HOOK_SOCKET) return fetch(`http://${DC_API_ADDR}${path}`, init)
+	await verifyHookSocket()
+	if (!(globalThis as typeof globalThis & { Bun?: unknown }).Bun) {
+		throw new Error("the DefenseClaw hook socket needs the Bun runtime")
+	}
+	return fetch(`http://localhost${path}`, { ...init, unix: DC_HOOK_SOCKET } as RequestInit)
 }
 
 async function scopedHookToken(): Promise<string> {
@@ -261,7 +303,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 		let token: string
 		try {
-			token = await scopedHookToken()
+			token = DC_HOOK_SOCKET ? "" : await scopedHookToken()
 		} catch {
 			// Credential failures are categorically unsafe at the two Amp policy
 			// boundaries, regardless of the operator's transport fail mode.
@@ -278,10 +320,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			"X-DefenseClaw-Client": "amp-plugin/1.0",
 			...identityHeaders(),
 		}
-		headers.Authorization = `Bearer ${token}`
+		if (token) headers.Authorization = `Bearer ${token}`
 
 		try {
-			const response = await fetch(`http://${DC_API_ADDR}/api/v1/amp/hook`, {
+			const response = await gatewayFetch("/api/v1/amp/hook", {
 				method: "POST",
 				headers,
 				body,

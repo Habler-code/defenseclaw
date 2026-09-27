@@ -59,13 +59,22 @@ type Options struct {
 	// AdoptExisting backs up and takes over a pre-existing unmanaged
 	// layout instead of refusing.
 	AdoptExisting bool
-	Purge         bool
+	// AllowDowngrade permits installing a payload older than the recorded
+	// deployment (a deliberate rollback). Without it downgrades are refused.
+	AllowDowngrade bool
+	Purge          bool
 	// RemoveServiceAccount deletes the gateway account on purge.
 	RemoveServiceAccount bool
 	// ProductVersion, when set, must equal the payload's version.
 	ProductVersion string
 	// Reason annotates an ensure run (e.g. "path", "secret", "package").
 	Reason string
+	// Mutate changes protected state (for example a credential) inside the
+	// lifecycle lock, immediately before an ensure applies it, so the
+	// change and its application are one transaction: the apply watcher
+	// that the change wakes cannot interleave with it. A Mutate error fails
+	// the run before anything is applied.
+	Mutate func(ctx context.Context) error
 }
 
 // Error codes in the lifecycle result.
@@ -75,9 +84,11 @@ const (
 	codeNotRoot             = "not_root"
 	codeServiceManager      = "service_manager_unavailable"
 	codeBusy                = "lifecycle_busy"
+	codeChange              = "change_failed"
 	codeProfileConflict     = "profile_conflict"
 	codeUnmanagedLayout     = "unmanaged_layout_present"
 	codeAlreadyInstalled    = "already_installed"
+	codeDowngrade           = "downgrade_refused"
 	codeNotInstalled        = "not_installed"
 	codePayload             = "payload_invalid"
 	codePackageOwned        = "package_owned_binaries"
@@ -166,6 +177,16 @@ func (l *lifecycle) run(ctx context.Context) int {
 	if record != nil {
 		r.Installed = true
 		r.InstalledVersion = record.ProductVersion
+	}
+	if l.opts.Mutate != nil {
+		if l.opts.Action != ActionEnsure {
+			r.AddError(codeInvalidArguments, "a protected-state change can only be applied by ensure")
+			return enterprisestatus.InvalidArgsExitCode(env.GOOS)
+		}
+		if err := l.opts.Mutate(ctx); err != nil {
+			r.AddError(codeChange, err.Error())
+			return 0
+		}
 	}
 
 	switch l.opts.Action {
@@ -424,6 +445,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		p.payload = pay
 	}
 	p.version = p.payload.Version
+	if record != nil && !l.opts.AllowDowngrade && compareProductVersions(p.version, record.ProductVersion) < 0 {
+		return nil, &codedError{code: codeDowngrade, err: fmt.Errorf("payload version %s is older than the installed %s; downgrades are refused (rerun with --allow-downgrade to roll back deliberately)", p.version, record.ProductVersion)}
+	}
 	if l.opts.ProductVersion != "" && strings.TrimPrefix(l.opts.ProductVersion, "v") != p.version {
 		return nil, &codedError{code: codePayload, err: fmt.Errorf("payload version %s does not match --product-version %s", p.version, l.opts.ProductVersion)}
 	}
@@ -466,6 +490,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		for _, dir := range machinePolicyDirs(env.GOOS, connector) {
 			p.dirs = append(p.dirs, desiredDir{Path: dir, Mode: 0o755, Owner: rootOwner(), External: true})
 		}
+	}
+	if err := env.checkSharedParentsTraversable(p.dirs); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
 	}
 
 	p.render = renderInputs{
@@ -661,6 +688,10 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 	_ = env.savePending(pending)
 	if !l.opts.NoStart {
 		if err := l.activate(ctx, units, restartSockets); err != nil {
+			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
+				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
+					filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
+			}
 			return failAndRollback(codeActivate, err)
 		}
 	} else {
@@ -706,6 +737,9 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 		return failAndRollback(codeApply, err)
 	}
 	_ = env.clearPending()
+	// The deployment owns its state again; a kept-state record from an
+	// earlier non-purge uninstall no longer applies.
+	_ = removeFile(env.retainedStatePath())
 	env.discardSnapshot(snap)
 	r.Installed = true
 	r.InstalledVersion = newRecord.ProductVersion
@@ -748,7 +782,7 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 		}
 	}
 	for _, file := range p.files {
-		if err := mkdirAllExact(env.P(filepath.Dir(file.Path)), 0o755); err != nil {
+		if err := mkdirParents(env.P(filepath.Dir(file.Path))); err != nil {
 			return nil, err
 		}
 	}
@@ -1108,6 +1142,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	if err := errors.Join(errs...); err != nil {
 		r.AddError(codeUninstall, err.Error())
 		return 0
+	}
+	if !l.opts.Purge && record != nil {
+		// Record what stays so a reinstall resumes with it instead of
+		// refusing it as an unmanaged layout.
+		if err := env.recordRetainedState(); err != nil {
+			r.AddWarning(codeLeftovers, "could not record the retained gateway state; a reinstall may need --adopt-existing: "+err.Error())
+		}
 	}
 	r.Installed = false
 	return 0

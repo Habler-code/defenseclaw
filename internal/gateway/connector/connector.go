@@ -90,6 +90,19 @@ type SetupOpts struct {
 	// disable-sentinel overrides and derive their data directory from the
 	// verified script location instead.
 	ManagedEnterprise bool
+	// ManagedHookSocket is the standalone gateway's peer-authorized unix
+	// hook socket (from the root-owned runtime descriptor). When set on a
+	// unix host, in-agent plugins (OpenCode, Amp) send hook traffic to it
+	// instead of the TCP API, and only after checking that the socket and
+	// its directory belong to root or ManagedServiceUID; the gateway then
+	// identifies the caller by kernel-verified uid, so no bearer token
+	// leaves the plugin. Empty keeps the TCP transport (per-user installs
+	// and the Secure Client profile).
+	ManagedHookSocket string
+	// ManagedServiceUID is the standalone gateway's service uid, trusted
+	// alongside root as the hook socket owner. Ignored unless
+	// ManagedHookSocket is set.
+	ManagedServiceUID int
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,

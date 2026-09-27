@@ -330,7 +330,10 @@ dc_layout() {
     fi
     log_dir=$(dirname "$DC_LOG")
     if [ ! -d "$log_dir" ]; then
-        mkdir -p "$log_dir" 2>/dev/null || DC_LOG=""
+        # The wrapper runs under umask 077, but the log directory's parents
+        # are shared: the gateway's own log lives under /Library/Logs/Cisco
+        # and its service account must traverse it. The log stays private.
+        ( umask 022; mkdir -p "$log_dir" ) 2>/dev/null || DC_LOG=""
     fi
 }
 

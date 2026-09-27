@@ -62,14 +62,17 @@ func defaultHookConfigStubForConnector(conn connector.Connector, opts connector.
 			Mode:        0o600,
 		}
 	case "openhands":
-		// OpenHands reads ~/.openhands/hooks.json but only creates it when
-		// the user writes hooks; a pinned workspace keeps the strict check.
+		// OpenHands CLI loads user-global ~/.openhands/hooks.json but only
+		// creates it when the user writes hooks; without the file the user
+		// would stay unprotected and every repair would fail (seen live on
+		// RHEL and macOS). A pinned workspace keeps the strict check.
 		if strings.TrimSpace(opts.WorkspaceDir) != "" {
 			return connector.HookConfigStub{}
 		}
 		return connector.HookConfigStub{
 			ContentPath: filepath.Join(home, ".openhands", "hooks.json"),
 			Contents:    []byte("{}\n"),
+			Mode:        0o600,
 		}
 	case "antigravity":
 		// agy reads ~/.gemini/config/hooks.json but never creates it, so a

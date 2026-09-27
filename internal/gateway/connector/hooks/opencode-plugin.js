@@ -18,14 +18,22 @@
 // /api/v1/opencode/hook; the response carries hook_output={decision,
 // reason}; decision "deny"/"block" aborts the tool.
 
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import { userInfo } from "node:os";
+import { dirname } from "node:path";
 
 // DC_-prefixed constants are non-secret values baked in at setup time, not
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 const DC_TOKEN_FILE = "{{.TokenFileJS}}";
 const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
+// Standalone managed installs talk to the gateway's peer-authorized unix
+// hook socket instead of the TCP API: the gateway identifies the caller by
+// kernel-verified uid, so no bearer token leaves this process, and a user
+// who binds the TCP port during a gateway restart receives nothing. Empty
+// keeps the TCP transport (per-user installs).
+const DC_HOOK_SOCKET = "{{.HookSocketJS}}";
+const DC_SERVICE_UID = Number("{{.ServiceUID}}");
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -155,10 +163,73 @@ async function defenseclawToken() {
   }
 }
 
+function defenseclawTrustedSocketOwner(uid) {
+  return uid === 0 || (DC_SERVICE_UID > 0 && uid === DC_SERVICE_UID);
+}
+
+// defenseclawVerifyHookSocket refuses a hook socket (or its directory, or the
+// directory's parent) that root or the gateway service account does not own,
+// or that another account could write. Only root or the service account can
+// create a socket there, so a verified path cannot be an impostor listener.
+async function defenseclawVerifyHookSocket() {
+  const dir = dirname(DC_HOOK_SOCKET);
+  for (const path of [dirname(dir), dir]) {
+    const info = await lstat(path);
+    if (!info.isDirectory() || !defenseclawTrustedSocketOwner(info.uid) || (info.mode & 0o022) !== 0) {
+      throw new Error("the DefenseClaw hook socket directory is not trusted");
+    }
+  }
+  const socket = await lstat(DC_HOOK_SOCKET);
+  if (!socket.isSocket() || !defenseclawTrustedSocketOwner(socket.uid)) {
+    throw new Error("the DefenseClaw hook socket is not trusted");
+  }
+}
+
+// defenseclawSocketRequest sends one request over the verified unix socket
+// with node:http when the Bun unix fetch option is unavailable.
+async function defenseclawSocketRequest(path, init) {
+  const { request } = await import("node:http");
+  return await new Promise((resolve, reject) => {
+    const req = request({ socketPath: DC_HOOK_SOCKET, path, method: init.method || "POST", headers: init.headers }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > 1048576) {
+          req.destroy(new Error("oversized DefenseClaw gateway response"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          json: async () => JSON.parse(text),
+        });
+      });
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    if (init.signal) init.signal.addEventListener("abort", () => req.destroy(new Error("DefenseClaw gateway timeout")), { once: true });
+    req.end(init.body);
+  });
+}
+
+// defenseclawFetch posts to the gateway over the managed hook socket when one
+// is configured (after verifying it), and over TCP otherwise.
+async function defenseclawFetch(path, init) {
+  if (!DC_HOOK_SOCKET) return fetch("http://" + DC_API_ADDR + path, init);
+  await defenseclawVerifyHookSocket();
+  if (globalThis.Bun) return fetch("http://localhost" + path, { ...init, unix: DC_HOOK_SOCKET });
+  return defenseclawSocketRequest(path, init);
+}
+
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   let token;
   try {
-    token = await defenseclawToken();
+    token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
   } catch (_) {
     // Missing, unreadable, or malformed credentials are never safe at a
     // pre-execution boundary, even when transport fail-open was selected.
@@ -168,7 +239,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
-  headers["Authorization"] = "Bearer " + token;
+  if (token) headers["Authorization"] = "Bearer " + token;
   try {
     const payload = {
       hook_event_name: event,
@@ -190,7 +261,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       payload.tool_response = toolResult;
       payload.tool_result = toolResult;
     }
-    const res = await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {
+    const res = await defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
@@ -224,7 +295,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
 async function defenseclawPostLoadHeartbeat(cwd) {
   let token;
   try {
-    token = await defenseclawToken();
+    token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
   } catch (_) {
     // Load health is diagnostic only; tool hooks enforce credential failures.
     return;
@@ -232,9 +303,9 @@ async function defenseclawPostLoadHeartbeat(cwd) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
-  headers["Authorization"] = "Bearer " + token;
+  if (token) headers["Authorization"] = "Bearer " + token;
   try {
-    await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {
+    await defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -259,7 +330,7 @@ async function defenseclawPostLifecycle(event, cwd) {
   if (!event || !event.type) return;
   let token;
   try {
-    token = await defenseclawToken();
+    token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
   } catch (_) {
     // Lifecycle telemetry is observe-only; an unavailable credential skips it.
     return;
@@ -269,9 +340,9 @@ async function defenseclawPostLifecycle(event, cwd) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
-  headers["Authorization"] = "Bearer " + token;
+  if (token) headers["Authorization"] = "Bearer " + token;
   try {
-    await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {
+    await defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
       headers,
       body: JSON.stringify({

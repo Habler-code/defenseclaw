@@ -5690,6 +5690,40 @@ func alertOnlyRuleFindings(findings []RuleFinding) []RuleFinding {
 	return alerts
 }
 
+// trustedActiveHome is the home directory action analysis resolves "~" and
+// $HOME against for this request. On the managed standalone hook socket the
+// gateway runs as a service account, so it is the kernel-verified caller's
+// home (empty if unresolved — never the service account's). Everywhere else
+// the gateway runs as the user and its own home is the caller's.
+func trustedActiveHome(ctx context.Context) string {
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		return peer.Home
+	}
+	if serviceAccountGatewayFromContext(ctx) {
+		// A standalone gateway runs as its service account; a request that
+		// did not arrive on the verified hook socket has no trusted caller
+		// home, and the service account's home is never the caller's.
+		return ""
+	}
+	return trustedSameHostHome()
+}
+
+type serviceAccountGatewayContextKey struct{}
+
+// withServiceAccountGateway marks requests served by a standalone gateway,
+// which runs as a service account on behalf of many users.
+func withServiceAccountGateway(ctx context.Context) context.Context {
+	return context.WithValue(ctx, serviceAccountGatewayContextKey{}, true)
+}
+
+func serviceAccountGatewayFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	marked, _ := ctx.Value(serviceAccountGatewayContextKey{}).(bool)
+	return marked
+}
+
 func trustedSameHostHome() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

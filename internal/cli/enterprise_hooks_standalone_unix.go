@@ -491,6 +491,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 	run.ManifestSHA256 = manifestSHA256
 	apiAddr, proxyAddr := enterpriseHookListenAddrs()
+	hookSocket, serviceUID := enterpriseHookStandaloneHookTransport()
 	resolver := enterprisehooks.StandaloneResolver()
 	if caching, ok := resolver.(*unixidentity.CachingResolver); ok {
 		caching.Reset()
@@ -625,6 +626,8 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
 			RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 			RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
+			ManagedHookSocket:                  hookSocket,
+			ManagedServiceUID:                  serviceUID,
 		}
 		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 			for _, dir := range dirs {
@@ -865,6 +868,29 @@ func enterpriseHookStandaloneConfigChanged(startup string, w io.Writer) bool {
 	}
 	fmt.Fprintf(w, "[hook-guardian] managed config changed; exiting so the service manager restarts the guardian with it\n")
 	return true
+}
+
+// enterpriseHookStandaloneHookTransport returns the gateway's unix hook socket
+// and service uid from the root-owned runtime descriptor, so in-agent plugins
+// talk to the peer-authorized socket instead of the TCP API. ("", 0) keeps the
+// TCP transport. Replaced in tests.
+var enterpriseHookStandaloneHookTransport = func() (string, int) {
+	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	if err != nil {
+		return "", 0
+	}
+	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
+	if err != nil {
+		return "", 0
+	}
+	socket := strings.TrimSpace(descriptor.HookSocket)
+	if socket == "" {
+		socket = layout.HookSocketPath
+	}
+	if descriptor.ServiceUID < 0 {
+		return socket, 0
+	}
+	return socket, descriptor.ServiceUID
 }
 
 // enterpriseHookStandaloneMachinePolicySet names the connectors the

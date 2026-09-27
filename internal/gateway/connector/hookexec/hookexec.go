@@ -892,15 +892,15 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	if !opts.ManagedEnterprise || sp.connector != "copilot" {
 		return 0, false
 	}
-	message, _ := json.Marshal(managedDenyMessage(reason))
+	message := mustJSONString(managedCopilotDenyMessage(reason))
 	var body string
 	// Exact reviewed event names only: an unreviewed spelling never reaches
 	// the gateway and never synthesizes enforcement.
 	switch opts.Event {
 	case "preToolUse":
-		body = `{"permissionDecision":"deny","permissionDecisionReason":` + string(message) + `}`
+		body = `{"permissionDecision":"deny","permissionDecisionReason":` + message + `}`
 	case "permissionRequest":
-		body = `{"behavior":"deny","message":` + string(message) + `}`
+		body = `{"behavior":"deny","message":` + message + `}`
 	default:
 		return 0, false
 	}
@@ -909,15 +909,19 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	return 0, true
 }
 
-// foreignHookBlockPrefix starts the foreign-hook guard denial, which names
-// the file and the allowlist key the user needs.
-const foreignHookBlockPrefix = "enterprise_foreign_hook_blocked:"
+// ForeignHookBlockedReasonPrefix starts the enterprise foreign-hook guard's
+// denial reason (internal/enterprisepolicy.EvaluateForeignHooks). That reason
+// names the unapproved hook file, its digest and the allowlist key and holds
+// no secret.
+const ForeignHookBlockedReasonPrefix = "enterprise_foreign_hook_blocked:"
 
-// managedDenyMessage is the reason a managed fail-closed denial shows the
-// user: the foreign-hook guard explanation when that is the cause (it names
-// the file and how to get it approved), else the generic unavailable text.
-func managedDenyMessage(reason string) string {
-	if reason = strings.TrimSpace(reason); strings.HasPrefix(reason, foreignHookBlockPrefix) {
+// managedCopilotDenyMessage is the text Copilot shows for a managed local
+// denial. Copilot surfaces only the structured reason (not stderr), so a
+// foreign-hook guard denial carries its own reason and the user learns which
+// file to remove; every other local failure keeps the generic text.
+func managedCopilotDenyMessage(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
 		return reason
 	}
 	return "DefenseClaw policy service is unavailable."

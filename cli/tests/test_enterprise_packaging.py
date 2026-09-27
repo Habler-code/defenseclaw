@@ -321,7 +321,10 @@ def test_macos_enterprise_pkg_builder_calls_the_lifecycle():
     builder = (ROOT / "scripts/build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
     assert builder.startswith("#!/usr/bin/env bash")
     assert "set -euo pipefail" in builder
-    assert "enterprise macos ensure --from-package --reason package --json" in builder
+    assert "enterprise macos ensure --from-package $downgrade --reason package --json" in builder
+    # Downgrades stop in preinstall, before older binaries land, unless the
+    # administrator placed the root-owned rollback marker.
+    assert "refusing to downgrade" in builder and "allow-downgrade" in builder
     assert 'readonly INSTALL_BIN="opt/cisco/defenseclaw/bin"' in builder
     assert 'readonly PKG_ID="com.cisco.defenseclaw.enterprise"' in builder
     assert "com.cisco.secureclient.defenseclaw" in builder

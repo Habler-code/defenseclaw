@@ -165,7 +165,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				Tool:                                     actionTool,
 				Args:                                     toolArgs,
 				CWD:                                      req.CWD,
-				ActiveHome:                               trustedSameHostHome(),
+				ActiveHome:                               trustedActiveHome(ctx),
 				ToolResourceIdentity:                     resourceIdentity,
 				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
 				ActiveAgentFiles:                         activeAgentContext.files,
@@ -622,7 +622,7 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 		ToolResponse:  req.ToolResponse,
 		MCPServerName: req.MCPServerName,
 		Payload:       req.Payload,
-	}
+	}.withTrustedActiveHome(ctx)
 	strictScope := codexToolResultContentScope(provenanceReq)
 	if mode == "action" || strictScope == ruleContentScopeSource {
 		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
