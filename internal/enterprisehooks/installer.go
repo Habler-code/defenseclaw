@@ -69,6 +69,10 @@ type InstallOptions struct {
 	// transport.
 	ManagedHookSocket string
 	ManagedServiceUID int
+	// ForeignHookGuardBinary is the administrator-owned hook binary the
+	// standalone Amp and OpenCode plugins run for the foreign-hook guard
+	// (see connector.SetupOpts). Empty everywhere else.
+	ForeignHookGuardBinary string
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -180,6 +184,10 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// installed hooks were rendered for.
 		ManagedHookSocket: strings.TrimSpace(opts.ManagedHookSocket),
 		ManagedServiceUID: opts.ManagedServiceUID,
+		// Verification requires the guard line the standalone Amp and
+		// OpenCode plugins carry, so a plugin rendered without it (before
+		// the guard existed, or edited) fails and the guardian re-renders it.
+		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 	}
 	if setupOpts.AgentVersion == "" {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
@@ -339,6 +347,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
 		ManagedHookSocket: strings.TrimSpace(opts.ManagedHookSocket),
 		ManagedServiceUID: opts.ManagedServiceUID,
+		// Only the standalone guardian sets this, for Amp and OpenCode.
+		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
 	if requiresScopedHookToken {

@@ -190,6 +190,7 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 				Connector:     name,
 				GOOS:          ctx.opts.GOOS,
 				Home:          target.UserHome,
+				AccountHome:   target.UserHome,
 				WorkingDir:    project,
 				HookBinary:    ctx.opts.HookBinary,
 				Policy:        policy,

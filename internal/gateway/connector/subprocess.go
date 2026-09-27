@@ -55,14 +55,18 @@ type templateData struct {
 	HookSocketJS string
 	// ServiceUID is the standalone gateway's service uid trusted as the
 	// hook socket owner (with root); 0 when unused.
-	ServiceUID    int
-	FailMode      string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
-	Managed       bool
-	TokenFile     string
-	ScopedToken   bool
-	ConnectorName string
-	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
-	HookTimeoutMS int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
+	ServiceUID int
+	// ForeignHookGuardJS is the administrator-owned hook binary an in-agent
+	// plugin runs for the standalone foreign-hook guard, escaped for a
+	// JavaScript double-quoted string; empty skips the check.
+	ForeignHookGuardJS string
+	FailMode           string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
+	Managed            bool
+	TokenFile          string
+	ScopedToken        bool
+	ConnectorName      string
+	HookBinaryPS       string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS      int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
 	CursorHookTimeoutMS int

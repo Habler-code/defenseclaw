@@ -81,7 +81,10 @@ func BuildPublicPolicy(opts Options, connectors []string) PublicPolicy {
 		allowed := append([]string{}, policy.AllowedHooks...)
 		sort.Strings(allowed)
 		summary.Connectors[name] = PublicConnectorPolicy{
-			Route:        RouteFor(name, opts.goos()),
+			// opts.Route: an installed administrator OpenCode plugin moves
+			// OpenCode onto machine policy, where the per-user plugin and
+			// per-user registration commands are foreign.
+			Route:        opts.Route(name),
 			ForeignHooks: policy.ForeignHooks,
 			Guard:        GuardApplies(name, policy),
 			AllowedHooks: allowed,

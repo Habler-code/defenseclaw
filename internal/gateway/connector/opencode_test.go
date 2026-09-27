@@ -628,6 +628,7 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 			"{{.FailMode}}", failMode,
 			"{{.HookSocketJS}}", "",
 			"{{.ServiceUID}}", "0",
+			"{{.ForeignHookGuardJS}}", "",
 		).Replace(string(body))
 		if strings.Contains(text, "{{.") {
 			t.Fatalf("rendered %s plugin retains a template placeholder", failMode)
@@ -1107,4 +1108,45 @@ func openCodeTestPathContains(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Only a standalone managed install renders the foreign-hook guard binary,
+// and verification then requires it, so a plugin rendered before the guard
+// existed is repaired on upgrade. Per-user installs render it empty.
+func TestPluginForeignHookGuardRendersOnlyForManagedInstalls(t *testing.T) {
+	if got := managedPluginForeignHookGuard(SetupOpts{ForeignHookGuardBinary: "/opt/defenseclaw/bin/defenseclaw-hook"}); got != "" {
+		t.Fatalf("a per-user install must not run the guard: %q", got)
+	}
+	if got := managedPluginForeignHookGuard(SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: "relative/defenseclaw-hook"}); got != "" {
+		t.Fatalf("a relative guard binary must be refused: %q", got)
+	}
+	guard := testForeignHookGuardBinary()
+	opts := SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}
+	if got := managedPluginForeignHookGuard(opts); got != guard {
+		t.Fatalf("managed guard binary = %q", got)
+	}
+	for _, name := range []string{"hooks/opencode-plugin.js", "hooks/amp-plugin.ts"} {
+		body, err := hookFS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		declaration, terminator := "const DC_FOREIGN_GUARD: string = ", "\n"
+		if strings.HasSuffix(name, ".js") {
+			declaration, terminator = "const DC_FOREIGN_GUARD = ", ";\n"
+		}
+		rendered, err := renderTemplate(string(body), templateData{ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(rendered, string(managedPluginForeignHookGuardMarker(opts, declaration, terminator))) {
+			t.Fatalf("%s: the managed render must carry the guard marker", name)
+		}
+		perUser, err := renderTemplate(string(body), templateData{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(perUser, string(managedPluginForeignHookGuardMarker(opts, declaration, terminator))) {
+			t.Fatalf("%s: a per-user render must not carry the guard", name)
+		}
+	}
 }

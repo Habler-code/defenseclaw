@@ -53,6 +53,7 @@ func newHookCmd() *cobra.Command {
 		failMode          string
 		inputFile         string
 		enterpriseManaged bool
+		foreignHookCheck  bool
 	)
 
 	cmd := &cobra.Command{
@@ -67,6 +68,13 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if foreignHookCheck {
+				// The standalone Amp and OpenCode plugins ask for the
+				// foreign-hook guard's decision only; nothing is sent to
+				// the gateway.
+				os.Exit(runForeignHookCheck(connector, os.Stdin, os.Stdout))
+				return nil
+			}
 			if !enterpriseManaged && implicitEnterpriseManagedHook() {
 				enterpriseManaged = true
 			}
@@ -110,7 +118,9 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
 	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
+	cmd.Flags().BoolVar(&foreignHookCheck, "foreign-hook-check", false, "print the standalone foreign-hook guard decision as JSON (in-agent plugins)")
 	_ = cmd.Flags().MarkHidden("input-file")
+	_ = cmd.Flags().MarkHidden("foreign-hook-check")
 	_ = cmd.Flags().MarkHidden("hook-contract")
 	_ = cmd.Flags().MarkHidden("enterprise-managed")
 	_ = cmd.MarkFlagRequired("connector")

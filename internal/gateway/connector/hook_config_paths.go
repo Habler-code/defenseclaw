@@ -338,7 +338,7 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	if info == nil || !managedFileBackupMatchesSnapshot(&backup, data, true) {
 		return false, nil
 	}
-	for _, marker := range [][]byte{
+	markers := [][]byte{
 		[]byte("// defenseclaw-managed-plugin v7"),
 		[]byte(`"/api/v1/opencode/hook"`),
 		[]byte(`"tool.execute.before": async`),
@@ -348,7 +348,11 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 		[]byte(`"tool.execute.after": async`),
 		[]byte(`input && input.args`),
 		[]byte(`payload.tool_result = toolResult`),
-	} {
+	}
+	if guard := managedPluginForeignHookGuardMarker(opts, "const DC_FOREIGN_GUARD = ", ";\n"); guard != nil {
+		markers = append(markers, guard, []byte(`if (blocked) throw new Error(blocked);`))
+	}
+	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {
 			return false, nil
 		}

@@ -91,13 +91,27 @@ var enterpriseHookWindowsForeignCleanupState struct {
 
 var enterpriseHookWindowsForeignCleanupInterval = 5 * time.Minute
 
+// enterpriseHookWindowsGuardianOptions and enterpriseHookWindowsEligibleProfiles
+// are replaceable in tests.
+var enterpriseHookWindowsGuardianOptions = windowsStandaloneGuardianOptions
+
+// enterpriseHookWindowsEligibleProfiles lists the profiles enrollment admits
+// (include_users, exclude_users and exempt_users, as the enumerator applies
+// them), so users without a per-user manifest row are cleaned too.
+var enterpriseHookWindowsEligibleProfiles = func(ctx context.Context) ([]enterprisehooks.TargetCredentials, error) {
+	opts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{})
+	return enterprisehooks.WindowsStandaloneEligibleProfiles(ctx, opts.IncludeUsers, opts.ExcludeUsers)
+}
+
 // enterpriseHookStandalonePlatformFinish removes unapproved foreign hooks
-// for every verified Windows user and every guarded connector the user has
-// no manifest row for; rows run the cleanup for their own connector as they
-// verify. Cleanup runs as the user and is best effort: the hook-side guard
-// still denies tool calls while an unapproved hook remains.
-func enterpriseHookStandalonePlatformFinish(_ context.Context, stderr io.Writer, rows []enterpriseHookReconcileRow, now time.Time) {
-	_, connectors, standalone, err := windowsStandaloneGuardianOptions()
+// for every verified Windows user and every eligible profile without rows
+// (a user whose connectors are all machine policy, such as Cursor, has
+// none), for each guarded connector the user has no manifest row for; rows
+// run the cleanup for their own connector as they verify. Cleanup runs as
+// the user and is best effort: the hook-side guard still denies tool calls
+// while an unapproved hook remains.
+func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Writer, rows []enterpriseHookReconcileRow, now time.Time) {
+	_, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone || err != nil || len(connectors) == 0 {
 		return
 	}
@@ -129,6 +143,25 @@ func enterpriseHookStandalonePlatformFinish(_ context.Context, stderr io.Writer,
 		}
 		current.rows[strings.ToLower(strings.TrimSpace(row.Connector))] = true
 	}
+	profiles, profilesErr := enterpriseHookWindowsEligibleProfiles(ctx)
+	if profilesErr != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: eligible profiles: %v\n", profilesErr)
+	}
+	for _, profile := range profiles {
+		key := strings.ToUpper(strings.TrimSpace(profile.SID))
+		if key == "" || strings.TrimSpace(profile.UserHome) == "" {
+			continue
+		}
+		if _, ok := users[key]; ok {
+			continue
+		}
+		users[key] = &user{
+			creds:   enterprisehooks.TargetCredentials{UserHome: profile.UserHome, UID: -1, GID: -1, SID: profile.SID},
+			dataDir: filepath.Join(filepath.Clean(profile.UserHome), ".defenseclaw"),
+			rows:    map[string]bool{},
+		}
+		order = append(order, key)
+	}
 	fingerprint := strings.Join(order, ",") + "|" + strings.Join(connectors, ",")
 	enterpriseHookWindowsForeignCleanupState.Lock()
 	due := now.Sub(enterpriseHookWindowsForeignCleanupState.last) >= enterpriseHookWindowsForeignCleanupInterval ||
@@ -143,6 +176,12 @@ func enterpriseHookStandalonePlatformFinish(_ context.Context, stderr io.Writer,
 	}
 	for _, key := range order {
 		current := users[key]
+		blocks, dropped, blocksErr := enterpriseForeignHookCollectBlocks(current.creds)
+		blocksError := ""
+		if blocksErr != nil {
+			blocksError = blocksErr.Error()
+		}
+		logEnterpriseForeignHookBlocks(stderr, current.creds.UserHome, blocks, dropped, blocksError)
 		for _, name := range connectors {
 			if current.rows[name] {
 				continue

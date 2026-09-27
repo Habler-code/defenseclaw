@@ -18,6 +18,7 @@
 // /api/v1/opencode/hook; the response carries hook_output={decision,
 // reason}; decision "deny"/"block" aborts the tool.
 
+import { execFile } from "node:child_process";
 import { lstat, open } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname } from "node:path";
@@ -34,6 +35,11 @@ const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
 // keeps the TCP transport (per-user installs).
 const DC_HOOK_SOCKET = "{{.HookSocketJS}}";
 const DC_SERVICE_UID = Number("{{.ServiceUID}}");
+// Standalone managed installs also run the administrator-owned hook binary
+// before each tool call: it applies the organization's foreign-hook guard
+// (unapproved project or user plugins that could change a tool call after
+// DefenseClaw checks it). Empty skips the check (per-user installs).
+const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -226,6 +232,50 @@ async function defenseclawFetch(path, init) {
   return defenseclawSocketRequest(path, init);
 }
 
+// defenseclawForeignHookCheck asks the administrator-owned hook binary for
+// the foreign-hook guard's decision and resolves to a block reason, or ""
+// when no unapproved plugin or hook is present. A binary that cannot be
+// run, times out, or answers anything but {"deny": false} blocks.
+function defenseclawForeignHookCheck(event, cwd) {
+  if (!DC_FOREIGN_GUARD) return Promise.resolve("");
+  return new Promise((resolve) => {
+    const fail = (why) => resolve("DefenseClaw could not check for unapproved plugins (" + why + "), so this tool call is blocked.");
+    try {
+      const child = execFile(
+        DC_FOREIGN_GUARD,
+        ["hook", "--connector", "opencode", "--foreign-hook-check"],
+        { timeout: DC_TIMEOUT_MS, maxBuffer: 65536, windowsHide: true },
+        (err, stdout) => {
+          if (err) {
+            fail(err && err.message ? err.message : String(err));
+            return;
+          }
+          let verdict;
+          try {
+            verdict = JSON.parse(String(stdout));
+          } catch (_) {
+            fail("invalid response");
+            return;
+          }
+          if (verdict && verdict.deny === false) {
+            resolve("");
+            return;
+          }
+          resolve(verdict && typeof verdict.reason === "string" && verdict.reason
+            ? verdict.reason
+            : "DefenseClaw blocked this tool call because an unapproved plugin is present.");
+        },
+      );
+      if (child.stdin) {
+        child.stdin.on("error", () => {});
+        child.stdin.end(JSON.stringify({ hook_event_name: event, cwd: cwd || "" }));
+      }
+    } catch (err) {
+      fail(err && err.message ? err.message : String(err));
+    }
+  });
+}
+
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   let token;
   try {
@@ -369,6 +419,10 @@ async function defenseclawPostLifecycle(event, cwd) {
 
 export const DefenseClaw = async ({ directory, worktree }) => {
   const cwd = directory || worktree || "";
+  // OpenCode loads plugins once at startup: a foreign plugin present now
+  // keeps running for this process even if its file is deleted later, so a
+  // block found at load holds for the whole process.
+  const defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
   return {
     config: async (config) => {
       defenseclawConfigure(config);
@@ -391,6 +445,8 @@ export const DefenseClaw = async ({ directory, worktree }) => {
     // The decision is resolved BEFORE the throw so a fail-open transport
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
+      const blocked = (await defenseclawStartupGuard) || (await defenseclawForeignHookCheck("tool.execute.before", cwd));
+      if (blocked) throw new Error(blocked);
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(
         "tool.execute.before",

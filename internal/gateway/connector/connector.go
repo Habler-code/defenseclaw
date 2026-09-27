@@ -103,6 +103,12 @@ type SetupOpts struct {
 	// alongside root as the hook socket owner. Ignored unless
 	// ManagedHookSocket is set.
 	ManagedServiceUID int
+	// ForeignHookGuardBinary is the administrator-owned hook binary a
+	// standalone managed in-agent plugin (Amp, OpenCode) runs before each
+	// tool call to evaluate the enterprise foreign-hook guard: those
+	// plugins call the gateway directly and never run `defenseclaw hook`.
+	// Empty (per-user installs, Secure Client) keeps the plugin unchanged.
+	ForeignHookGuardBinary string
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,

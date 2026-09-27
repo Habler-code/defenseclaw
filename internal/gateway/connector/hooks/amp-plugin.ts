@@ -16,6 +16,7 @@
 // does not read secrets or policy from process environment variables.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
+import { execFile } from 'node:child_process'
 import { lstat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
 import { dirname } from 'node:path'
@@ -30,6 +31,12 @@ const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
 // the TCP transport (per-user installs).
 const DC_HOOK_SOCKET: string = "{{.HookSocketJS}}"
 const DC_SERVICE_UID = Number("{{.ServiceUID}}")
+// Standalone managed installs also run the administrator-owned hook binary
+// before each tool call: it applies the organization's foreign-hook guard
+// (unapproved project or user plugins that could change a tool call after
+// DefenseClaw checks it, since Amp does not order sibling handlers). Empty
+// skips the check (per-user installs).
+const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
@@ -164,6 +171,48 @@ function assistantResponse(messages: ThreadMessage[]): string {
 	return parts.join("\n")
 }
 
+// runForeignHookCheck asks the administrator-owned hook binary for the
+// foreign-hook guard's decision and resolves to a block reason, or "" when
+// no unapproved plugin or hook is present. A binary that cannot be run,
+// times out, or answers anything but {"deny": false} blocks.
+function runForeignHookCheck(event: string, cwd: string): Promise<string> {
+	if (!DC_FOREIGN_GUARD) return Promise.resolve("")
+	return new Promise(resolve => {
+		const fail = (why: string) => resolve(`DefenseClaw could not check for unapproved plugins (${why}), so this tool call is blocked.`)
+		try {
+			const child = execFile(
+				DC_FOREIGN_GUARD,
+				["hook", "--connector", "amp", "--foreign-hook-check"],
+				{ timeout: DC_TIMEOUT_MS, maxBuffer: 65536, windowsHide: true },
+				(error, stdout) => {
+					if (error) {
+						fail(safeError(error))
+						return
+					}
+					let verdict: { deny?: unknown, reason?: unknown }
+					try {
+						verdict = JSON.parse(String(stdout))
+					} catch {
+						fail("invalid response")
+						return
+					}
+					if (verdict && verdict.deny === false) {
+						resolve("")
+						return
+					}
+					resolve(verdict && typeof verdict.reason === "string" && verdict.reason
+						? verdict.reason
+						: "DefenseClaw blocked this tool call because an unapproved plugin is present.")
+				},
+			)
+			child.stdin?.on("error", () => {})
+			child.stdin?.end(JSON.stringify({ hook_event_name: event, cwd }))
+		} catch (error) {
+			fail(safeError(error))
+		}
+	})
+}
+
 function failureResponse(reason: string): GatewayResponse {
 	if (DC_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
@@ -192,6 +241,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		? amp.helpers.filePathFromURI(amp.system.workspaceRoot)
 		: ""
 	const executorKind = amp.system.executor?.kind || ""
+	// Amp loads plugins once at startup: a foreign plugin present now keeps
+	// running for this process even if its file is deleted later, so a block
+	// found at load holds for the whole process.
+	const startupGuard = runForeignHookCheck("session.load", workspaceRoot)
+	const foreignHookCheck = async (event: string): Promise<string> =>
+		(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
 		const cached = agents.get(threadID)
@@ -382,6 +437,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	})
 
 	amp.on("tool.call", async (event, ctx): Promise<ToolCallResult> => {
+		const blocked = await foreignHookCheck("tool.call")
+		if (blocked) return { action: "reject-and-continue", message: blocked }
 		const threadID = stringID(event.thread.id)
 		const toolUseID = stringID(event.toolUseID)
 		const verdict = await post({

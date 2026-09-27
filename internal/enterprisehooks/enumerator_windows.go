@@ -568,6 +568,29 @@ type windowsUserProfile struct {
 	HomeMtime int64
 }
 
+// WindowsStandaloneEligibleProfiles lists the interactive user profiles the
+// standalone profile's enrollment admits (the filters EnumerateWindows
+// applies), for guardian work that needs no per-user manifest row: a user
+// whose connectors are all machine policy still gets foreign hooks removed
+// from their user-level config.
+func WindowsStandaloneEligibleProfiles(ctx context.Context, include, exclude []string) ([]TargetCredentials, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	profiles, err := listWindowsUserProfiles(ctx, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TargetCredentials, 0, len(profiles))
+	for _, profile := range profiles {
+		if !windowsProfileAdmittedByEnrollment(profile, include, exclude) {
+			continue
+		}
+		out = append(out, TargetCredentials{UserHome: filepath.Clean(profile.Home), UID: -1, GID: -1, SID: profile.SID})
+	}
+	return out, nil
+}
+
 // listWindowsUserProfiles walks the ProfileList registry key and
 // returns one row per surviving profile. Profiles that fail any step
 // of the filter chain (parse, well-known-SID, path-not-absolute,

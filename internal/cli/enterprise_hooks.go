@@ -454,6 +454,10 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
 		RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 		RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
+		// Standalone Amp and OpenCode only; empty on Secure Client. The
+		// reconcile verifies with it, so an install without it would be
+		// re-rendered on the next pass.
+		ForeignHookGuardBinary: standaloneForeignHookGuardBinary(enterpriseHookConnector),
 	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
@@ -1360,6 +1364,8 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				AgentVersion:  strings.TrimSpace(target.AgentVersion),
 				WorkspaceDir:  cfg.ConnectorWorkspaceDir(),
 				Registry:      registry,
+				// Standalone Amp and OpenCode only; empty on Secure Client.
+				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 			}
 			var result enterprisehooks.InstallResult
 			result, targetErr = enterprisehooks.Verify(ctx, opts)
@@ -1676,6 +1682,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
 				RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
+				// Standalone Amp and OpenCode only; empty on Secure Client.
+				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 			}
 			if err == nil {
 				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {

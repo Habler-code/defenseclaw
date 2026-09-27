@@ -110,7 +110,7 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, marker := range [][]byte{
+	markers := [][]byte{
 		[]byte("// defenseclaw-managed-plugin v2"),
 		[]byte("/api/v1/amp/hook"),
 		[]byte(`amp.on("session.start"`),
@@ -118,7 +118,11 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 		[]byte(`amp.on("tool.call"`),
 		[]byte(`amp.on("tool.result"`),
 		[]byte(`amp.on("agent.end"`),
-	} {
+	}
+	if guard := managedPluginForeignHookGuardMarker(opts, "const DC_FOREIGN_GUARD: string = ", "\n"); guard != nil {
+		markers = append(markers, guard, []byte(`await foreignHookCheck("tool.call")`))
+	}
+	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {
 			return false, nil
 		}

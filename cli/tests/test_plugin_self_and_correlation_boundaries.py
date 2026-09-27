@@ -123,6 +123,7 @@ def _render_bridge_publication(
     data_dir: Path,
     *,
     connector: str,
+    foreign_guard: str = "",
 ) -> bytes:
     template_name = {
         "amp": "amp-plugin.ts",
@@ -139,6 +140,9 @@ def _render_bridge_publication(
         template.replace("{{.APIAddr}}", "127.0.0.1:18970")
         .replace("{{.TokenFileJS}}", token_path_js)
         .replace("{{.FailMode}}", "closed")
+        .replace("{{.HookSocketJS}}", "")
+        .replace("{{.ServiceUID}}", "0")
+        .replace("{{.ForeignHookGuardJS}}", json.dumps(foreign_guard)[1:-1])
     )
     assert "{{." not in rendered
     return rendered.encode()
@@ -438,6 +442,42 @@ def test_registered_connector_bridge_requires_exact_published_bytes(
     )
 
     assert not self_identity._looks_like_bridge_file(str(target))
+    assert first_party_self_reason(target) is None
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_path"),
+    [
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
+def test_bridge_naming_a_user_writable_guard_binary_is_not_first_party(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+) -> None:
+    """The standalone bridge runs its foreign-hook guard binary on every tool
+    call, so a copy naming a binary another account can replace is scanned
+    like any third-party plugin."""
+
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    guard = tmp_path / "defenseclaw-hook"
+    guard.write_text("#!/bin/sh\n", encoding="utf-8")
+    repository_root = Path(__file__).resolve().parents[2]
+    published = _render_bridge_publication(
+        repository_root,
+        data_dir,
+        connector=connector,
+        foreign_guard=str(guard),
+    )
+    _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+
     assert first_party_self_reason(target) is None
 
 

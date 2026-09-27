@@ -12,6 +12,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		Connector:     name,
 		GOOS:          layout.GOOS,
 		Home:          target.UserHome,
+		AccountHome:   target.UserHome,
 		HookBinary:    opts.HookBinary,
 		Policy:        policy,
 		OwnedCommands: perUserOwnedHookCommands(name, target.UserHome, dataDir),
@@ -61,6 +63,54 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		return cleanErr
 	})
 	return result, err
+}
+
+// enterpriseForeignHookCollectBlocks takes the foreign-hook blocks one
+// user's hooks recorded, running as that user. Secure Client and unmanaged
+// configs return immediately. Replaceable in tests.
+var enterpriseForeignHookCollectBlocks = func(target enterprisehooks.TargetCredentials) ([]enterprisepolicy.BlockSummary, int, error) {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil, 0, nil
+	}
+	var blocks []enterprisepolicy.BlockSummary
+	dropped := 0
+	err := enterprisehooks.RunAsTarget(target, func() error {
+		var collectErr error
+		blocks, dropped, collectErr = enterprisepolicy.CollectForeignHookBlocks(target.UserHome, time.Now())
+		return collectErr
+	})
+	return blocks, dropped, err
+}
+
+// logEnterpriseForeignHookBlocks reports recorded blocks in the guardian
+// log. The records come from a user-writable file: every field is bounded
+// and stripped of control characters.
+func logEnterpriseForeignHookBlocks(stderr io.Writer, user string, blocks []enterprisepolicy.BlockSummary, dropped int, collectErr string) {
+	for i, block := range blocks {
+		if i == enterprisepolicy.BlockSummaryLimit {
+			break
+		}
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %s for %s (recorded by the user's hook)\n", foreignGuardLogField(block.String(), 2048), foreignGuardLogField(user, 256))
+	}
+	if dropped > 0 {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %d more blocked hook file(s) for %s not listed\n", dropped, foreignGuardLogField(user, 256))
+	}
+	if collectErr != "" {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: block records for %s: %s\n", foreignGuardLogField(user, 256), foreignGuardLogField(collectErr, 512))
+	}
+}
+
+func foreignGuardLogField(value string, limit int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	if len(value) > limit {
+		return value[:limit]
+	}
+	return value
 }
 
 // reconcileEnterpriseForeignHooks is the reconcile loop's call site. Cleanup

@@ -72,6 +72,7 @@ func TestOpenCodeBridgeUsesVerifiedManagedHookSocket(t *testing.T) {
 			"{{.FailMode}}", "closed",
 			"{{.HookSocketJS}}", javaScriptStringContent(socketPath),
 			"{{.ServiceUID}}", strconv.Itoa(serviceUID),
+			"{{.ForeignHookGuardJS}}", "",
 		).Replace(string(body))
 		if strings.Contains(text, "{{.") {
 			t.Fatal("rendered plugin retains a template placeholder")
@@ -142,5 +143,126 @@ func TestManagedPluginHookSocketOnlyForManagedUnixInstalls(t *testing.T) {
 	}
 	if _, uid := managedPluginHookSocket(SetupOpts{ManagedEnterprise: true, ManagedHookSocket: "/run/x.sock", ManagedServiceUID: -1}); uid != 0 {
 		t.Fatalf("negative service uid = %d, want 0", uid)
+	}
+}
+
+// fakeForeignHookGuard writes an executable standing in for the
+// administrator-owned hook binary: it answers each --foreign-hook-check
+// call with the next of answers (repeating the last) and records its
+// arguments and request.
+func fakeForeignHookGuard(t *testing.T, answers ...string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	guard := filepath.Join(dir, "defenseclaw-hook")
+	script := []string{"#!/bin/sh", "dir='" + dir + "'", `n=$(cat "$dir/count" 2>/dev/null || echo 0)`, `echo $((n + 1)) > "$dir/count"`, `cat > "$dir/request-$n"`, `echo "$*" > "$dir/args"`}
+	for index, answer := range answers {
+		condition := `[ "$n" -eq ` + strconv.Itoa(index) + ` ]`
+		if index == len(answers)-1 {
+			condition = "true"
+		}
+		script = append(script, "if "+condition+"; then printf '%s' '"+answer+"'; exit 0; fi")
+	}
+	if err := os.WriteFile(guard, []byte(strings.Join(script, "\n")+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return guard, dir
+}
+
+// The standalone OpenCode plugin calls the gateway directly, so it must run
+// the administrator-owned foreign-hook guard itself: a denial (at load or
+// per call) aborts the tool before any gateway contact, a denial at load
+// holds for the process, and a guard that cannot run fails closed.
+func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required for the executable OpenCode plugin contract")
+	}
+	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	requests := 0
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"hook_output": map[string]any{"decision": "allow"}})
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	root := t.TempDir()
+	tokenPath := filepath.Join(root, ".hook-opencode.token")
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(guard string) string {
+		t.Helper()
+		text := strings.NewReplacer(
+			"{{.APIAddr}}", listener.Addr().String(),
+			"{{.TokenFileJS}}", javaScriptStringContent(tokenPath),
+			"{{.FailMode}}", "closed",
+			"{{.HookSocketJS}}", "",
+			"{{.ServiceUID}}", "0",
+			"{{.ForeignHookGuardJS}}", javaScriptStringContent(guard),
+		).Replace(string(body))
+		plugin := filepath.Join(t.TempDir(), "plugin.mjs")
+		if err := os.WriteFile(plugin, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		script := `const m = await import(process.argv[1]);
+const hooks = await m.DefenseClaw({ directory: "/work/repo", worktree: "/work/repo" });
+for (const call of ["c1", "c2"]) {
+  try {
+    await hooks["tool.execute.before"]({ tool: "bash", sessionID: "s", callID: call }, { args: { command: "echo hi" } });
+    console.log("ALLOWED");
+  } catch (e) { console.log("THREW:" + e.message); }
+}`
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, node, "--input-type=module", "-e", script, plugin).CombinedOutput()
+		if err != nil {
+			t.Fatalf("node harness: %v\n%s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	deny, dir := fakeForeignHookGuard(t, `{"deny":true,"reason":"enterprise_foreign_hook_blocked: The project file /work/repo/.opencode/plugins/x.js adds a plugin"}`)
+	got := run(deny)
+	if strings.Count(got, "THREW:enterprise_foreign_hook_blocked") != 2 {
+		t.Fatalf("a denying guard must abort every call: %q", got)
+	}
+	args, _ := os.ReadFile(filepath.Join(dir, "args"))
+	request, _ := os.ReadFile(filepath.Join(dir, "request-0"))
+	if !strings.Contains(string(args), "hook --connector opencode --foreign-hook-check") || !strings.Contains(string(request), `"cwd":"/work/repo"`) {
+		t.Fatalf("guard invocation: args=%q request=%q", args, request)
+	}
+
+	sticky, _ := fakeForeignHookGuard(t, `{"deny":true,"reason":"blocked at load"}`, `{"deny":false}`)
+	if got := run(sticky); strings.Count(got, "THREW:blocked at load") != 2 {
+		t.Fatalf("a denial at load must hold for the process: %q", got)
+	}
+
+	allow, _ := fakeForeignHookGuard(t, `{"deny":false}`)
+	if got := run(allow); strings.Count(got, "ALLOWED") != 2 {
+		t.Fatalf("an allowing guard lets calls through: %q", got)
+	}
+	for name, guard := range map[string]string{
+		"missing binary":   filepath.Join(root, "missing-guard"),
+		"malformed answer": func() string { g, _ := fakeForeignHookGuard(t, `not json`); return g }(),
+		"no deny field":    func() string { g, _ := fakeForeignHookGuard(t, `{}`); return g }(),
+	} {
+		if got := run(guard); strings.Count(got, "THREW:") != 2 {
+			t.Fatalf("%s: the guard must fail closed: %q", name, got)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 2 {
+		t.Fatalf("only the allowed calls reach the gateway: %d requests", requests)
 	}
 }

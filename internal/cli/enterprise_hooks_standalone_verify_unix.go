@@ -158,8 +158,9 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 			AgentVersion:  strings.TrimSpace(target.AgentVersion),
 			WorkspaceDir:  cfg.ConnectorWorkspaceDir(),
 
-			ManagedHookSocket: hookSocket,
-			ManagedServiceUID: serviceUID,
+			ManagedHookSocket:      hookSocket,
+			ManagedServiceUID:      serviceUID,
+			ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 		}
 		index := len(run.Rows)
 		run.Rows = append(run.Rows, row)

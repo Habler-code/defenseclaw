@@ -693,6 +693,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 			ManagedHookSocket:                  hookSocket,
 			ManagedServiceUID:                  serviceUID,
+			ForeignHookGuardBinary:             standaloneForeignHookGuardBinary(target.Connector),
 		}
 		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 			for _, dir := range dirs {

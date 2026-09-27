@@ -50,24 +50,43 @@ func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, erro
 	}
 	backupDir := filepath.Join(req.Home, ".defenseclaw", "foreign-hooks-backup", req.Connector, now.UTC().Format("20060102T150405Z"))
 	var errs []error
+	scan := newGuardScan(req)
 	for _, source := range guardSources(req) {
 		if source.scope != ScopeUser {
 			continue
 		}
+		if scan.exceeded != nil {
+			result.Reported = append(result.Reported, unreadableFinding(req, source, scan.exceeded))
+			break
+		}
 		switch source.format {
 		case formatCodexTOML:
-			data, exists, err := readGuardFile(source.path)
-			if err != nil || !exists {
+			data, exists, err := scan.readFile(source.path)
+			if err != nil {
+				result.Reported = append(result.Reported, unreadableFinding(req, source, err))
 				continue
 			}
-			for _, finding := range scanCodexTOML(req, source, data) {
+			if !exists {
+				continue
+			}
+			for _, finding := range scan.scanCodexTOML(source, data) {
+				if !finding.Allowed {
+					result.Reported = append(result.Reported, finding)
+				}
+			}
+		case formatClaudePlugins:
+			// Plugin hooks live in Claude's plugin cache; the user disables
+			// the plugin. Report them and leave the settings file alone.
+			for _, finding := range scan.scanClaudePlugins(source) {
 				if !finding.Allowed {
 					result.Reported = append(result.Reported, finding)
 				}
 			}
 		case formatPluginDir:
-			for _, finding := range scanPluginDir(req, source) {
-				if finding.Allowed || strings.HasPrefix(finding.Reason, "cannot verify") {
+			for _, finding := range scan.scanPluginDir(source) {
+				// Past a scan budget a finding may be unapprovable only
+				// because the scan stopped binding it: report, never remove.
+				if finding.Allowed || strings.HasPrefix(finding.Reason, "cannot verify") || scan.exceeded != nil {
 					if !finding.Allowed {
 						result.Reported = append(result.Reported, finding)
 					}
@@ -83,21 +102,25 @@ func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, erro
 				result.FilesTouch = appendUnique(result.FilesTouch, finding.Path)
 			}
 		case formatFlatDir:
-			entries, err := os.ReadDir(source.path)
+			entries, exists, err := scan.readDir(source.path)
 			if err != nil {
+				result.Reported = append(result.Reported, unreadableFinding(req, source, err))
+				continue
+			}
+			if !exists {
 				continue
 			}
 			for _, entry := range entries {
 				if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
 					continue
 				}
-				child := hookSource{scope: ScopeUser, path: filepath.Join(source.path, entry.Name()), format: formatFlat}
-				if err := cleanJSONSource(req, child, backupDir, &result); err != nil {
+				child := source.child(filepath.Join(source.path, entry.Name()), formatFlat)
+				if err := cleanJSONSource(scan, child, backupDir, &result); err != nil {
 					errs = append(errs, err)
 				}
 			}
 		default:
-			if err := cleanJSONSource(req, source, backupDir, &result); err != nil {
+			if err := cleanJSONSource(scan, source, backupDir, &result); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -106,8 +129,9 @@ func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, erro
 }
 
 // cleanJSONSource rewrites one user JSON file without its foreign entries.
-func cleanJSONSource(req GuardRequest, source hookSource, backupDir string, result *CleanupResult) error {
-	data, exists, err := readGuardFile(source.path)
+func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, result *CleanupResult) error {
+	req := scan.req
+	data, exists, err := scan.readSource(source)
 	if err != nil {
 		result.Reported = append(result.Reported, unreadableFinding(req, source, err))
 		return nil
@@ -117,21 +141,27 @@ func cleanJSONSource(req GuardRequest, source hookSource, backupDir string, resu
 	}
 	var findings []Finding
 	if source.format == formatPluginList {
-		findings = scanPluginList(req, source, data)
+		findings = scan.scanPluginList(source, data)
 	} else {
-		findings = scanJSONHooks(req, source, data)
+		findings = scan.scanJSONHooks(source, data)
 	}
+	_, strict, _ := decodeGuardDocument(data)
 	remove := map[string]bool{}
+	var removed []Finding
 	for _, finding := range findings {
 		if finding.Allowed {
 			continue
 		}
-		if strings.HasPrefix(finding.Reason, "cannot verify") {
+		if strings.HasPrefix(finding.Reason, "cannot verify") || scan.exceeded != nil || source.reportOnly || source.inline != nil || !strict {
+			// Unverifiable (or past a scan budget, where an approved
+			// entry may look unapprovable), owned by another program, or
+			// JSONC whose comments a rewrite would drop: report and leave
+			// it; the hook keeps denying until the user removes the entry.
 			result.Reported = append(result.Reported, finding)
 			continue
 		}
-		remove[finding.Digest] = true
-		result.Removed = append(result.Removed, finding)
+		remove[finding.key] = true
+		removed = append(removed, finding)
 	}
 	if len(remove) == 0 {
 		return nil
@@ -208,6 +238,7 @@ func cleanJSONSource(req GuardRequest, source hookSource, backupDir string, resu
 	if err := rewriteUserFile(source.path, rendered, info.Mode().Perm()); err != nil {
 		return err
 	}
+	result.Removed = append(result.Removed, removed...)
 	result.FilesTouch = appendUnique(result.FilesTouch, source.path)
 	return nil
 }

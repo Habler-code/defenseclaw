@@ -21,10 +21,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const foreignGuardHookBinary = "/opt/defenseclaw/bin/defenseclaw-hook"
@@ -53,7 +55,8 @@ func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 			"cursor": {Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: mode, Guard: true},
 		},
 	}
-	previousPath, previousLoad, previousHomes := hookForeignGuardSummaryPath, hookForeignGuardLoad, hookForeignGuardHomes
+	previousPath, previousLoad := hookForeignGuardSummaryPath, hookForeignGuardLoad
+	previousAccountHome, previousEnvHomes := hookForeignGuardAccountHome, hookForeignGuardEnvHomes
 	hookForeignGuardSummaryPath = func() (string, bool) { return "/etc/defenseclaw/machine-policy.json", true }
 	hookForeignGuardLoad = func(string) (*enterprisepolicy.PublicPolicy, error) {
 		if fixture.loadErr != nil {
@@ -64,9 +67,11 @@ func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 		}
 		return fixture.summary, nil
 	}
-	hookForeignGuardHomes = func() []string { return []string{fixture.home} }
+	hookForeignGuardAccountHome = func() string { return fixture.home }
+	hookForeignGuardEnvHomes = func() []string { return nil }
 	t.Cleanup(func() {
-		hookForeignGuardSummaryPath, hookForeignGuardLoad, hookForeignGuardHomes = previousPath, previousLoad, previousHomes
+		hookForeignGuardSummaryPath, hookForeignGuardLoad = previousPath, previousLoad
+		hookForeignGuardAccountHome, hookForeignGuardEnvHomes = previousAccountHome, previousEnvHomes
 	})
 	return fixture
 }
@@ -173,16 +178,67 @@ func TestForeignHookGuardFailsClosedOnUntrustedSummary(t *testing.T) {
 	}
 }
 
-func TestForeignHookGuardTreatsPerUserRegistrationAsOwned(t *testing.T) {
+// A per-user script lives in the user's home, so the user controls its
+// bytes. On a machine-policy connector (Cursor) the guardian never repairs
+// it: registering it must be treated like any other foreign hook, or a
+// user-edited script rewrites the call after the machine hook checked it.
+func TestForeignHookGuardTreatsPerUserScriptAsForeignOnMachinePolicy(t *testing.T) {
 	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
-	script := filepath.Join(fixture.home, ".defenseclaw", "hooks", "cursor-hook.sh")
+	userHooks := filepath.Join(fixture.home, ".cursor", "hooks.json")
 	machine := `'` + foreignGuardHookBinary + `' hook --connector cursor --enterprise-managed`
 	document, _ := json.Marshal(map[string]any{"version": 1, "hooks": map[string]any{
+		"preToolUse": []any{map[string]any{"command": machine}},
+	}})
+	fixture.write(t, userHooks, string(document))
+	if opts, _, _ := fixture.run(t, true); opts.ManagedRuntimeFailure != "" {
+		t.Fatalf("a copy of the admin-binary registration is not foreign: %q", opts.ManagedRuntimeFailure)
+	}
+
+	script := filepath.Join(fixture.home, ".defenseclaw", "hooks", "cursor-hook.sh")
+	fixture.write(t, script, "#!/bin/sh\necho '{\"permission\":\"allow\",\"updated_input\":{}}'\n")
+	document, _ = json.Marshal(map[string]any{"version": 1, "hooks": map[string]any{
 		"preToolUse": []any{map[string]any{"command": script}, map[string]any{"command": machine}},
 	}})
-	fixture.write(t, filepath.Join(fixture.home, ".cursor", "hooks.json"), string(document))
-	if opts, _, _ := fixture.run(t, false); opts.ManagedRuntimeFailure != "" {
-		t.Fatalf("DefenseClaw's own per-user and machine registrations are not foreign: %q", opts.ManagedRuntimeFailure)
+	fixture.write(t, userHooks, string(document))
+	opts, _, _ := fixture.run(t, true)
+	if !strings.Contains(opts.ManagedRuntimeFailure, "enterprise_foreign_hook_blocked") || !strings.Contains(opts.ManagedRuntimeFailure, userHooks) {
+		t.Fatalf("a per-user script registered for a machine-policy connector must deny: %q", opts.ManagedRuntimeFailure)
+	}
+}
+
+// On a per-user connector (Devin) DefenseClaw's own registration is the
+// per-user script the guardian installs and repairs, but only under the
+// account's home: a data directory the agent's environment names
+// (DEFENSECLAW_HOME, a different HOME) is user-chosen code.
+func TestForeignHookGuardOwnsPerUserScriptOnlyUnderTheAccountHome(t *testing.T) {
+	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
+	fixture.summary.Connectors["devin"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
+	agentHome := t.TempDir()
+	hookForeignGuardEnvHomes = func() []string { return []string{agentHome} }
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(agentHome, "dc"))
+	t.Setenv("XDG_CONFIG_HOME", "")
+	userConfig := filepath.Join(fixture.home, ".config", "devin", "config.json")
+	register := func(script string) {
+		document, _ := json.Marshal(map[string]any{"hooks": map[string]any{
+			"PreToolUse": []any{map[string]any{"matcher": "", "hooks": []any{map[string]any{"type": "command", "command": script, "timeout": 10}}}},
+		}})
+		fixture.write(t, userConfig, string(document))
+	}
+	run := func() string {
+		payload := `{"hook_event_name":"PreToolUse","cwd":"` + fixture.project + `"}`
+		opts := hookexec.Options{Connector: "devin", Home: filepath.Join(agentHome, "dc"), Stdin: strings.NewReader(payload), Stderr: io.Discard}
+		applyEnterpriseForeignHookGuard(&opts)
+		return opts.ManagedRuntimeFailure
+	}
+	register(filepath.Join(fixture.home, ".defenseclaw", "hooks", "devin-hook.sh"))
+	if reason := run(); reason != "" {
+		t.Fatalf("DefenseClaw's per-user Devin registration under the account home is not foreign: %q", reason)
+	}
+	for _, dir := range []string{filepath.Join(agentHome, "dc"), filepath.Join(agentHome, ".defenseclaw")} {
+		register(filepath.Join(dir, "hooks", "devin-hook.sh"))
+		if reason := run(); !strings.Contains(reason, "enterprise_foreign_hook_blocked") {
+			t.Fatalf("a script under %s (named by the agent's environment) must be foreign: %q", dir, reason)
+		}
 	}
 }
 
@@ -246,5 +302,125 @@ func TestForeignHookGuardCopilotDenialNamesTheFile(t *testing.T) {
 			!strings.Contains(message, "enterprise.machine_policy.connectors.copilot.allowed_hooks") {
 			t.Fatalf("%s: the deny reason must name %s and the allowlist key: %q", event, foreign, message)
 		}
+	}
+}
+
+// The standalone guard's scan is part of the hook invocation: hookexec's
+// request budget must start before it. Hosts without a standalone summary
+// (Secure Client, unmanaged) keep the unchanged budget start.
+func TestForeignHookGuardStartsTheRequestBudgetBeforeScanning(t *testing.T) {
+	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
+	before := time.Now()
+	opts, _, _ := fixture.run(t, true)
+	if opts.StartedAt.IsZero() || opts.StartedAt.Before(before) || opts.StartedAt.After(time.Now()) {
+		t.Fatalf("the guard must start the request budget: %v", opts.StartedAt)
+	}
+	fixture.summary = nil
+	opts, _, _ = fixture.run(t, true)
+	if !opts.StartedAt.IsZero() {
+		t.Fatalf("a host without a standalone summary must keep the budget start unchanged: %v", opts.StartedAt)
+	}
+	if budget := hookForeignGuardScanBudget("codex", "SessionEnd"); budget <= 0 || budget >= hookexec.RequestTimeout("codex", "SessionEnd") {
+		t.Fatalf("the scan budget must fit inside the request budget: %v", budget)
+	}
+	if budget := hookForeignGuardScanBudget("copilot", "preToolUse"); budget != hookForeignGuardMaxScan {
+		t.Fatalf("the scan budget is capped: %v", budget)
+	}
+}
+
+// The hook-time block is recorded in the user's data directory for the
+// guardian to report; an allowed call records nothing.
+func TestForeignHookGuardRecordsTheBlockForTheGuardian(t *testing.T) {
+	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
+	record := enterprisepolicy.BlockRecordPath(fixture.home)
+	fixture.run(t, true)
+	if _, err := os.Stat(record); !os.IsNotExist(err) {
+		t.Fatalf("an allowed call must not record a block: %v", err)
+	}
+	foreign := filepath.Join(fixture.project, ".cursor", "hooks.json")
+	fixture.write(t, foreign, `{"version": 1, "hooks": {"preToolUse": [{"command": "./rewrite.sh"}]}}`)
+	fixture.run(t, true)
+	blocks, dropped, err := enterprisepolicy.CollectForeignHookBlocks(fixture.home, time.Now())
+	if err != nil || dropped != 0 || len(blocks) != 1 || blocks[0].Path != foreign || blocks[0].Connector != "cursor" || blocks[0].Event != "preToolUse" {
+		t.Fatalf("the block must be recorded with its file and event: %+v %d %v", blocks, dropped, err)
+	}
+	if _, err := os.Stat(record); !os.IsNotExist(err) {
+		t.Fatalf("collecting takes the records: %v", err)
+	}
+}
+
+// The standalone Amp and OpenCode plugins call the gateway directly and
+// never run `defenseclaw hook`; they ask `hook --foreign-hook-check` for the
+// guard's decision. The answer is always one JSON object, and anything but
+// {"deny": false} blocks in the plugin.
+func TestForeignHookCheckAnswersInAgentPlugins(t *testing.T) {
+	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	fixture.summary.Connectors["opencode"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
+	check := func() foreignHookCheckResult {
+		t.Helper()
+		var out bytes.Buffer
+		payload := `{"hook_event_name":"tool.execute.before","cwd":"` + fixture.project + `"}`
+		if code := runForeignHookCheck("opencode", strings.NewReader(payload), &out); code != 0 {
+			t.Fatalf("the check always exits 0, got %d", code)
+		}
+		var result foreignHookCheckResult
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatalf("the answer must be JSON: %v: %q", err, out.String())
+		}
+		return result
+	}
+	fixture.write(t, filepath.Join(fixture.home, ".config", "opencode", "plugins", "defenseclaw.js"), "// DefenseClaw")
+	if result := check(); result.Deny {
+		t.Fatalf("DefenseClaw's installed plugin alone allows: %+v", result)
+	}
+	foreign := filepath.Join(fixture.project, ".opencode", "plugins", "rewrite.js")
+	fixture.write(t, foreign, "export const x = {}")
+	result := check()
+	if !result.Deny || !strings.Contains(result.Reason, foreign) || !strings.HasPrefix(result.Reason, hookexec.ForeignHookBlockedReasonPrefix) {
+		t.Fatalf("a project plugin must deny and name its file: %+v", result)
+	}
+	if blocks, _, _ := enterprisepolicy.CollectForeignHookBlocks(fixture.home, time.Now()); len(blocks) != 1 || blocks[0].Path != foreign {
+		t.Fatalf("the plugin block is recorded for the guardian: %+v", blocks)
+	}
+
+	fixture.loadErr = errors.New("machine policy summary is group-writable")
+	if result := check(); !result.Deny || result.Reason != "enterprise_machine_policy_summary_untrusted" {
+		t.Fatalf("an untrusted summary must deny: %+v", result)
+	}
+	fixture.loadErr = nil
+	fixture.summary = nil
+	if result := check(); result.Deny {
+		t.Fatalf("a host without a standalone summary answers allow: %+v", result)
+	}
+}
+
+// Only the standalone profile renders the guard into the Amp and OpenCode
+// plugins; every other connector and profile (Secure Client, unmanaged)
+// keeps the plugin unchanged.
+func TestStandaloneForeignHookGuardBinaryOnlyForStandalonePlugins(t *testing.T) {
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+	}
+	for _, name := range []string{"amp", "opencode", "OpenCode"} {
+		if binary := standaloneForeignHookGuardBinary(name); !filepath.IsAbs(binary) || !strings.Contains(filepath.Base(binary), "defenseclaw-hook") {
+			t.Fatalf("%s: standalone plugins run the admin hook binary, got %q", name, binary)
+		}
+	}
+	for _, name := range []string{"cursor", "codex", "devin", ""} {
+		if binary := standaloneForeignHookGuardBinary(name); binary != "" {
+			t.Fatalf("%s: only plugin connectors get a guard binary, got %q", name, binary)
+		}
+	}
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
+	if binary := standaloneForeignHookGuardBinary("amp"); binary != "" {
+		t.Fatalf("the Secure Client profile must not render the guard: %q", binary)
+	}
+	cfg = nil
+	if binary := standaloneForeignHookGuardBinary("opencode"); binary != "" {
+		t.Fatalf("an unmanaged install must not render the guard: %q", binary)
 	}
 }

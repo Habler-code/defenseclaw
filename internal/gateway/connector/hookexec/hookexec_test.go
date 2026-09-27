@@ -2427,3 +2427,69 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 		t.Fatalf("status = %d, want 302 (redirect surfaced, not followed)", resp.StatusCode)
 	}
 }
+
+// Work the hook did before Run (the standalone foreign-hook guard's scan)
+// counts against the request budget: a budget already spent must fail
+// closed before gateway contact instead of granting a fresh full budget
+// that outlives the agent's own hook timeout.
+func TestRunChargesWorkBeforeRunToTheRequestBudget(t *testing.T) {
+	r := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) {
+		o.StartedAt = time.Now().Add(-time.Hour)
+		o.FailMode = "closed"
+	})
+	if r.rt.requests != 0 {
+		t.Fatalf("a spent budget must not contact the gateway: %d requests", r.rt.requests)
+	}
+	if r.code == 0 || !strings.Contains(r.stderr, "budget exhausted") {
+		t.Fatalf("a spent budget must fail closed: code=%d stderr=%q", r.code, r.stderr)
+	}
+	if fresh := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) { o.FailMode = "closed" }); fresh.rt.requests != 1 {
+		t.Fatalf("a zero StartedAt keeps the full budget: %d requests", fresh.rt.requests)
+	}
+}
+
+// A foreign-hook guard denial must reach the user in each connector's
+// native block response with the guard's reason (file and allowlist key),
+// not the generic "policy service unavailable" text, and must never
+// contact the gateway.
+func TestForeignHookBlockNamesTheFileInEveryConnectorsResponse(t *testing.T) {
+	reason := ForeignHookBlockedReasonPrefix + " The project file /repo/.cursor/hooks.json defines a hook (digest sha256:ab). Ask your administrator to add the digest to enterprise.machine_policy.connectors.x.allowed_hooks."
+	for _, tc := range []struct {
+		connector, event, payload string
+		code                      int
+		stdout, stderr            string
+	}{
+		{connector: "cursor", payload: `{"hook_event_name":"preToolUse","tool_name":"Shell"}`, code: 2, stdout: `"permission":"deny"`},
+		{connector: "codex", event: "PreToolUse", code: 0, stdout: `"permissionDecision":"deny"`},
+		{connector: "antigravity", event: "PreToolUse", code: 0, stdout: `"decision":"deny"`},
+		{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stdout: `"decision":"block"`},
+		{connector: "claudecode", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stderr: "blocking claude-code tool"},
+		{connector: "copilot", event: "preToolUse", code: 0, stdout: `"permissionDecision":"deny"`},
+	} {
+		rt := ok(`{"action":"allow"}`)
+		r := run(t, tc.connector, rt, func(o *Options) {
+			o.ManagedEnterprise = true
+			o.ManagedRuntimeFailure = reason
+			o.Event = tc.event
+			if tc.payload != "" {
+				o.Stdin = strings.NewReader(tc.payload)
+			}
+		})
+		if rt.requests != 0 {
+			t.Fatalf("%s: a foreign-hook block must not contact the gateway", tc.connector)
+		}
+		if r.code != tc.code || !strings.Contains(r.stdout, tc.stdout) || !strings.Contains(r.stderr, tc.stderr) {
+			t.Fatalf("%s: code=%d stdout=%q stderr=%q", tc.connector, r.code, r.stdout, r.stderr)
+		}
+		shown := r.stdout
+		if tc.connector == "claudecode" {
+			shown = r.stderr
+		}
+		if !strings.Contains(shown, "/repo/.cursor/hooks.json") || !strings.Contains(shown, "allowed_hooks") {
+			t.Fatalf("%s: the block must name the file and the allowlist key: stdout=%q stderr=%q", tc.connector, r.stdout, r.stderr)
+		}
+		if strings.Contains(r.stderr, "gateway unreachable") {
+			t.Fatalf("%s: a policy block is not a gateway outage: %q", tc.connector, r.stderr)
+		}
+	}
+}

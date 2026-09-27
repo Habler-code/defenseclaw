@@ -36,8 +36,9 @@ foreign-hook guard closes that gap for agents without a vendor lock.
    `~/.defenseclaw/foreign-hooks-backup/<connector>/<timestamp>/` and logged.
 2. **Blocks while a project hook is present.** Repository files are never
    rewritten. Before each call the hook checks the working directory and its
-   parents up to the repository root for files such as `.cursor/hooks.json`,
-   `.github/hooks/*.json`, `.github/copilot/settings*.json`,
+   parents up to the repository root (on Windows, up to and including the
+   drive root, where standard users can create folders) for files such as
+   `.cursor/hooks.json`, `.github/hooks/*.json`, `.github/copilot/settings*.json`,
    `.devin/*.json`, `.opencode/plugins/` and `.amp/plugins/`. While an
    unapproved hook is present, tool calls are denied.
 3. **Reads Claude-format files too.** Cursor, Copilot and Devin also load
@@ -74,6 +75,18 @@ enterprise:
       amp:
         foreign_hooks: allow        # do not scan
 ```
+
+A digest covers the hook entry and the content of every file its command may
+run: paths it names, plain words such as `check.sh` in `bash check.sh`
+(looked up in the project root, the hook file's folder, the agent's working
+directory, a Copilot `cwd` and any folder the command changes into), and
+environment values the entry sets. The same entry in another repository
+with a different script gets a different digest. An entry that names a
+variable DefenseClaw cannot resolve, a file larger than 64 MiB, or a file
+that is not a readable regular file cannot be approved; move its logic into
+a script and approve that. Programs found through `PATH` (such as `bash` or
+`node`) and files a command reads on its own (a `Makefile` for `make`, the
+`package.json` scripts for `npm run`) are bound by name only.
 
 | `foreign_hooks` | User-level foreign hooks | Project-level foreign hooks |
 | --- | --- | --- |

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -43,6 +44,10 @@ var hookForeignGuardSummaryPath = func() (string, bool) {
 
 var hookForeignGuardLoad = enterprisepolicy.LoadPublicPolicy
 
+// hookForeignGuardRecord records a block for the guardian to report
+// (replaceable in tests).
+var hookForeignGuardRecord = enterprisepolicy.RecordForeignHookBlock
+
 // applyEnterpriseForeignHookGuard denies a hook invocation on a standalone
 // managed host while an unapproved hook that could rewrite the tool call
 // after DefenseClaw checks it is present in the agent's user or project
@@ -51,6 +56,7 @@ var hookForeignGuardLoad = enterprisepolicy.LoadPublicPolicy
 // path, so each connector gets its native block response carrying the
 // reason (file, digest and allowlist key).
 func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
+	startedAt := time.Now()
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		return
 	}
@@ -72,10 +78,25 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	if !ok || !policy.Guard {
 		return
 	}
-	decision := evaluateHookForeignGuard(name, summary.HookBinary, policy, captureHookPayloadWorkingDirs(opts), opts.Home)
+	// The scan is part of this invocation: hookexec's request budget starts
+	// here, and the scan itself stops (failing closed) well inside it, so a
+	// slow or flooded tree can never run into the agent's own hook timeout
+	// (which Copilot treats as allow).
+	opts.StartedAt = startedAt
+	deadline := startedAt.Add(hookForeignGuardScanBudget(name, opts.Event))
+	workingDirs, payloadEvent := captureHookPayloadWorkingDirs(opts)
+	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, workingDirs, deadline)
 	if decision.Deny {
 		opts.ManagedEnterprise = true
 		opts.ManagedRuntimeFailure = decision.Reason
+		// The block never reaches the gateway, and the managed hook's own
+		// failure log is not user-writable: leave a record in the user's
+		// data directory for the guardian to report (best effort).
+		event := strings.TrimSpace(opts.Event)
+		if event == "" {
+			event = payloadEvent
+		}
+		_ = hookForeignGuardRecord(accountHome, name, event, decision, time.Now())
 		return
 	}
 	stderr := opts.Stderr
@@ -89,47 +110,155 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	}
 }
 
-// evaluateHookForeignGuard scans every home and working directory the
-// agent may load hooks from and merges the findings.
-func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, workingDirs []string, dataDir string) enterprisepolicy.GuardDecision {
-	merged := enterprisepolicy.GuardDecision{}
-	seen := map[string]bool{}
-	if len(workingDirs) == 0 {
-		workingDirs = []string{""}
+// standaloneForeignHookGuardBinary is the administrator-owned hook binary
+// the standalone Amp and OpenCode plugins run for the foreign-hook guard
+// (those plugins call the gateway directly, so the hook-time guard would
+// otherwise never run for them). Empty for every other connector and on
+// any non-standalone profile, so Secure Client and per-user installs render
+// the plugins unchanged.
+func standaloneForeignHookGuardBinary(connectorName string) string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return ""
 	}
-	for _, home := range hookForeignGuardHomes() {
-		owned := perUserOwnedHookCommands(name, home, dataDir)
-		for _, dir := range workingDirs {
-			decision := enterprisepolicy.EvaluateForeignHooks(enterprisepolicy.GuardRequest{
-				Connector:     name,
-				Home:          home,
-				WorkingDir:    dir,
-				HookBinary:    hookBinary,
-				Policy:        policy,
-				Getenv:        os.Getenv,
-				OwnedCommands: owned,
-			})
-			for _, finding := range decision.Findings {
-				key := finding.Path + "\x00" + finding.Digest
-				if !seen[key] {
-					seen[key] = true
-					merged.Findings = append(merged.Findings, finding)
-				}
-			}
-			if decision.Deny && !merged.Deny {
-				merged.Deny = true
-				merged.Reason = decision.Reason
-			}
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "amp", enterprisepolicy.ConnectorOpenCode:
+	default:
+		return ""
+	}
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return ""
+	}
+	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
+	if err != nil {
+		return ""
+	}
+	return opts.HookBinary
+}
+
+// hookForeignGuardHomes lists the homes an agent may read hook config
+// from: the account's home and, when different, the home its environment
+// names.
+func hookForeignGuardHomes(accountHome string) []string {
+	homes := appendDistinctAbs(nil, accountHome)
+	for _, home := range hookForeignGuardEnvHomes() {
+		homes = appendDistinctAbs(homes, home)
+	}
+	return homes
+}
+
+// foreignHookCheckResult is the JSON the in-agent plugins read from
+// `hook --foreign-hook-check`. Anything but {"deny": false} blocks.
+type foreignHookCheckResult struct {
+	Deny     bool     `json:"deny"`
+	Reason   string   `json:"reason,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// runForeignHookCheck evaluates the foreign-hook guard for an in-agent
+// plugin (Amp, OpenCode) that calls the gateway directly. It reads the
+// plugin's {hook_event_name, cwd} from stdin, applies the same summary
+// trust, scan and budget as the hook-time guard, records a block for the
+// guardian, and always exits 0 with one JSON object: the plugin treats a
+// missing or malformed answer as a block. Hosts without a standalone
+// summary answer allow, like the hook-time guard.
+func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer) int {
+	startedAt := time.Now()
+	result := foreignHookCheckResult{}
+	defer func() {
+		_ = json.NewEncoder(stdout).Encode(result)
+	}()
+	path, ok := hookForeignGuardSummaryPath()
+	if !ok {
+		return 0
+	}
+	summary, err := hookForeignGuardLoad(path)
+	if errors.Is(err, enterprisepolicy.ErrNoPublicPolicy) {
+		return 0
+	}
+	if err != nil {
+		result = foreignHookCheckResult{Deny: true, Reason: "enterprise_machine_policy_summary_untrusted"}
+		return 0
+	}
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	policy, ok := summary.Connectors[name]
+	if !ok || !policy.Guard {
+		return 0
+	}
+	opts := hookexec.Options{Connector: name, Stdin: stdin}
+	workingDirs, event := captureHookPayloadWorkingDirs(&opts)
+	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, workingDirs, startedAt.Add(hookForeignGuardMaxScan))
+	if decision.Deny {
+		_ = hookForeignGuardRecord(accountHome, name, event, decision, time.Now())
+		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason}
+		return 0
+	}
+	for _, finding := range decision.Findings {
+		if !finding.Allowed {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("unapproved %s hook in %s (sha256:%s); your organization reports it but allows it to run", name, finding.Path, finding.Digest))
 		}
 	}
-	return merged
+	return 0
+}
+
+// hookForeignGuardMaxScan caps the foreign-hook scan; real hook trees
+// take milliseconds.
+const hookForeignGuardMaxScan = 5 * time.Second
+
+// hookForeignGuardScanBudget is at most half the invocation's request
+// budget, so a denial is always delivered before the agent's timeout.
+func hookForeignGuardScanBudget(connector, event string) time.Duration {
+	budget := hookexec.RequestTimeout(connector, event) / 2
+	if budget > hookForeignGuardMaxScan || budget <= 0 {
+		budget = hookForeignGuardMaxScan
+	}
+	return budget
+}
+
+// evaluateHookForeignGuard scans every home and working directory the
+// agent may load hooks from, in one pass that reads each path once and
+// stops at the first unapproved finding. DefenseClaw's own per-user
+// registration is recognized only under the account's home: the hook's
+// data directory and $HOME come from the agent's environment
+// (DEFENSECLAW_HOME, HOME), which the user controls.
+func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, workingDirs []string, deadline time.Time) (enterprisepolicy.GuardDecision, string) {
+	accountHome := hookForeignGuardAccountHome()
+	owned := []string{}
+	if accountHome != "" {
+		owned = perUserOwnedHookCommands(name, accountHome, "")
+	}
+	homes := hookForeignGuardHomes(accountHome)
+	if len(homes) == 0 {
+		return enterprisepolicy.GuardDecision{
+			Deny:   true,
+			Reason: hookexec.ForeignHookBlockedReasonPrefix + " your organization blocks " + name + " hooks it has not approved, and DefenseClaw cannot determine your home directory to check for them.",
+		}, ""
+	}
+	request := enterprisepolicy.GuardRequest{
+		Connector:           name,
+		Home:                homes[0],
+		Homes:               homes[1:],
+		AccountHome:         accountHome,
+		HookBinary:          hookBinary,
+		Policy:              policy,
+		Getenv:              os.Getenv,
+		OwnedCommands:       owned,
+		Deadline:            deadline,
+		StopAtFirstBlocking: true,
+	}
+	if len(workingDirs) > 0 {
+		request.WorkingDir = workingDirs[0]
+		request.WorkingDirs = workingDirs[1:]
+	}
+	return enterprisepolicy.EvaluateForeignHooks(request), accountHome
 }
 
 // captureHookPayloadWorkingDirs buffers the start of the hook payload to
-// read the agent's working directory, then hands hookexec an identical
-// stream. The process working directory is always included because the
-// agent loads project hooks from where it runs.
-func captureHookPayloadWorkingDirs(opts *hookexec.Options) []string {
+// read the agent's working directory (and the event name, for the block
+// record), then hands hookexec an identical stream. The process working
+// directory is always included because the agent loads project hooks from
+// where it runs.
+func captureHookPayloadWorkingDirs(opts *hookexec.Options) ([]string, string) {
 	dirs := []string{}
 	if cwd, err := os.Getwd(); err == nil {
 		dirs = appendDistinctAbs(dirs, cwd)
@@ -141,11 +270,18 @@ func captureHookPayloadWorkingDirs(opts *hookexec.Options) []string {
 	buffered, err := io.ReadAll(io.LimitReader(source, hookForeignGuardPayloadLimit))
 	opts.Stdin = io.MultiReader(bytes.NewReader(buffered), source)
 	if err != nil {
-		return dirs
+		return dirs, ""
 	}
 	var payload map[string]json.RawMessage
 	if json.Unmarshal(buffered, &payload) != nil {
-		return dirs
+		return dirs, ""
+	}
+	event := ""
+	for _, key := range []string{"hook_event_name", "event"} {
+		if json.Unmarshal(payload[key], &event) == nil && strings.TrimSpace(event) != "" {
+			break
+		}
+		event = ""
 	}
 	for _, key := range []string{"cwd", "working_directory", "workingDirectory"} {
 		var value string
@@ -161,7 +297,7 @@ func captureHookPayloadWorkingDirs(opts *hookexec.Options) []string {
 			}
 		}
 	}
-	return dirs
+	return dirs, strings.TrimSpace(event)
 }
 
 // perUserOwnedHookCommands lists DefenseClaw's own per-user registration

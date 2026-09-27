@@ -220,3 +220,42 @@ func ensurePrivateDir(dir string) error {
 	}
 	return os.Chmod(dir, 0o700)
 }
+
+// openGuardFile opens a user or project file for the foreign-hook guard.
+// It never follows a final symlink and never blocks: a user can swap a
+// FIFO in after the guard's Lstat, and a blocking open would stall the
+// hook until the agent's timeout (which several agents treat as allow).
+func openGuardFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+}
+
+// openGuardDir opens a user or project directory for listing with the same
+// rules; a non-directory fails instead of blocking.
+func openGuardDir(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_DIRECTORY, 0)
+}
+
+// openGuardFileFollow opens a file a hook command names, following links
+// as the agent would, without blocking on a FIFO.
+func openGuardFileFollow(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
+// adminOwnedFile reports a root-owned file no group or other account can
+// write: a user cannot change what it holds.
+// guardPathCannotExist reports a stat error that means nothing can be at
+// the path (a component is a file, or the name is too long).
+func guardPathCannotExist(err error) bool {
+	return errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ENAMETOOLONG)
+}
+
+func adminOwnedFile(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == 0 && info.Mode().Perm()&0o022 == 0
+}
+
+// openGuardAppend opens a user-owned record file for appending without
+// following a final symlink or blocking.
+func openGuardAppend(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+}

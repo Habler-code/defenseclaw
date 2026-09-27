@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -72,12 +73,19 @@ func enterprisePolicyLiveCredential(target enterprisehooks.TargetCredentials) fu
 	}
 }
 
-// hookForeignGuardHomes lists the profile directory and, when different,
-// USERPROFILE as inherited from the agent. Replaceable in tests.
-var hookForeignGuardHomes = func() []string {
-	homes := []string{}
-	if account, err := user.Current(); err == nil && account.HomeDir != "" {
-		homes = append(homes, account.HomeDir)
+// hookForeignGuardAccountHome returns the profile directory of the
+// process token (never the agent's environment): the guardian installs
+// DefenseClaw's per-user registrations there. Replaceable in tests.
+var hookForeignGuardAccountHome = func() string {
+	if account, err := user.Current(); err == nil && filepath.IsAbs(account.HomeDir) {
+		return filepath.Clean(account.HomeDir)
 	}
-	return appendDistinctAbs(homes, os.Getenv("USERPROFILE"))
+	return ""
+}
+
+// hookForeignGuardEnvHomes lists the homes the agent's environment names
+// (USERPROFILE as inherited from the agent), which it may read hook config
+// from. Replaceable in tests.
+var hookForeignGuardEnvHomes = func() []string {
+	return []string{os.Getenv("USERPROFILE")}
 }

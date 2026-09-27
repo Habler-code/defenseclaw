@@ -97,6 +97,7 @@ type enterpriseHookWorkerOptions struct {
 	RecoveryHookContractEntryUpdatedAt string `json:"recovery_hook_contract_entry_updated_at,omitempty"`
 	ManagedHookSocket                  string `json:"managed_hook_socket,omitempty"`
 	ManagedServiceUID                  int    `json:"managed_service_uid,omitempty"`
+	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 }
 
 type enterpriseHookWorkerTarget struct {
@@ -159,7 +160,12 @@ type enterpriseHookWorkerResponse struct {
 	Versions map[string]string                            `json:"versions,omitempty"`
 	Reasons  map[string]string                            `json:"reasons,omitempty"`
 	Cleanup  map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
-	Error    string                                       `json:"error,omitempty"`
+	// Blocks are the foreign-hook blocks the user's hooks recorded since
+	// the last cleanup (user-influenced; only logged).
+	Blocks        []enterprisepolicy.BlockSummary `json:"blocks,omitempty"`
+	BlocksDropped int                             `json:"blocks_dropped,omitempty"`
+	BlocksError   string                          `json:"blocks_error,omitempty"`
+	Error         string                          `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -245,7 +251,14 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		}
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
-		return respond(enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, time.Now())}, 0)
+		now := time.Now()
+		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now)}
+		blocks, dropped, err := enterprisepolicy.CollectForeignHookBlocks(filepath.Clean(request.Home), now)
+		response.Blocks, response.BlocksDropped = blocks, dropped
+		if err != nil {
+			response.BlocksError = err.Error()
+		}
+		return respond(response, 0)
 	default:
 		return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("unknown operation %q", request.Operation)}, 3)
 	}
@@ -413,6 +426,7 @@ func (o enterpriseHookWorkerOptions) installOptions(registry *connector.Registry
 		RecoveryHookContractEntryUpdatedAt: o.RecoveryHookContractEntryUpdatedAt,
 		ManagedHookSocket:                  o.ManagedHookSocket,
 		ManagedServiceUID:                  o.ManagedServiceUID,
+		ForeignHookGuardBinary:             o.ForeignHookGuardBinary,
 	}
 }
 
@@ -438,6 +452,7 @@ func enterpriseHookWorkerOptionsFrom(opts enterprisehooks.InstallOptions) enterp
 		RecoveryHookContractEntryUpdatedAt: opts.RecoveryHookContractEntryUpdatedAt,
 		ManagedHookSocket:                  opts.ManagedHookSocket,
 		ManagedServiceUID:                  opts.ManagedServiceUID,
+		ForeignHookGuardBinary:             opts.ForeignHookGuardBinary,
 	}
 }
 

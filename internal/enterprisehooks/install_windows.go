@@ -433,6 +433,22 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
 		HookExecutable:     hookExecutable,
 	}
+	// The standalone Amp and OpenCode plugins run the administrator-owned
+	// hook binary for the foreign-hook guard. Install and verify share this
+	// setup, so the plugin is rendered with the guard and verification
+	// requires it (a plugin rendered without it is repaired).
+	if guard := strings.TrimSpace(opts.ForeignHookGuardBinary); guard != "" {
+		if !filepath.IsAbs(guard) {
+			return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: foreign-hook guard binary is not absolute: %s", guard)
+		}
+		guard = filepath.Clean(guard)
+		if !sameWindowsEnterprisePath(guard, hookExecutable) {
+			if err := windowsEnterpriseHookTrustCheck(guard); err != nil {
+				return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: foreign-hook guard binary trust check failed: %w", err)
+			}
+		}
+		setup.ForeignHookGuardBinary = guard
+	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setup); err != nil {
 		return windowsGenericManagedTarget{}, err
 	}

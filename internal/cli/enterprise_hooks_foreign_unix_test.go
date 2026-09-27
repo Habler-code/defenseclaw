@@ -94,9 +94,15 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 			t.Errorf("worker spawned for %+v", account)
 		}
 		requests = append(requests, request)
-		return enterpriseHookWorkerResponse{Cleanup: map[string]enterpriseHookWorkerCleanupReport{
-			"cursor": {Removed: []string{"/home/alice/.cursor/hooks.json"}, BackupDir: "/home/alice/.defenseclaw/foreign-hooks-backup/cursor/x"},
-		}}, nil
+		return enterpriseHookWorkerResponse{
+			Cleanup: map[string]enterpriseHookWorkerCleanupReport{
+				"cursor": {Removed: []string{"/home/alice/.cursor/hooks.json"}, BackupDir: "/home/alice/.defenseclaw/foreign-hooks-backup/cursor/x"},
+			},
+			Blocks: []enterprisepolicy.BlockSummary{{
+				BlockRecord: enterprisepolicy.BlockRecord{Time: "2026-09-26T11:59:00Z", Connector: "cursor", Event: "preToolUse", Scope: "project", Path: "/home/alice/repo/.cursor/hooks.json\nforged line", Digest: "ab"},
+				Count:       3, Last: "2026-09-26T11:59:30Z",
+			}},
+		}, nil
 	}
 
 	var log bytes.Buffer
@@ -123,6 +129,12 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "removed a cursor hook for alice") {
 		t.Fatalf("log:\n%s", log.String())
+	}
+	// A repository-hook block never reaches the gateway; the guardian log
+	// is where an administrator sees it, with user-written fields defanged.
+	if !strings.Contains(log.String(), "blocked cursor preToolUse 3 time(s)") || !strings.Contains(log.String(), "/home/alice/repo/.cursor/hooks.json forged line") ||
+		strings.Contains(log.String(), "\nforged line") {
+		t.Fatalf("recorded blocks must be logged on one line each:\n%s", log.String())
 	}
 
 	// Within the interval nothing runs again; a new account does.

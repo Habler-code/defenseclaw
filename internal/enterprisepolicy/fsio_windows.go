@@ -643,3 +643,54 @@ func ensurePrivateDir(dir string) error {
 	}
 	return applySDDL(dir, privateDirSDDL)
 }
+
+// openGuardFile opens a user or project file for the foreign-hook guard
+// without following a reparse point.
+func openGuardFile(path string) (*os.File, error) {
+	return openNoFollow(path)
+}
+
+// openGuardDir opens a user or project directory for listing without
+// following a reparse point.
+func openGuardDir(path string) (*os.File, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
+		return nil, fmt.Errorf("%s is a reparse point", path)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", path)
+	}
+	return os.Open(path)
+}
+
+// openGuardFileFollow opens a file a hook command names, following links
+// as the agent would.
+func openGuardFileFollow(path string) (*os.File, error) {
+	return os.Open(path)
+}
+
+// adminOwnedFile is not derived on Windows: every referenced file is bound
+// by content.
+func adminOwnedFile(os.FileInfo) bool { return false }
+
+// guardPathCannotExist reports a stat error that means nothing can be at
+// the path: a name no Windows file can have (a command word such as *.tmp
+// or a:b), a component that is a file, or a name past the length limit.
+func guardPathCannotExist(err error) bool {
+	return errors.Is(err, windows.ERROR_INVALID_NAME) ||
+		errors.Is(err, windows.ERROR_BAD_PATHNAME) ||
+		errors.Is(err, windows.ERROR_DIRECTORY) ||
+		errors.Is(err, windows.ERROR_FILENAME_EXCED_RANGE)
+}
+
+// openGuardAppend opens a user-owned record file for appending without
+// following a reparse point.
+func openGuardAppend(path string) (*os.File, error) {
+	if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0) {
+		return nil, fmt.Errorf("%s is a reparse point", path)
+	}
+	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+}

@@ -136,6 +136,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s: %v\n", user, outcome.Err)
 			continue
 		}
+		logEnterpriseForeignHookBlocks(stderr, user, outcome.Response.Blocks, outcome.Response.BlocksDropped, outcome.Response.BlocksError)
 		for _, name := range sortedCleanupConnectors(outcome.Response.Cleanup) {
 			report := outcome.Response.Cleanup[name]
 			for _, path := range boundedStrings(report.Removed, 32) {
@@ -167,6 +168,7 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 			Connector:     name,
 			GOOS:          runtime.GOOS,
 			Home:          home,
+			AccountHome:   home,
 			HookBinary:    cleanup.HookBinary,
 			Policy:        cleanup.Policy,
 			Getenv:        os.Getenv,

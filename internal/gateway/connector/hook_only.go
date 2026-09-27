@@ -1801,6 +1801,28 @@ func managedPluginHookSocket(opts SetupOpts) (string, int) {
 	return filepath.Clean(socket), uid
 }
 
+// managedPluginForeignHookGuard returns the administrator-owned hook binary
+// a standalone managed plugin runs for the foreign-hook guard, or "" for
+// any other install.
+func managedPluginForeignHookGuard(opts SetupOpts) string {
+	binary := strings.TrimSpace(opts.ForeignHookGuardBinary)
+	if !opts.ManagedEnterprise || binary == "" || !filepath.IsAbs(binary) {
+		return ""
+	}
+	return filepath.Clean(binary)
+}
+
+// managedPluginForeignHookGuardMarker is the rendered line a standalone
+// managed plugin must carry; a plugin rendered before the guard existed
+// (or with another binary) fails verification and is repaired.
+func managedPluginForeignHookGuardMarker(opts SetupOpts, declaration, terminator string) []byte {
+	binary := managedPluginForeignHookGuard(opts)
+	if binary == "" {
+		return nil
+	}
+	return []byte(declaration + `"` + javaScriptStringContent(binary) + `"` + terminator)
+}
+
 // setupPluginArtifact renders the embedded bridge-plugin template
 // (APIAddr / stable token-sidecar path / FailMode substituted) and writes it
 // to the host agent's auto-load plugin directory at 0o600. The scoped token is
@@ -1828,12 +1850,13 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	}
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:      opts.APIAddr,
-		TokenFileJS:  javaScriptStringContent(tokenPath),
-		HookSocketJS: javaScriptStringContent(hookSocket),
-		ServiceUID:   serviceUID,
-		FailMode:     failMode,
-		Managed:      opts.ManagedEnterprise,
+		APIAddr:            opts.APIAddr,
+		TokenFileJS:        javaScriptStringContent(tokenPath),
+		HookSocketJS:       javaScriptStringContent(hookSocket),
+		ServiceUID:         serviceUID,
+		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
+		FailMode:           failMode,
+		Managed:            opts.ManagedEnterprise,
 	})
 	if err != nil {
 		return fmt.Errorf("%s render plugin template: %w", c.name, err)

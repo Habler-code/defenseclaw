@@ -160,6 +160,10 @@ type Options struct {
 	GatewayRecovery func(context.Context, error) error
 	// Now is injectable for deterministic failure-log timestamps in tests.
 	Now func() time.Time
+	// StartedAt, when set, is when the hook process began work the
+	// request budget must include (the standalone foreign-hook guard's scan
+	// runs before Run). Zero starts the budget when Run is called.
+	StartedAt time.Time
 }
 
 // Run executes the hook described by opts and returns the process exit code.
@@ -168,7 +172,10 @@ type Options struct {
 // by synchronous PreToolUse stdout {"decision":"deny"}; no Antigravity
 // behavior relies on a non-zero process exit code.
 func Run(ctx context.Context, opts Options) int {
-	startedAt := time.Now()
+	startedAt := opts.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
 	opts = withDefaults(opts)
 
 	sp, ok := specFor(opts.Connector)
@@ -182,11 +189,15 @@ func Run(ctx context.Context, opts Options) int {
 	}
 	failMode := normalizeFailMode(opts.FailMode)
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
+		reason := strings.TrimSpace(opts.ManagedRuntimeFailure)
+		if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
+			return failForeignHookBlocked(opts, sp, reason)
+		}
 		return failUnreachable(
 			opts,
 			sp,
 			"closed",
-			strings.TrimSpace(opts.ManagedRuntimeFailure),
+			reason,
 		)
 	}
 
@@ -915,6 +926,56 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 // no secret.
 const ForeignHookBlockedReasonPrefix = "enterprise_foreign_hook_blocked:"
 
+// failForeignHookBlocked delivers the enterprise foreign-hook guard's
+// denial as the connector's native block with the guard's reason as the
+// message, so the user sees which file to remove and which allowlist key an
+// administrator would use. Only the standalone guard sets this reason; the
+// response is never an allow. Commands that do not bind their event (the
+// Cursor and Claude machine hooks) take it from the payload, which carries
+// no authority here: every shape rendered is a block.
+func failForeignHookBlocked(opts Options, sp spec, reason string) int {
+	logHookFailure(opts, sp, reason, "policy", "closed")
+	switch sp.connector {
+	case "codex", "copilot", "antigravity":
+		// These commands bind the reviewed event out of band.
+	default:
+		if strings.TrimSpace(opts.Event) == "" {
+			if payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody); err == nil && !overflow {
+				opts.Event = resolveHookEvent("", payload)
+			}
+		}
+	}
+	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		return code
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s\n", sp.subject, reason)
+	message := mustJSONString(reason)
+	switch sp.connector {
+	case "codex":
+		return emitCodexBlock(opts, reason)
+	case "cursor":
+		fmt.Fprintln(opts.Stdout, cursorFallbackOutput(opts.Event, true, reason))
+		return sp.unreachableStrict.exit
+	case "antigravity":
+		if strings.TrimSpace(opts.Event) == "PreToolUse" {
+			fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+message+`}`)
+			return 0
+		}
+	case "devin":
+		fmt.Fprintln(opts.Stdout, `{"decision":"block","reason":`+message+`}`)
+		return sp.unreachableStrict.exit
+	case "openhands":
+		fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+message+`}`)
+		return sp.unreachableStrict.exit
+	}
+	if sp.failOpenOnly {
+		return emitHookResult(opts, sp, sp.openAllow)
+	}
+	// Claude Code shows stderr on its exit-2 block; the rest keep their
+	// strict failure response.
+	return emitHookResult(opts, sp, sp.unreachableStrict)
+}
+
 // managedCopilotDenyMessage is the text Copilot shows for a managed local
 // denial. Copilot surfaces only the structured reason (not stderr), so a
 // foreign-hook guard denial carries its own reason and the user learns which
@@ -1167,6 +1228,12 @@ func codexContractAllowsEvent(contractID, event string) bool {
 		}
 	}
 	return false
+}
+
+// RequestTimeout is the total budget a hook invocation for connector and
+// event has before the agent's own hook timeout.
+func RequestTimeout(connector, event string) time.Duration {
+	return hookRequestTimeout(connector, event)
 }
 
 func hookRequestTimeout(connector, event string) time.Duration {
