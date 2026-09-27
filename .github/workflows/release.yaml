@@ -36,6 +36,11 @@ on:
         required: false
         type: boolean
         default: false
+      allow_unnotarized_macos_app:
+        description: "Publish an ad-hoc signed macOS app when the Apple secrets are missing (it runs without administrator mode)"
+        required: false
+        type: boolean
+        default: false
       operation:
         description: "release, or legacy-channel to point 0.8.8-0.8.10 upgrades at an already published 1.x release (run once)"
         required: false
@@ -204,10 +209,18 @@ jobs:
       - name: Verify the app bundle
         env:
           VERIFICATION_STATUS: ${{ steps.app.outputs.verification_status }}
+          ALLOW_UNNOTARIZED: ${{ inputs.allow_unnotarized_macos_app }}
         run: |
           scripts/verify-macos-app-release.sh "$VERSION" macos-out "$VERIFICATION_STATUS"
-          [[ "$VERIFICATION_STATUS" == notarized ]] \
-            || echo "::warning title=Unnotarized macOS app::Apple credentials were absent; the app is ad-hoc signed."
+          if [[ "$VERIFICATION_STATUS" != notarized ]]; then
+            # install.sh puts this app on users' Macs, so an ad-hoc signed one
+            # ships only when asked for.
+            if [[ "$ALLOW_UNNOTARIZED" != true ]]; then
+              echo "::error title=Unnotarized macOS app::The Apple signing secrets are missing, so the app is only ad-hoc signed. Set them in the release environment, or re-run with allow_unnotarized_macos_app: true."
+              exit 1
+            fi
+            echo "::warning title=Unnotarized macOS app::Apple credentials were absent; the app is ad-hoc signed."
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-app

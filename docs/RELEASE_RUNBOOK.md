@@ -26,6 +26,14 @@ between versions.
 Releases build for Linux (`amd64`, `arm64`), macOS on Apple Silicon (`arm64`;
 Intel Macs are unsupported), and Windows (`amd64`).
 
+The macOS app is signed with Developer ID and notarized when all five Apple
+secrets (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`,
+`MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, `MACOS_NOTARY_ISSUER_ID`) are
+set in the `release` environment. Without them the run fails, because
+`install.sh` would put an ad-hoc signed app, which runs without administrator
+mode, on users' Macs. To publish such an app anyway (a fork, a test), run with
+`-f allow_unnotarized_macos_app=true`.
+
 To try a release on real machines before users see it, run the workflow with
 `draft: true` and download the draft's assets (`gh release download X.Y.Z`).
 Check them against the signed checksum list before running anything:
