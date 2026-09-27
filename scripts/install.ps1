@@ -1463,7 +1463,7 @@ try {
     # holding only the installer and checksums.txt.
     $launchDir = if ($RunAsFile) { Split-Path -Parent $PSCommandPath } else { "" }
     if ($launchDir -and (Split-Path -Leaf $launchDir) -match '^defenseclaw-(upgrade|rollback)-[a-z0-9_]+$' -and
-        -not @(Get-ChildItem -LiteralPath $launchDir -Force | Where-Object { $_.Name -notin @("install.ps1", "checksums.txt") }).Count) {
+        -not @(Get-ChildItem -LiteralPath $launchDir -Force | Where-Object { $_.Name -notin @("install.ps1", "checksums.txt", "checksums.txt.bundle") }).Count) {
         Set-Location -LiteralPath $env:SystemRoot
         [Environment]::CurrentDirectory = $env:SystemRoot
         Invoke-Quietly { Remove-Tree $launchDir }

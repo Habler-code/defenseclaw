@@ -58,7 +58,7 @@ case "$(basename "${SELF_TMP}")" in
     *) SELF_TMP="" ;;
 esac
 if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
-        ! -name install.sh ! -name checksums.txt -print -quit 2>/dev/null)" ]]; then
+        ! -name install.sh ! -name checksums.txt ! -name checksums.txt.bundle -print -quit 2>/dev/null)" ]]; then
     SELF_TMP=""
 fi
 [[ -z "${SELF_TMP}" ]] || trap 'rm -rf "${SELF_TMP}"' EXIT
