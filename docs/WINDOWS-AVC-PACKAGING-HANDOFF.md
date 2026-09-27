@@ -19,9 +19,11 @@ The build-kit directory is
 windows-enterprise-buildkit-<version>/
 ├── payload/
 │   ├── DefenseClawEnterprise.psm1
+│   ├── defenseclaw-acp.exe
 │   ├── defenseclaw-cmid-broker.exe
 │   ├── defenseclaw-gateway.exe
 │   ├── defenseclaw-hook.exe
+│   ├── defenseclaw-sensor-helper.exe
 │   ├── defenseclaw.exe
 │   └── install-enterprise.ps1
 ├── source/                         # trimmed, vendored, offline Go build

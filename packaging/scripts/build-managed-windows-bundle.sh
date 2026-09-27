@@ -347,7 +347,7 @@ KIT_DIR="${DIST_ABS}/${KIT_NAME}"
 rm -rf "${KIT_DIR}"
 mkdir -p "${KIT_DIR}/payload" "${KIT_DIR}/source" "${KIT_DIR}/packaging/scripts/lib"
 
-# ---- kit/payload: the seven files AVC signs (or leaves unsigned in
+# ---- kit/payload: the eight files AVC signs (or leaves unsigned in
 #                   --allow-unsigned mode) ------------------------------
 echo "==> staging kit payload"
 # Single-source the expected filename list: EXPECTED_PAYLOAD_NAMES is

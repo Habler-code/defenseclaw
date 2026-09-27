@@ -398,6 +398,11 @@ dev-pycli: pycli
 # Tool binaries are installed under .tools/bin so contributors do not
 # need protoc-gen-go in their global $GOPATH/bin, and the versions
 # are pinned to what the generated files were produced against.
+# protoc itself comes from the contributor's PATH. Every stub records
+# the protoc version in its header, so `proto` refuses any protoc other
+# than PROTOC_VERSION; otherwise one run cannot reproduce the committed
+# stubs and `proto-check` fails on header noise. To move to a new protoc,
+# regenerate every stub with it and update PROTOC_VERSION.
 # The generated .pb.go files are committed, so `make gateway` /
 # `make build` never invoke `proto` — you only run it when the .proto
 # changes.
@@ -405,6 +410,7 @@ PROTO_TOOLS_DIR := $(CURDIR)/.tools
 PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
 PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
+PROTOC_VERSION             := 29.3
 
 proto-tools: _checkout-write-preflight
 	@mkdir -p $(PROTO_TOOLS_BIN)
@@ -412,7 +418,8 @@ proto-tools: _checkout-write-preflight
 	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
 
 proto: proto-tools
-	@command -v protoc >/dev/null 2>&1 || { echo "protoc not found — brew install protobuf (or apt install protobuf-compiler)"; exit 1; }
+	@command -v protoc >/dev/null 2>&1 || { echo "protoc not found — install protoc $(PROTOC_VERSION) from https://github.com/protocolbuffers/protobuf/releases/tag/v$(PROTOC_VERSION)"; exit 1; }
+	@found="$$(protoc --version 2>/dev/null)"; [ "$$found" = "libprotoc $(PROTOC_VERSION)" ] || { echo "protoc $(PROTOC_VERSION) required, found '$$found' — the committed stubs record the protoc version; install it from https://github.com/protocolbuffers/protobuf/releases/tag/v$(PROTOC_VERSION)"; exit 1; }
 	@cd proto/defenseclaw/secureclient/v1 && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
 		--go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
