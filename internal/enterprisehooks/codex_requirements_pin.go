@@ -70,8 +70,14 @@ type CodexRequirementsPinResult struct {
 	RemovedFile bool   `json:"removed_file,omitempty"`
 }
 
-var errCodexRequirementsPinUneditable = errors.New(
-	"the Codex requirements layout cannot be edited automatically; add [features] hooks = true to the requirements file",
+var (
+	errCodexRequirementsPinUneditable = errors.New(
+		"the Codex requirements layout cannot be edited automatically; add [features] hooks = true to the requirements file",
+	)
+	errCodexRequirementsPinUnremovable = errors.New(
+		"DefenseClaw's hooks pin cannot be removed automatically from this Codex requirements layout; " +
+			"delete the lines marked '" + codexRequirementsPinLineMarker + "' or the DefenseClaw managed hooks block from the requirements file",
+	)
 )
 
 func parseCodexRequirementsPinModel(raw []byte) (map[string]interface{}, error) {
@@ -174,7 +180,7 @@ func renderCodexRequirementsPin(raw []byte) (rendered []byte, changed bool, err 
 	}
 	features["hooks"] = true
 	expected["features"] = features
-	if err := requireCodexRequirementsPinModel(rendered, expected); err != nil {
+	if err := requireCodexRequirementsPinModel(rendered, expected, errCodexRequirementsPinUneditable); err != nil {
 		return nil, false, err
 	}
 	return rendered, true, nil
@@ -183,7 +189,8 @@ func renderCodexRequirementsPin(raw []byte) (rendered []byte, changed bool, err 
 // removeCodexRequirementsPin removes exactly the bytes DefenseClaw added.
 // removeFile is true when nothing but whitespace remains, which is the case
 // when DefenseClaw created the file. changed is false when the document holds
-// no DefenseClaw pin.
+// no DefenseClaw pin. DefenseClaw bytes that cannot be removed exactly, such
+// as a region whose END marker was deleted, fail closed with guidance.
 func removeCodexRequirementsPin(raw []byte) (rendered []byte, removeFile, changed bool, err error) {
 	model, err := parseCodexRequirementsPinModel(raw)
 	if err != nil {
@@ -223,6 +230,10 @@ func removeCodexRequirementsPin(raw []byte) (rendered []byte, removeFile, change
 			}
 		}
 	}
+	if begin >= 0 {
+		// A BEGIN marker without its END: the region's extent is unknown.
+		return nil, false, false, errCodexRequirementsPinUnremovable
+	}
 	if !removedRegion && !removedLine {
 		return raw, false, false, nil
 	}
@@ -233,17 +244,35 @@ func removeCodexRequirementsPin(raw []byte) (rendered []byte, removeFile, change
 		}
 	}
 	rendered = out.Bytes()
+	if codexRequirementsPinHasOwnedBytes(rendered) {
+		return nil, false, false, errCodexRequirementsPinUnremovable
+	}
 	expected := model
 	if features, ok := expected["features"].(map[string]interface{}); ok {
 		delete(features, "hooks")
-		if removedRegion && len(features) == 0 {
+		// Without the pin an empty features table may vanish entirely: the
+		// region carried its own [features] header, and a dotted
+		// features.hooks line is the last features key once the administrator
+		// has removed theirs. Absent and empty mean the same to Codex.
+		if len(features) == 0 && !codexRequirementsPinDefinesFeatures(rendered) {
 			delete(expected, "features")
 		}
 	}
-	if err := requireCodexRequirementsPinModel(rendered, expected); err != nil {
+	if err := requireCodexRequirementsPinModel(rendered, expected, errCodexRequirementsPinUnremovable); err != nil {
 		return nil, false, false, err
 	}
 	return rendered, len(bytes.TrimSpace(rendered)) == 0, true, nil
+}
+
+// codexRequirementsPinDefinesFeatures reports whether raw parses with a
+// features key.
+func codexRequirementsPinDefinesFeatures(raw []byte) bool {
+	model, err := parseCodexRequirementsPinModel(raw)
+	if err != nil {
+		return false
+	}
+	_, defined := model["features"]
+	return defined
 }
 
 type codexRequirementsPinLayout struct {
@@ -318,13 +347,15 @@ func codexRequirementsPinHasOwnedBytes(raw []byte) bool {
 	return false
 }
 
-func requireCodexRequirementsPinModel(rendered []byte, expected map[string]interface{}) error {
+// requireCodexRequirementsPinModel returns failure unless rendered parses to
+// exactly the expected model.
+func requireCodexRequirementsPinModel(rendered []byte, expected map[string]interface{}, failure error) error {
 	got, err := parseCodexRequirementsPinModel(rendered)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errCodexRequirementsPinUneditable, err)
+		return fmt.Errorf("%w: %v", failure, err)
 	}
 	if !reflect.DeepEqual(got, expected) {
-		return errCodexRequirementsPinUneditable
+		return failure
 	}
 	return nil
 }
