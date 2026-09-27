@@ -333,3 +333,203 @@ s=socket.socket(); s.bind(("127.0.0.1",%d)); s.listen(1); print("up",flush=True)
 		t.Fatalf("owner's own listener refused: %s", out)
 	}
 }
+
+// listenerTrustScript replaces the platform, the account database, the
+// socket table and the user-namespace probe with shell functions, so each
+// trust decision of defenseclaw_verify_gateway_listener runs on any host.
+// Arguments: platform, listener owners ("!" = lookup failure), managed
+// (1 or empty), service-account uid (empty = no such account), nested
+// user namespace (1 or empty). The hook user is uid 1000.
+const listenerTrustScript = `
+DC_TEST_PLATFORM="$1" DC_TEST_OWNERS="$2" DC_TEST_SERVICE="$4" DC_TEST_NESTED="$5"
+uname() { printf '%s\n' "$DC_TEST_PLATFORM"; }
+id() {
+  case "$*" in
+    -u) printf '1000\n' ;;
+    "-u defenseclaw") [ -n "$DC_TEST_SERVICE" ] || return 1; printf '%s\n' "$DC_TEST_SERVICE" ;;
+    *) return 1 ;;
+  esac
+}
+_dc_test_owners() { [ "$DC_TEST_OWNERS" != "!" ] || return 1; [ -z "$DC_TEST_OWNERS" ] || printf '%s\n' $DC_TEST_OWNERS; }
+_defenseclaw_listener_uids_linux() { _dc_test_owners; }
+_defenseclaw_listener_uids_darwin() { _dc_test_owners; }
+_defenseclaw_initial_user_namespace() { [ "$DC_TEST_NESTED" != 1 ]; }
+DEFENSECLAW_MANAGED_HOOK="$3"
+defenseclaw_verify_gateway_listener 127.0.0.1:18970 || { printf '%s' "$DEFENSECLAW_LISTENER_REASON"; exit 1; }
+`
+
+// TestHookListenerCheckTrustSet pins who may hold the gateway port. A
+// per-user hook trusts its own user and root. A managed hook trusts only
+// the managed gateway: root on macOS, root or the packaged defenseclaw
+// service account on Linux (the systemd unit runs the gateway as
+// User=defenseclaw), never the hook user's own listener and never from a
+// nested user namespace on Linux.
+func TestHookListenerCheckTrustSet(t *testing.T) {
+	cases := []struct {
+		name                     string
+		platform, owners         string
+		managed, service, nested string
+		wantOK                   bool
+		wantReason               string
+	}{
+		{name: "per-user own listener", platform: "Linux", owners: "1000", wantOK: true},
+		{name: "per-user root listener", platform: "Linux", owners: "0", wantOK: true},
+		{name: "per-user other user", platform: "Linux", owners: "1001", wantReason: "held by 1001, not this user's gateway"},
+		{name: "per-user service account", platform: "Linux", owners: "998", service: "998", wantReason: "held by 998"},
+		{name: "per-user mixed owners", platform: "Linux", owners: "1000 1001", wantReason: "held by 1001"},
+		{name: "managed linux service account", platform: "Linux", owners: "998", managed: "1", service: "998", wantOK: true},
+		{name: "managed linux root and service account", platform: "Linux", owners: "0 998", managed: "1", service: "998", wantOK: true},
+		{name: "managed linux root without service account", platform: "Linux", owners: "0", managed: "1", wantOK: true},
+		{name: "managed linux service uid without account", platform: "Linux", owners: "998", managed: "1", wantReason: "held by 998, not the managed gateway"},
+		{name: "managed linux hook user", platform: "Linux", owners: "1000", managed: "1", service: "998", wantReason: "held by 1000, not the managed gateway"},
+		{name: "managed linux other user", platform: "Linux", owners: "1001", managed: "1", service: "998", wantReason: "held by 1001"},
+		{name: "managed linux service and other user", platform: "Linux", owners: "998 1001", managed: "1", service: "998", wantReason: "held by 1001"},
+		{name: "managed linux nested namespace", platform: "Linux", owners: "0", managed: "1", service: "998", nested: "1", wantReason: "nested user namespace"},
+		{name: "managed linux unreadable table", platform: "Linux", owners: "!", managed: "1", service: "998", wantReason: "cannot verify"},
+		{name: "managed macos root", platform: "Darwin", owners: "0", managed: "1", wantOK: true},
+		{name: "managed macos hook user", platform: "Darwin", owners: "1000", managed: "1", wantReason: "held by 1000"},
+		{name: "managed macos service account", platform: "Darwin", owners: "998", managed: "1", service: "998", wantReason: "held by 998"},
+		{name: "managed macos launchd socket", platform: "Darwin", owners: "launchd", managed: "1", wantReason: "held by launchd"},
+		{name: "managed macos nested probe ignored", platform: "Darwin", owners: "0", managed: "1", nested: "1", wantOK: true},
+		{name: "per-user macos own listener", platform: "Darwin", owners: "1000", wantOK: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, ok := runHardeningShell(t, listenerTrustScript, tc.platform, tc.owners, tc.managed, tc.service, tc.nested)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v (reason %q), want %v", ok, out, tc.wantOK)
+			}
+			if !tc.wantOK && !strings.Contains(out, tc.wantReason) {
+				t.Fatalf("reason = %q, want it to contain %q", out, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestHookListenerCheckInitialUserNamespace(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]bool{
+		"         0          0 4294967295\n":       true,
+		"0 0 4294967295":                           true,
+		"         0       1000          1\n":       false,
+		"0 0 4294967295\n1 1 1\n":                  false,
+		"         0     100000      65536\n":       false,
+		"":                                         false,
+		"         0          0 4294967294\n":       false,
+		"         1          1 4294967295\n":       false,
+		"         0          0 4294967295 extra\n": false,
+	}
+	i := 0
+	for body, want := range cases {
+		i++
+		path := filepath.Join(dir, fmt.Sprintf("uid_map.%d", i))
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := runHardeningShell(t, `_defenseclaw_initial_user_namespace "$1"`, path); ok != want {
+			t.Fatalf("uid_map %q: initial namespace = %v, want %v", body, ok, want)
+		}
+	}
+	if _, ok := runHardeningShell(t, `_defenseclaw_initial_user_namespace "$1"`, filepath.Join(dir, "missing")); ok {
+		t.Fatal("a missing uid_map was treated as the initial namespace")
+	}
+}
+
+// TestHookListenerCheckManagedRefusesOwnListener binds a real loopback
+// listener as the test account: a managed hook must refuse it, because
+// the managed gateway runs as root or the service account, never as the
+// hook user.
+func TestHookListenerCheckManagedRefusesOwnListener(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root is a trusted listener owner")
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("netstat"); err != nil {
+			t.Skip("netstat is required")
+		}
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	out, ok := runHardeningShell(t,
+		`DEFENSECLAW_MANAGED_HOOK=1; defenseclaw_verify_gateway_listener "$1" || { printf '%s' "$DEFENSECLAW_LISTENER_REASON"; exit 1; }`,
+		listener.Addr().String())
+	if ok {
+		t.Fatalf("managed hook accepted a listener owned by the hook user %d", os.Getuid())
+	}
+	if want := fmt.Sprintf("held by %d, not the managed gateway", os.Getuid()); !strings.Contains(out, want) &&
+		!strings.Contains(out, "nested user namespace") {
+		t.Fatalf("managed refusal reason = %q, want %q", out, want)
+	}
+}
+
+// TestHookListenerCheckManagedTrustsServiceAccount runs a real listener as
+// the packaged defenseclaw service account and checks it as another
+// unprivileged account: the managed hook accepts it and a per-user hook
+// refuses it. It needs root, an existing defenseclaw account, and
+// DEFENSECLAW_TEST_OTHER_UID naming an unprivileged uid, so it runs on the
+// disposable test hosts.
+func TestHookListenerCheckManagedTrustsServiceAccount(t *testing.T) {
+	other := os.Getenv("DEFENSECLAW_TEST_OTHER_UID")
+	if runtime.GOOS != "linux" || other == "" || os.Geteuid() != 0 {
+		t.Skip("requires Linux, root and DEFENSECLAW_TEST_OTHER_UID")
+	}
+	raw, err := exec.Command("/usr/bin/id", "-u", "defenseclaw").Output()
+	if err != nil {
+		t.Skip("requires an existing defenseclaw service account")
+	}
+	service := strings.TrimSpace(string(raw))
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("", "dc-listener-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+	holder := exec.Command("/usr/bin/sudo", "-u", "defenseclaw", "/usr/bin/python3", "-c",
+		fmt.Sprintf(`import socket,time
+s=socket.socket(); s.bind(("127.0.0.1",%d)); s.listen(1); print("up",flush=True); time.sleep(20)`, port))
+	stdout, err := holder.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Start(); err != nil {
+		t.Skipf("start service-account listener: %v", err)
+	}
+	defer func() { _ = holder.Process.Kill(); _ = holder.Wait() }()
+	buf := make([]byte, 3)
+	if _, err := stdout.Read(buf); err != nil {
+		t.Skipf("service-account listener did not start: %v", err)
+	}
+	check := func(managed string) (string, bool) {
+		cmd := exec.Command("/usr/bin/sudo", "-u", "#"+other, "/usr/bin/env", "-i",
+			"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "DEFENSECLAW_MANAGED_HOOK="+managed, "/bin/bash", "-c",
+			`. "$0"; defenseclaw_verify_gateway_listener "$1" || { printf '%s' "$DEFENSECLAW_LISTENER_REASON"; exit 1; }`,
+			helperPath, fmt.Sprintf("127.0.0.1:%d", port))
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err == nil
+	}
+	if out, ok := check("1"); !ok {
+		t.Fatalf("managed hook refused the service account (uid %s) listener: %s", service, out)
+	}
+	if out, ok := check(""); ok || !strings.Contains(out, "held by "+service) {
+		t.Fatalf("per-user hook check of the service account listener = ok %v reason %q, want refusal", ok, out)
+	}
+}
