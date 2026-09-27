@@ -34,6 +34,7 @@ CASES = [
     ("enterprise-profile-lifecycle-lock-smoke.ps1", "pwsh.exe"),
     ("enterprise-profile-lifecycle-lock-smoke.ps1", "powershell.exe"),
     ("enterprise-standalone-claude-policy-binding-smoke.ps1", "pwsh.exe"),
+    ("enterprise-standalone-manifest-adoption-smoke.ps1", "pwsh.exe"),
 ]
 
 

@@ -396,6 +396,7 @@ STANDALONE_SMOKES = (
     "enterprise-profile-deployment-record-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
     "enterprise-standalone-ipc-uninstall-smoke.ps1",
+    "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-opencode-plugin-uninstall-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",

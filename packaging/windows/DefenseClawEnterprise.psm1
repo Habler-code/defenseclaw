@@ -15524,6 +15524,203 @@ function New-DefenseClawRequiredRights {
     return $required
 }
 
+function Get-DefenseClawStandaloneManifestAdoption {
+    <#
+        Standalone only. The hook enumerator service republishes targets.yaml
+        whenever enrollment changes (a new user or agent, an agent update, a
+        deferred row), after the last lifecycle transaction bound the
+        deployment's managed-hook activation evidence to the manifest it
+        activated. The guardian then reconciles the new manifest and records
+        its SHA-256 in its protected activation record. When that record is
+        healthy and binds the installed manifest exactly, the drift is the
+        enumerator's own publication that the guardian has already activated,
+        and the lifecycle may adopt it. Anything else keeps failing closed.
+        Secure Client deployments never adopt.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)]$Activation,
+        [Parameter(Mandatory)][string]$InstalledManifestSHA256
+    )
+    $result = {
+        param([bool]$Ok, [string]$Reason, [int64]$TargetCount)
+        return [pscustomobject][ordered]@{
+            ok = $Ok
+            reason = $Reason
+            target_count = $TargetCount
+        }
+    }
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return & $result $false '' -1
+    }
+    if ([string]$Activation.state -cne 'activated') {
+        return & $result $false (
+            'the deployment was never activated, so no guardian record can ' +
+            'prove the republished manifest'
+        ) -1
+    }
+    $report = Get-DefenseClawGuardianStatusReport `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
+    if ($null -eq $report -or
+        $null -eq $report.PSObject.Properties['ok'] -or
+        -not [bool]$report.ok) {
+        $issues = @()
+        if ($null -ne $report -and
+            $null -ne $report.PSObject.Properties['errors']) {
+            $issues = @($report.errors | Microsoft.PowerShell.Core\Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_)
+            })
+        }
+        $detail = if ($issues.Count -gt 0) {
+            ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')
+        }
+        else {
+            'guardian status reported no healthy activation'
+        }
+        return & $result $false (
+            'the hook enumerator republished targets.yaml and the hook guardian ' +
+            "has not yet activated it without errors: $detail; " +
+            'wait for the guardian''s next pass (about a minute) and retry'
+        ) -1
+    }
+    if ($null -eq $report.PSObject.Properties['activation'] -or
+        $null -eq $report.activation -or
+        $null -eq $report.activation.PSObject.Properties['manifest_sha256'] -or
+        $null -eq $report.activation.PSObject.Properties['target_count']) {
+        return & $result $false 'guardian status has no protected activation record' -1
+    }
+    $guardianManifestSHA256 = [string]$report.activation.manifest_sha256
+    if ($guardianManifestSHA256 -cne $InstalledManifestSHA256) {
+        return & $result $false (
+            "the hook guardian last activated targets.yaml $guardianManifestSHA256, " +
+            "not the installed $InstalledManifestSHA256; wait for the " +
+            'guardian''s next pass (about a minute) and retry'
+        ) -1
+    }
+    try {
+        $targetCount = [Convert]::ToInt64($report.activation.target_count)
+    }
+    catch {
+        return & $result $false 'guardian activation has an invalid target count' -1
+    }
+    if ($targetCount -lt 0 -or $targetCount -gt 384) {
+        return & $result $false 'guardian activation target count is outside its bound' -1
+    }
+    return & $result $true '' $targetCount
+}
+
+function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
+    <#
+        Standalone only. Runs under the lifecycle lock, after any pending
+        transaction was recovered and before Upgrade, Repair, Reconcile or
+        Uninstall opens its own transaction. When the enumerator republished
+        targets.yaml since the last transaction and the guardian has already
+        activated it (Get-DefenseClawStandaloneManifestAdoption), rebind the
+        committed activation evidence to that manifest, so every later exact
+        binding check of the transaction sees one manifest generation. Only
+        manifest_sha256 and target_count change; the state and the deployment
+        generation stay as recorded. Returns $true when it rebound.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    foreach ($path in @($Layout.PendingPath)) {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
+            return $false
+        }
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ManifestPath -PathType Leaf)) {
+        return $false
+    }
+    $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+    if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+        return $false
+    }
+    $activationProperty = $metadata.PSObject.Properties['managed_hooks_activation']
+    if ($null -eq $activationProperty -or $null -eq $activationProperty.Value) {
+        return $false
+    }
+    $activation = Assert-DefenseClawManagedHooksActivationRecord `
+        -Record $activationProperty.Value
+    Assert-DefenseClawNoReparsePath -Path $Layout.ManifestPath
+    $installedManifestSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.ManifestPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ([string]$activation.manifest_sha256 -ceq $installedManifestSHA256) {
+        return $false
+    }
+    $adoption = Get-DefenseClawStandaloneManifestAdoption `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Activation $activation `
+        -InstalledManifestSHA256 $installedManifestSHA256
+    if (-not [bool]$adoption.ok) {
+        throw (
+            'deployment managed-hook activation evidence does not bind installed targets.yaml' +
+            " ($([string]$adoption.reason))"
+        )
+    }
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        throw 'rebinding standalone managed-hook activation evidence requires PowerShell 7'
+    }
+    # Edit only the two binding fields of the exact committed JSON so every
+    # other recorded value keeps its type and text.
+    $raw = [IO.File]::ReadAllText($Layout.MetadataPath)
+    $document = [System.Text.Json.Nodes.JsonNode]::Parse($raw)
+    $record = $document['managed_hooks_activation']
+    if ($null -eq $record) {
+        throw 'deployment metadata lost its managed-hook activation record while rebinding'
+    }
+    $record['manifest_sha256'] =
+        [System.Text.Json.Nodes.JsonValue]::Create([string]$installedManifestSHA256)
+    $record['target_count'] =
+        [System.Text.Json.Nodes.JsonValue]::Create([int64]$adoption.target_count)
+    $options = [System.Text.Json.JsonSerializerOptions]::new()
+    $options.WriteIndented = $true
+    $options.Encoder = [System.Text.Encodings.Web.JavaScriptEncoder]::UnsafeRelaxedJsonEscaping
+    $json = $document.ToJsonString($options)
+    $temporary = "$($Layout.MetadataPath).new.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
+        Set-DefenseClawPathAcl `
+            -Path $temporary `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        Microsoft.PowerShell.Management\Move-Item `
+            -LiteralPath $temporary `
+            -Destination $Layout.MetadataPath `
+            -Force
+    }
+    finally {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+    Set-DefenseClawPathAcl `
+        -Path $Layout.MetadataPath `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    $rebound = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+    [void](Assert-DefenseClawManagedHooksActivationRecord `
+        -Record $rebound.managed_hooks_activation `
+        -ExpectedManifestSHA256 $installedManifestSHA256 `
+        -ExpectedTargetCount ([int64]$adoption.target_count) `
+        -ExpectedDeploymentGenerationID ([string]$activation.deployment_generation_id))
+    if ([string]$rebound.managed_hooks_activation.state -cne [string]$activation.state) {
+        throw 'rebinding changed the managed-hook activation state'
+    }
+    return $true
+}
+
 function Assert-DefenseClawEnterpriseDeployment {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -15573,7 +15770,20 @@ function Assert-DefenseClawEnterpriseDeployment {
     ).Hash.ToLowerInvariant()
     if ([string]$managedHooksActivation.manifest_sha256 -cne
         $installedManifestSHA256) {
-        throw 'deployment managed-hook activation evidence does not bind installed targets.yaml'
+        # Standalone: accept a manifest the enumerator republished after the
+        # last transaction once the guardian has activated it exactly.
+        $adoption = Get-DefenseClawStandaloneManifestAdoption `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Activation $managedHooksActivation `
+            -InstalledManifestSHA256 $installedManifestSHA256
+        if (-not [bool]$adoption.ok) {
+            $message = 'deployment managed-hook activation evidence does not bind installed targets.yaml'
+            if (-not [string]::IsNullOrWhiteSpace([string]$adoption.reason)) {
+                $message += " ($([string]$adoption.reason))"
+            }
+            throw $message
+        }
     }
     if ($RequireReadiness -and
         [string]$managedHooksActivation.state -cne 'activated') {
@@ -22833,6 +23043,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     throw 'Reconcile recovered a failed initial install; run Install to create a deployment'
                 }
             }
+            [void](Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName)
             return Invoke-DefenseClawReconcileLifecycle `
                 -Layout $layout `
                 -GatewayServiceName $GatewayServiceName `
@@ -22974,6 +23187,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             New-DefenseClawLayoutDirectories -Layout $layout
         }
 
+        if ($Action -in @('Upgrade', 'Repair', 'Uninstall')) {
+            [void](Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName)
+        }
         if ($Action -eq 'Uninstall') {
             return Invoke-DefenseClawUninstallLifecycle `
                 -Layout $layout `
