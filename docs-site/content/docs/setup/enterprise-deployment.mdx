@@ -1301,6 +1301,16 @@ folders, or a folder that Cursor reports as a remote or relative path rather
 than a local one. To approve a handler, add its
 digest to `connector_hooks.cursor.approved_foreign_hooks` and let the guardian
 reconcile; the allowlist is published in the protected Cursor machine state.
+The digest covers the handler registration (in Claude-format files, together
+with its matcher), its event and its scope, so approving a user-level handler
+does not approve the same text in a workspace file, and an approval under one
+matcher does not cover another. It does not cover the script the command
+runs: the same registration in any other workspace of that scope is approved
+too, and a relative or `$CLAUDE_PROJECT_DIR` command runs that workspace's own
+script. Approve only handlers whose command is an absolute path to an
+executable that standard users cannot modify. The denial shown to the user
+includes the handler's command so it can be reviewed before approval; the
+message returned to the agent leaves it out.
 
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
