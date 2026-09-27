@@ -41,6 +41,10 @@ func runCodexMachineHookHelper() {
 		os.Exit(10)
 	}
 	fmt.Print(codexMachineHookHelperDecision)
+	// Windows PowerShell 5.1 Start-Process -Wait fails with "the process has
+	// exited" when the child exits before it attaches; the other hook probes
+	// stay alive briefly for the same reason.
+	time.Sleep(500 * time.Millisecond)
 	os.Exit(2)
 }
 
