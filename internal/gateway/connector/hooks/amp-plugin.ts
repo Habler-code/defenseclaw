@@ -115,8 +115,9 @@ async function scopedHookToken(): Promise<string> {
 
 // listenerRefusal resolves to "" when the gateway port may receive the scoped
 // bearer, and otherwise to the reason it may not. It runs the shell hooks'
-// listener-owner check (DC_LISTENER_CHECK, the self-contained block of
-// hooks/_hardening.sh substituted at setup time) on Linux and macOS: every
+// listener-owner check (DC_LISTENER_CHECK, the self-contained block of the
+// hooks' hardening helper, substituted at setup time and left empty on
+// Windows) on Linux and macOS: every
 // listener on the port must belong to this user or root for a per-user
 // install, or to the managed gateway for a managed one, so another local user
 // who binds the port while the gateway is down never receives the bearer or

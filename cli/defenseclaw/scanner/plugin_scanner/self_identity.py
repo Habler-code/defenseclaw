@@ -66,8 +66,8 @@ _BRIDGE_PUBLICATION_SCHEMA = {
     },
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
-    "amp": "cab8d09f3f055b9bfc1fb01644a8f8d2753b86856ba3840448318c577f00e88b",
-    "opencode": "c6b998a222e4de675c223f0928a3a06ecb8f949e52bd39be1b97524b0909a035",
+    "amp": "fcfa50a3e55c6d5ae245fe40a8344aaa53ae0b47698c5d9507a88cb0261c3b38",
+    "opencode": "9be6851de52e851189f41fe9c0912f933c0f8bfaa39461c1b809943f3905ffbe",
 }
 # SHA-256 of the gateway listener-owner check as setup renders it into a
 # bridge's DC_LISTENER_CHECK line: the listener check block of

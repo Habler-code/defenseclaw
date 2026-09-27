@@ -387,7 +387,8 @@ def _listener_refusal() -> str:
     """Return why the gateway port must not receive the credential, or "".
 
     Runs the shell hooks' listener-owner check (the self-contained block of
-    hooks/_hardening.sh, substituted at setup time) on Linux and macOS: every
+    the hooks' hardening helper, substituted at setup time) on Linux and
+    macOS: every
     listener on the gateway port must belong to this user or root for a
     per-user install, or to the managed gateway for a managed one, so another
     local user who binds the port while the gateway is down never receives
