@@ -4660,7 +4660,7 @@
     {
       "name": "DEFENSECLAW_TEST_OTHER_UID",
       "category": "test_fixture",
-      "purpose": "Names a second unprivileged uid that must refuse the foreign listener in the root-only hook listener-owner test.",
+      "purpose": "Names an unprivileged uid that runs the checks in the root-only hook listener-owner tests: it must refuse another account's listener, and as a managed hook must accept the defenseclaw service account's listener.",
       "default": "unset",
       "accepted_values": [
         "numeric uid of an unprivileged test account",
