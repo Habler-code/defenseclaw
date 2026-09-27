@@ -976,6 +976,14 @@ jobs:
       - name: Test root boundary and connector repair
         shell: bash
         run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" "${{ matrix.connector }}"
+      # The script above drives the real privilege drop through the gateway
+      # binary. The root-only Go tests also race the worker's repairs and
+      # check its identity, deadline and watch-path handling; they skip
+      # unless run as root, so run them once per OS under sudo.
+      - name: Test per-target worker as root
+        if: matrix.connector == 'codex'
+        shell: bash
+        run: ./scripts/test-enterprise-hook-root-worker.sh
 
   macos-enterprise-packaging:
     name: macOS Enterprise Packaging
