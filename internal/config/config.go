@@ -1413,12 +1413,24 @@ type AgentHookConfig struct {
 }
 
 // ClaudeCodeAllowUnmanagedHooks reports the administrator opt-out from the
-// managed Claude Code hooks-only lock.
+// managed Claude Code hooks-only lock. The documented key is
+// claude_code.allow_unmanaged_hooks, and connector_hooks.claudecode carries
+// the same field. ConnectorHookConfig returns only the connector_hooks entry
+// when one exists, so the documented key would silently do nothing in a
+// config that also has that entry; either block sets the opt-out.
 func (c *Config) ClaudeCodeAllowUnmanagedHooks() bool {
 	if c == nil {
 		return false
 	}
-	return c.ConnectorHookConfig("claudecode").AllowUnmanagedHooks
+	if c.ClaudeCode.AllowUnmanagedHooks {
+		return true
+	}
+	for _, name := range []string{"claudecode", "claude_code"} {
+		if hooks, ok := c.ConnectorHooks[name]; ok && hooks.AllowUnmanagedHooks {
+			return true
+		}
+	}
+	return false
 }
 
 // ApprovedForeignHooksForConnector returns the normalized (lowercase hex,

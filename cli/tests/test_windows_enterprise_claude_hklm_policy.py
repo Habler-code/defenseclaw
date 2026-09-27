@@ -12,6 +12,7 @@ that matrix.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -52,10 +53,11 @@ def test_connector_admits_merge_or_the_carried_matrix_without_trusting_recorded_
     assert 'ClaudeCodeManagedPolicyExportCommand = "defenseclaw-gateway enterprise windows export-claude-policy"' in merge
     assert 'claudeCodeOSAdminPolicyComposition = runtime.GOOS == "windows"' in merge
     admits = _slice(merge, "func claudeCodeOSAdminAdmitsManagedHooks", "func ClaudeCodeOSAdminPolicyAdmitsManagedHooks")
-    # Hook-defeating gates are checked before either admission path.
+    # Hook-defeating gates are checked before either admission path, and a
+    # DefenseClaw hook outside the target contract is refused under both.
     assert admits.index("validateClaudeCodeManagedHookControls(source, true)") < admits.index(
-        "claudeCodeSourceHasHookContract(source, opts, false)"
-    )
+        "claudeCodeOSAdminStrayManagedHookEvent(source, opts)"
+    ) < admits.index("claudeCodeOSAdminCarriesManagedHooks(source, opts)")
     # #899 review: the recorded agent_version is written once, at discovery,
     # and is often the installer placeholder, so it must neither admit nor
     # refuse a target under merge; the floor is enforced host-wide.
@@ -94,7 +96,76 @@ def test_status_reports_hklm_shadowing_with_the_fix() -> None:
     assert "SetValue" not in view and "CreateSubKey" not in view
     assert "export-claude-policy" in view
     catch = view[view.index("    catch {") :]
-    assert "$state.shadowed = $true" in catch[: catch.index("finally")]
+    assert "shadowed = $true" in catch[: catch.index("finally")]
+    assert "Get-DefenseClawClaudeHKLMPolicyVerdict -Raw $raw -Layout $Layout" in view
+    verdict = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyVerdict", "function Get-DefenseClawClaudeHKLMPolicyState")
+    assert "export-claude-policy" in verdict and "allowManagedHooksOnly" in verdict
+    catch = verdict[verdict.index("    catch {") :]
+    assert "$state.shadowed = $true" in catch
+    # #899 review: settings keys match by exact case, as Claude and the
+    # gateway read them; PSObject.Properties[...] ignores case.
+    for owner in (
+        "function Get-DefenseClawClaudeHKLMPolicyVerdict",
+        "function Get-DefenseClawClaudeHKLMHookCopies",
+        "function Get-DefenseClawClaudeInstalledHookContract",
+        "function Test-DefenseClawClaudeHandlerTargetsHook",
+    ):
+        body = _slice(module, owner, "\nfunction ")
+        assert ".PSObject.Properties['" not in body, owner
+        assert "Get-DefenseClawJsonMember" in body, owner
+
+
+def test_status_reads_the_hklm_policy_as_strict_case_sensitive_json() -> None:
+    # #899 review: ConvertFrom-Json accepts comments, trailing commas and
+    # single quotes (differently on Windows PowerShell 5.1 and PowerShell 7)
+    # and rejects keys that differ only in case, while Claude Code and the
+    # gateway do the opposite.
+    module = MODULE.read_text(encoding="utf-8")
+    verdict = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyVerdict", "function Get-DefenseClawClaudeHKLMPolicyState")
+    assert "ConvertFrom-DefenseClawStrictJson -Text $Raw" in verdict
+    begin = module.index("function ConvertFrom-DefenseClawStrictJsonString")
+    helpers = module[begin : module.index("function Get-DefenseClawClaudeHKLMPolicyState", begin)]
+    assert "ConvertFrom-Json" not in helpers.replace("ConvertFrom-Json differs", "")
+    assert "PSCustomObject" not in helpers[: helpers.index("function Get-DefenseClawClaudeMergePendingTargets")]
+    parser = _slice(module, "function ConvertFrom-DefenseClawStrictJson {", "\nfunction ")
+    assert "[StringComparer]::Ordinal" in parser
+    assert "JSON nesting exceeds 10000 levels" in parser
+    # The remedy names the version the gate compares with: the target's
+    # recorded contract, not the client the endpoints happen to run.
+    assert "the agent_version recorded for the target" in verdict
+    assert "the Claude Code version your endpoints run" not in module
+
+
+def test_status_and_gate_share_the_hklm_admission_vectors() -> None:
+    vectors = ROOT / "internal" / "gateway" / "connector" / "testdata" / "claude_hklm_admission_vectors.json"
+    data = json.loads(vectors.read_text(encoding="utf-8"))
+    wants = {case["want"] for case in data["cases"]}
+    assert wants == {"inactive", "carry", "merge", "refuse"}
+    smoke = SMOKE.read_text(encoding="utf-8")
+    assert "claude_hklm_admission_vectors.json" in smoke
+    assert "Get-DefenseClawClaudeHKLMPolicyVerdict" in smoke
+    go_test = (ROOT / "internal" / "gateway" / "connector" / "claudecode_policy_merge_windows_test.go").read_text(
+        encoding="utf-8"
+    )
+    assert "//go:embed testdata/claude_hklm_admission_vectors.json" in go_test
+    assert "ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, caseOpts)" in go_test
+    # #899 review: Claude Code runs one copy of a repeated DefenseClaw hook and
+    # a changed copy can be the one that runs, so it is refused under carry
+    # and merge.
+    wanted = {case["name"]: case["want"] for case in data["cases"]}
+    for name in (
+        "merge with a shorter DefenseClaw copy",
+        "exported hooks with a shorter PreToolUse copy after them",
+        "exported hooks with an async PreToolUse copy after them",
+        "merge with a shorter PreToolUse copy after the exported one",
+        "merge with an async PreToolUse copy after the exported one",
+        "single-quoted JSON",
+        "block comment inside the object",
+        "trailing comma in the object",
+    ):
+        assert wanted[name] == "refuse", name
+    for name in ("keys that differ only in case", "event keys that differ only in case"):
+        assert wanted[name] == "merge", name
 
 
 
@@ -108,11 +179,11 @@ def test_module_merge_client_floor_matches_the_connector_constant() -> None:
 
 def test_status_withholds_claude_verification_under_merge_until_the_floor_is_attested() -> None:
     module = MODULE.read_text(encoding="utf-8")
-    view = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyState", "function ConvertTo-DefenseClawBoundedDiagnostic")
+    view = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyVerdict", "function Get-DefenseClawClaudeHKLMPolicyState")
     # A merge policy that carries the DefenseClaw hooks is effective on every
     # client; only one that relies on merge raises the approved-client floor.
-    floor = view[view.index("managedSourcesBehavior") :]
-    assert floor.index("Test-DefenseClawClaudeHKLMCarriesInstalledHooks") < floor.index(
+    floor = view[view.index("$merge = [bool]") :]
+    assert floor.index("Get-DefenseClawClaudeHKLMHookCopies") < floor.index(
         "$state.merge_client_floor_required = $true"
     )
     status = _slice(module, "function Get-DefenseClawLifecycleStatus", "function Test-DefenseClawGuardianCoverageReport")

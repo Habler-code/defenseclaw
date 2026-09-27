@@ -125,18 +125,33 @@ policy only when the DefenseClaw hooks stay effective:
   `claude_policy_hklm_merge_pending_targets`. The targets still enroll: a
   recorded version is written once, at discovery, and cannot show which client
   runs, so it neither admits nor refuses a target; or
-- the policy already carries the exact DefenseClaw hook matrix. Print it on an
-  installed endpoint with
-  `defenseclaw-gateway enterprise windows export-claude-policy` (add
-  `--agent-version <x.y.z>` to select a hook contract, `--compact` for a
-  single-line `REG_SZ` value, or `--hook-executable` for a non-default
-  install root) and add its `hooks` object to the MDM/GPO policy. Claude then
-  loads only that policy, so add the printed `"allowManagedHooksOnly": true`
-  as well: enrollment refuses a policy that carries the hooks without it
-  unless the DefenseClaw config sets `claude_code.allow_unmanaged_hooks: true`.
+- the policy already carries the DefenseClaw hook entries exactly as they are
+  exported: the same matcher, `timeout`, `async` flag and `args` (the hook
+  path may differ only in case), and one copy of each. Other administrator
+  hooks may sit beside them. Claude stops a hook at its registered `timeout`
+  and lets the action run, so a copy with a shorter one is refused. Print the
+  entries on an installed endpoint with
+  `defenseclaw-gateway enterprise windows export-claude-policy --agent-version <x.y.z>`,
+  where `<x.y.z>` is the `agent_version` recorded for the target, which
+  selects its hook contract; the enrollment refusal for each target names the
+  exact command. Without `--agent-version` the command prints the oldest
+  supported hook contract, which a target recorded on a newer contract
+  refuses. Add `--compact` for a single-line `REG_SZ` value, or
+  `--hook-executable` for a non-default install root. Add the printed `hooks`
+  object to the MDM/GPO policy. Claude then loads only that policy, so add the
+  printed `"allowManagedHooksOnly": true` as well: enrollment refuses a policy
+  that carries the hooks without it unless the DefenseClaw config sets
+  `claude_code.allow_unmanaged_hooks: true`.
 
 While that managed-hooks-only lock is enforced, an HKLM policy that sets
-`allowManagedHooksOnly: false` is refused under either option.
+`allowManagedHooksOnly: false` is refused under either option. A policy that
+registers a DefenseClaw hook on an event outside the target's hook contract,
+such as an export for another Claude Code version, is also refused under
+either option, as is one that registers a DefenseClaw hook anywhere but in the
+exported entry. Claude Code runs one copy of a repeated command hook: it keys
+the copies by command, `args` and condition, not by `timeout` or `async`, so a
+second DefenseClaw copy with a shorter `timeout` or `async: true`, beside the
+exported entry or beside the drop-in under merge, can be the one that runs.
 
 An HKLM policy that sets `disableAllHooks` or `policyHelper` is still refused,
 as is any other HKLM policy, with a message naming both fixes. `enterprise
@@ -147,7 +162,12 @@ carry the DefenseClaw hooks) and
 `agent_application_control_claude_minimum_version` (the floor the
 application-control evidence was attested at). A shadowed policy, or a merge
 policy whose floor is not attested, reports
-`claude_effective_policy_verified=false`.
+`claude_effective_policy_verified=false`. Status reads the policy by the same
+rules as enrollment, comparing it with the installed DefenseClaw drop-in:
+the value must be strict JSON (no comments, trailing commas or single quotes),
+settings keys match by exact case, a repeated key keeps its last value and
+values compare by JSON type, as Claude reads them, and an empty `Settings`
+value or `{}` is no policy.
 
 ## Hook contract
 

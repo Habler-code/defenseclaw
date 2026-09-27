@@ -94,3 +94,47 @@ func TestManagedHookPolicyDefaultsAreSecure(t *testing.T) {
 		t.Fatal("legacy claude_code block opt-out was not honored")
 	}
 }
+
+// TestClaudeCodeAllowUnmanagedHooksReadsBothBlocks is the #899 review
+// regression: the documented claude_code.allow_unmanaged_hooks was ignored
+// whenever the config also had a connector_hooks.claudecode entry, and the
+// refusals kept naming the key the administrator had already set.
+func TestClaudeCodeAllowUnmanagedHooksReadsBothBlocks(t *testing.T) {
+	raw := []byte(`config_version: 8
+claude_code:
+  allow_unmanaged_hooks: true
+connector_hooks:
+  claudecode:
+    enabled: true
+    fail_mode: closed
+`)
+	if _, err := ParseCompileObservabilityV8("managed-hook-policy-both-v8.yaml", raw, ObservabilityV8CompileOptions{DefaultDataDir: "/tmp/defenseclaw"}); err != nil {
+		t.Fatalf("v8 compiler rejected both hook blocks: %v", err)
+	}
+	var parsed Config
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.ClaudeCodeAllowUnmanagedHooks() {
+		t.Fatal("claude_code.allow_unmanaged_hooks was ignored beside connector_hooks.claudecode")
+	}
+	for name, cfg := range map[string]*Config{
+		"connector_hooks.claudecode": {ConnectorHooks: map[string]AgentHookConfig{
+			"claudecode": {AllowUnmanagedHooks: true},
+		}},
+		"connector_hooks.claude_code": {ConnectorHooks: map[string]AgentHookConfig{
+			"claude_code": {AllowUnmanagedHooks: true},
+		}},
+	} {
+		if !cfg.ClaudeCodeAllowUnmanagedHooks() {
+			t.Fatalf("%s.allow_unmanaged_hooks was not honored", name)
+		}
+	}
+	locked := &Config{
+		ClaudeCode:     AgentHookConfig{Enabled: true},
+		ConnectorHooks: map[string]AgentHookConfig{"claudecode": {Enabled: true}, "cursor": {AllowUnmanagedHooks: true}},
+	}
+	if locked.ClaudeCodeAllowUnmanagedHooks() {
+		t.Fatal("an opt-out on another connector unlocked Claude Code")
+	}
+}

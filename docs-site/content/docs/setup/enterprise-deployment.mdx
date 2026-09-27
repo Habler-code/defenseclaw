@@ -1278,7 +1278,8 @@ The drop-in also sets `allowManagedHooksOnly: true`, so Claude Code loads only
 administrator-managed hooks on the endpoint and the tool input DefenseClaw
 inspects is the input that runs. User, project, local, and plugin hooks do not
 load. An administrator who must keep them can set
-`claude_code.allow_unmanaged_hooks: true` in the protected DefenseClaw config.
+`claude_code.allow_unmanaged_hooks: true` in the protected DefenseClaw config
+(`connector_hooks.claudecode.allow_unmanaged_hooks: true` is honored too).
 `defenseclaw-gateway enterprise hooks status` and `verify` then print a warning, and
 verify results report `claude_managed_hooks_only: disabled_by_admin`. While the
 lock is enforced, another managed-settings file that sets
@@ -1318,10 +1319,19 @@ policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or a
 file policy superseded by `policyHelper`. An HKLM `Settings` policy outranks the
 DefenseClaw drop-in. Enrollment accepts it when it sets
 `"managedSourcesBehavior": "merge"` (honored by Claude Code 2.1.242 and newer,
-which then becomes the approved-client floor) or already carries the exact
-DefenseClaw hook matrix, which the installed CLI prints with `enterprise windows
-export-claude-policy` for the MDM/GPO policy; any other HKLM policy is refused
-with both fixes named. Claude loads only an HKLM policy that carries the
+which then becomes the approved-client floor) or already carries the
+DefenseClaw hook entries exactly (same matcher, timeout, `async` flag and
+arguments, one copy of each), which the installed CLI prints with `enterprise
+windows export-claude-policy --agent-version <x.y.z>`, where `<x.y.z>` is the
+`agent_version` recorded for the target (the version its enrollment refusal
+names); any other HKLM policy is refused with both fixes named, and the
+refusal names the export command for its target. Without `--agent-version` the
+export prints the oldest supported hook contract. A policy that registers a
+DefenseClaw hook outside the target's hook contract, or anywhere but in the
+exported entry, is refused either way: Claude Code runs one copy of a repeated
+hook whatever its timeout or `async` flag, so a changed copy could replace the
+exported one.
+Claude loads only an HKLM policy that carries the
 matrix, so that policy must also set the printed `allowManagedHooksOnly: true`,
 and while the lock is enforced no HKLM policy may set it to `false`; setting
 `claude_code.allow_unmanaged_hooks: true` waives both. See [Claude Code on

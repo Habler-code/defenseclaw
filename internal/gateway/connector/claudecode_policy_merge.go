@@ -4,8 +4,11 @@
 package connector
 
 import (
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -37,23 +40,31 @@ func claudeCodeSourceRequestsManagedMerge(source *claudeCodeSettingsSource) bool
 	return ok && behavior == "merge"
 }
 
-func claudeCodeOSAdminRemedy() string {
+func claudeCodeOSAdminRemedy(opts SetupOpts) string {
 	return fmt.Sprintf(
-		`either set "managedSourcesBehavior": "merge" in that policy (Claude Code %s or newer composes it with the DefenseClaw managed-settings.d policy), or add the DefenseClaw hook matrix printed by %s to its hooks`,
+		`either set "managedSourcesBehavior": "merge" in that policy (Claude Code %s or newer composes it with the DefenseClaw managed-settings.d policy), or add the "hooks" and "%s" settings printed by %s to it`,
 		ClaudeCodeManagedSourcesMergeMinimumVersion,
-		ClaudeCodeManagedPolicyExportCommand,
+		claudeCodeManagedHooksOnlyKey,
+		claudeCodeManagedPolicyExportCommandFor(opts),
 	)
 }
 
 // claudeCodeOSAdminAdmitsManagedHooks decides whether DefenseClaw's managed
 // hooks are effective under an active OS-admin (HKLM) policy that outranks
 // the file-based tier DefenseClaw owns. They are when that policy itself
-// carries the complete DefenseClaw contract (first-wins then selects it), or
+// carries the DefenseClaw hook entries exactly as rendered for opts
+// (first-wins then selects it; see claudeCodeOSAdminCarriesManagedHooks), or
 // when it opts into merging managed sources, which clients honor from
 // ClaudeCodeManagedSourcesMergeMinimumVersion. A policy that disables hooks
 // defeats both, and anything else fails closed with the two ways to fix it.
 // Either admission also keeps the managed-hooks-only lock effective (see
 // claudeCodeOSAdminKeepsManagedHooksOnly).
+//
+// The Windows lifecycle module's Status view applies the same rules to the
+// same registry value (Get-DefenseClawClaudeHKLMPolicyVerdict in
+// packaging/windows/DefenseClawEnterprise.psm1). Both run the documents in
+// testdata/claude_hklm_admission_vectors.json (in this package), so change
+// them together.
 func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts SetupOpts) error {
 	if !source.active() {
 		return nil
@@ -61,7 +72,25 @@ func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts 
 	if err := validateClaudeCodeManagedHookControls(source, true); err != nil {
 		return err
 	}
-	carries, err := claudeCodeSourceHasHookContract(source, opts, false)
+	// Claude runs the policy's DefenseClaw handlers under either admission:
+	// first-wins loads only that policy, and merge unions its hooks with the
+	// drop-in. One on an event outside the target's contract is what an
+	// export for another Claude Code version carries, and the guardian's
+	// contract audit reports such a registration as missing hooks, so the
+	// target would never audit healthy. Name it here instead.
+	stray, err := claudeCodeOSAdminStrayManagedHookEvent(source, opts)
+	if err != nil {
+		return err
+	}
+	if stray != "" {
+		return fmt.Errorf(
+			"Claude Code %s registers the DefenseClaw %s hook, which is outside the hook contract this target uses; replace the DefenseClaw hooks in that policy with the ones printed by %s",
+			source.label(),
+			stray,
+			claudeCodeManagedPolicyExportCommandFor(opts),
+		)
+	}
+	carries, err := claudeCodeOSAdminCarriesManagedHooks(source, opts)
 	if err != nil {
 		return err
 	}
@@ -89,7 +118,7 @@ func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts 
 	return fmt.Errorf(
 		"Claude Code %s has higher precedence than the DefenseClaw managed-settings.d policy, so Claude would never load the DefenseClaw hooks; %s",
 		source.label(),
-		claudeCodeOSAdminRemedy(),
+		claudeCodeOSAdminRemedy(opts),
 	)
 }
 
@@ -125,7 +154,7 @@ func claudeCodeOSAdminKeepsManagedHooksOnly(source *claudeCodeSettingsSource, op
 			`Claude Code %s carries the DefenseClaw hooks and outranks the DefenseClaw managed-settings.d policy, so the managed-hooks-only lock in that policy does not apply; add "%s": true (printed by %s) to it, %s`,
 			source.label(),
 			claudeCodeManagedHooksOnlyKey,
-			ClaudeCodeManagedPolicyExportCommand,
+			claudeCodeManagedPolicyExportCommandFor(opts),
 			optOut,
 		)
 	}
@@ -141,17 +170,228 @@ func ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, label string, opts SetupOpts
 	}
 	settings, err := decodeClaudeCodeSettings([]byte(raw), label)
 	if err != nil {
-		return fmt.Errorf("%w; the policy outranks the DefenseClaw managed-settings.d policy, so %s", err, claudeCodeOSAdminRemedy())
+		return fmt.Errorf("%w; the policy outranks the DefenseClaw managed-settings.d policy, so %s", err, claudeCodeOSAdminRemedy(opts))
 	}
 	source := &claudeCodeSettingsSource{name: label, settings: settings}
 	if raw, exists := source.settings["policyHelper"]; exists && raw != nil {
 		return fmt.Errorf(
 			"Claude Code policyHelper from %s supersedes file-based managed hooks; add the DefenseClaw hook matrix printed by %s to the helper output",
 			source.label(),
-			ClaudeCodeManagedPolicyExportCommand,
+			claudeCodeManagedPolicyExportCommandFor(opts),
 		)
 	}
 	return claudeCodeOSAdminAdmitsManagedHooks(source, opts)
+}
+
+// claudeCodeManagedPolicyExportCommandFor names the export command that
+// prints the hook contract opts resolves to. Without --agent-version the
+// export renders the default (oldest) Claude contract, which a target on a
+// newer contract refuses, so a refusal must name the version to export.
+func claudeCodeManagedPolicyExportCommandFor(opts SetupOpts) string {
+	contract, err := claudeCodeHookContractForSetup(opts)
+	if err != nil {
+		return ClaudeCodeManagedPolicyExportCommand
+	}
+	for _, candidate := range []string{opts.AgentVersion, contract.MinAgentVersion} {
+		version := NormalizeAgentVersion("claudecode", candidate)
+		if version != "" && ResolveHookContract("claudecode", version).Contract.ContractID == contract.ContractID {
+			return ClaudeCodeManagedPolicyExportCommand + " --agent-version " + version
+		}
+	}
+	return ClaudeCodeManagedPolicyExportCommand
+}
+
+func claudeCodeOSAdminHooks(source *claudeCodeSettingsSource) (map[string]interface{}, error) {
+	rawHooks, exists := source.settings["hooks"]
+	if !exists {
+		return nil, nil
+	}
+	hooks, ok := rawHooks.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("Claude Code hooks from %s have unsupported type %T", source.label(), rawHooks)
+	}
+	return hooks, nil
+}
+
+// claudeCodeOSAdminCarriesManagedHooks reports whether an OS-admin policy
+// carries the DefenseClaw hooks exactly as rendered for opts: on every event
+// of the contract, one DefenseClaw handler, in the rendered entry. A
+// first-wins client then loads this copy instead of the DefenseClaw drop-in,
+// which verify holds to the same rule: the same matcher, timeout, async flag
+// and argv, and one DefenseClaw handler per event. A shorter timeout, for
+// example, lets Claude stop the hook before it can deny. Only the handler
+// command compares by path identity, so a path typed in another case still
+// matches. Other administrator entries and handlers may sit beside these.
+//
+// A DefenseClaw handler anywhere else on a contract event is refused under
+// carry and merge alike. Claude Code runs one copy of a repeated command
+// hook: it keys the copies by command, argv and condition, not by timeout or
+// async flag, and keeps one of them (the last registered, in Claude Code
+// 2.1.283). A shorter or asynchronous copy beside the rendered entry, in this
+// policy or in the union with the drop-in under merge, can then be the copy
+// that runs, and a fail-closed hook fails open.
+func claudeCodeOSAdminCarriesManagedHooks(source *claudeCodeSettingsSource, opts SetupOpts) (bool, error) {
+	hooks, err := claudeCodeOSAdminHooks(source)
+	if err != nil || hooks == nil {
+		return false, err
+	}
+	body, err := renderClaudeCodeManagedHookPolicy(opts)
+	if err != nil {
+		return false, err
+	}
+	var rendered struct {
+		Hooks map[string][]interface{} `json:"hooks"`
+	}
+	if err := json.Unmarshal(body, &rendered); err != nil {
+		return false, fmt.Errorf("parse rendered Claude Code managed hook policy: %w", err)
+	}
+	command, _ := claudeCodeManagedHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+	events := make([]string, 0, len(rendered.Hooks))
+	for event := range rendered.Hooks {
+		events = append(events, event)
+	}
+	sort.Strings(events)
+	carries := true
+	repeatedEvent, repeatedCount := "", 0
+	for _, event := range events {
+		wanted := rendered.Hooks[event]
+		renderedEntries := make(map[string]struct{}, len(wanted))
+		for _, entry := range wanted {
+			text, ok := claudeCodeCanonicalJSON(entry)
+			if !ok {
+				return false, fmt.Errorf("canonicalize the rendered Claude Code %s hook", event)
+			}
+			renderedEntries[text] = struct{}{}
+		}
+		entries, _ := hooks[event].([]interface{})
+		present := make(map[string]struct{}, len(entries))
+		handlers := 0
+		for _, entry := range entries {
+			owned := claudeCodeOSAdminEntryManagedHandlers(entry, opts)
+			if owned == 0 {
+				continue
+			}
+			text, ok := claudeCodeCanonicalOSAdminHookEntry(entry, command, opts)
+			if _, exact := renderedEntries[text]; !ok || !exact {
+				return false, fmt.Errorf(
+					"Claude Code %s registers a DefenseClaw %s hook that differs from the entry DefenseClaw renders for it; Claude Code runs one copy of a repeated hook whatever its timeout or async flag, so that copy can replace the enforcing one. Keep only the DefenseClaw hooks printed by %s",
+					source.label(),
+					event,
+					claudeCodeManagedPolicyExportCommandFor(opts),
+				)
+			}
+			present[text] = struct{}{}
+			handlers += owned
+		}
+		if len(present) != len(renderedEntries) {
+			carries = false
+		} else if handlers != len(wanted) && repeatedEvent == "" {
+			repeatedEvent, repeatedCount = event, handlers
+		}
+	}
+	if !carries {
+		return false, nil
+	}
+	if repeatedEvent != "" {
+		return false, fmt.Errorf(
+			"Claude Code %s registers the DefenseClaw %s hook %d times; keep one copy of each DefenseClaw hook printed by %s",
+			source.label(),
+			repeatedEvent,
+			repeatedCount,
+			claudeCodeManagedPolicyExportCommandFor(opts),
+		)
+	}
+	return true, nil
+}
+
+// claudeCodeOSAdminEntryManagedHandlers counts the DefenseClaw handlers in
+// one policy hook entry.
+func claudeCodeOSAdminEntryManagedHandlers(raw interface{}, opts SetupOpts) int {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	handlers, _ := entry["hooks"].([]interface{})
+	owned := 0
+	for _, rawHandler := range handlers {
+		if handler, ok := rawHandler.(map[string]interface{}); ok && claudeCodeHandlerTargetsCurrentRuntime(handler, opts) {
+			owned++
+		}
+	}
+	return owned
+}
+
+// claudeCodeCanonicalOSAdminHookEntry is the canonical JSON of one policy
+// hook entry with each DefenseClaw handler's command replaced by the
+// rendered spelling.
+func claudeCodeCanonicalOSAdminHookEntry(raw interface{}, command string, opts SetupOpts) (string, bool) {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	normalized := cloneClaudeCodeSettingsMap(entry)
+	if handlers, ok := entry["hooks"].([]interface{}); ok {
+		rewritten := make([]interface{}, len(handlers))
+		for i, rawHandler := range handlers {
+			rewritten[i] = rawHandler
+			if handler, ok := rawHandler.(map[string]interface{}); ok && claudeCodeHandlerTargetsCurrentRuntime(handler, opts) {
+				handler = cloneClaudeCodeSettingsMap(handler)
+				handler["command"] = command
+				rewritten[i] = handler
+			}
+		}
+		normalized["hooks"] = rewritten
+	}
+	return claudeCodeCanonicalJSON(normalized)
+}
+
+// claudeCodeCanonicalJSON is key-sorted JSON with every number in float64
+// form, so 30 and 30.0 compare equal whichever decoder produced them.
+func claudeCodeCanonicalJSON(value interface{}) (string, bool) {
+	first, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	var decoded interface{}
+	if err := json.Unmarshal(first, &decoded); err != nil {
+		return "", false
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return "", false
+	}
+	return string(canonical), true
+}
+
+// claudeCodeOSAdminStrayManagedHookEvent returns the first event, in sorted
+// order, outside the contract opts resolves to on which the policy
+// registers the DefenseClaw hook, or "" when there is none.
+func claudeCodeOSAdminStrayManagedHookEvent(source *claudeCodeSettingsSource, opts SetupOpts) (string, error) {
+	hooks, err := claudeCodeOSAdminHooks(source)
+	if err != nil || len(hooks) == 0 {
+		return "", err
+	}
+	groups, err := claudeCodeHookGroupsForSetup(opts)
+	if err != nil {
+		return "", err
+	}
+	contract := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		contract[group.eventType] = struct{}{}
+	}
+	events := make([]string, 0, len(hooks))
+	for event := range hooks {
+		if _, expected := contract[event]; !expected {
+			events = append(events, event)
+		}
+	}
+	sort.Strings(events)
+	for _, event := range events {
+		if entries, ok := hooks[event].([]interface{}); ok && claudeCodeEventTargetsCurrentRuntime(entries, opts) {
+			return event, nil
+		}
+	}
+	return "", nil
 }
 
 // claudeCodeMergedManagedSource is what a merge-honoring client loads from
