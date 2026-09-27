@@ -132,6 +132,28 @@ def test_claude_placeholder_follows_the_detected_hook_contract() -> None:
     minimums = sorted((c["agent_version"]["min_inclusive"] for c in contracts), key=_version)
     assert re.findall(r"'([0-9.]+)'", table.group(1)) == minimums
 
+    # A detected version counts by its leading major.minor.patch, the part the
+    # gateway normalizes (64-bit components, suffix ignored) before it picks
+    # the contract, so 2.1.250-beta.1 is on the newest contract.
+    key = installer[
+        installer.index("function ConvertTo-DefenseClawClaudeContractVersionKey") : installer.index(
+            "function Get-DefenseClawClaudeBootstrapPlaceholder"
+        )
+    ]
+    assert "ConvertTo-DefenseClawConnectorMetadataVersion -Value $Value" in key
+    assert "-cnotmatch '^([0-9]+)\\.([0-9]+)\\.([0-9]+)'" in key
+    assert "[long]::TryParse(" in key
+    placeholder = installer[installer.index("function Get-DefenseClawClaudeBootstrapPlaceholder") :]
+    placeholder = placeholder[: placeholder.index("\n}\n")]
+    assert "ConvertTo-DefenseClawClaudeContractVersionKey -Value ([string]$detected)" in placeholder
+    go = (ROOT / "internal" / "gateway" / "connector" / "hook_contract.go").read_text(encoding="utf-8")
+    assert (
+        "versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\\.([0-9]+))?(?:\\.([0-9]+))?`)" in go
+    )
+    normalize = go[go.index("func NormalizeAgentVersion(") :]
+    normalize = normalize[: normalize.index("\n}\n")]
+    assert "strconv.Atoi(parts[i])" in normalize
+
     render = installer[installer.index("function Get-DefenseClawRenderedEnterpriseTargets") :]
     render = render[: render.index("\n$bootstrapEnvironment = $null")]
     # Every row is discovered before the first row is rendered, and Claude
