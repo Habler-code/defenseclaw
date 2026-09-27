@@ -2181,11 +2181,50 @@ type cachedAgentSignal struct {
 	BinaryPath string `json:"binary_path"`
 }
 
+// agentDiscoveryCacheMaxBytes bounds the agent discovery cache read; the
+// cache the CLI writes is a few kilobytes.
+const agentDiscoveryCacheMaxBytes = 1 << 20
+
+// readBoundedRegularStateFile reads a state file that another user may
+// control. It opens the path without blocking, requires the opened object to
+// be a regular file no larger than limit, and reads at most limit bytes, so a
+// FIFO cannot hang the reader and a device or huge file cannot exhaust its
+// memory. Unlike readStablePrivateStateFile it keeps following symlinks and
+// does not check the owner or mode.
+func readBoundedRegularStateFile(path string, limit int64) ([]byte, error) {
+	file, err := openStateFileReadOnlyNonblocking(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, limit)
+	}
+	return data, nil
+}
+
 func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bool) {
 	if strings.TrimSpace(dataDir) == "" {
 		return cachedAgentSignal{}, false
 	}
-	data, err := os.ReadFile(filepath.Join(dataDir, "agent_discovery.json"))
+	// The cache lives in the user's data dir, so the user controls what is
+	// at this path: never block on a FIFO or read a device or an unbounded
+	// file.
+	data, err := readBoundedRegularStateFile(filepath.Join(dataDir, "agent_discovery.json"), agentDiscoveryCacheMaxBytes)
 	if err != nil {
 		return cachedAgentSignal{}, false
 	}

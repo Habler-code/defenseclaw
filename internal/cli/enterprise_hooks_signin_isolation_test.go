@@ -41,6 +41,9 @@ type signInIsolationOptions struct {
 	// realClassifier keeps the production platform sign-in classifier
 	// instead of the per-target awaitingSignIn stub.
 	realClassifier bool
+	// observeInstallContext, when set, sees the context of every stubbed
+	// per-target install and verification.
+	observeInstallContext func(context.Context)
 }
 
 type signInIsolationPublication struct {
@@ -134,7 +137,10 @@ func runSignInIsolationReconcileWithOptions(
 
 	enterpriseHookScopedTokenMinter = func(string, string) (string, error) { return "token", nil }
 	enterpriseHookScopedOTLPTokenMinter = func(string, string) (string, error) { return "otlp", nil }
-	install := func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	install := func(ctx context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if options.observeInstallContext != nil {
+			options.observeInstallContext(ctx)
+		}
 		target := byHome[opts.UserHome]
 		if target.installErr != nil {
 			return enterprisehooks.InstallResult{}, target.installErr

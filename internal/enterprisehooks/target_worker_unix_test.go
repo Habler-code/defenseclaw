@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // targetWorkerTestSwapEnv tells a worker started by these tests to replace
@@ -48,6 +49,9 @@ const (
 	testTargetOperationIdentity = "enterprise-hooks.test.identity"
 	testTargetOperationFail     = "enterprise-hooks.test.fail"
 	testTargetOperationSleep    = "enterprise-hooks.test.sleep"
+	// testTargetOperationPause returns after the payload's milliseconds, as
+	// a worker the target user stops and resumes just before its deadline.
+	testTargetOperationPause = "enterprise-hooks.test.pause"
 )
 
 type testTargetIdentity struct {
@@ -62,6 +66,7 @@ type testTargetIdentity struct {
 	Home          string   `json:"home"`
 	Env           []string `json:"env"`
 	Echo          string   `json:"echo"`
+	BinaryVersion string   `json:"binary_version"`
 }
 
 func init() {
@@ -77,7 +82,7 @@ func init() {
 		identity := testTargetIdentity{
 			UID: os.Getuid(), EUID: os.Geteuid(), GID: os.Getgid(), EGID: os.Getegid(),
 			Groups: groups, Dumpable: testProcessDumpable(), Home: target.UserHome,
-			Env: os.Environ(), Echo: echo,
+			Env: os.Environ(), Echo: echo, BinaryVersion: version.Current().BinaryVersion,
 		}
 		if err := verifySavedTargetIDs(target.UID, target.GID); err != nil {
 			identity.SavedIDsErr = err.Error()
@@ -99,6 +104,14 @@ func init() {
 		case <-ctx.Done():
 		case <-time.After(time.Minute):
 		}
+		return struct{}{}, nil
+	})
+	RegisterTargetOperation(testTargetOperationPause, func(_ context.Context, _ TargetCredentials, payload json.RawMessage) (any, error) {
+		var milliseconds int
+		if err := DecodeTargetOperationRequest(payload, &milliseconds); err != nil {
+			return nil, err
+		}
+		time.Sleep(time.Duration(milliseconds) * time.Millisecond)
 		return struct{}{}, nil
 	})
 }
@@ -152,6 +165,15 @@ func stubBeforeTargetPathMutation(t *testing.T, hook func(string)) {
 	original := beforeTargetPathMutation
 	beforeTargetPathMutation = hook
 	t.Cleanup(func() { beforeTargetPathMutation = original })
+}
+
+// setGuardianBinaryVersion records a release version in this (guardian)
+// process the way CLI startup does; the worker never runs CLI startup.
+func setGuardianBinaryVersion(t *testing.T, value string) {
+	t.Helper()
+	previous := version.Current().BinaryVersion
+	version.SetBinaryVersion(value)
+	t.Cleanup(func() { version.SetBinaryVersion(previous) })
 }
 
 func currentTestTarget(t *testing.T) TargetCredentials {
@@ -406,6 +428,7 @@ func TestSpawnTargetWorkerRequiresWorkerEntrypoint(t *testing.T) {
 func TestTargetWorkerSubprocessRunsOperationAsTarget(t *testing.T) {
 	target := currentTestTarget(t)
 	t.Setenv("DEFENSECLAW_TEST_UNLISTED_SECRET", "must-not-pass")
+	setGuardianBinaryVersion(t, "9.8.7-worker-test")
 	var identity testTargetIdentity
 	if err := runTargetOperationInWorkerForTest(t, target, testTargetOperationIdentity, "hello", &identity); err != nil {
 		t.Fatalf("worker identity operation: %v", err)
@@ -418,6 +441,9 @@ func TestTargetWorkerSubprocessRunsOperationAsTarget(t *testing.T) {
 	}
 	if identity.Home != target.UserHome || identity.Echo != "hello" {
 		t.Fatalf("worker saw home %q payload %q", identity.Home, identity.Echo)
+	}
+	if identity.BinaryVersion != "9.8.7-worker-test" {
+		t.Fatalf("worker binary version = %q, want the guardian's 9.8.7-worker-test", identity.BinaryVersion)
 	}
 	if runtime.GOOS == "linux" && identity.Dumpable != 0 {
 		t.Fatalf("worker dumpable = %d, want 0", identity.Dumpable)
@@ -483,10 +509,12 @@ func TestTargetWorkerSubprocessInstallsAndVerifiesTarget(t *testing.T) {
 	}
 	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
 	opts.AllowMissingHookConfigRepair = true
+	setGuardianBinaryVersion(t, "9.8.7-worker-test")
 	result, err := installThroughTargetWorker(context.Background(), opts, targetOperationInstall)
 	if err != nil {
 		t.Fatalf("worker Install: %v", err)
 	}
+	requireHookContractLockVersion(t, target.UserHome, "codex", "9.8.7-worker-test")
 	if result.Connector != "codex" || len(result.HookConfigPaths) != 1 || result.HookConfigPaths[0] != codexConfig {
 		t.Fatalf("worker Install result = %+v", result)
 	}
@@ -506,6 +534,27 @@ func TestTargetWorkerSubprocessInstallsAndVerifiesTarget(t *testing.T) {
 	opts.AllowMissingHookConfigRepair = false
 	if _, err := installThroughTargetWorker(context.Background(), opts, targetOperationVerify); err != nil {
 		t.Fatalf("worker Verify: %v", err)
+	}
+}
+
+// requireHookContractLockVersion checks the release version a worker install
+// recorded for connectorName in the target's hook contract lock.
+func requireHookContractLockVersion(t *testing.T, home, connectorName, want string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json"))
+	if err != nil {
+		t.Fatalf("read hook contract lock: %v", err)
+	}
+	var lock struct {
+		Connectors map[string]struct {
+			DefenseClawVersion string `json:"defenseclaw_version"`
+		} `json:"connectors"`
+	}
+	if err := json.Unmarshal(data, &lock); err != nil {
+		t.Fatalf("decode hook contract lock: %v", err)
+	}
+	if got := lock.Connectors[connectorName].DefenseClawVersion; got != want {
+		t.Fatalf("hook contract lock %s defenseclaw_version = %q, want the guardian's %q", connectorName, got, want)
 	}
 }
 
@@ -813,6 +862,7 @@ func TestRootGuardianRepairsThroughWorkerWithoutChangingItsOwnCredentials(t *tes
 			runtime.Gosched()
 		}
 	}()
+	setGuardianBinaryVersion(t, "9.8.7-root-worker-test")
 	result, installErr := Install(context.Background(), f.repairOptions())
 	_, verifyErr := Verify(context.Background(), codexInstallOptions(f.home, f.uid, f.gid))
 	var identity testTargetIdentity
@@ -833,6 +883,10 @@ func TestRootGuardianRepairsThroughWorkerWithoutChangingItsOwnCredentials(t *tes
 
 	if result.UserHome != f.home || len(result.HookConfigPaths) != 1 {
 		t.Fatalf("root Install result = %+v", result)
+	}
+	requireHookContractLockVersion(t, f.home, "codex", "9.8.7-root-worker-test")
+	if identity.BinaryVersion != "9.8.7-root-worker-test" {
+		t.Fatalf("root worker binary version = %q, want the guardian's", identity.BinaryVersion)
 	}
 	if identity.UID != f.uid || identity.EUID != f.uid || identity.GID != f.gid || identity.EGID != f.gid ||
 		!slices.Equal(identity.Groups, []int{f.gid}) || identity.CanRegainRoot || identity.SavedIDsErr != "" {
@@ -872,5 +926,546 @@ func TestRootGuardianRepairsThroughWorkerWithoutChangingItsOwnCredentials(t *tes
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Resolving watch paths reads files in the target's home, so a root guardian
+// resolves them only in the per-target worker and never in its own process.
+func TestRootWatchPathsResolveInTargetWorker(t *testing.T) {
+	target := currentTestTarget(t)
+	stubTargetProcessEUID(t, 0)
+	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
+	opts.AgentVersion = ""
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+
+	if _, err := WatchDirs(opts); !errors.Is(err, errRootTargetPathOperation) {
+		t.Fatalf("WatchDirs in a root process = %v, want refusal", err)
+	}
+	if _, err := WatchOwnedFiles(opts); !errors.Is(err, errRootTargetPathOperation) {
+		t.Fatalf("WatchOwnedFiles in a root process = %v, want refusal", err)
+	}
+
+	reply := targetWatchPathsResult{
+		Dirs:            []string{filepath.Join(target.UserHome, ".codex"), dataDir},
+		ExclusiveWriter: []string{filepath.Join(dataDir, "hooks", "codex-hook.sh")},
+		SharedWriter:    []string{filepath.Join(target.UserHome, ".codex", "config.toml")},
+	}
+	var operations []string
+	original := targetWorkerRunner
+	targetWorkerRunner = func(_ context.Context, workerTarget TargetCredentials, operation string, payload json.RawMessage) (json.RawMessage, error) {
+		options, err := decodeTargetInstallRequest(workerTarget, payload)
+		if err != nil {
+			return nil, err
+		}
+		if workerTarget != (TargetCredentials{UserHome: target.UserHome, UID: target.UID, GID: target.GID}) || options.AgentVersion != "" {
+			return nil, fmt.Errorf("worker asked for %+v with agent version %q", workerTarget, options.AgentVersion)
+		}
+		operations = append(operations, operation)
+		return json.Marshal(reply)
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+
+	set := ResolveWatchPaths(context.Background(), opts)
+	if !slices.Equal(operations, []string{targetOperationWatchPaths}) {
+		t.Fatalf("worker operations = %v, want one %s", operations, targetOperationWatchPaths)
+	}
+	if set.DirsErr != nil || set.OwnershipErr != nil || !slices.Equal(set.Dirs, reply.Dirs) ||
+		!slices.Equal(set.Ownership.ExclusiveWriter, reply.ExclusiveWriter) ||
+		!slices.Equal(set.Ownership.SharedWriter, reply.SharedWriter) {
+		t.Fatalf("root ResolveWatchPaths = %+v, want the worker's answer %+v", set, reply)
+	}
+
+	// Each half keeps its own error, as the in-process calls do.
+	reply.Dirs, reply.DirsError = nil, "enterprise hooks: specific data dir failure"
+	set = ResolveWatchPaths(context.Background(), opts)
+	if set.DirsErr == nil || set.DirsErr.Error() != reply.DirsError || set.OwnershipErr != nil ||
+		!slices.Equal(set.Ownership.SharedWriter, reply.SharedWriter) {
+		t.Fatalf("root ResolveWatchPaths with a dirs failure = %+v", set)
+	}
+
+	// The guardian watches the returned directories itself, so one outside
+	// the target home is refused.
+	reply.DirsError = ""
+	reply.Dirs = []string{filepath.Dir(target.UserHome)}
+	set = ResolveWatchPaths(context.Background(), opts)
+	if set.DirsErr == nil || !strings.Contains(set.DirsErr.Error(), "outside the target home") || set.OwnershipErr == nil {
+		t.Fatalf("root ResolveWatchPaths accepted a watch dir outside the home: %+v", set)
+	}
+}
+
+// requireCodexWatchFixture creates the Codex config and hook directory that
+// WatchDirs and WatchOwnedFiles report for a codex target.
+func requireCodexWatchFixture(t *testing.T, home string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".defenseclaw", "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTargetWorkerSubprocessResolvesWatchPaths(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	target := currentTestTarget(t)
+	requireCodexWatchFixture(t, target.UserHome)
+	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
+	opts.AgentVersion = ""
+	// The worker reads the user's agent discovery cache for the version; a
+	// FIFO there must not hold it up.
+	if err := syscall.Mkfifo(filepath.Join(target.UserHome, ".defenseclaw", "agent_discovery.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantDirs, err := WatchDirs(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOwnership, err := WatchOwnedFiles(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	set, err := resolveWatchPathsThroughTargetWorker(ctx, opts)
+	if err != nil {
+		t.Fatalf("worker watch paths: %v", err)
+	}
+	if set.DirsErr != nil || set.OwnershipErr != nil || !slices.Equal(set.Dirs, wantDirs) ||
+		!reflect.DeepEqual(set.Ownership, wantOwnership) {
+		t.Fatalf("worker watch paths = %+v\nwant dirs %v ownership %+v", set, wantDirs, wantOwnership)
+	}
+}
+
+func TestRootGuardianResolvesWatchPathsInWorkerDespiteFIFOCache(t *testing.T) {
+	f := newRootWorkerFixture(t)
+	f.mkdirTarget(t, filepath.Join(f.home, ".defenseclaw"))
+	f.mkdirTarget(t, f.hookDir)
+	cache := filepath.Join(f.home, ".defenseclaw", "agent_discovery.json")
+	if err := syscall.Mkfifo(cache, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(cache, f.uid, f.gid); err != nil {
+		t.Fatal(err)
+	}
+	opts := codexInstallOptions(f.home, f.uid, f.gid)
+	opts.AgentVersion = ""
+	if _, err := WatchDirs(opts); !errors.Is(err, errRootTargetPathOperation) {
+		t.Fatalf("WatchDirs in the root guardian = %v, want refusal", err)
+	}
+	done := make(chan WatchPathSet, 1)
+	go func() { done <- ResolveWatchPaths(context.Background(), opts) }()
+	var set WatchPathSet
+	select {
+	case set = <-done:
+	case <-time.After(30 * time.Second):
+		if writer, err := os.OpenFile(cache, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = writer.Close()
+		}
+		<-done
+		t.Fatal("root ResolveWatchPaths blocked on a FIFO agent discovery cache")
+	}
+	if set.DirsErr != nil || set.OwnershipErr != nil {
+		t.Fatalf("root ResolveWatchPaths = %+v", set)
+	}
+	for _, want := range []string{filepath.Dir(f.codexConfig), filepath.Join(f.home, ".defenseclaw"), f.hookDir} {
+		if !slices.Contains(set.Dirs, want) {
+			t.Fatalf("root watch dirs = %v, missing %s", set.Dirs, want)
+		}
+	}
+	if !slices.Contains(set.Ownership.SharedWriter, f.codexConfig) {
+		t.Fatalf("root owned shared-writer files = %v, missing %s", set.Ownership.SharedWriter, f.codexConfig)
+	}
+}
+
+// A target user can stop or block their own worker until its deadline. In a
+// reconcile pass that costs that user's targets one deadline, not one per
+// worker, and never delays other users' workers.
+func TestTargetWorkerPassSkipsOnlyTheStalledUserForThePass(t *testing.T) {
+	calls := map[int]int{}
+	original := targetWorkerRunner
+	targetWorkerRunner = func(_ context.Context, target TargetCredentials, _ string, _ json.RawMessage) (json.RawMessage, error) {
+		calls[target.UID]++
+		switch target.UID {
+		case 1001:
+			return nil, fmt.Errorf("enterprise hooks: target worker for uid 1001 did not finish: %w", context.DeadlineExceeded)
+		case 1002:
+			return nil, errors.New("enterprise hooks: target worker for uid 1002 failed: exit status 1")
+		}
+		return json.RawMessage(`{}`), nil
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+	stalled := TargetCredentials{UserHome: "/home/stalled", UID: 1001, GID: 1001}
+	failing := TargetCredentials{UserHome: "/home/failing", UID: 1002, GID: 1002}
+	healthy := TargetCredentials{UserHome: "/home/healthy", UID: 1003, GID: 1003}
+
+	pass := WithTargetWorkerPass(context.Background())
+	var skipped error
+	for i := 0; i < 3; i++ {
+		_, err := runTargetWorker(pass, stalled, targetOperationVerify, nil)
+		if i > 0 {
+			skipped = err
+		}
+		if _, err := runTargetWorker(pass, failing, targetOperationVerify, nil); err == nil {
+			t.Fatal("failing worker reported success")
+		}
+		if _, err := runTargetWorker(pass, healthy, targetOperationVerify, nil); err != nil {
+			t.Fatalf("healthy worker: %v", err)
+		}
+	}
+	if calls[1001] != 1 || calls[1002] != 3 || calls[1003] != 3 {
+		t.Fatalf("worker calls = %v, want one for the stalled user and every call for the others", calls)
+	}
+	if skipped == nil || !strings.Contains(skipped.Error(), targetWorkerPassSkipMessage) {
+		t.Fatalf("skipped worker error = %v", skipped)
+	}
+
+	// The next pass tries the user again; outside a pass every call runs.
+	if _, err := runTargetWorker(WithTargetWorkerPass(context.Background()), stalled, targetOperationVerify, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("next pass = %v, want a new worker attempt", err)
+	}
+	for i := 0; i < 2; i++ {
+		_, _ = runTargetWorker(context.Background(), stalled, targetOperationVerify, nil)
+	}
+	if calls[1001] != 4 {
+		t.Fatalf("stalled user worker calls = %d, want 4", calls[1001])
+	}
+}
+
+// In a reconcile pass a root guardian that saw a user's worker miss its
+// deadline does not start more workers for that user: not the repair after
+// the failed verification, and not the watch-path resolution.
+func TestRootReconcilePassSkipsFurtherWorkersAfterADeadline(t *testing.T) {
+	target := currentTestTarget(t)
+	stubTargetProcessEUID(t, 0)
+	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
+	var operations []string
+	original := targetWorkerRunner
+	targetWorkerRunner = func(_ context.Context, _ TargetCredentials, operation string, _ json.RawMessage) (json.RawMessage, error) {
+		operations = append(operations, operation)
+		return nil, fmt.Errorf("enterprise hooks: target worker for uid %d did not finish: %w", target.UID, context.DeadlineExceeded)
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+
+	pass := WithTargetWorkerPass(context.Background())
+	if _, err := Verify(pass, opts); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Verify = %v, want the worker deadline", err)
+	}
+	if _, err := Install(pass, opts); err == nil || !strings.Contains(err.Error(), targetWorkerPassSkipMessage) {
+		t.Fatalf("Install after a stalled worker = %v, want an immediate skip", err)
+	}
+	if set := ResolveWatchPaths(pass, opts); set.DirsErr == nil || set.OwnershipErr == nil {
+		t.Fatalf("ResolveWatchPaths after a stalled worker = %+v, want an immediate skip", set)
+	}
+	if !slices.Equal(operations, []string{targetOperationVerifyWithWatchPaths}) {
+		t.Fatalf("worker operations = %v, want only the verification that stalled", operations)
+	}
+}
+
+func TestTargetWorkerPassRecognizesARealWorkerDeadline(t *testing.T) {
+	target := currentTestTarget(t)
+	pass := WithTargetWorkerPass(context.Background())
+	ctx, cancel := context.WithTimeout(pass, 300*time.Millisecond)
+	defer cancel()
+	if _, err := runTargetWorker(ctx, target, testTargetOperationSleep, json.RawMessage(`null`)); err == nil ||
+		!strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("hung worker = %v, want a deadline failure", err)
+	}
+	if _, err := runTargetWorker(pass, target, testTargetOperationIdentity, json.RawMessage(`"x"`)); err == nil ||
+		!strings.Contains(err.Error(), targetWorkerPassSkipMessage) {
+		t.Fatalf("worker after a real deadline = %v, want an immediate skip", err)
+	}
+}
+
+// Root counterpart of the deadline subprocess test: the guardian stops a
+// dropped worker that does not finish, and the pass starts no further
+// workers for that user.
+func TestRootGuardianWorkerDeadlineSkipsThatUserForThePass(t *testing.T) {
+	f := newRootWorkerFixture(t)
+	target := TargetCredentials{UserHome: f.home, UID: f.uid, GID: f.gid}
+	pass := WithTargetWorkerPass(context.Background())
+	ctx, cancel := context.WithTimeout(pass, 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := RunTargetOperation(ctx, target, testTargetOperationSleep, nil, nil); err == nil || !strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("hung root worker = %v, want a deadline failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("hung root worker was stopped after %s", elapsed)
+	}
+	var identity testTargetIdentity
+	if err := RunTargetOperation(pass, target, testTargetOperationIdentity, "root", &identity); err == nil ||
+		!strings.Contains(err.Error(), targetWorkerPassSkipMessage) {
+		t.Fatalf("root worker after a deadline = %v, want an immediate skip", err)
+	}
+	if err := RunTargetOperation(context.Background(), target, testTargetOperationIdentity, "root", &identity); err != nil || identity.UID != f.uid {
+		t.Fatalf("root worker outside the pass = %+v, %v", identity, err)
+	}
+}
+
+const targetWorkerPassSkipMessage = "used up their time in this reconcile pass"
+
+func stubTargetWorkerPassBudget(t *testing.T, budget time.Duration) {
+	t.Helper()
+	previous := targetWorkerPassBudget
+	targetWorkerPassBudget = budget
+	t.Cleanup(func() { targetWorkerPassBudget = previous })
+}
+
+// A user who stops each of their workers and resumes it just before its
+// deadline never makes one miss it. The user's workers still share one
+// budget per pass: each runs only for what is left of it, and none starts
+// once it is used up. Other users keep their own budgets.
+func TestTargetWorkerPassSharesOneBudgetAcrossAUsersWorkers(t *testing.T) {
+	const budget = time.Second
+	const pause = 700 * time.Millisecond
+	stubTargetWorkerPassBudget(t, budget)
+	var mu sync.Mutex
+	calls := map[int]int{}
+	left := map[int][]time.Duration{}
+	original := targetWorkerRunner
+	targetWorkerRunner = func(ctx context.Context, target TargetCredentials, _ string, _ json.RawMessage) (json.RawMessage, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, errors.New("worker has no deadline")
+		}
+		mu.Lock()
+		calls[target.UID]++
+		left[target.UID] = append(left[target.UID], time.Until(deadline))
+		mu.Unlock()
+		if target.UID != 1001 {
+			return json.RawMessage(`{}`), nil
+		}
+		select {
+		case <-time.After(pause):
+			return json.RawMessage(`{}`), nil
+		case <-ctx.Done():
+			return nil, fmt.Errorf("enterprise hooks: target worker for uid 1001 did not finish: %w", ctx.Err())
+		}
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+	pausing := TargetCredentials{UserHome: "/home/pausing", UID: 1001, GID: 1001}
+	healthy := TargetCredentials{UserHome: "/home/healthy", UID: 1003, GID: 1003}
+
+	pass := WithTargetWorkerPass(context.Background())
+	started := time.Now()
+	var errs []error
+	for i := 0; i < 3; i++ {
+		_, err := runTargetWorker(pass, pausing, targetOperationVerify, nil)
+		errs = append(errs, err)
+		if _, err := runTargetWorker(pass, healthy, targetOperationVerify, nil); err != nil {
+			t.Fatalf("healthy worker %d: %v", i, err)
+		}
+	}
+	elapsed := time.Since(started)
+	if errs[0] != nil || !errors.Is(errs[1], context.DeadlineExceeded) ||
+		errs[2] == nil || !strings.Contains(errs[2].Error(), targetWorkerPassSkipMessage) {
+		t.Fatalf("pausing user's workers = %v, want one in time, one stopped at the budget, one skipped", errs)
+	}
+	if calls[1001] != 2 || calls[1003] != 3 {
+		t.Fatalf("worker calls = %v, want 2 for the pausing user and 3 for the other", calls)
+	}
+	if second := left[1001][1]; second > budget-pause {
+		t.Fatalf("second worker had %s, want at most the %s left of the budget", second, budget-pause)
+	}
+	for i, got := range left[1003] {
+		if got < budget-100*time.Millisecond {
+			t.Fatalf("other user's worker %d had %s, want its own full budget", i, got)
+		}
+	}
+	// Three workers that each pause for 700ms would take 2.1s.
+	if elapsed > budget+700*time.Millisecond {
+		t.Fatalf("pass took %s, want about the %s budget", elapsed, budget)
+	}
+}
+
+// The same with real worker processes.
+func TestTargetWorkerSubprocessPassBudgetStopsAPausingUser(t *testing.T) {
+	target := currentTestTarget(t)
+	stubTargetWorkerPassBudget(t, 1500*time.Millisecond)
+	pass := WithTargetWorkerPass(context.Background())
+	started := time.Now()
+	var errs []error
+	for i := 0; i < 3; i++ {
+		_, err := runTargetWorker(pass, target, testTargetOperationPause, json.RawMessage(`1000`))
+		errs = append(errs, err)
+	}
+	elapsed := time.Since(started)
+	if errs[0] != nil || errs[1] == nil || !strings.Contains(errs[1].Error(), "did not finish") ||
+		errs[2] == nil || !strings.Contains(errs[2].Error(), targetWorkerPassSkipMessage) {
+		t.Fatalf("pausing workers = %v, want one in time, one stopped at the budget, one skipped", errs)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("pass took %s", elapsed)
+	}
+}
+
+// In a reconcile pass the Install or Verify worker also reports the
+// target's watch paths, so ResolveWatchPaths starts no worker of its own,
+// and the paths come from the last worker that ran for those options.
+func TestRootReconcilePassTakesWatchPathsFromTheInstallOrVerifyWorker(t *testing.T) {
+	target := currentTestTarget(t)
+	stubTargetProcessEUID(t, 0)
+	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	result := InstallResult{Connector: "codex", UserHome: target.UserHome, DataDir: dataDir}
+	answers := map[string]targetInstallWithWatchPathsResult{
+		targetOperationVerifyWithWatchPaths: {
+			Error: "enterprise hooks: specific verification failure",
+			Watch: targetWatchPathsResult{Dirs: []string{filepath.Join(target.UserHome, ".codex")}},
+		},
+		targetOperationInstallWithWatchPaths: {
+			Result: &result,
+			Watch: targetWatchPathsResult{
+				Dirs:         []string{filepath.Join(target.UserHome, ".codex"), dataDir},
+				SharedWriter: []string{filepath.Join(target.UserHome, ".codex", "config.toml")},
+			},
+		},
+	}
+	var operations []string
+	original := targetWorkerRunner
+	targetWorkerRunner = func(_ context.Context, _ TargetCredentials, operation string, _ json.RawMessage) (json.RawMessage, error) {
+		operations = append(operations, operation)
+		answer, ok := answers[operation]
+		if !ok {
+			return nil, fmt.Errorf("unexpected worker operation %s", operation)
+		}
+		return json.Marshal(answer)
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+
+	pass := WithTargetWorkerPass(context.Background())
+	if _, err := Verify(pass, opts); err == nil || err.Error() != "enterprise hooks: specific verification failure" {
+		t.Fatalf("Verify = %v, want the worker's own failure", err)
+	}
+	set := ResolveWatchPaths(pass, opts)
+	if set.DirsErr != nil || !slices.Equal(set.Dirs, answers[targetOperationVerifyWithWatchPaths].Watch.Dirs) {
+		t.Fatalf("watch paths after a failed verification = %+v", set)
+	}
+	if got, err := Install(pass, opts); err != nil || got.UserHome != target.UserHome {
+		t.Fatalf("Install = %+v, %v", got, err)
+	}
+	set = ResolveWatchPaths(pass, opts)
+	install := answers[targetOperationInstallWithWatchPaths].Watch
+	if set.DirsErr != nil || set.OwnershipErr != nil || !slices.Equal(set.Dirs, install.Dirs) ||
+		!slices.Equal(set.Ownership.SharedWriter, install.SharedWriter) {
+		t.Fatalf("watch paths after the repair = %+v, want %+v", set, install)
+	}
+	if want := []string{targetOperationVerifyWithWatchPaths, targetOperationInstallWithWatchPaths}; !slices.Equal(operations, want) {
+		t.Fatalf("worker operations = %v, want %v", operations, want)
+	}
+
+	// Other options are another request: that one needs its own worker.
+	other := opts
+	other.AgentVersion = "codex-cli 0.143.0"
+	operations = nil
+	if set := ResolveWatchPaths(pass, other); set.DirsErr == nil {
+		t.Fatalf("watch paths for other options = %+v, want this stub's refusal", set)
+	}
+	if !slices.Equal(operations, []string{targetOperationWatchPaths}) {
+		t.Fatalf("worker operations = %v, want one %s", operations, targetOperationWatchPaths)
+	}
+
+	// A watch directory outside the home fails both halves, and the result
+	// still binds to the target.
+	answers[targetOperationVerifyWithWatchPaths] = targetInstallWithWatchPathsResult{
+		Result: &result,
+		Watch:  targetWatchPathsResult{Dirs: []string{filepath.Dir(target.UserHome)}},
+	}
+	if _, err := Verify(pass, opts); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if set := ResolveWatchPaths(pass, opts); set.DirsErr == nil || !strings.Contains(set.DirsErr.Error(), "outside the target home") || set.OwnershipErr == nil {
+		t.Fatalf("watch paths with a directory outside the home = %+v", set)
+	}
+	foreign := result
+	foreign.UserHome = t.TempDir()
+	answers[targetOperationVerifyWithWatchPaths] = targetInstallWithWatchPathsResult{Result: &foreign}
+	if _, err := Verify(pass, opts); err == nil || !strings.Contains(err.Error(), "different target") {
+		t.Fatalf("Verify accepted a result for another home: %v", err)
+	}
+}
+
+func TestTargetWorkerSubprocessReportsWatchPathsWithInstallAndVerify(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	target := currentTestTarget(t)
+	requireCodexWatchFixture(t, target.UserHome)
+	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
+	opts.AllowMissingHookConfigRepair = true
+	var operations []string
+	original := targetWorkerRunner
+	targetWorkerRunner = func(ctx context.Context, workerTarget TargetCredentials, operation string, payload json.RawMessage) (json.RawMessage, error) {
+		operations = append(operations, operation)
+		return spawnTargetWorker(ctx, workerTarget, operation, payload)
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+
+	pass := WithTargetWorkerPass(context.Background())
+	if _, err := installThroughTargetWorker(pass, opts, targetOperationInstall); err != nil {
+		t.Fatalf("worker Install: %v", err)
+	}
+	// The root path of ResolveWatchPaths; this test process is not root.
+	set, err := resolveWatchPathsThroughTargetWorker(pass, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDirs, err := WatchDirs(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOwnership, err := WatchOwnedFiles(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.DirsErr != nil || set.OwnershipErr != nil || !slices.Equal(set.Dirs, wantDirs) ||
+		!reflect.DeepEqual(set.Ownership, wantOwnership) {
+		t.Fatalf("watch paths from the install worker = %+v\nwant dirs %v ownership %+v", set, wantDirs, wantOwnership)
+	}
+	if _, err := installThroughTargetWorker(pass, opts, targetOperationVerify); err != nil {
+		t.Fatalf("worker Verify: %v", err)
+	}
+	if again, err := resolveWatchPathsThroughTargetWorker(pass, opts); err != nil || again.DirsErr != nil || !slices.Equal(again.Dirs, wantDirs) {
+		t.Fatalf("watch paths from the verify worker = %+v, %v", again, err)
+	}
+	if want := []string{targetOperationInstallWithWatchPaths, targetOperationVerifyWithWatchPaths}; !slices.Equal(operations, want) {
+		t.Fatalf("worker operations = %v, want %v", operations, want)
+	}
+}
+
+// Root counterpart: a reconcile pass repairs a target and resolves its
+// watch paths with one worker.
+func TestRootGuardianReconcilePassRepairsAndResolvesWatchPathsInOneWorker(t *testing.T) {
+	f := newRootWorkerFixture(t)
+	if err := os.Chmod(f.codexConfig, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	opts := f.repairOptions()
+	var operations []string
+	original := targetWorkerRunner
+	targetWorkerRunner = func(ctx context.Context, target TargetCredentials, operation string, payload json.RawMessage) (json.RawMessage, error) {
+		operations = append(operations, operation)
+		return spawnTargetWorker(ctx, target, operation, payload)
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+	pass := WithTargetWorkerPass(context.Background())
+	if _, err := Install(pass, opts); err != nil {
+		t.Fatalf("root Install in a pass: %v", err)
+	}
+	set := ResolveWatchPaths(pass, opts)
+	if set.DirsErr != nil || set.OwnershipErr != nil {
+		t.Fatalf("root watch paths = %+v", set)
+	}
+	for _, want := range []string{filepath.Dir(f.codexConfig), filepath.Join(f.home, ".defenseclaw"), f.hookDir} {
+		if !slices.Contains(set.Dirs, want) {
+			t.Fatalf("root watch dirs = %v, missing %s", set.Dirs, want)
+		}
+	}
+	if !slices.Contains(set.Ownership.SharedWriter, f.codexConfig) {
+		t.Fatalf("root shared-writer files = %v, missing %s", set.Ownership.SharedWriter, f.codexConfig)
+	}
+	if !slices.Equal(operations, []string{targetOperationInstallWithWatchPaths}) {
+		t.Fatalf("worker operations = %v, want one %s", operations, targetOperationInstallWithWatchPaths)
 	}
 }

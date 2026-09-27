@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // A root guardian never touches a user's home with its own credentials and
@@ -49,8 +50,14 @@ const (
 	targetWorkerTimeout         = 2 * time.Minute
 	targetWorkerWaitDelay       = 5 * time.Second
 
-	targetOperationInstall = "enterprise-hooks.install"
-	targetOperationVerify  = "enterprise-hooks.verify"
+	targetOperationInstall    = "enterprise-hooks.install"
+	targetOperationVerify     = "enterprise-hooks.verify"
+	targetOperationWatchPaths = "enterprise-hooks.watch-paths"
+	// Install and Verify that also report the target's watch paths, for a
+	// reconcile pass (see WithTargetWorkerPass). A guardian that predates
+	// them sends only the plain operations, whose answers are unchanged.
+	targetOperationInstallWithWatchPaths = "enterprise-hooks.install-with-watch-paths"
+	targetOperationVerifyWithWatchPaths  = "enterprise-hooks.verify-with-watch-paths"
 
 	targetWorkerExitProtocol = 2
 	targetWorkerExitIdentity = 3
@@ -100,6 +107,10 @@ type targetWorkerRequest struct {
 	GID       int             `json:"gid"`
 	Home      string          `json:"home"`
 	Payload   json.RawMessage `json:"payload"`
+	// BinaryVersion is the guardian's release version. The worker exits
+	// before CLI initialization records it, and operations stamp it into
+	// the files they write (the hook contract lock's defenseclaw_version).
+	BinaryVersion string `json:"binary_version,omitempty"`
 }
 
 type targetWorkerResponse struct {
@@ -206,6 +217,71 @@ func init() {
 		}
 		return result, nil
 	})
+	RegisterTargetOperation(targetOperationWatchPaths, func(_ context.Context, target TargetCredentials, payload json.RawMessage) (any, error) {
+		opts, err := decodeTargetInstallRequest(target, payload)
+		if err != nil {
+			return nil, err
+		}
+		return resolveTargetWatchPaths(opts), nil
+	})
+	registerTargetInstallWithWatchPaths(targetOperationInstallWithWatchPaths, Install)
+	registerTargetInstallWithWatchPaths(targetOperationVerifyWithWatchPaths, Verify)
+}
+
+// targetInstallWithWatchPathsResult answers an Install or Verify that also
+// resolves the target's watch paths after the operation, whether or not it
+// succeeded. Error is the operation's own failure.
+type targetInstallWithWatchPathsResult struct {
+	Result *InstallResult         `json:"result,omitempty"`
+	Error  string                 `json:"error,omitempty"`
+	Watch  targetWatchPathsResult `json:"watch"`
+}
+
+func registerTargetInstallWithWatchPaths(name string, run func(context.Context, InstallOptions) (InstallResult, error)) {
+	RegisterTargetOperation(name, func(ctx context.Context, target TargetCredentials, payload json.RawMessage) (any, error) {
+		opts, err := decodeTargetInstallRequest(target, payload)
+		if err != nil {
+			return nil, err
+		}
+		var answer targetInstallWithWatchPathsResult
+		result, err := run(ctx, opts)
+		if err != nil {
+			answer.Error = err.Error()
+			if answer.Error == "" {
+				answer.Error = "enterprise hooks: target operation failed without a reason"
+			}
+		} else {
+			answer.Result = &result
+		}
+		answer.Watch = resolveTargetWatchPaths(opts)
+		return answer, nil
+	})
+}
+
+// targetWatchPathsResult carries WatchDirs and WatchOwnedFiles back from
+// the worker; each keeps its own error, as the in-process calls do.
+type targetWatchPathsResult struct {
+	Dirs            []string `json:"dirs,omitempty"`
+	DirsError       string   `json:"dirs_error,omitempty"`
+	ExclusiveWriter []string `json:"exclusive_writer,omitempty"`
+	SharedWriter    []string `json:"shared_writer,omitempty"`
+	OwnershipError  string   `json:"ownership_error,omitempty"`
+}
+
+func resolveTargetWatchPaths(opts InstallOptions) targetWatchPathsResult {
+	var result targetWatchPathsResult
+	if dirs, err := WatchDirs(opts); err != nil {
+		result.DirsError = err.Error()
+	} else {
+		result.Dirs = dirs
+	}
+	if ownership, err := WatchOwnedFiles(opts); err != nil {
+		result.OwnershipError = err.Error()
+	} else {
+		result.ExclusiveWriter = ownership.ExclusiveWriter
+		result.SharedWriter = ownership.SharedWriter
+	}
+	return result
 }
 
 func decodeTargetInstallRequest(target TargetCredentials, payload json.RawMessage) (InstallOptions, error) {
@@ -220,33 +296,40 @@ func decodeTargetInstallRequest(target TargetCredentials, payload json.RawMessag
 	return request.installOptions(), nil
 }
 
-// installThroughTargetWorker is the root path of Install and Verify on Unix.
-// The guardian only resolves the target's identity (read-only) and then
-// hands the whole operation, including every validation and repair, to a
-// worker running as that user.
-func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operation string) (InstallResult, error) {
+// targetWorkerInstallCall is a root guardian's request for one target's
+// Install-shaped worker operation, with the identity it resolved.
+type targetWorkerInstallCall struct {
+	target    TargetCredentials
+	connector string
+	dataDir   string
+	payload   json.RawMessage
+}
+
+// prepareTargetWorkerInstallCall resolves the target's identity (read-only)
+// and encodes opts for the worker, which does every validation and repair.
+func prepareTargetWorkerInstallCall(opts InstallOptions) (targetWorkerInstallCall, error) {
 	if targetWorkerActive.Load() {
-		return InstallResult{}, errTargetWorkerRecursion
+		return targetWorkerInstallCall{}, errTargetWorkerRecursion
 	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
-		return InstallResult{}, err
+		return targetWorkerInstallCall{}, err
 	}
 	uid, gid, err := resolveOwner(home, opts.OwnerUID, opts.OwnerGID)
 	if err != nil {
-		return InstallResult{}, err
+		return targetWorkerInstallCall{}, err
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
 	if name == "" {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector is required")
+		return targetWorkerInstallCall{}, fmt.Errorf("enterprise hooks: connector is required")
 	}
 	if opts.Registry != nil {
 		conn, ok := opts.Registry.Get(name)
 		if !ok {
-			return InstallResult{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
+			return targetWorkerInstallCall{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
 		}
 		if !connector.IsKnownBuiltinConnector(conn.Name()) {
-			return InstallResult{}, fmt.Errorf(
+			return targetWorkerInstallCall{}, fmt.Errorf(
 				"enterprise hooks: connector %q is not built in; a root guardian runs only built-in connectors in the per-target worker",
 				name,
 			)
@@ -258,26 +341,146 @@ func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operat
 	}
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
+		return targetWorkerInstallCall{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
 	}
 	payload, err := json.Marshal(newTargetInstallRequest(opts, home, uid, gid))
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: encode target install request: %w", err)
+		return targetWorkerInstallCall{}, fmt.Errorf("enterprise hooks: encode target install request: %w", err)
 	}
-	raw, err := targetWorkerRunner(ctx, TargetCredentials{UserHome: home, UID: uid, GID: gid}, operation, payload)
+	return targetWorkerInstallCall{
+		target:    TargetCredentials{UserHome: home, UID: uid, GID: gid},
+		connector: name,
+		dataDir:   dataDir,
+		payload:   payload,
+	}, nil
+}
+
+// installThroughTargetWorker is the root path of Install and Verify on Unix.
+// The guardian only resolves the target's identity (read-only) and then
+// hands the whole operation, including every validation and repair, to a
+// worker running as that user. In a reconcile pass the same worker also
+// reports the target's watch paths, which the pass keeps for
+// ResolveWatchPaths.
+func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operation string) (InstallResult, error) {
+	call, err := prepareTargetWorkerInstallCall(opts)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	var result InstallResult
-	if err := decodeTargetOperationJSON(raw, &result); err != nil {
+	pass := targetWorkerPassFrom(ctx)
+	withWatchPaths := map[string]string{
+		targetOperationInstall: targetOperationInstallWithWatchPaths,
+		targetOperationVerify:  targetOperationVerifyWithWatchPaths,
+	}[operation]
+	if pass == nil || withWatchPaths == "" {
+		raw, err := runTargetWorker(ctx, call.target, operation, call.payload)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		var result InstallResult
+		if err := decodeTargetOperationJSON(raw, &result); err != nil {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: decode target worker result: %w", err)
+		}
+		return call.bindResult(result)
+	}
+	raw, err := runTargetWorker(ctx, call.target, withWatchPaths, call.payload)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	var answer targetInstallWithWatchPathsResult
+	if err := decodeTargetOperationJSON(raw, &answer); err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: decode target worker result: %w", err)
 	}
-	// The worker runs as the target user, so bind its answer to the target
-	// the guardian asked about.
-	if result.Connector != name || filepath.Clean(result.UserHome) != home || filepath.Clean(result.DataDir) != dataDir {
+	pass.storeWatchPaths(call.payload, call.watchPathSet(answer.Watch))
+	if answer.Error != "" {
+		// Keep the operation's own message, as spawnTargetWorker does.
+		return InstallResult{}, errors.New(answer.Error)
+	}
+	if answer.Result == nil {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: target worker returned no result")
+	}
+	return call.bindResult(*answer.Result)
+}
+
+// bindResult accepts a worker's result only for the target the guardian
+// asked about: the worker runs as the target user.
+func (call targetWorkerInstallCall) bindResult(result InstallResult) (InstallResult, error) {
+	if result.Connector != call.connector || filepath.Clean(result.UserHome) != call.target.UserHome ||
+		filepath.Clean(result.DataDir) != call.dataDir {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: target worker returned a result for a different target")
 	}
 	return result, nil
+}
+
+// watchPathSet converts a worker's watch paths. The guardian watches these
+// directories with its own credentials, so it accepts only what WatchDirs
+// can return: clean absolute paths inside the target home; otherwise both
+// halves fail. Owned files are watched only inside those directories.
+func (call targetWorkerInstallCall) watchPathSet(result targetWatchPathsResult) WatchPathSet {
+	for _, dir := range result.Dirs {
+		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || !pathInside(call.target.UserHome, dir) {
+			err := fmt.Errorf("enterprise hooks: target worker returned watch directory %q outside the target home", dir)
+			return WatchPathSet{DirsErr: err, OwnershipErr: err}
+		}
+	}
+	set := WatchPathSet{
+		Dirs:      result.Dirs,
+		Ownership: WatchOwnership{ExclusiveWriter: result.ExclusiveWriter, SharedWriter: result.SharedWriter},
+	}
+	if result.DirsError != "" {
+		set.DirsErr = errors.New(result.DirsError)
+	}
+	if result.OwnershipError != "" {
+		set.OwnershipErr = errors.New(result.OwnershipError)
+	}
+	return set
+}
+
+// resolveWatchPathsThroughTargetWorker is the root path of ResolveWatchPaths
+// on Unix: the worker, running as the target user, computes WatchDirs and
+// WatchOwnedFiles. In a reconcile pass it takes them from the Install or
+// Verify worker that already ran for the same request.
+func resolveWatchPathsThroughTargetWorker(ctx context.Context, opts InstallOptions) (WatchPathSet, error) {
+	call, err := prepareTargetWorkerInstallCall(opts)
+	if err != nil {
+		return WatchPathSet{}, err
+	}
+	if pass := targetWorkerPassFrom(ctx); pass != nil {
+		if set, ok := pass.watchPaths(call.payload); ok {
+			return set, nil
+		}
+	}
+	raw, err := runTargetWorker(ctx, call.target, targetOperationWatchPaths, call.payload)
+	if err != nil {
+		return WatchPathSet{}, err
+	}
+	var result targetWatchPathsResult
+	if err := decodeTargetOperationJSON(raw, &result); err != nil {
+		return WatchPathSet{}, fmt.Errorf("enterprise hooks: decode target worker watch paths: %w", err)
+	}
+	return call.watchPathSet(result), nil
+}
+
+// runTargetWorker runs one operation in a worker. In a reconcile pass (see
+// WithTargetWorkerPass) the worker runs only for what is left of its user's
+// budget, and does not start once that is used up.
+func runTargetWorker(ctx context.Context, target TargetCredentials, operation string, payload json.RawMessage) (json.RawMessage, error) {
+	pass := targetWorkerPassFrom(ctx)
+	if pass == nil {
+		return targetWorkerRunner(ctx, target, operation, payload)
+	}
+	left, ok := pass.remaining(target.UID)
+	if !ok {
+		return nil, fmt.Errorf(
+			"enterprise hooks: skipping the target worker for uid %d: this user's workers used up their time in this reconcile pass",
+			target.UID,
+		)
+	}
+	workerCtx, cancel := context.WithTimeout(ctx, left)
+	defer cancel()
+	started := time.Now()
+	raw, err := targetWorkerRunner(workerCtx, target, operation, payload)
+	pass.charge(target.UID, time.Since(started), err != nil && errors.Is(err, context.DeadlineExceeded))
+	return raw, err
 }
 
 // runTargetOperation validates the target and runs op with its credentials.
@@ -301,7 +504,7 @@ func runTargetOperation(
 		if targetWorkerActive.Load() {
 			return nil, errTargetWorkerRecursion
 		}
-		return targetWorkerRunner(ctx, target, name, payload)
+		return runTargetWorker(ctx, target, name, payload)
 	}
 	var result json.RawMessage
 	err = withOwnerCredentials(uid, gid, func() error {
@@ -331,6 +534,8 @@ func spawnTargetWorker(ctx context.Context, target TargetCredentials, operation 
 		GID:       target.GID,
 		Home:      target.UserHome,
 		Payload:   payload,
+
+		BinaryVersion: version.Current().BinaryVersion,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("enterprise hooks: encode target worker request: %w", err)
@@ -505,6 +710,9 @@ func runTargetWorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	_ = syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0})
 	syscall.Umask(0o077)
+	if binaryVersion := strings.TrimSpace(request.BinaryVersion); binaryVersion != "" {
+		version.SetBinaryVersion(binaryVersion)
+	}
 	targetWorkerActive.Store(true)
 	// The guardian kills the worker's process group at its deadline. macOS
 	// has no parent-death signal, so a worker orphaned by a guardian crash

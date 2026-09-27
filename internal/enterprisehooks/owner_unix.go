@@ -35,12 +35,34 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 	return result, true, err
 }
 
+// Resolving watch paths reads files in the target's home, so a root caller
+// gets them only from ResolveWatchPaths, which runs them in the per-target
+// worker.
 func platformWatchDirs(InstallOptions) ([]string, bool, error) {
+	if targetProcessEUID() == 0 {
+		return nil, true, errRootTargetPathOperation
+	}
 	return nil, false, nil
 }
 
 func platformWatchOwnedFiles(InstallOptions) (WatchOwnership, bool, error) {
+	if targetProcessEUID() == 0 {
+		return WatchOwnership{}, true, errRootTargetPathOperation
+	}
 	return WatchOwnership{}, false, nil
+}
+
+// platformResolveWatchPaths hands a root caller's watch-path resolution to
+// the per-target worker; an unprivileged caller resolves them in-process.
+func platformResolveWatchPaths(ctx context.Context, opts InstallOptions) (WatchPathSet, bool) {
+	if targetProcessEUID() != 0 {
+		return WatchPathSet{}, false
+	}
+	set, err := resolveWatchPathsThroughTargetWorker(ctx, opts)
+	if err != nil {
+		return WatchPathSet{DirsErr: err, OwnershipErr: err}, true
+	}
+	return set, true
 }
 
 func platformRemoveManagedPolicy(context.Context, InstallOptions) error {

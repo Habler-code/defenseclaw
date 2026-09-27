@@ -164,6 +164,34 @@ def test_enterprise_hook_hardening_covers_amp_without_provider_secrets() -> None
     assert "validate_amp_plugin_constants request" in hardening
 
 
+def test_enterprise_hook_hardening_runs_root_worker_tests_once_per_os() -> None:
+    job = _workflow(CI_PATH)["jobs"]["enterprise-hook-hardening"]
+    steps = [
+        step
+        for step in job["steps"]
+        if "scripts/test-enterprise-hook-root-worker.sh" in step.get("run", "")
+    ]
+    assert len(steps) == 1
+    assert steps[0].get("if") == "matrix.connector == 'codex'"
+
+    script = (ROOT / "scripts/test-enterprise-hook-root-worker.sh").read_text(encoding="utf-8")
+    assert 'sudo -n env DEFENSECLAW_TEST_TARGET_UID="$(id -u)"' in script
+    assert "-test.run '^TestRootGuardian'" in script
+    assert "'--- SKIP'" in script
+
+
+def test_enterprise_hook_hardening_tests_the_macos_guardian_watcher() -> None:
+    job = _workflow(CI_PATH)["jobs"]["enterprise-hook-hardening"]
+    steps = [
+        step
+        for step in job["steps"]
+        if "./internal/enterprisehooks/guardianwatch" in step.get("run", "")
+    ]
+    assert len(steps) == 1
+    assert steps[0].get("if") == "runner.os == 'macOS' && matrix.connector == 'codex'"
+    assert "macos-latest" in job["strategy"]["matrix"]["os"]
+
+
 def test_required_go_lint_gate_typechecks_amp_against_locked_official_api() -> None:
     job = _workflow(CI_PATH)["jobs"]["go-lint"]
     rendered = _render(job)
