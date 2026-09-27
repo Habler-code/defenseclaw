@@ -64,6 +64,39 @@ stopped`. Nothing is changed; use the install command above.
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
 
+## [Unreleased] — Kiro CLI hooks
+
+### Fixed
+
+- **Kiro on native Windows blocks again, per-user installs included.** Setup
+  registers `defenseclaw-hook.exe hook --connector kiro --hook-surface v3`
+  for Kiro IDE and `kiro-cli --v3`, but the hook binary did not know
+  `--hook-surface` and exited 1, which Kiro treats as a failed hook: it
+  showed a warning and let every prompt and tool call through. The CLI 2.x
+  agent hook, which carries no marker, instead exited 2 on every event,
+  because the binary had no Kiro contract, so it blocked every tool call. The
+  binary now accepts the hidden `--hook-surface` flag (per-connector values;
+  Kiro: `v3`), answers exactly like `kiro-hook.sh`, and forwards the surface
+  in the new `X-DefenseClaw-Hook-Dialect` header (the gateway still reads
+  `X-DefenseClaw-Kiro-Surface` from `kiro-hook.sh`). Every DefenseClaw-side
+  failure of a Kiro hook, including a usage error, now exits 2, the only
+  status Kiro honors as a block.
+- **Enterprise (standalone) Kiro follows kiro-cli self-updates.** Kiro's hook
+  contract is not version-gated, so the Linux and macOS guardian refused
+  every repair after a kiro-cli update ("hook contract drift detected"). It
+  now follows updates at or above kiro-cli 2.24.1, the certified minimum,
+  refuses to enroll older builds in action mode, and keeps a row at its
+  certified version when the CLI is downgraded below the minimum.
+
+### Changed
+
+- **Enterprise Kiro route.** `enterprise policy show|verify` reports Kiro as
+  `per_user` on Linux and macOS, where the guardian enrolls it, instead of
+  `acp`. A managed Kiro install writes only each user's global
+  `~/.kiro/hooks/defenseclaw.json` (plus the CLI 2.x agent), never a copy in
+  the machine-wide workspace directory. Windows keeps the `acp` route: the
+  Windows guardian does not enroll Kiro.
+
 ## [Unreleased] — Hook collector unification
 
 This rollup unifies the agent hook collector across all 8 hook-first

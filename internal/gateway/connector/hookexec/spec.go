@@ -45,6 +45,10 @@ const (
 	// styleActionStderr: no stdout echo; on action=block write reason to
 	// stderr + exit 2. (amp-plugin)
 	styleActionStderr
+	// styleHookDecisionStderr: no stdout; when hook_output's decision is
+	// deny/block write its reason to stderr and exit 2. Kiro adds hook
+	// stdout to the agent's context. (kiro-hook.sh)
+	styleHookDecisionStderr
 	// stylePluginBridge: echo the whole gateway response object as one JSON
 	// line and exit 0. An in-agent plugin that delegates to this runner (the
 	// managed OpenCode plugin) reads hook_output and mode from it exactly as
@@ -173,6 +177,19 @@ var specs = map[string]spec{
 		oversizedClosed:    failResult{body: `{"decision":"block","reason":"` + tooLarge + `"}`, exit: blockExit},
 		unreachableStrict:  failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
 		responseClosed:     failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
+	},
+	// Kiro blocks PreToolUse (every surface) and UserPromptSubmit (Kiro IDE
+	// and kiro-cli --v3) with exit 2 and shows stderr; any other non-zero
+	// status is a failed hook Kiro proceeds past, so every closed failure
+	// here exits 2. Kiro appends hook stdout to the agent's context, so the
+	// hook never prints one.
+	"kiro": {
+		connector: "kiro", hookName: "kiro-hook", errLabel: "kiro",
+		subject: "kiro hook", endpoint: "/api/v1/kiro/hook",
+		outputField: "hook_output", style: styleHookDecisionStderr,
+		oversizedClosed:   failResult{exit: blockExit},
+		unreachableStrict: failResult{exit: blockExit},
+		responseClosed:    failResult{exit: blockExit},
 	},
 	"openhands": {
 		connector: "openhands", hookName: "openhands-hook", errLabel: "openhands",

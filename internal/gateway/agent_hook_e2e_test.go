@@ -791,6 +791,7 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		surface      string
+		headers      map[string]string
 		wantAction   string
 		wantRaw      string
 		wantWould    bool
@@ -809,6 +810,21 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 			// existed. Fall back to the surface that vetoes less.
 			name: "unmarked config records a would-block", surface: "",
 			wantAction: "allow", wantRaw: "block", wantWould: true,
+		},
+		{
+			// The native hook binary (Kiro on Windows) forwards its
+			// --hook-surface value in the generic dialect header.
+			name:       "native hook dialect header vetoes the prompt",
+			headers:    map[string]string{"X-DefenseClaw-Hook-Dialect": connector.KiroHookSurfaceV3},
+			wantAction: "block", wantRaw: "block", wantWould: false, wantDecision: "block",
+		},
+		{
+			name: "dialect header wins over the kiro-hook.sh header",
+			headers: map[string]string{
+				"X-DefenseClaw-Hook-Dialect": connector.KiroHookSurfaceV3,
+				"X-DefenseClaw-Kiro-Surface": connector.KiroHookSurfaceV2,
+			},
+			wantAction: "block", wantRaw: "block", wantWould: false, wantDecision: "block",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -829,6 +845,9 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			if tc.surface != "" {
 				req.Header.Set("X-DefenseClaw-Kiro-Surface", tc.surface)
+			}
+			for name, value := range tc.headers {
+				req.Header.Set(name, value)
 			}
 			w := httptest.NewRecorder()
 			http.HandlerFunc(api.handleAgentHook("kiro")).ServeHTTP(w, req)

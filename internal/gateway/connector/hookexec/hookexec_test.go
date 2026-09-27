@@ -1254,6 +1254,7 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 		"copilot":     "/api/v1/copilot/hook",
 		"antigravity": "/api/v1/antigravity/hook",
 		"hermes":      "/api/v1/hermes/hook",
+		"kiro":        "/api/v1/kiro/hook",
 	}
 	for connector, endpoint := range tests {
 		t.Run(connector, func(t *testing.T) {
@@ -2000,7 +2001,7 @@ func TestReadTokenFileManagedRejectsOversizedSparseFileWithoutChangingUnmanagedM
 
 func TestSupportedConnectorsSorted(t *testing.T) {
 	got := SupportedConnectors()
-	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode", "openhands"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

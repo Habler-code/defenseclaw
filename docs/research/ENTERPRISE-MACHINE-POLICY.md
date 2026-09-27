@@ -66,7 +66,7 @@ Legend: ✔ admin hook still ran / control held · ✘ bypass works ·
 | hermes | none (`hooks:` in `~/.hermes/config.yaml`) | — | none | — ; hook exit status/timeouts only warn (no fail-closed) | Per-user + admin hook binary; residual |
 | openhands | none; `~/.openhands/hooks.json`, project `.openhands/hooks.json` | — | none | verify per release | Linux/macOS per-user |
 | omnigent | none; `~/.omnigent/config.yaml` policy modules | — | none | — | Linux/macOS per-user |
-| kiro | none; workspace `.kiro/hooks/*.json`, user `~/.kiro/hooks/` | — | none | blocks only | `enterprise acp` mediation |
+| kiro | none (`managed-settings.json` carries permission rules only); workspace `.kiro/hooks/*.json`, user `~/.kiro/hooks/` ("All scopes merged" for IDE 1.0.182+ and `kiro-cli --v3`) | — | none | blocks only | Linux/macOS per-user (global `~/.kiro/hooks` + CLI 2.x agent); Windows `enterprise acp` mediation |
 
 ## Claude Code
 
@@ -281,7 +281,7 @@ Source: https://antigravity.google/docs/hooks (retrieved 2026-09-26).
 | hermes | `hooks:` in `~/.hermes/config.yaml` (default profile only) | none | Hermes does not enforce hook exit status, timeouts or non-zero exits — there is no fail-closed surface (DefenseClaw `hermes.mdx`, `hook_contract.go`) |
 | openhands | `~/.openhands/hooks.json`; project `.openhands/hooks.json` layers with it | none | Windows requires WSL (unsupported natively) |
 | omnigent | `~/.omnigent/config.yaml` (`policies`, `policy_modules`) | none | Windows degraded |
-| kiro | workspace `.kiro/hooks/*.json`, user `~/.kiro/hooks/` | none | DefenseClaw mediates via ACP (`enterprise acp enroll`) |
+| kiro | workspace `.kiro/hooks/*.json`, user `~/.kiro/hooks/` | none | Linux/macOS: the guardian writes each user's global `~/.kiro/hooks/defenseclaw.json` and the CLI 2.x agent. Windows: DefenseClaw mediates via ACP (`enterprise acp enroll`); the guardian cannot read the kiro-cli version without running it |
 
 ## Design implications
 
@@ -298,7 +298,7 @@ Source: https://antigravity.google/docs/hooks (retrieved 2026-09-26).
 | hermes | **No** | No | Low | No fail-closed surface upstream |
 | openhands | **No** | No | Verify per release | Project hooks layer with user hooks |
 | omnigent | **No** | No | — | Policy modules are Python code in the user profile |
-| kiro | **No** (ACP mediation) | No | — | Workspace hooks are user-controlled |
+| kiro | **No** (per-user global hooks on Linux/macOS; ACP mediation on Windows) | No | Recommended (project `.kiro/hooks` run on the same trigger); not implemented yet | User owns `~/.kiro/hooks`; `KIRO_HOME` and cloud configuration sync bypass it; CLI 2.x vetoes tool calls only |
 
 Cross-cutting requirements for DefenseClaw's implementation:
 

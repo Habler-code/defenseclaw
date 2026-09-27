@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 const (
@@ -104,7 +106,7 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	command := c.hookCommand(opts)
 	var errs []error
-	for _, path := range c.hookConfigPaths(opts) {
+	for _, path := range c.hookCleanupPaths(opts) {
 		logical := kiroBackupLogicalName(path)
 		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
 		if err != nil {
@@ -159,7 +161,7 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 
 func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 	command := c.hookCommand(opts)
-	for _, path := range c.hookConfigPaths(opts) {
+	for _, path := range c.hookCleanupPaths(opts) {
 		if present, err := kiroV3FileReferencesHook(path, command); err != nil {
 			return err
 		} else if present {
@@ -207,17 +209,23 @@ func (c *KiroConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 }
 
 func (c *KiroConnector) HookCapabilities(opts SetupOpts) HookCapability {
+	// Kiro merges hooks from every scope, and its global scope is
+	// ~/.kiro/hooks/ (kiro.dev/docs/configuration: "Hooks: All scopes
+	// merged"), read by Kiro IDE 1.0.182 and later and by kiro-cli --v3.
+	// The managed (standalone enterprise) footprint writes only that global
+	// file, so it claims the user scope. A per-user install still reports
+	// the workspace scope it has always reported; correcting that for older
+	// IDE builds, which read only the project's .kiro/hooks, is a separate
+	// per-user change.
+	scope := "workspace"
+	if kiroManaged(opts) {
+		scope = "user"
+	}
 	return HookCapability{
 		CanBlock:           true,
 		SupportsFailClosed: true,
-		// Workspace only. Kiro discovers hooks from .kiro/hooks/*.json
-		// relative to the project root (kiro.dev/docs/hooks: "Location:
-		// .kiro/hooks/ in your project root"), and documents no user-level
-		// location. ~/.kiro/hooks/defenseclaw.json is still written and
-		// tracked so teardown can reclaim it, but Kiro never reads it, so
-		// claiming a user scope here reports enforcement that cannot happen.
-		Scope:      "workspace",
-		ConfigPath: kiroHooksPath(opts),
+		Scope:              scope,
+		ConfigPath:         kiroHooksPath(opts),
 		// The declared surface is what the v3 hook config honors. Requests
 		// arriving from the CLI 2.x agent-hook config are narrowed
 		// per-request by KiroBlockEventsForSurface, because the two configs
@@ -243,6 +251,14 @@ func (c *KiroConnector) HookCapabilities(opts SetupOpts) HookCapability {
 const (
 	KiroHookSurfaceV2 = "v2"
 	KiroHookSurfaceV3 = "v3"
+)
+
+// HookDialectHeader is the generic header in which the native hook binary
+// forwards its --hook-surface value; KiroSurfaceHeader is the one kiro-hook.sh
+// sends. The gateway reads both for Kiro.
+const (
+	HookDialectHeader = hookexec.HookDialectHeader
+	KiroSurfaceHeader = "X-DefenseClaw-Kiro-Surface"
 )
 
 // KiroBlockEventsForSurface returns the events the named surface honors as a
@@ -315,9 +331,36 @@ func (c *KiroConnector) hookCommandForV3Surface(opts SetupOpts) string {
 	return c.hookCommand(opts) + " --hook-surface " + KiroHookSurfaceV3
 }
 
+// kiroManaged reports whether opts render the administrator-managed Kiro
+// footprint. Only the standalone enterprise guardian on Linux and macOS
+// manages Kiro: the Secure Client profiles do not list it and the Windows
+// guardian refuses it, so a managed Kiro install is a standalone one.
+func kiroManaged(opts SetupOpts) bool {
+	return opts.ManagedEnterprise
+}
+
+// hookConfigPaths are the v3 hook files Setup writes and verification
+// requires. A managed install writes only the user's global
+// ~/.kiro/hooks/defenseclaw.json, which Kiro merges into every workspace:
+// a workspace copy under a machine-wide workspace directory would be shared
+// by every enrolled user and is redundant with the global file.
 func (c *KiroConnector) hookConfigPaths(opts SetupOpts) []string {
 	paths := []string{kiroHooksPath(opts)}
+	if kiroManaged(opts) {
+		return paths
+	}
 	if workspace := kiroWorkspaceHooksPath(opts); workspace != "" && workspace != paths[0] {
+		paths = append(paths, workspace)
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
+// hookCleanupPaths are the v3 hook files teardown reclaims: the files Setup
+// writes plus, for a managed install, a workspace copy an earlier build
+// wrote there.
+func (c *KiroConnector) hookCleanupPaths(opts SetupOpts) []string {
+	paths := c.hookConfigPaths(opts)
+	if workspace := kiroWorkspaceHooksPath(opts); workspace != "" {
 		paths = append(paths, workspace)
 	}
 	return uniqueNonEmptyStrings(paths)

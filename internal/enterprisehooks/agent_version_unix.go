@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -366,12 +367,33 @@ func DiscoverUnixMachineAgentVersion(connector string) string {
 
 func unixAgentBinaryCandidates(home, binary string) []string {
 	dirs := unixAgentDiscoveryDirs(home)
-	candidates := make([]string, 0, len(dirs))
+	candidates := make([]string, 0, len(dirs)+2)
 	for _, dir := range dirs {
 		candidates = append(candidates, filepath.Join(dir, binary))
 	}
+	if unixAgentAppBundleGOOS == "darwin" {
+		if relative := unixAgentAppBundleBinaries[binary]; relative != "" {
+			candidates = append(candidates,
+				filepath.Join(home, "Applications", relative),
+				filepath.Join("/Applications", relative),
+			)
+		}
+	}
 	return candidates
 }
+
+// unixAgentAppBundleBinaries are CLIs that macOS installs inside an app
+// bundle. Kiro CLI.app keeps kiro-cli in Contents/MacOS, and a bin
+// directory links to it only after the user runs the app's shell setup.
+// Until then the user can still start the bundle's binary, so discovery
+// looks in the bundle too: the user's ~/Applications first, then
+// /Applications.
+var unixAgentAppBundleBinaries = map[string]string{
+	"kiro-cli": filepath.Join("Kiro CLI.app", "Contents", "MacOS", "kiro-cli"),
+}
+
+// unixAgentAppBundleGOOS selects the app bundle candidates; tests set it.
+var unixAgentAppBundleGOOS = runtime.GOOS
 
 // UnixAgentSearchDirs lists fixed directories agent discovery looks in for
 // home, per-user install locations first, then the machine prefixes. It

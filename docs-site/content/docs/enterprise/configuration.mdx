@@ -115,8 +115,8 @@ guardrail:
 | Route | Connectors | What DefenseClaw changes |
 | --- | --- | --- |
 | Machine policy | `codex`, `claudecode`, `cursor`, `copilot`, and `opencode` through its managed plugin | The agent's machine-wide policy file, which standard users cannot edit |
-| Per user | `devin`, `antigravity`, `hermes`, `amp` on every OS; `openhands`, `omnigent` on Linux and macOS only | Each enrolled user's own agent config, which the guardian repairs |
-| ACP | `kiro` | Enrolled with `defenseclaw-gateway enterprise acp`, not through this map; see [ACP guard](/docs/acp-guard). |
+| Per user | `devin`, `antigravity`, `hermes`, `amp` on every OS; `openhands`, `omnigent`, `kiro` on Linux and macOS only | Each enrolled user's own agent config, which the guardian repairs |
+| ACP | `kiro` on Windows | Enrolled with `defenseclaw-gateway enterprise acp`, not through this map; see [ACP guard](/docs/acp-guard). ACP stays available for Kiro on Linux and macOS too |
 
 `openclaw` and `zeptoclaw` need the guardrail proxy, which a managed host
 does not run, so they are not managed: Linux and macOS skip them (route

@@ -39,7 +39,7 @@ func TestPublishVerifyRemoveAll(t *testing.T) {
 	for _, state := range result.States {
 		routes[state.Connector] = state.Route
 	}
-	if routes["devin"] != RoutePerUser || routes["openclaw"] != RouteUnsupported || routes["kiro"] != RouteACP || routes["copilot"] != RouteUnsupported {
+	if routes["devin"] != RoutePerUser || routes["openclaw"] != RouteUnsupported || routes["kiro"] != RoutePerUser || routes["copilot"] != RouteUnsupported {
 		t.Fatalf("routes: %v", routes)
 	}
 	if !result.Complete() {

@@ -175,6 +175,9 @@ func reconcileOne(opts Options, name string) (State, error) {
 		if route == RoutePerUser {
 			state.detail("per-user registration of the admin hook binary, repaired by the guardian")
 		}
+		if name == "kiro" {
+			kiroRouteDetail(route, &state)
+		}
 		if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
 			openCodePerUserFallback(opts, policy, &state)
 		}
@@ -182,6 +185,17 @@ func reconcileOne(opts Options, name string) (State, error) {
 	}
 	target, _ := TargetFor(name)
 	return target.Reconcile(opts)
+}
+
+// kiroRouteDetail says where Kiro's hook lives on its route and that the
+// ACP guard stays available.
+func kiroRouteDetail(route string, state *State) {
+	switch route {
+	case RoutePerUser:
+		state.detail("kiro: the guardian writes each enrolled user's ~/.kiro/hooks/defenseclaw.json (Kiro IDE, kiro-cli --v3) and the CLI 2.x defenseclaw agent; `defenseclaw-gateway enterprise acp` stays available for editors that start Kiro over ACP")
+	case RouteACP:
+		state.detail("kiro: the Windows guardian does not enroll Kiro; protect it with `defenseclaw-gateway enterprise acp`")
+	}
 }
 
 // VerifyAll inspects every connector without writing.
@@ -196,6 +210,9 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 		route := opts.Route(name)
 		if route != RouteMachinePolicy {
 			state := State{Connector: name, Route: route, ForeignHooks: opts.PolicyFor(name).ForeignHooks}
+			if name == "kiro" {
+				kiroRouteDetail(route, &state)
+			}
 			if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
 				// Say why OpenCode is not on its machine policy route.
 				openCodePerUserFallback(opts, opts.PolicyFor(name), &state)

@@ -49,6 +49,7 @@ func newHookCmd() *cobra.Command {
 		connector         string
 		event             string
 		hookContractID    string
+		hookSurface       string
 		apiAddr           string
 		failMode          string
 		inputFile         string
@@ -60,7 +61,9 @@ func newHookCmd() *cobra.Command {
 		Use:    "hook",
 		Short:  "Run an agent guardrail hook (invoked by the agent runtime)",
 		Hidden: true,
-		Args:   cobra.NoArgs,
+		Args: func(cmd *cobra.Command, args []string) error {
+			return hookFailure(hookFailureConnector(connector), cobra.NoArgs(cmd, args))
+		},
 		// The hook is a short-lived per-event subprocess. Skip the daemon's
 		// PersistentPreRunE/PostRun (config load and audit store open):
 		// they are slow, can fail when the gateway is mid-setup, and would
@@ -68,6 +71,9 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateHookSurface(connector, hookSurface); err != nil {
+				return hookFailure(connector, err)
+			}
 			if foreignHookCheck {
 				// The standalone Amp and OpenCode plugins ask for the
 				// foreign-hook guard's decision only; nothing is sent to
@@ -83,10 +89,11 @@ func newHookCmd() *cobra.Command {
 			}
 			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
 			opts.HookContractID = hookContractID
+			opts.HookSurface = strings.TrimSpace(hookSurface)
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {
-					return fmt.Errorf("--input-file is only supported for the Cursor Windows hook adapter")
+					return hookFailure(connector, fmt.Errorf("--input-file is only supported for the Cursor Windows hook adapter"))
 				}
 				var err error
 				input, err = openCursorHookInputFile(opts.HookDir, inputFile)
@@ -106,7 +113,7 @@ func newHookCmd() *cobra.Command {
 				// read handle if an unusual filesystem reports a close error.
 				_ = input.Close()
 			}
-			os.Exit(code)
+			hookProcessExit(code)
 			return nil
 		},
 	}
@@ -114,6 +121,7 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&connector, "connector", "", "connector name (e.g. claudecode, codex, amp, cursor)")
 	cmd.Flags().StringVar(&event, "event", "", "agent hook event name (selects the request deadline; inferred when omitted)")
 	cmd.Flags().StringVar(&hookContractID, "hook-contract", "", "installer-bound connector hook contract")
+	cmd.Flags().StringVar(&hookSurface, "hook-surface", "", "hook dialect the invoking hook configuration speaks (per connector; kiro: v3)")
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
 	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
@@ -122,10 +130,85 @@ func newHookCmd() *cobra.Command {
 	_ = cmd.Flags().MarkHidden("input-file")
 	_ = cmd.Flags().MarkHidden("foreign-hook-check")
 	_ = cmd.Flags().MarkHidden("hook-contract")
+	_ = cmd.Flags().MarkHidden("hook-surface")
 	_ = cmd.Flags().MarkHidden("enterprise-managed")
 	_ = cmd.MarkFlagRequired("connector")
+	// A flag the hook does not know (or a malformed value) fails before
+	// RunE. Report it with the connector's failure status, not cobra's 1.
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return hookFailure(hookFailureConnector(connector), err)
+	})
 
 	return cmd
+}
+
+// hookProcessExit ends the hook process with hookexec's connector-native
+// status. It is a variable so tests can run the command without exiting.
+var hookProcessExit = os.Exit
+
+// hookRawArgs returns the hook process's own arguments. A flag error stops
+// parsing before --connector may have been read, so the failure status looks
+// the connector up here. It is a variable for tests, which run the command
+// through SetArgs rather than os.Args.
+var hookRawArgs = func() []string { return os.Args[1:] }
+
+// validateHookSurface accepts an empty --hook-surface and any value the
+// connector lists (hookexec.HookSurfaceAllowed). There is one hidden flag
+// for every connector; each connector names the hook dialects its installed
+// configuration speaks, and anything else is a usage error.
+func validateHookSurface(connectorName, surface string) error {
+	if strings.TrimSpace(surface) == "" || hookexec.HookSurfaceAllowed(connectorName, surface) {
+		return nil
+	}
+	return fmt.Errorf("--hook-surface %q is not valid for connector %q", surface, connectorName)
+}
+
+// hookFailureExitCode is the exit status of a hook invocation that fails
+// before hookexec runs: an unknown flag, a malformed or unlisted flag value,
+// a positional argument. Cobra reports these as 1. Kiro treats every status
+// other than 0 and 2 as a failed hook, shows its stderr as a warning and
+// lets the prompt or tool call go ahead (kiro.dev/docs/hooks/actions), so a
+// Kiro hook that failed that way would allow everything. Kiro failures exit
+// 2, the only status Kiro honors as a block. Other connectors keep 1.
+func hookFailureExitCode(connectorName string) int {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") {
+		return 2
+	}
+	return 1
+}
+
+// hookFailure labels a pre-run hook failure with the connector's failure
+// status (see hookFailureExitCode).
+func hookFailure(connectorName string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if code := hookFailureExitCode(connectorName); code != 1 {
+		return withExitCode(err, code)
+	}
+	return err
+}
+
+// hookFailureConnector is the connector a failed invocation names: the
+// parsed --connector value when parsing reached it, otherwise the value in
+// the raw arguments.
+func hookFailureConnector(parsed string) string {
+	if strings.TrimSpace(parsed) != "" {
+		return parsed
+	}
+	args := hookRawArgs()
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--":
+			return ""
+		case arg == "--connector" && index+1 < len(args):
+			return args[index+1]
+		case strings.HasPrefix(arg, "--connector="):
+			return strings.TrimPrefix(arg, "--connector=")
+		}
+	}
+	return ""
 }
 
 const cursorHookInputMaxBytes int64 = 1 << 20

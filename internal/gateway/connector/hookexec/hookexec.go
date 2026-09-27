@@ -72,6 +72,43 @@ const (
 	codexBoundContractHeader = "X-DefenseClaw-Hook-Contract"
 )
 
+// HookDialectHeader carries the --hook-surface value of the hook
+// configuration that invoked this hook: the payload and veto dialect the
+// gateway decodes it with. It is one header for every connector; each
+// connector lists the values it accepts (hookDialects). Kiro's bash hook
+// (kiro-hook.sh) keeps sending the older X-DefenseClaw-Kiro-Surface header,
+// which the gateway still reads.
+const HookDialectHeader = "X-DefenseClaw-Hook-Dialect"
+
+// hookDialects lists, per connector, the values --hook-surface may carry:
+// the hook dialects that connector's installed configuration speaks. Kiro
+// marks the .kiro/hooks configuration that Kiro IDE and `kiro-cli --v3` read
+// with v3 (connector.KiroHookSurfaceV3); its CLI 2.x agent configuration is
+// left unmarked, so v2 is never rendered.
+var hookDialects = map[string][]string{
+	"kiro": {"v3"},
+}
+
+// HookSurfaceAllowed reports whether connector lists surface as a
+// --hook-surface value. The CLI refuses any other value before Run.
+func HookSurfaceAllowed(connector, surface string) bool {
+	surface = strings.TrimSpace(surface)
+	for _, allowed := range hookDialects[strings.ToLower(strings.TrimSpace(connector))] {
+		if surface == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// hookDialect returns opts.HookSurface when the connector lists it.
+func hookDialect(opts Options) string {
+	if !HookSurfaceAllowed(opts.Connector, opts.HookSurface) {
+		return ""
+	}
+	return strings.TrimSpace(opts.HookSurface)
+}
+
 // Options configures a single hook invocation. The CLI entrypoint fills these
 // from flags + environment; tests construct them directly so the full decision
 // matrix can be exercised without a real gateway or agent.
@@ -85,6 +122,10 @@ type Options struct {
 	// the protected native Windows command. Codex uses it to prevent local
 	// failure paths from backfilling newer lifecycle controls into legacy tiers.
 	HookContractID string
+	// HookSurface is the hook dialect the invoking hook configuration speaks
+	// (--hook-surface; Kiro's .kiro/hooks configuration passes "v3"). It is
+	// forwarded in HookDialectHeader when the connector lists the value.
+	HookSurface string
 	// APIAddr is the gateway "host:port" the hook posts to.
 	APIAddr string
 	// FailMode is "open" or "closed"; it governs invalid responses
@@ -539,6 +580,12 @@ func sendHookRequest(
 		// DefenseClaw header.
 		req.Header.Set("X-DefenseClaw-Copilot-Event", opts.Event)
 	}
+	if dialect := hookDialect(opts); dialect != "" {
+		// Kiro's .kiro/hooks configuration (Kiro IDE, kiro-cli --v3) and its
+		// CLI 2.x agent configuration honor different vetoes, and the
+		// release cannot tell them apart. The marker on the command can.
+		req.Header.Set(HookDialectHeader, dialect)
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -708,6 +755,19 @@ func (sp spec) decide(opts Options, body []byte) int {
 		if output != "" {
 			fmt.Fprintln(opts.Stdout, output)
 			if d := decodeDecision(output); d == "deny" || d == "block" {
+				return blockExit
+			}
+		}
+		return 0
+
+	case styleHookDecisionStderr:
+		// Mirror kiro-hook.sh: stdout stays empty, and a hook_output
+		// decision of deny or block is reported on stderr with exit 2.
+		if output != "" {
+			if d := decodeDecision(output); d == "deny" || d == "block" {
+				if reason := decodeReason(output); reason != "" {
+					fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", reason)
+				}
 				return blockExit
 			}
 		}
@@ -1548,6 +1608,16 @@ func decodeDecision(output string) string {
 		return ""
 	}
 	return rawStringOr(m, "decision", "")
+}
+
+// decodeReason pulls the `reason` string from an already-compact JSON
+// object (the connector's hook_output).
+func decodeReason(output string) string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &m); err != nil {
+		return ""
+	}
+	return rawStringOr(m, "reason", "")
 }
 
 // mustJSONString returns s as a JSON string literal (quoted + escaped).

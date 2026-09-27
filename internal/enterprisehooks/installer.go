@@ -1005,6 +1005,11 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	if connector.HookContractNeedsActionOverride(resolution) {
 		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, resolution.Reason)
 	}
+	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" {
+		if admitted, reason := standaloneNotGatedVersionAdmitted(resolution); !admitted {
+			return fmt.Errorf("enterprise hooks: connector %s agent version %q is not certified for the standalone profile: %s", conn.Name(), opts.AgentVersion, reason)
+		}
+	}
 	// Native Windows managed runtimes are administrator-published regular
 	// files. Unix guardians intentionally install hardened per-user symlinks,
 	// so keep their established contract reader and digest semantics.
@@ -1044,10 +1049,21 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 // version resolves to a known, verified hook contract; the install then writes
 // a new contract lock. A version without a verified contract never gets here:
 // validateHookContract refuses it first, and status and verify report it as
-// hook_contract_unverified. The Secure Client profile keeps refusing every
-// change, because its versions come from an administrator-authored manifest.
+// hook_contract_unverified. A connector whose hook contract is not
+// version-gated (Kiro) has no known contract, so it follows a new version at
+// or above its standalone floor instead; without this every kiro-cli
+// self-update stopped the guardian repairing that user's hooks. The Secure
+// Client profile keeps refusing every change, because its versions come from
+// an administrator-authored manifest.
 func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolution) bool {
-	return standaloneProfileProcess() && resolution.Status == connector.HookCompatibilityKnown
+	if !standaloneProfileProcess() {
+		return false
+	}
+	if resolution.Status == connector.HookCompatibilityKnown {
+		return true
+	}
+	admitted, _ := standaloneNotGatedVersionAdmitted(resolution)
+	return admitted
 }
 
 func pathInside(root, path string) bool {

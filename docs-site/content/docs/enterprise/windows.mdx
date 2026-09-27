@@ -481,7 +481,7 @@ so they need no manifest.
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | ACP | Managed through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard). |
+| Kiro | ACP | Managed through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard). The guardian does not enroll Kiro on Windows: `kiro-cli.exe` records its version nowhere DefenseClaw can read without running it. |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See
