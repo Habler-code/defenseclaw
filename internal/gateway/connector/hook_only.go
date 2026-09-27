@@ -4253,17 +4253,24 @@ func cursorOwnedHookCommands(opts SetupOpts) []string {
 // one of DefenseClaw's finite installer or legacy user-install locations.
 // Arbitrary commands that merely end in "hook --connector cursor" are foreign.
 func legacyCursorNativeHookCommands() []string {
-	binaries := append(
+	binaries := legacyNativeHookBinaries()
+	commands := make([]string, 0, len(binaries))
+	for _, binary := range binaries {
+		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
+	}
+	return uniqueNonEmptyStrings(commands)
+}
+
+// legacyNativeHookBinaries returns DefenseClaw's finite installer and legacy
+// user-install locations of the native launcher and gateway executables that
+// Windows releases registered as direct native hook commands.
+func legacyNativeHookBinaries() []string {
+	return uniqueNonEmptyStrings(append(
 		nativeHookBinaryOwnershipCandidates(),
 		defenseclawGatewayBinary(),
 		canonicalNativeWindowsInstalledGatewayBinary(),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
-	)
-	commands := make([]string, 0, len(binaries))
-	for _, binary := range uniqueNonEmptyStrings(binaries) {
-		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
-	}
-	return uniqueNonEmptyStrings(commands)
+	))
 }
 
 type cursorHookCommandMatcher map[string]struct{}
