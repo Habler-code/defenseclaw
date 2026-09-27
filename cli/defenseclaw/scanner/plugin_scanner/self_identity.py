@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -355,6 +356,9 @@ def _valid_bridge_dynamic_value(
     if kind == "mode":
         return value in {b"open", b"closed"}
     if kind == "listener":
+        # Setup renders no check on Windows, where the bridge does not run one.
+        if not value:
+            return sys.platform == "win32"
         return hashlib.sha256(value).hexdigest() == _BRIDGE_LISTENER_CHECK_DIGEST
     if kind == "managed":
         return value in {b"", b"1"}

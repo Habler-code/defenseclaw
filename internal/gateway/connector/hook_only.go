@@ -1730,9 +1730,15 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
 		failMode = "open"
 	}
-	listenerCheck, err := hookListenerCheckProgram()
-	if err != nil {
-		return fmt.Errorf("%s render plugin listener check: %w", c.name, err)
+	// The bridges run the listener check only on Linux and macOS (they test
+	// process.platform first), so a Windows endpoint's bridge carries none
+	// rather than a shell program it never runs.
+	listenerCheck := ""
+	if runtime.GOOS != "windows" {
+		listenerCheck, err = hookListenerCheckProgram()
+		if err != nil {
+			return fmt.Errorf("%s render plugin listener check: %w", c.name, err)
+		}
 	}
 	rendered, err := renderTemplate(string(tmpl), templateData{
 		APIAddr:         opts.APIAddr,

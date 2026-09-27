@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -505,12 +506,23 @@ def test_registered_connector_bridge_pins_the_listener_check(
         assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
 
     check = _bridge_listener_check_js(repository_root)
-    for changed in (check + "true\\n", check.replace("exit 1", "exit 0", 1), ""):
+    for changed in (check + "true\\n", check.replace("exit 1", "exit 0", 1)):
         assert changed != check
         published = _render_bridge_publication(
             repository_root, data_dir, connector=connector, listener_check_js=changed
         )
         _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+        assert first_party_self_reason(target) is None
+
+    # Setup renders no check on Windows, where the bridge does not run one; an
+    # empty check is DefenseClaw's own bridge only there.
+    published = _render_bridge_publication(
+        repository_root, data_dir, connector=connector, listener_check_js=""
+    )
+    _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+    if sys.platform == "win32":
+        assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
+    else:
         assert first_party_self_reason(target) is None
 
     published = _render_bridge_publication(repository_root, data_dir, connector=connector).replace(

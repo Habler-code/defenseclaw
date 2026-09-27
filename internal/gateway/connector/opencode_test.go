@@ -124,6 +124,10 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	if strings.Contains(body, opts.APIToken) {
 		t.Fatal("plugin embeds the connector-scoped credential instead of loading its sidecar")
 	}
+	// The bridge runs the listener check only on Linux and macOS.
+	if empty := strings.Contains(body, `const DC_LISTENER_CHECK = "";`); empty != (runtime.GOOS == "windows") {
+		t.Errorf("DC_LISTENER_CHECK is empty = %v on %s", empty, runtime.GOOS)
+	}
 
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(pluginPath)
