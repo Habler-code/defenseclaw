@@ -54,6 +54,27 @@ func applyDeviceIdentityFixtureSecurity(t *testing.T, path, sddl string, setOwne
 	}
 }
 
+// deviceIdentityTestTokenOwner is the default owner (TOKEN_OWNER) of the
+// objects this process creates.
+func deviceIdentityTestTokenOwner(t *testing.T) *windows.SID {
+	t.Helper()
+	token := windows.GetCurrentProcessToken()
+	var size uint32
+	_ = windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size)
+	if size == 0 {
+		t.Fatal("query the process token owner size")
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, &buffer[0], size, &size); err != nil {
+		t.Fatalf("query the process token owner: %v", err)
+	}
+	owner, err := (*struct{ Owner *windows.SID })(unsafe.Pointer(&buffer[0])).Owner.Copy()
+	if err != nil {
+		t.Fatalf("copy the process token owner: %v", err)
+	}
+	return owner
+}
+
 func currentDeviceIdentityTestUser(t *testing.T) *windows.SID {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -270,6 +291,18 @@ func TestLoadOrCreateIdentityRuntimeDirectoryNeedsBothServicePins(t *testing.T) 
 func TestLoadOrCreateIdentityManagedServiceRealRuntimeTrust(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("an Administrators-owned ProgramData fixture requires an elevated process token")
+	}
+	// The gateway service creates the identity files under its service SID.
+	// This process creates them under its token's default owner instead,
+	// which is Administrators for an elevated member of that group unless the
+	// token names the user itself (the built-in Administrator on
+	// GitHub-hosted Windows runners does).
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner := deviceIdentityTestTokenOwner(t); !owner.Equals(administrators) {
+		t.Skipf("the process token's default owner is %s, not Administrators, so the files it creates cannot stand in for the service's", owner)
 	}
 	const account = `NT SERVICE\EventLog`
 	serviceSID, err := managed.WindowsServiceAccountSID(account)
