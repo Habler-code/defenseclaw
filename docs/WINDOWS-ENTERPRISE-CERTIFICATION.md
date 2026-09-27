@@ -24,8 +24,8 @@ evidence:
 | Drive-namespace integrity | Every enterprise source, managed root, certification home, and target profile uses an exact mount-manager drive root on fixed NTFS. Effective-drive, global-drive, and volume-GUID DOS-device targets are single, well-formed, and identical. A medium user raw `DefineDosDevice` alias that still reports `Fixed`/`NTFS` is rejected by the CLI, bootstrap, module, Codex machine-policy path, and target-profile path before mutation. |
 | Service control | The gateway runs as `NT SERVICE\<gateway-name>`; the credential broker, sensor helper, and guardian run as LocalSystem. All four start automatically, and a standard user cannot stop, disable, reconfigure, delete, or obtain `PROCESS_TERMINATE` access to any of those four services. Direct `taskkill` fails and their PIDs remain unchanged. The derived LocalSystem Enumerator is covered in this run only by exact-name collision refusal and uninstall/fallback-cleanup absence checks; this broker-focused matrix does not claim its full token/recovery behavior. |
 | Process/token object isolation | A standard user may obtain query-limited process access, but cannot terminate, suspend, inject into, create threads in, duplicate handles from, change quota/information/DACL/owner on, or obtain all-access to the broker, gateway, sensor helper, or guardian process. It also cannot obtain any duplicate/impersonate/assign-primary/adjust/DACL/owner token handle. Those four original PIDs remain responsive after every probe. |
-| Actual service tokens | A read-only C#/PInvoke probe records the broker, gateway, and guardian live PIDs' TokenUser, integrity, privileges, groups, and restricted SIDs. The gateway is the exact virtual service SID with a restricted high-integrity token and only ChangeNotify. The LocalSystem broker is unrestricted with only ChangeNotify. The LocalSystem guardian has exactly Tcb/Impersonate/ChangeNotify/Backup/Restore; Backup and Restore must be present-but-disabled at idle and enabled only on the dedicated bounded DACL-repair thread. TakeOwnership is never retained. |
-| Recovery semantics | The broker, gateway, and guardian each have only restart actions at 5s/15s/60s, with the final 60s action repeated indefinitely and no terminal NONE. Controlled unexpected failures 1-4 replace each of those PIDs every time. Servicing persists intent, disables and stops all managed services, and the certification observes the three-service set through a fresh 65-second queued-restart drain before guardian-first activation. `-NoStart` keeps those three disabled/stopped until a complete public `Repair`; raw SCM start is rejected as an activation path. |
+| Actual service tokens | A read-only C#/PInvoke probe records the broker, gateway, sensor helper, and guardian live PIDs' TokenUser, integrity, privileges, groups, and restricted SIDs. The gateway is the exact virtual service SID with a restricted high-integrity token and only ChangeNotify. The LocalSystem broker and the LocalSystem sensor helper are each unrestricted with only ChangeNotify. The LocalSystem guardian has exactly Tcb/Impersonate/ChangeNotify/Backup/Restore; Backup and Restore must be present-but-disabled at idle and enabled only on the dedicated bounded DACL-repair thread. TakeOwnership is never retained. |
+| Recovery semantics | The broker, gateway, sensor helper, and guardian each have only restart actions at 5s/15s/60s, with the final 60s action repeated indefinitely and no terminal NONE. Controlled unexpected failures 1-4 replace each of those PIDs every time. Servicing persists intent, disables and stops all managed services, and the certification observes those four services through a fresh 65-second queued-restart drain before guardian-first activation. `-NoStart` keeps those four disabled/stopped until a complete public `Repair`; raw SCM start is rejected as an activation path. |
 | Shared Codex prerequisite | Explicit enterprise lifecycle securely creates missing `C:\ProgramData\OpenAI\Codex` parents with System/Administrators full control and Users read/traverse. Status and normal mode do not create them; unsafe preexisting owners/DACLs/reparse points fail without takeover; rollback removes only transaction-created empty directories; preexisting legitimate directories survive failure and purge. |
 | Codex machine policy | `%ProgramData%\OpenAI\Codex\requirements.toml` contains exactly ten managed hook groups and points only to the protected installed hook. Its protected enrollment state, ownership record, and ACL preimage are non-user-writable and guardian-repaired after deletion, event removal, or DACL drift. Managed enterprise never reads, writes, or patches `<profile>\.codex`. |
 | Codex policy serialization | `%ProgramData%\OpenAI\Codex\.defenseclaw-managed-hooks.lock` is Administrators-owned, protected, no-reparse, and single-link. Acquisition is bounded. The retired predictable Global mutex name is ignored even when a user pre-creates it; a user-held read lock may deny availability only until the bounded failure and later reconcile. |
@@ -212,8 +212,8 @@ It then:
    either live `.codex` or the alternate child;
 5. passes the alternate `CODEX_HOME` only to the disposable actual Codex child
    process used for end-to-end policy evidence; and
-6. verifies machine, coordinator, gateway, broker, and guardian still omit the
-   override,
+6. verifies machine, coordinator, gateway, broker, sensor helper, and guardian
+   still omit the override,
    then removes the absent-baseline certification child.
 
 The switch is certification-only. It is an exact unsigned-scope marker for
@@ -328,7 +328,8 @@ positive contract and negative production,
 mismatched-id, case-near-miss, nested-root, and CODEX_HOME-near-miss
 assertions run before install. Before any installer action, the
 harness byte-copies the installer, adjacent module, gateway, hook, required
-CLI, and required three-binary upgrade set into the administrator/System-only
+CLI, and required six-binary upgrade set (broker, gateway, ACP, hook, sensor
+helper, and CLI) into the administrator/System-only
 staging root, then proves source and staged hashes match. The adjacent module is validated
 before import across its complete fixed-NTFS/reparse/owner/DACL/signature path
 chain. Installer child commands receive a strict environment allowlist, a
@@ -374,8 +375,8 @@ report the policy-bound effective-policy field and aggregate security true.
 The CLI delegates to the same protected PowerShell transaction; it does not
 weaken elevation, signature, source-path, or action restrictions.
 Certification drives the clean first transaction through the protected staged
-base CLI with `--no-start`, proves the gateway, broker, and guardian remain
-disabled with PID zero,
+base CLI with `--no-start`, proves the gateway, broker, sensor helper, and
+guardian remain disabled with PID zero,
 and then uses the installed public `repair` command for guardian-first
 activation; it does not substitute a direct installer call for public
 `install`.
@@ -386,8 +387,8 @@ same file through `--cli-binary`. Windows cannot safely replace the currently
 mapped installed image synchronously. The installed CLI therefore rejects its
 own byte replacement before mutation; it remains valid for a broker/gateway/hook-only
 upgrade when `--cli-binary` is omitted. Certification invokes the staged
-release CLI and binds the installed broker, gateway, hook, and CLI hashes
-exactly to all four staged upgrade hashes.
+release CLI and binds the installed broker, gateway, ACP, hook, sensor-helper,
+and CLI hashes exactly to all six staged upgrade hashes.
 
 The certification harness also creates a real per-logon raw DOS-device drive
 alias under the medium test token, pointing at a local NTFS subdirectory. It
@@ -439,9 +440,10 @@ second build:
   -DisposableHost
 ```
 
-Full execution refuses to start without all four second-build artifacts. The
-harness requires each staged upgrade hash to differ from its corresponding
-installed preimage and requires the resulting broker, gateway, hook, and CLI
+Full execution refuses to start without all six second-build artifacts
+(broker, gateway, ACP, hook, sensor helper, and CLI). The harness requires
+each staged upgrade hash to differ from its corresponding installed preimage
+and requires the resulting broker, gateway, ACP, hook, sensor-helper, and CLI
 hashes to match the staged values exactly. The signed Cisco provider DLL stays
 at its trusted Secure Client path and is path-, signature-, and digest-pinned
 before every mutation. Immediately after that byte change, the
@@ -449,8 +451,8 @@ harness invokes public `verify` through the newly installed v2 CLI, requires
 healthy gateway and guardian readiness, revalidates the complete service
 contract, and matches the installed config and manifest to their protected
 source hashes. It also proves that an invalid upgrade returns non-zero,
-preserves the installed hashes, leaves the broker, gateway, and guardian
-running, and keeps
+preserves the installed hashes, leaves the broker, gateway, sensor helper, and
+guardian running, and keeps
 guardian verification healthy. It runs two negative servicing paths: a
 missing hook source that must fail before transaction creation, and a protected,
 syntactically valid managed config with a non-loopback bind that must fail only
@@ -556,14 +558,15 @@ It opens a query-limited handle only to prove that `OpenProcessToken` denies
 TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_ASSIGN_PRIMARY,
 TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_GROUPS, TOKEN_ADJUST_DEFAULT, WRITE_DAC,
 WRITE_OWNER, and their combined mutation mask. It requires `taskkill /PID /F`
-to fail for the exact broker, gateway, and guardian PIDs, and opens every
+to fail for the exact broker, gateway, sensor-helper, and guardian PIDs, and
+opens every
 binary/config/manifest/ledger/token for write and DELETE access without changing
 it; each protected handle request must be denied. The harness then requires
-the broker, gateway, and guardian to retain their original PIDs and remain
-Running with byte-identical `qc`,
+the broker, gateway, sensor helper, and guardian to retain their original PIDs
+and remain Running with byte-identical `qc`,
 `qfailure`, SDDL, environment, image paths, deployment hashes, authorization
 ledger, and user-hook artifacts. Installer `Verify` and guardian verification
-must also prove those three services remained responsive. Its unregister attempt is accepted as a
+must also prove those four services remained responsive. Its unregister attempt is accepted as a
 denial only when diagnostics identify the authorization/elevation/LocalSystem
 boundary, not merely an unsupported connector.
 
