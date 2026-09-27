@@ -8186,9 +8186,48 @@ targets:
             -Condition (-not [bool]$sameInodeLegacyCoverage.ok) `
             -Message 'same-inode rollback-compatible v1 Guardian coverage was accepted'
 
+        # Managed-layout inventory cases run the real module functions on
+        # scratch trees under TestRoot.
+        $layoutInventoryResults = [Collections.Generic.List[object]]::new()
+
+        # The rollback and Reconcile freshness waits compare the identity of
+        # the guardian's own state file, which the guardian writes into the
+        # runtime directory, not the state root.
+        $guardianStateRoot = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'gsid'
+        $guardianStateRuntime = Microsoft.PowerShell.Management\Join-Path `
+            $guardianStateRoot `
+            'runtime'
+        Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $guardianStateRuntime `
+            -Force | Microsoft.PowerShell.Core\Out-Null
+        [IO.File]::WriteAllText(
+            (Microsoft.PowerShell.Management\Join-Path `
+                $guardianStateRuntime `
+                'hook_guardian_state.json'),
+            '{}',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $guardianStateIdentity = [string](
+            Get-DefenseClawGuardianStateIdentity -Layout @{
+                StateRoot = $guardianStateRoot
+                RuntimeDirectory = $guardianStateRuntime
+            }
+        )
+        Assert-Harness `
+            -Condition (-not [string]::IsNullOrWhiteSpace($guardianStateIdentity)) `
+            -Message 'guardian state identity ignored the runtime directory state file'
+        $layoutInventoryResults.Add([pscustomobject]@{
+            name = 'guardian-state-identity-runtime-directory'
+            identity_present = $true
+        })
+
         return [pscustomobject]@{
             schema_version = 1
             ok = $true
+            layout_inventory_cases = @($layoutInventoryResults)
             shared_directory_cases = @($sharedDirectoryResults)
             recovery_cases = @($recoveryResults)
             quiescing_cases = @($quiescingResults)
