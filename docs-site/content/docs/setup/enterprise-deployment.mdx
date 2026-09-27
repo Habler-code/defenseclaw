@@ -740,8 +740,9 @@ requires each of those services to remain stopped for longer than 60 seconds.
 Because an already queued SCM restart cannot be canceled,
 servicing first persists its intent, disables all managed services, stops them, and
 holds the disabled state through a bounded 65-second drain. Activation then
-makes only the guardian demand-startable, requires a fresh successful
-reconcile while the gateway remains disabled, starts the gateway, proves live
+demand-starts the broker and the sensor helper, makes the guardian
+demand-startable and requires a fresh successful reconcile while the gateway
+remains disabled, starts the gateway and then the enumerator, proves live
 readiness, and finally restores automatic start. Any interrupted activation
 re-enters a fresh disable/stop/drain cycle. Planned maintenance stop must not
 race recovery.

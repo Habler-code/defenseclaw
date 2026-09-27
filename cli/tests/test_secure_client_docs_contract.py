@@ -19,6 +19,7 @@ AVC_HANDOFF = ROOT / "docs/WINDOWS-AVC-PACKAGING-HANDOFF.md"
 BUNDLE_SCRIPT = ROOT / "packaging/scripts/build-managed-windows-bundle.sh"
 MODULE = ROOT / "packaging/windows/DefenseClawEnterprise.psm1"
 HARNESS = ROOT / "scripts/test-windows-enterprise-hardening.ps1"
+LIFECYCLE_CLI = ROOT / "internal/cli/windows_enterprise_service.go"
 
 NUMBER_WORDS = {
     3: "three",
@@ -86,6 +87,8 @@ def test_avc_handoff_payload_tree_lists_every_expected_payload_file() -> None:
     flat = _flat(doc)
     assert f"The {count}-file inventory is closed" in flat
     assert f"signs all {count} files under `payload/`" in flat
+    # The bundle script's own staging comment gives the same count.
+    assert f"# ---- kit/payload: the {count} files AVC signs" in script
 
 
 def test_threat_model_service_rows_cover_every_managed_service() -> None:
@@ -132,6 +135,50 @@ def test_threat_model_service_rows_cover_every_managed_service() -> None:
         assert stale not in rows, stale
 
 
+def test_activation_order_docs_match_the_module() -> None:
+    # The transaction activation demand-starts each service explicitly; the
+    # sensor helper is started right after the broker, not by the gateway's
+    # SCM dependency.
+    module = _read(MODULE)
+    start = module.index("Start-DefenseClawService -Name $Layout.BrokerServiceName")
+    block = module[start : module.index("-StartMode 2", start)]
+    steps = {
+        "$Layout.BrokerServiceName": "broker",
+        "$Layout.SensorHelperServiceName": "sensor helper",
+        "guardian": "guardian",
+        "$GatewayServiceName": "gateway",
+        "$enumeratorServiceName": "enumerator",
+    }
+    order = [
+        steps[match.group(1) or "guardian"]
+        for match in re.finditer(
+            r"Start-DefenseClawService -Name (\S+)|Wait-DefenseClawFreshGuardianReconcile",
+            block,
+        )
+    ]
+    assert order == ["broker", "sensor helper", "guardian", "gateway", "enumerator"], order
+
+    w36 = _threat_row("W-36")
+    assert (
+        "demand-start order broker, `DefenseClawSensorHelper`, guardian/fresh reconcile, gateway, enumerator;"
+        in w36
+    )
+    threat = _flat(_read(THREAT_MODEL))
+    assert (
+        "Activation demand-starts the broker first, then `DefenseClawSensorHelper`, then the guardian"
+        in threat
+    )
+    assert "whose SCM dependency starts `DefenseClawSensorHelper`" not in threat
+    assert "(after its `DefenseClawSensorHelper` dependency)" not in threat
+
+    deployment = _flat(_read(DEPLOYMENT_DOC))
+    assert (
+        "Activation then demand-starts the broker and the sensor helper, makes the guardian demand-startable"
+        in deployment
+    )
+    assert "Activation then makes only the guardian demand-startable" not in deployment
+
+
 def test_certification_doc_matches_the_harness_upgrade_and_service_sets() -> None:
     harness = _read(HARNESS)
     upgrade_inputs = set(re.findall(r"^\s*\[string\]\$Upgrade(\w+)Binary = ''", harness, re.MULTILINE))
@@ -160,6 +207,52 @@ def test_certification_doc_matches_the_harness_upgrade_and_service_sets() -> Non
     assert "$script:SensorHelperServiceName" in tokens
     for row in ("Actual service tokens", "Recovery semantics"):
         assert "sensor helper" in _certification_row(row), row
+
+
+def test_certification_doc_lists_the_protected_staging_set() -> None:
+    staging = _powershell_function(_read(HARNESS), "Initialize-ProtectedCertificationSources")
+    labels = set(re.findall(r"'stage-(?!upgrade-)([\w-]+)'", staging))
+    documented = {
+        "enterprise-installer": "installer",
+        "enterprise-module": "adjacent module",
+        "broker": "broker",
+        "gateway": "gateway",
+        "acp": "ACP",
+        "hook": "hook",
+        "sensor-helper": "sensor helper",
+        "cli": "required CLI",
+        "normal-mode-cli-launcher": "normal-mode CLI launcher",
+        "normal-mode-cli-wheel": "wheel",
+    }
+    assert labels == set(documented), labels
+    # The provider library is checked where it is installed, not copied.
+    assert "Assert-CertificationProviderLibraryCurrent" in staging
+
+    flat = _flat(_read(CERTIFICATION_DOC))
+    start = flat.index("Before any installer action, the harness byte-copies")
+    # Up to the upgrade set, which the upgrade test above checks.
+    sentence = flat[start : flat.index("-binary upgrade set", start)]
+    for label, name in documented.items():
+        assert name in sentence, label
+    assert "The managed credential provider library `cmidapi.dll` is not copied" in flat
+    assert "byte-copies the installer, adjacent module, gateway, hook, required CLI, and" not in flat
+
+
+def test_certification_doc_names_every_binary_a_cli_upgrade_takes() -> None:
+    flags = re.findall(
+        r'flags\.StringVar\(&opts\.\w+Binary, "([\w-]+)-binary"',
+        _read(LIFECYCLE_CLI),
+    )
+    assert set(flags) == {"broker", "gateway", "acp", "hook", "sensor-helper", "cli"}, flags
+    names = {"broker": "broker", "gateway": "gateway", "acp": "ACP", "hook": "hook", "sensor-helper": "sensor helper"}
+
+    flat = _flat(_read(CERTIFICATION_DOC))
+    start = flat.index("it remains valid for an upgrade that omits `--cli-binary`")
+    sentence = flat[start : flat.index(".", start)]
+    for flag in flags:
+        if flag != "cli":
+            assert names[flag] in sentence, flag
+    assert "broker/gateway/hook-only" not in flat
 
 
 def test_codex_requirements_doc_names_the_guardian_reconcile() -> None:

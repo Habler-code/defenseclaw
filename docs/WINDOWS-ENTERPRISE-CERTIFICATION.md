@@ -327,10 +327,13 @@ these certification-only flags only for those three mutating actions. Its
 positive contract and negative production,
 mismatched-id, case-near-miss, nested-root, and CODEX_HOME-near-miss
 assertions run before install. Before any installer action, the
-harness byte-copies the installer, adjacent module, gateway, hook, required
-CLI, and required six-binary upgrade set (broker, gateway, ACP, hook, sensor
-helper, and CLI) into the administrator/System-only
-staging root, then proves source and staged hashes match. The adjacent module is validated
+harness byte-copies the installer, adjacent module, broker, gateway, ACP, hook,
+sensor helper, required CLI, normal-mode CLI launcher and wheel, and required
+six-binary upgrade set (broker, gateway, ACP, hook, sensor helper, and CLI)
+into the administrator/System-only staging root, then proves source and staged
+hashes match. The managed credential provider library `cmidapi.dll` is not
+copied: the harness re-checks it in place under `Cisco Secure Client\CM`
+(Cisco signature and the preflight hash). The adjacent module is validated
 before import across its complete fixed-NTFS/reparse/owner/DACL/signature path
 chain. Installer child commands receive a strict environment allowlist, a
 `System32` working directory, and only a newly created protected
@@ -391,8 +394,9 @@ For a CLI-replacing `enterprise windows upgrade`, execute the **new release's
 protected staged CLI** outside the installed `bin` directory and supply that
 same file through `--cli-binary`. Windows cannot safely replace the currently
 mapped installed image synchronously. The installed CLI therefore rejects its
-own byte replacement before mutation; it remains valid for a broker/gateway/hook-only
-upgrade when `--cli-binary` is omitted. Certification invokes the staged
+own byte replacement before mutation; it remains valid for an upgrade that
+omits `--cli-binary` and replaces only the broker, gateway, ACP, hook, and
+sensor helper. Certification invokes the staged
 release CLI and binds the installed broker, gateway, ACP, hook, sensor-helper,
 and CLI hashes exactly to all six staged upgrade hashes.
 
