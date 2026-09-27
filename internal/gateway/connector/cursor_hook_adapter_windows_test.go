@@ -59,7 +59,10 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	case "timeout":
 		if pidFile := os.Getenv(copilotAdapterPIDFileEnv); pidFile != "" {
-			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+			// The start time lets the test measure the adapter deadline from
+			// when the adapter launched this child, independent of how long
+			// powershell.exe took to start on a loaded runner.
+			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"+strconv.FormatInt(time.Now().UnixNano(), 10)), 0o600)
 		}
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
@@ -213,13 +216,10 @@ func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
 	t.Setenv(copilotAdapterHelperMode, "timeout")
 	t.Setenv(copilotAdapterPIDFileEnv, pidFile)
 	adapter := renderCopilotAdapterForTest(t, executable, copilotWindowsHookAdapterTimeoutMS)
-	startedAt := time.Now()
 	stdout, stderr, code := runCopilotAdapterTest(
 		t, adapter, `{"source":"copilot-adapter-probe"}`,
 	)
-	if elapsed := time.Since(startedAt); elapsed > time.Duration(copilotWindowsHookContractTimeoutMS)*time.Millisecond {
-		t.Fatalf("adapter exceeded the Copilot command-hook deadline: %s", elapsed)
-	}
+	finishedAt := time.Now()
 	if code != 0 {
 		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
 	}
@@ -233,9 +233,25 @@ func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read helper PID: %v", err)
 	}
-	pid, err := strconv.ParseUint(strings.TrimSpace(string(rawPID)), 10, 32)
+	fields := strings.Fields(string(rawPID))
+	if len(fields) != 2 {
+		t.Fatalf("helper PID file = %q, want pid and start time", string(rawPID))
+	}
+	pid, err := strconv.ParseUint(fields[0], 10, 32)
 	if err != nil {
 		t.Fatalf("parse helper PID: %v", err)
+	}
+	childStartNanos, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		t.Fatalf("parse helper start time: %v", err)
+	}
+	// Measure from the moment the adapter launched its child: the adapter
+	// must kill it and return within the Copilot command-hook contract. The
+	// child sleeps for the whole contract, so an adapter that never killed
+	// it would exceed this bound. powershell.exe startup before the adapter
+	// runs is outside the adapter's control and is not counted.
+	if elapsed := finishedAt.Sub(time.Unix(0, childStartNanos)); elapsed > time.Duration(copilotWindowsHookContractTimeoutMS)*time.Millisecond {
+		t.Fatalf("adapter exceeded the Copilot command-hook deadline after launching its child: %s", elapsed)
 	}
 	if windowsProcessRunning(uint32(pid)) {
 		t.Fatalf("timed-out Copilot launcher process %d is still running", pid)
