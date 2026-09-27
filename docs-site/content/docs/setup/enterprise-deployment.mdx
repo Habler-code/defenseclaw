@@ -425,6 +425,14 @@ normal per-user application-protection controller is not removed from the
 product; managed mode deliberately transfers that work to the guardian so the
 gateway virtual account never scans or writes arbitrary profiles.
 
+The gateway service creates its device identity (`device.key`,
+`device.key.provenance` and `device.provenance.secret`) in the runtime
+directory the first time it starts. The files inherit the runtime directory
+ACL: SYSTEM and Administrators get full control, and the gateway service
+account gets Modify. The gateway will not create them if any other principal
+could read new files in that directory. Keep `gateway.device_key_file` inside
+`data_dir`.
+
 Stage a schema-valid `targets.yaml` for the first transaction. The enumerator
 subsequently maintains this protected file from eligible Windows profiles. A
 target user must already have a supported CLI installation that the enumerator
@@ -1177,6 +1185,14 @@ Likewise, removal never recursively deletes `C:\Program Files\ClaudeCode` or
 exact DefenseClaw leaves or values to be removed/restored. A current value that
 no longer matches the owned postimage is preserved and removal fails
 truthfully rather than overwriting a concurrent administrator edit.
+
+Before it retires the Program Files tree, uninstall checks the tree's contents.
+It accepts only the installed binaries and scripts, plus the managed IPC
+directory and its socket (`ipc\defenseclaw_ipc.sock`). Any other file or
+directory, and any other reparse point, stops uninstall before anything is
+removed. The gateway deletes its socket when it stops cleanly. If the gateway
+stopped without deleting it, uninstall deletes the socket after it removes the
+services and before it changes the tree's permissions.
 
 Uninstall verifies that machine policy and every DefenseClaw-owned command
 reference are absent before it retires the Program Files tree. Close or restart

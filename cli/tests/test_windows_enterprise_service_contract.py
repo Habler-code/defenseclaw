@@ -1693,6 +1693,17 @@ def test_bootstrap_compiler_environment_is_one_shot_and_protected() -> None:
     assert "Restore-DefenseClawBootstrapEnvironment -Context $context" in bootstrap
 
 
+def test_guardian_state_identity_uses_runtime_directory() -> None:
+    module = read(MODULE)
+    guardian_identity = module[
+        module.index("function Get-DefenseClawGuardianStateIdentity") : module.index(
+            "function Wait-DefenseClawServiceFailureRestartQuiescence"
+        )
+    ]
+    assert "$Layout.RuntimeDirectory" in guardian_identity
+    assert "$Layout.StateRoot" not in guardian_identity
+
+
 def test_lifecycle_reauthenticates_volumes_and_sources_at_last_use() -> None:
     module = read(MODULE)
 
@@ -2768,6 +2779,88 @@ def test_certification_manually_drives_every_public_windows_lifecycle_verb() -> 
         lifecycle_cli
     )
     assert "os.SameFile(executableInfo, expectedInfo)" in lifecycle_cli
+
+
+def test_install_tree_inventory_accepts_managed_ipc_under_install_root() -> None:
+    module = read(MODULE)
+    inventory = module[
+        module.index("function Assert-DefenseClawManagedInstallTree") : module.index(
+            "function Assert-DefenseClawManagedTreeNoReparse"
+        )
+    ]
+    # The Secure Client IPC directory and socket live under InstallRoot.
+    assert "$Layout.ManagedIPCDirectory" in inventory
+    assert "$Layout.ManagedIPCSocketPath" in inventory
+    # Only the exact socket leaf is exempt from the reparse-point veto.
+    assert "$item.PSIsContainer -or" in inventory
+    install_root_removals = [
+        block
+        for block in module.split("Remove-DefenseClawManagedTree `")[1:]
+        if "-Label 'InstallRoot'" in block.split("\n\n", 1)[0]
+    ]
+    assert install_root_removals
+    for block in install_root_removals:
+        call = block.split("\n\n", 1)[0]
+        assert "-AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath" in call
+
+
+def test_retired_install_tree_allowlist_covers_every_bin_payload() -> None:
+    module = read(MODULE)
+    layout = module[
+        module.index("function Get-DefenseClawLayout {") : module.index(
+            "\nfunction ", module.index("function Get-DefenseClawLayout {") + 1
+        )
+    ]
+    payloads = re.findall(r"Join-Path \$bin '([^']+)'", layout)
+    assert "defenseclaw-acp.exe" in payloads
+    assert "defenseclaw-sensor-helper.exe" in payloads
+    allowlist = module[
+        module.index("function Get-DefenseClawRetiredInstallTreeAllowlist") : module.index(
+            "function Assert-DefenseClawRetiredInstallTree"
+        )
+    ]
+    for payload in payloads:
+        assert f"'bin\\{payload}'" in allowlist, payload
+
+
+def test_uninstall_removes_stale_ipc_socket_before_retirement_acls() -> None:
+    module = read(MODULE)
+    helper = module[
+        module.index("function Remove-DefenseClawStaleManagedIPCSocket") : module.index(
+            "function Set-DefenseClawPreservedStateAcls"
+        )
+    ]
+    # Only a non-directory entry at the exact socket path, and only once the
+    # gateway service is gone.
+    assert "[IO.FileAttributes]::Directory" in helper
+    service_check = helper.index("Test-DefenseClawServiceExists -Name $GatewayServiceName")
+    parent_check = helper.index("Assert-DefenseClawNoReparsePath", service_check)
+    delete = helper.index("[IO.File]::Delete($socket)", parent_check)
+    assert "stale managed IPC socket survived removal" in helper[delete:]
+    lifecycle = module[
+        module.index("function Invoke-DefenseClawUninstallLifecycle") : module.index(
+            "function Invoke-DefenseClawReconcileLifecycle"
+        )
+    ]
+    gateway_removal = lifecycle.index("Remove-DefenseClawService -Name $GatewayServiceName")
+    socket_removal = lifecycle.index("Remove-DefenseClawStaleManagedIPCSocket `", gateway_removal)
+    retirement_acls = lifecycle.index("Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout", socket_removal)
+    assert lifecycle.index("Complete-DefenseClawTransaction -SnapshotPath $snapshot", retirement_acls)
+
+
+def test_fresh_install_root_cleanup_exempts_only_the_install_root_ipc_socket() -> None:
+    module = read(MODULE)
+    cleanup = module[
+        module.index("function Complete-DefenseClawInstallRollbackIntent") : module.index(
+            "function Set-DefenseClawInstallRollbackIntentCommitState"
+        )
+    ]
+    assert "$socketExemption = if ([string]$claim[0] -ceq 'InstallRoot') {" in cleanup
+    exempt_check = "Assert-DefenseClawManagedTreeNoReparse -Root $path `\n            -AllowAFUnixSocketAt $socketExemption"
+    assert cleanup.count(exempt_check) == 2
+    assert cleanup.count("Assert-DefenseClawManagedTreeNoReparse -Root $path\n") == 0
+    removal = cleanup[cleanup.index("Remove-DefenseClawManagedTree `") :].split("\n\n", 1)[0]
+    assert "-AllowAFUnixSocketAt $socketExemption" in removal
 
 
 def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -> None:

@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 func validateDeviceIdentityPathSyntax(_, _ string) error { return nil }
@@ -39,6 +40,17 @@ func validateFreshIdentityDirectoryPlatform(path string, info os.FileInfo) error
 
 func validateFreshIdentityFilePlatform(path string) error {
 	return validateFreshIdentityPathACL(path)
+}
+
+// The managed service exception below exists only for the Windows runtime
+// tree, which the gateway service shares with the Administrators-run
+// lifecycle. A unix gateway owns its data directory.
+func validateFreshIdentityManagedServiceDirectory(string) (bool, error) { return false, nil }
+
+func writeFreshIdentityManagedServiceFile(string, []byte) (bool, error) { return false, nil }
+
+func createFreshIdentityDirectoryComponent(path string) error {
+	return safefile.ProtectDirectory(path)
 }
 
 func syncFreshIdentityDirectory(path string) error {
