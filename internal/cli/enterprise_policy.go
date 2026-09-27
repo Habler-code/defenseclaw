@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -34,7 +33,7 @@ var (
 	enterprisePolicyProject     string
 	enterprisePolicyLive        bool
 	enterprisePolicyAgentBinary string
-	enterprisePolicyGatewayLog  string
+	enterprisePolicyAuditDB     string
 	enterprisePolicyTimeout     time.Duration
 )
 
@@ -99,7 +98,7 @@ func init() {
 	_ = enterprisePolicyExportCmd.MarkFlagRequired("connector")
 	enterprisePolicyVerifyCmd.Flags().BoolVar(&enterprisePolicyLive, "live", false, "Run the real client as --user and prove it loads DefenseClaw's hooks (codex, claudecode)")
 	enterprisePolicyVerifyCmd.Flags().StringVar(&enterprisePolicyAgentBinary, "agent-binary", "", "Absolute path of the client binary for --live")
-	enterprisePolicyVerifyCmd.Flags().StringVar(&enterprisePolicyGatewayLog, "gateway-log", "", "Gateway log searched for the Claude Code canary (default: the standalone log)")
+	enterprisePolicyVerifyCmd.Flags().StringVar(&enterprisePolicyAuditDB, "audit-db", "", "Gateway audit database whose event history is searched for the Claude Code canary tool call (default: the configured audit_db)")
 	enterprisePolicyVerifyCmd.Flags().DurationVar(&enterprisePolicyTimeout, "timeout", 90*time.Second, "Live check timeout")
 	enterprisePolicyCmd.AddCommand(enterprisePolicyShowCmd, enterprisePolicyExportCmd, enterprisePolicyVerifyCmd)
 	enterpriseCmd.AddCommand(enterprisePolicyCmd)
@@ -254,7 +253,7 @@ func runEnterprisePolicyVerify(cmd *cobra.Command, _ []string) error {
 			UID:         target.UID,
 			GID:         target.GID,
 			Timeout:     enterprisePolicyTimeout,
-			GatewayLog:  enterprisePolicyGatewayLogPath(ctx.layout),
+			AuditDB:     enterprisePolicyAuditDBPath(),
 			Credential:  enterprisePolicyLiveCredential(target),
 		})
 		if liveErr != nil {
@@ -291,23 +290,16 @@ func runEnterprisePolicyExport(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
-// enterprisePolicyGatewayLogPath picks the gateway log the Claude canary
-// is searched in.
-func enterprisePolicyGatewayLogPath(layout managed.StandaloneLayout) string {
-	if value := strings.TrimSpace(enterprisePolicyGatewayLog); value != "" {
+// enterprisePolicyAuditDBPath is the audit database whose v8 event history
+// holds the record the Claude Code canary tool call leaves.
+func enterprisePolicyAuditDBPath() string {
+	if value := strings.TrimSpace(enterprisePolicyAuditDB); value != "" {
 		return value
 	}
-	for _, candidate := range []string{
-		filepath.Join(layout.LogDir, "gateway.jsonl"),
-		filepath.Join(layout.LogDir, "gateway.log"),
-		filepath.Join(layout.DataDir, "gateway.jsonl"),
-		filepath.Join(layout.DataDir, "gateway.log"),
-	} {
-		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
-			return candidate
-		}
+	if cfg == nil {
+		return ""
 	}
-	return ""
+	return strings.TrimSpace(cfg.AuditDB)
 }
 
 func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) error {

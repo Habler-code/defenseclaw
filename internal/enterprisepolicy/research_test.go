@@ -183,6 +183,16 @@ func TestCopilotUntrustedDropInIsAConflict(t *testing.T) {
 	if state.Covered || !hasConflict(state, "Copilot silently ignores") {
 		t.Fatalf("a world-writable drop-in is ignored by Copilot and must not count: %+v", state)
 	}
+	// Reconcile replaces DefenseClaw's own drop-in when it is untrusted
+	// instead of failing every pass.
+	state, err = copilotTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatalf("reconcile must repair an untrusted DefenseClaw drop-in: %v", err)
+	}
+	mustNoConflicts(t, state)
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 || !state.Covered {
+		t.Fatalf("repaired drop-in: %v %v %+v", info, err, state)
+	}
 }
 
 func TestOpenCodeManagedPluginRoute(t *testing.T) {

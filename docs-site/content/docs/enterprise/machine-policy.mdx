@@ -48,6 +48,16 @@ user's configuration, and the guardian repairs it.
 - **Root- or Administrators-owned files, readable by users** (`0644`).
   Copilot ignores group- or world-writable policy files, so DefenseClaw never
   writes one.
+- **Vendor directories under `%ProgramData%` it can trust.** Standard users
+  may create folders in `%ProgramData%`. A vendor folder a standard user
+  created first gets DefenseClaw's owner and protected DACL. A file, junction,
+  symbolic link or folder a standard user left at a vendor path or at
+  DefenseClaw's drop-in name is removed (a link, never its target) or moved
+  aside to a hidden `.<name>.defenseclaw-displaced-<time>-<id>` name that
+  DefenseClaw owns, and the folder is created in its place. A `*.json` file a
+  standard user left in Copilot's `policy.d` is moved aside the same way.
+  Objects Administrators, LocalSystem or TrustedInstaller own are never
+  removed; DefenseClaw reports them instead.
 
 Your own hooks and settings in the same files are preserved through install,
 repair, upgrade and uninstall.
@@ -122,7 +132,10 @@ defenseclaw-gateway enterprise policy verify --connector codex --live --user ali
   `toml`, `json`, `claude-hklm-json`, `reg`, `plist`,
   `intune-settings-catalog` (not every format applies to every connector).
 - `verify --live --user <user>` runs the real Codex or Claude Code client as
-  that user and proves it loads DefenseClaw's hooks.
+  that user and proves it loads DefenseClaw's hooks. For Claude Code the proof
+  is the gateway's `tool.invocation.requested` record of a canary tool call
+  in its event history (the audit database; `--audit-db` overrides the
+  path), so the gateway must be running and collecting `tool.activity` logs.
 
 ## Vendor limits
 

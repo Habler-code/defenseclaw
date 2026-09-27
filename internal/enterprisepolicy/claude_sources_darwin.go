@@ -63,11 +63,15 @@ func plistToJSON(path string) ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/usr/bin/plutil", "-convert", "json", "-o", "-", "--", path)
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &limitedBuffer{buf: &stdout, limit: policyFileLimit}
-	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: 64 << 10}
+	stdout, stderr := newLimitedBuffer(policyFileLimit), newLimitedBuffer(64<<10)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%v: %s", err, bytes.TrimSpace(stderr.Bytes()))
+	}
+	if stdout.Truncated() {
+		// A policy document larger than the cap is never parsed in part.
+		return nil, fmt.Errorf("%s converts to more than %d bytes of JSON", path, policyFileLimit)
 	}
 	return stdout.Bytes(), nil
 }

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"time"
 )
 
@@ -125,22 +126,53 @@ func deleteRecord(opts Options, connector string) error {
 	return nil
 }
 
-// beginRecord returns the existing record or a new one capturing the
-// current file as the preimage.
-func beginRecord(opts Options, connector, path string, current []byte, exists bool) (*ownershipRecord, error) {
-	record, err := loadRecord(opts, connector)
+// stripFunc removes DefenseClaw-owned content from one vendor file. It
+// returns the administrator's remaining bytes and whether any DefenseClaw
+// content was found. With nothing owned it must return current unchanged,
+// so a file DefenseClaw never touched is never re-encoded.
+type stripFunc func(current []byte) (admin []byte, owned bool, err error)
+
+// wholeFileStrip is the stripFunc of a file DefenseClaw owns entirely (its
+// 90-defenseclaw.json drop-ins, the Cursor PowerShell adapter): a file that
+// carries DefenseClaw's entries is DefenseClaw's, and any other content
+// under that name belongs to someone else and is left alone.
+func wholeFileStrip(isOwned func([]byte) bool) stripFunc {
+	return func(current []byte) ([]byte, bool, error) {
+		if isOwned(current) {
+			return nil, true, nil
+		}
+		return current, false, nil
+	}
+}
+
+// blank reports whether data holds no content worth restoring. An empty
+// JSON drop-in is not valid JSON (Claude Code refuses to start with one),
+// so blank administrator content means "no file".
+func blank(data []byte) bool {
+	return len(bytes.TrimSpace(data)) == 0
+}
+
+// capturePreimage records what the administrator, not DefenseClaw, keeps in
+// path: the current bytes with DefenseClaw's content stripped. A file that
+// held only DefenseClaw content (an admin-deployed `policy export`, a file
+// left by a crash before the record was saved) has no preimage, so removal
+// never puts DefenseClaw's hooks or lock back.
+func (r *ownershipRecord) capturePreimage(current []byte, exists bool, strip stripFunc) error {
+	r.PreimageExisted, r.Preimage, r.PreimageSHA256 = false, nil, ""
+	if !exists {
+		return nil
+	}
+	admin, _, err := strip(current)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if record != nil && record.Path == path {
-		return record, nil
+	if blank(admin) {
+		return nil
 	}
-	record = &ownershipRecord{Connector: connector, Path: path, PreimageExisted: exists}
-	if exists {
-		record.Preimage = append([]byte(nil), current...)
-		record.PreimageSHA256 = sha256Hex(current)
-	}
-	return record, nil
+	r.PreimageExisted = true
+	r.Preimage = append([]byte(nil), admin...)
+	r.PreimageSHA256 = sha256Hex(admin)
+	return nil
 }
 
 // noteRewrite records that the owned entries were found missing from a
@@ -169,14 +201,36 @@ func flapConflict(state *State, connector, path string, count int) {
 
 // publishWithRecord writes rendered when it differs from current and keeps
 // the ownership record in sync. It returns whether the file changed.
-func publishWithRecord(opts Options, connector, path string, current []byte, exists bool, rendered []byte, ownedWasPresent bool, state *State) (bool, error) {
-	record, err := beginRecord(opts, connector, path, current, exists)
+// alsoCreated names directories the caller created for this file (a
+// vendor directory that replaced a planted object), recorded like the ones
+// the write creates so removal deletes them when empty.
+//
+// The preimage follows the administrator: whenever the file on disk is not
+// what DefenseClaw last wrote (someone edited, replaced or deleted it), the
+// administrator content of that version replaces the recorded preimage
+// before DefenseClaw merges into it. Otherwise a reconcile would fold the
+// edit into the postimage and removal would restore the stale install-time
+// preimage, dropping the edit (or resurrecting deleted content).
+func publishWithRecord(opts Options, connector, path string, current []byte, exists bool, rendered []byte, ownedWasPresent bool, strip stripFunc, state *State, alsoCreated ...string) (bool, error) {
+	record, err := loadRecord(opts, connector)
 	if err != nil {
 		return false, err
 	}
-	if record.PostimageSHA256 != "" && exists && sha256Hex(current) != record.PostimageSHA256 && !ownedWasPresent {
-		flapConflict(state, connector, path, record.noteRewrite(opts.now()))
+	switch {
+	case record == nil || record.Path != path:
+		record = &ownershipRecord{Connector: connector, Path: path}
+		if err := record.capturePreimage(current, exists, strip); err != nil {
+			return false, err
+		}
+	case !exists || sha256Hex(current) != record.PostimageSHA256:
+		if record.PostimageSHA256 != "" && exists && !ownedWasPresent {
+			flapConflict(state, connector, path, record.noteRewrite(opts.now()))
+		}
+		if err := record.capturePreimage(current, exists, strip); err != nil {
+			return false, err
+		}
 	}
+	record.CreatedDirs = appendUnique(record.CreatedDirs, alsoCreated...)
 	changed := !exists || !bytes.Equal(current, rendered)
 	if changed {
 		created, err := writePolicyFile(opts, path, rendered)
@@ -193,10 +247,17 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 }
 
 // restoreOrStrip removes DefenseClaw's content from path. When the file is
-// exactly what DefenseClaw last wrote, the preimage is restored byte for
-// byte (or the file removed when it did not exist); otherwise strip is
-// applied to the current bytes so later administrator edits survive.
-func restoreOrStrip(opts Options, connector, path string, strip func([]byte) ([]byte, bool, error), state *State) error {
+// exactly what DefenseClaw last wrote, the recorded administrator content
+// is restored byte for byte (or the file removed when there was none);
+// otherwise strip is applied to the current bytes so later administrator
+// edits survive. A file without DefenseClaw content is never rewritten or
+// deleted, and a file left with nothing but DefenseClaw content is removed,
+// never truncated to an empty (unparsable) policy file.
+//
+// wholeFile marks a drop-in DefenseClaw owns entirely. Without an ownership
+// record such a file was deployed by the administrator (for example the
+// `policy export` output under verify_only), so it is left in place.
+func restoreOrStrip(opts Options, connector, path string, strip stripFunc, wholeFile bool, state *State) error {
 	record, err := loadRecord(opts, connector)
 	if err != nil {
 		return err
@@ -205,32 +266,55 @@ func restoreOrStrip(opts Options, connector, path string, strip func([]byte) ([]
 	if err != nil {
 		return err
 	}
-	if record != nil && record.Path == path && exists && sha256Hex(current) == record.PostimageSHA256 {
+	switch {
+	case !exists:
+	case record == nil && wholeFile:
+		state.detail("left %s in place: DefenseClaw has no record of writing it", path)
+	case record != nil && record.Path == path && sha256Hex(current) == record.PostimageSHA256:
+		var admin []byte
 		if record.PreimageExisted {
-			if _, err := writePolicyFile(opts, path, record.Preimage); err != nil {
+			// Records written before preimages were stripped can hold
+			// DefenseClaw's own entries; never restore those.
+			if admin, _, err = strip(record.Preimage); err != nil {
 				return err
 			}
-			state.detail("restored the preimage of %s", path)
-		} else {
+		}
+		if blank(admin) {
 			if err := removePolicyFile(opts, path); err != nil {
 				return err
 			}
-			state.detail("removed %s (it did not exist before DefenseClaw)", path)
+			state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
+		} else {
+			if _, err := writePolicyFile(opts, path, admin); err != nil {
+				return err
+			}
+			state.detail("restored the administrator content of %s", path)
 		}
 		state.Changed = true
-	} else if exists {
-		stripped, empty, err := strip(current)
+	default:
+		admin, owned, err := strip(current)
 		if err != nil {
+			if record == nil {
+				// No record says DefenseClaw ever wrote this file, and its
+				// content cannot be parsed: it is its owner's to fix.
+				state.detail("left %s unchanged: %v", path, err)
+				break
+			}
 			return err
 		}
 		switch {
-		case empty && (record == nil || !record.PreimageExisted):
+		case !owned:
+			if record != nil {
+				state.detail("%s no longer holds DefenseClaw entries; left it unchanged", path)
+			}
+		case blank(admin):
 			if err := removePolicyFile(opts, path); err != nil {
 				return err
 			}
 			state.Changed = true
-		case !bytes.Equal(stripped, current):
-			if _, err := writePolicyFile(opts, path, stripped); err != nil {
+			state.detail("removed %s (only DefenseClaw content remained)", path)
+		default:
+			if _, err := writePolicyFile(opts, path, admin); err != nil {
 				return err
 			}
 			state.Changed = true
@@ -238,9 +322,13 @@ func restoreOrStrip(opts Options, connector, path string, strip func([]byte) ([]
 		}
 	}
 	if record != nil {
-		for i := len(record.CreatedDirs) - 1; i >= 0; i-- {
-			if err := removeDirIfEmpty(opts, record.CreatedDirs[i]); err != nil {
-				state.detail("left %s in place: %v", record.CreatedDirs[i], err)
+		// Deepest first: a directory recorded later can be the parent of
+		// one recorded earlier.
+		dirs := append([]string(nil), record.CreatedDirs...)
+		sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+		for _, dir := range dirs {
+			if err := removeDirIfEmpty(opts, dir); err != nil {
+				state.detail("left %s in place: %v", dir, err)
 			}
 		}
 	}

@@ -121,6 +121,9 @@ func mergeCursorHooks(opts Options, current []byte) ([]byte, bool, error) {
 	return rendered, alreadyExact, err
 }
 
+// stripCursorHooks is the ownership stripFunc for the enterprise
+// hooks.json: it removes DefenseClaw's entries and returns an administrator
+// file without them untouched (no re-indenting or re-escaping).
 func stripCursorHooks(opts Options, current []byte) ([]byte, bool, error) {
 	doc, err := decodeOrderedObject(current)
 	if err != nil {
@@ -128,6 +131,7 @@ func stripCursorHooks(opts Options, current []byte) ([]byte, bool, error) {
 	}
 	hooksValue, _ := doc.get("hooks")
 	hooks, _ := hooksValue.(*object)
+	owned := false
 	if hooks != nil {
 		for _, event := range append([]string(nil), hooks.keys...) {
 			value, _ := hooks.get(event)
@@ -138,6 +142,10 @@ func stripCursorHooks(opts Options, current []byte) ([]byte, bool, error) {
 					kept = append(kept, item)
 				}
 			}
+			if len(kept) == len(list) {
+				continue
+			}
+			owned = true
 			if len(kept) == 0 {
 				hooks.delete(event)
 			} else {
@@ -145,8 +153,10 @@ func stripCursorHooks(opts Options, current []byte) ([]byte, bool, error) {
 			}
 		}
 	}
-	empty := hooks == nil || hooks.len() == 0
-	if empty {
+	if !owned {
+		return current, false, nil
+	}
+	if hooks.len() == 0 {
 		// Only DefenseClaw's content (plus the version marker) remained.
 		onlyVersion := true
 		for _, key := range doc.keys {
@@ -159,7 +169,7 @@ func stripCursorHooks(opts Options, current []byte) ([]byte, bool, error) {
 		}
 	}
 	rendered, err := encodeOrdered(doc)
-	return rendered, false, err
+	return rendered, true, err
 }
 
 func inspectCursor(opts Options, current []byte, state *State) error {
@@ -253,7 +263,9 @@ func (t cursorTarget) Reconcile(opts Options) (State, error) {
 			state.finish()
 			return state, nil
 		}
-		changed, err := publishWithRecord(opts, cursorConnector, path, current, exists, rendered, exact, &state)
+		changed, err := publishWithRecord(opts, cursorConnector, path, current, exists, rendered, exact, func(current []byte) ([]byte, bool, error) {
+			return stripCursorHooks(opts, current)
+		}, &state)
 		if err != nil {
 			return state, err
 		}
@@ -315,7 +327,7 @@ func (t cursorTarget) RemoveOwned(opts Options) (State, error) {
 	state := State{Connector: cursorConnector, Route: RouteMachinePolicy, Paths: paths}
 	err = restoreOrStrip(opts, cursorConnector, paths[0], func(current []byte) ([]byte, bool, error) {
 		return stripCursorHooks(opts, current)
-	}, &state)
+	}, false, &state)
 	return state, err
 }
 

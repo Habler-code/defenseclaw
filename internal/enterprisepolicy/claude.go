@@ -395,7 +395,7 @@ func (t claudeTarget) Reconcile(opts Options) (State, error) {
 				state.detail("replacing unparsable %s", path)
 			}
 		}
-		changed, err := publishWithRecord(opts, claudeConnector, path, current, exists, rendered, exists && bytes.Equal(current, rendered), &state)
+		changed, err := publishWithRecord(opts, claudeConnector, path, current, exists, rendered, exists && bytes.Equal(current, rendered), claudeStrip(opts), &state)
 		if err != nil {
 			return state, err
 		}
@@ -438,11 +438,22 @@ func (t claudeTarget) RemoveOwned(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := State{Connector: claudeConnector, Route: RouteMachinePolicy, Paths: []string{path}}
-	err = restoreOrStrip(opts, claudeConnector, path, func([]byte) ([]byte, bool, error) {
-		// DefenseClaw owns the whole drop-in.
-		return nil, true, nil
-	}, &state)
+	err = restoreOrStrip(opts, claudeConnector, path, claudeStrip(opts), true, &state)
 	return state, err
+}
+
+// claudeStrip treats a drop-in carrying DefenseClaw's hooks as DefenseClaw's
+// whole file; any other content under the drop-in name is left alone.
+func claudeStrip(opts Options) stripFunc {
+	return wholeFileStrip(func(current []byte) bool {
+		doc, err := decodeOrderedObject(current)
+		if err != nil {
+			return false
+		}
+		hooks, _ := doc.get("hooks")
+		owned, _, _ := countClaudeHooks(opts, hooks, nil)
+		return owned > 0
+	})
 }
 
 func (claudeTarget) Export(opts Options, format string) ([]byte, error) {

@@ -55,7 +55,7 @@ func windowsCursorReconcile(opts Options) (State, error) {
 		if err != nil {
 			return state, err
 		}
-		if _, err := publishWithRecord(opts, cursorAdapterRecord, adapterPath, adapterCurrent, adapterExists, adapter, adapterExists && bytes.Equal(adapterCurrent, adapter), &state); err != nil {
+		if _, err := publishWithRecord(opts, cursorAdapterRecord, adapterPath, adapterCurrent, adapterExists, adapter, adapterExists && bytes.Equal(adapterCurrent, adapter), windowsCursorAdapterStrip(opts), &state); err != nil {
 			return state, err
 		}
 		merged, err := connector.MergeWindowsCursorEnterpriseHooks(current, adapterPath, "closed")
@@ -65,7 +65,7 @@ func windowsCursorReconcile(opts Options) (State, error) {
 			return state, nil
 		}
 		exact := exists && connector.VerifyWindowsCursorEnterpriseHooks(current, adapterPath, "closed") == nil
-		changed, err := publishWithRecord(opts, cursorConnector, hooksPath, current, exists, merged, exact, &state)
+		changed, err := publishWithRecord(opts, cursorConnector, hooksPath, current, exists, merged, exact, windowsCursorHooksStrip(adapterPath), &state)
 		if err != nil {
 			return state, err
 		}
@@ -126,17 +126,36 @@ func windowsCursorRemove(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := State{Connector: cursorConnector, Route: RouteMachinePolicy, Paths: []string{hooksPath, adapterPath}}
-	if err := restoreOrStrip(opts, cursorConnector, hooksPath, func(current []byte) ([]byte, bool, error) {
+	if err := restoreOrStrip(opts, cursorConnector, hooksPath, windowsCursorHooksStrip(adapterPath), false, &state); err != nil {
+		return state, err
+	}
+	err = restoreOrStrip(opts, cursorAdapterRecord, adapterPath, windowsCursorAdapterStrip(opts), true, &state)
+	return state, err
+}
+
+// windowsCursorHooksStrip removes the adapter entries DefenseClaw merged
+// into the enterprise hooks.json; a file without them is left untouched.
+func windowsCursorHooksStrip(adapterPath string) stripFunc {
+	return func(current []byte) ([]byte, bool, error) {
 		cleaned, err := connector.RemoveWindowsCursorEnterpriseHooks(current, adapterPath)
 		if err != nil {
 			return nil, false, err
 		}
-		return cleaned, connector.WindowsCursorEnterpriseHooksEmpty(cleaned), nil
-	}, &state); err != nil {
-		return state, err
+		if bytes.Equal(cleaned, current) {
+			return current, false, nil
+		}
+		if connector.WindowsCursorEnterpriseHooksEmpty(cleaned) {
+			return nil, true, nil
+		}
+		return cleaned, true, nil
 	}
-	err = restoreOrStrip(opts, cursorAdapterRecord, adapterPath, func([]byte) ([]byte, bool, error) {
-		return nil, true, nil
-	}, &state)
-	return state, err
+}
+
+// windowsCursorAdapterStrip treats an adapter that launches DefenseClaw's
+// hook binary as DefenseClaw's whole file.
+func windowsCursorAdapterStrip(opts Options) stripFunc {
+	needle := bytes.ToLower([]byte(opts.HookBinary))
+	return wholeFileStrip(func(current []byte) bool {
+		return len(needle) > 0 && bytes.Contains(bytes.ToLower(current), needle)
+	})
 }

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // ExportFormats lists every export format.
@@ -31,17 +32,55 @@ func Export(opts Options, connectorName, format string) ([]byte, error) {
 	return target.Export(opts, strings.ToLower(strings.TrimSpace(format)))
 }
 
-// limitedBuffer caps command output.
+// limitedBuffer collects up to limit bytes of command output and discards
+// the rest. It never returns a write error, so exec keeps draining the
+// child's pipe and a chatty child cannot stall on a full pipe until its
+// timeout. Writes and reads are serialized, so one buffer may back both
+// Stdout and Stderr and be read while the command still runs.
 type limitedBuffer struct {
-	buf   *bytes.Buffer
-	limit int
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func newLimitedBuffer(limit int) *limitedBuffer {
+	return &limitedBuffer{limit: limit}
 }
 
 func (l *limitedBuffer) Write(p []byte) (int, error) {
-	if l.buf.Len()+len(p) > l.limit {
-		return 0, errors.New("command output exceeds its limit")
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	room := l.limit - l.buf.Len()
+	if room < len(p) {
+		if room > 0 {
+			l.buf.Write(p[:room])
+		}
+		l.truncated = true
+		return len(p), nil
 	}
-	return l.buf.Write(p)
+	l.buf.Write(p)
+	return len(p), nil
+}
+
+// Bytes returns a copy of the collected output.
+func (l *limitedBuffer) Bytes() []byte {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]byte(nil), l.buf.Bytes()...)
+}
+
+func (l *limitedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// Truncated reports whether output past the limit was discarded.
+func (l *limitedBuffer) Truncated() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.truncated
 }
 
 // renderPlist converts a JSON object into an XML property list dictionary,

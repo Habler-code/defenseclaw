@@ -20,9 +20,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
 // The live checks run a real client binary. These tests re-execute the
@@ -83,24 +87,98 @@ func fakeClaudeCLI() int {
 		return 1
 	}
 	content, _ := first["content"].([]any)
+	toolUseID := ""
 	for _, raw := range content {
 		block, _ := raw.(map[string]any)
 		input, _ := block["input"].(map[string]any)
 		command, _ := input["command"].(string)
-		if command != "" && os.Getenv("DC_FAKE_HOOK_LOG") != "" {
-			// Stand-in for DefenseClaw's managed PreToolUse hook reaching the gateway.
+		id, _ := block["id"].(string)
+		if command == "" || id == "" {
+			continue
+		}
+		toolUseID = id
+		if os.Getenv("DC_FAKE_HOOK_LOG") != "" {
+			// Stand-in for DefenseClaw's managed PreToolUse hook reporting the
+			// call to the gateway, which records it in its event history.
 			file, err := os.OpenFile(os.Getenv("DC_FAKE_HOOK_LOG"), os.O_APPEND|os.O_WRONLY, 0o600)
 			if err == nil {
-				fmt.Fprintf(file, `{"event":"PreToolUse","command":%q}`+"\n", command)
+				fmt.Fprintln(file, fakeHookCall(os.Getenv("DC_FAKE_HOOK_SHAPE"), id, command))
 				_ = file.Close()
 			}
 		}
 	}
-	if _, err := post(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_canary"}]}]}`); err != nil {
+	result, _ := json.Marshal(map[string]any{"messages": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": toolUseID}}}}})
+	if _, err := post(string(result)); err != nil {
 		return 1
+	}
+	if n, _ := strconv.Atoi(os.Getenv("DC_FAKE_FLOOD")); n > 0 {
+		// A chatty client writing to both streams at once.
+		chunk := bytes.Repeat([]byte("x"), 32<<10)
+		var wg sync.WaitGroup
+		for _, stream := range []*os.File{os.Stdout, os.Stderr} {
+			wg.Add(1)
+			go func(stream *os.File) {
+				defer wg.Done()
+				for written := 0; written < n; written += len(chunk) {
+					if _, err := stream.Write(chunk); err != nil {
+						return
+					}
+				}
+			}(stream)
+		}
+		wg.Wait()
 	}
 	fmt.Println(`{"result":"done"}`)
 	return 0
+}
+
+// fakeHookCall renders what the fake hook reports for one Claude Code
+// PreToolUse call; shape selects reports that must not prove hook contact.
+func fakeHookCall(shape, toolUseID, command string) string {
+	call := map[string]any{
+		"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": toolUseID,
+		"tool_input": map[string]string{"command": command}, "user_id": strconv.Itoa(os.Getuid()),
+	}
+	switch shape {
+	case "other-user":
+		call["user_id"] = strconv.Itoa(os.Getuid() + 1)
+	case "other-tool-call":
+		call["tool_use_id"] = "toolu_canary"
+	}
+	line, _ := json.Marshal(call)
+	return string(line)
+}
+
+// fakeEventHistory answers the live check's event-history query from the
+// fake hook's reports, the way the gateway's audit database would; the
+// match against real v8 records is covered in the gateway package.
+func fakeEventHistory(t *testing.T, log string, queries *[]audit.HookToolInvocationQuery) func(context.Context, audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
+	t.Helper()
+	return func(_ context.Context, query audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
+		if queries != nil {
+			*queries = append(*queries, query)
+		}
+		var evidence audit.HookToolInvocationEvidence
+		data, err := os.ReadFile(log)
+		if err != nil {
+			return evidence, err
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			var call struct {
+				ToolUseID string `json:"tool_use_id"`
+				UserID    string `json:"user_id"`
+			}
+			if json.Unmarshal([]byte(line), &call) != nil || call.ToolUseID != query.ToolCallID || query.Connector != ConnectorClaudeCode {
+				continue
+			}
+			if query.UserID != "" && call.UserID != query.UserID {
+				evidence.Mismatches = append(evidence.Mismatches, fmt.Sprintf("a tool call record for user %q", call.UserID))
+				continue
+			}
+			evidence.Matched = true
+		}
+		return evidence, nil
+	}
 }
 
 func fakeAgentScript(t *testing.T, agent string, env map[string]string) string {
@@ -145,21 +223,88 @@ func TestVerifyLiveCodexAppServer(t *testing.T) {
 func TestVerifyLiveClaudeCanary(t *testing.T) {
 	opts := testOptions(t)
 	home := t.TempDir()
-	log := filepath.Join(t.TempDir(), "gateway.jsonl")
+	log := filepath.Join(t.TempDir(), "hook-calls.jsonl")
 	writeFile(t, log, "")
+	var queries []audit.HookToolInvocationQuery
 	hooked := fakeAgentScript(t, "claude", map[string]string{"DC_FAKE_HOOK_LOG": log})
-	result, err := VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorClaudeCode, AgentBinary: hooked, Home: home, GatewayLog: log, Timeout: 30 * time.Second})
-	if err != nil || !result.Verified || result.HookContact != "yes" || !strings.Contains(readFile(t, log), result.Nonce) {
+	started := time.Now()
+	result, err := VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorClaudeCode, AgentBinary: hooked, Home: home, UID: os.Getuid(), HookRecords: fakeEventHistory(t, log, &queries), Timeout: 30 * time.Second})
+	if err != nil || !result.Verified || result.HookContact != "yes" {
 		t.Fatalf("a hooked run must reach the gateway: %+v %v", result, err)
+	}
+	// The stub gave the canary call a tool call id derived from the nonce,
+	// and the check asked the event history for exactly that call.
+	if !strings.Contains(readFile(t, log), canaryToolCallID(result.Nonce)) || len(queries) != 1 {
+		t.Fatalf("the canary call must carry the nonce-derived tool call id: %s %+v", readFile(t, log), queries)
+	}
+	if query := queries[0]; query.Connector != ConnectorClaudeCode || query.ToolCallID != canaryToolCallID(result.Nonce) ||
+		query.UserID != strconv.Itoa(os.Getuid()) || query.Since.Before(started) || query.Since.After(time.Now()) {
+		t.Fatalf("event-history query: %+v", query)
 	}
 
 	shadowed := fakeAgentScript(t, "claude", map[string]string{})
-	result, err = VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorClaudeCode, AgentBinary: shadowed, Home: home, GatewayLog: log, Timeout: 30 * time.Second})
+	result, err = VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorClaudeCode, AgentBinary: shadowed, Home: home, UID: os.Getuid(), HookRecords: fakeEventHistory(t, log, nil), Timeout: 30 * time.Second})
 	if err != nil || result.Verified || result.HookContact != "no" || !strings.Contains(strings.Join(result.Problems, " "), "server-managed") {
 		t.Fatalf("a run without DefenseClaw's hooks must fail and name the likely cause: %+v %v", result, err)
 	}
 
 	if _, err := VerifyLive(context.Background(), opts, LiveOptions{Connector: "cursor", AgentBinary: hooked, Home: home}); err == nil {
 		t.Fatal("live verification is only implemented for codex and claudecode")
+	}
+}
+
+// Only the gateway's record of the canary call itself, for the target
+// user, proves hook contact; a record of another call or for another user
+// does not, and an unreadable or unconfigured event history proves nothing.
+func TestVerifyLiveClaudeRequiresTheCanaryToolCallRecord(t *testing.T) {
+	opts := testOptions(t)
+	home := t.TempDir()
+	for _, shape := range []string{"other-user", "other-tool-call"} {
+		t.Run(shape, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "hook-calls.jsonl")
+			writeFile(t, log, "")
+			agent := fakeAgentScript(t, "claude", map[string]string{"DC_FAKE_HOOK_LOG": log, "DC_FAKE_HOOK_SHAPE": shape})
+			result, err := VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorClaudeCode, AgentBinary: agent, Home: home, UID: os.Getuid(), HookRecords: fakeEventHistory(t, log, nil), Timeout: 30 * time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(readFile(t, log), "PreToolUse") {
+				t.Fatalf("the fake hook did not report the call")
+			}
+			if result.Verified || result.HookContact != "no" {
+				t.Fatalf("a %s record must not prove hook contact: %+v", shape, result)
+			}
+		})
+	}
+	agent := fakeAgentScript(t, "claude", map[string]string{})
+	for name, lo := range map[string]LiveOptions{
+		"no event history":       {},
+		"missing audit database": {AuditDB: filepath.Join(t.TempDir(), "audit.db")},
+	} {
+		lo.Connector, lo.AgentBinary, lo.Home, lo.UID, lo.Timeout = ConnectorClaudeCode, agent, home, os.Getuid(), 30*time.Second
+		result, err := VerifyLive(context.Background(), opts, lo)
+		if err != nil || result.Verified || result.HookContact != "unknown" || len(result.Problems) == 0 {
+			t.Fatalf("%s must leave hook contact unproven: %+v %v", name, result, err)
+		}
+	}
+}
+
+// A client that writes more than the cap to stdout and stderr at once must
+// neither race on the shared output buffer (run under -race: exec copies the
+// two streams on separate goroutines) nor stall or be cut off by a write
+// error at the cap.
+func TestVerifyLiveClaudeDrainsAChattyClient(t *testing.T) {
+	opts := testOptions(t)
+	home := t.TempDir()
+	log := filepath.Join(t.TempDir(), "hook-calls.jsonl")
+	writeFile(t, log, "")
+	agent := fakeAgentScript(t, "claude", map[string]string{"DC_FAKE_HOOK_LOG": log, "DC_FAKE_FLOOD": strconv.Itoa(4 << 20)})
+	started := time.Now()
+	result, err := VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorClaudeCode, AgentBinary: agent, Home: home, UID: os.Getuid(), HookRecords: fakeEventHistory(t, log, nil), Timeout: 40 * time.Second})
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("the check stalled for %s on a chatty client", elapsed)
+	}
+	if err != nil || !result.Verified {
+		t.Fatalf("a chatty hooked client must still verify: %+v %v", result, err)
 	}
 }

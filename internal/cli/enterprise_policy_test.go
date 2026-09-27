@@ -32,7 +32,7 @@ func resetEnterprisePolicyFlags(t *testing.T) {
 	t.Cleanup(func() {
 		enterprisePolicyConnector, enterprisePolicyFormat, enterprisePolicyUser, enterprisePolicyProject = "", "", "", ""
 		enterprisePolicyJSON, enterprisePolicyLive = false, false
-		enterprisePolicyAgentBinary, enterprisePolicyGatewayLog = "", ""
+		enterprisePolicyAgentBinary, enterprisePolicyAuditDB = "", ""
 	})
 }
 

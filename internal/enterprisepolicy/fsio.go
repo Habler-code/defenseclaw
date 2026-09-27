@@ -39,6 +39,54 @@ func readBounded(file *os.File, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// untrustedPolicyFileError reports an existing policy file that fails the
+// administrator-ownership rules.
+type untrustedPolicyFileError struct {
+	path string
+	err  error
+}
+
+func (e *untrustedPolicyFileError) Error() string { return e.err.Error() }
+
+func (e *untrustedPolicyFileError) Unwrap() error { return e.err }
+
+// policyTakeBack is what reclaimPolicyDirs did to a policy path's vendor
+// directories.
+type policyTakeBack struct {
+	// reclaimed directories now carry DefenseClaw's owner and protected DACL.
+	reclaimed []string
+	// created directories replace an object an unprivileged user planted.
+	created []string
+	// notes describe the planted objects removed or moved aside.
+	notes []string
+}
+
+// takeBackPolicyPath reclaims the vendor directories of path that an
+// unprivileged user created or occupied ahead of DefenseClaw (Windows
+// ProgramData), and clears a planted non-regular object at path itself,
+// before a target reads or writes its policy. It records what it did and
+// returns the directories it created.
+func takeBackPolicyPath(opts Options, path string, state *State) ([]string, error) {
+	if opts.SkipTrustChecks {
+		return nil, nil
+	}
+	result, err := reclaimPolicyDirs(opts, platformPath(opts, dirFor(opts, path)))
+	for _, dir := range result.reclaimed {
+		state.detail("took back %s: an unprivileged user created it before DefenseClaw; it now has DefenseClaw's owner and protected DACL", dir)
+	}
+	for _, note := range result.notes {
+		state.detail("%s", note)
+	}
+	if err != nil {
+		return result.created, err
+	}
+	note, err := clearPolicyFileName(opts, platformPath(opts, path))
+	if note != "" {
+		state.detail("%s", note)
+	}
+	return result.created, err
+}
+
 // readPolicyFile returns (data, exists). The file must be a regular,
 // non-symlink file whose ancestors an unprivileged user cannot replace.
 func readPolicyFile(opts Options, path string) ([]byte, bool, error) {
@@ -60,7 +108,7 @@ func readPolicyFile(opts Options, path string) ([]byte, bool, error) {
 	}
 	if !opts.SkipTrustChecks {
 		if err := validateTrustedPolicyFile(opts, path); err != nil {
-			return nil, false, err
+			return nil, false, &untrustedPolicyFileError{path: path, err: err}
 		}
 	}
 	file, err := openNoFollow(path)

@@ -297,4 +297,31 @@ func TestCodexWindowsRendering(t *testing.T) {
 	if path, _ := CodexRequirementsPath(opts); path != `C:\ProgramData\OpenAI\Codex\requirements.toml` {
 		t.Fatalf("windows path = %q", path)
 	}
+	// Every group carries the command the standalone Windows requirements
+	// writer publishes: bound to its event and the default contract (the
+	// hook refuses an unbound Codex call), never the unbound form.
+	var cfg map[string]any
+	if err := toml.Unmarshal(rendered, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]any)
+	contract := connector.ResolveHookContract("codex", "").Contract.ContractID
+	groups, err := connector.ManagedHookGroupsForOS("codex", "", "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range groups {
+		want := connector.WindowsCodexStandaloneManagedHookCommand(opts.HookBinary, group.Event, contract)
+		list, _ := hooks[group.Event].([]any)
+		if len(list) != 1 {
+			t.Fatalf("hooks.%s has %d groups", group.Event, len(list))
+		}
+		handler := list[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
+		if handler["command"] != want || handler["command_windows"] != want {
+			t.Fatalf("hooks.%s command is not the bound standalone command", group.Event)
+		}
+	}
+	if strings.Contains(text, connector.WindowsCodexManagedHookCommand(opts.HookBinary)) {
+		t.Fatal("the unbound Secure Client command must not appear in standalone requirements")
+	}
 }

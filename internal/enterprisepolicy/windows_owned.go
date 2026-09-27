@@ -56,6 +56,20 @@ func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 		result.States = append(result.States, state)
 	}
 	result.MachinePolicyConnectors = reconciledConnectors(result.States)
+	intended := []string{}
+	for _, name := range MachinePolicyConnectors(opts, connectors) {
+		if windowsGoOwnedTargets[name] {
+			intended = append(intended, name)
+		}
+	}
+	retired, err := retireUnpublished(opts, intended, []string{ConnectorCopilot, ConnectorOpenCode})
+	if err != nil {
+		errs = append(errs, err)
+	}
+	result.Retired = retired
+	for _, state := range retired {
+		result.Changed = result.Changed || state.Changed
+	}
 	if opts.PublicPolicyPath != "" {
 		changed, err := WritePublicPolicy(opts, connectors)
 		if err != nil {

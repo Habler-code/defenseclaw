@@ -65,6 +65,12 @@ type WindowsCodexMachineRequirementsOptions struct {
 	ClaudeTargetEnabled           bool
 	CodexTargetEnabled            bool
 	CursorTargetEnabled           bool
+	// HookContractID binds every managed group's command to its Codex event
+	// and this hook contract. The hook refuses a Codex invocation that does
+	// not carry both, so an unbound command never reaches the gateway. Only
+	// the standalone profile sets it (WindowsCodexStandaloneHookContract);
+	// the Secure Client profile keeps its certified command byte for byte.
+	HookContractID string
 }
 
 // WindowsCodexManagedRuntimeTarget is the non-secret mapping a standard-user
@@ -218,12 +224,43 @@ func windowsCodexManagedHookCommand(hookBinary string) string {
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
+// windowsCodexBoundManagedHookCommand is the standalone command of one
+// managed group. It names the group's event and the hook contract, which
+// the hook requires, and starts the GUI-subsystem launcher through
+// Start-Process -Wait: the PowerShell call operator does not wait for a
+// GUI-subsystem process, so its exit code (2 blocks) and stdout never
+// reached Codex and every decision was lost.
+func windowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
+	arguments := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
+	quoted := make([]string, 0, len(arguments))
+	for _, argument := range arguments {
+		quoted = append(quoted, powershellQuoteLiteral(argument))
+	}
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+			" -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// windowsCodexManagedHookCommandFor is the managed command opts publishes
+// for event.
+func windowsCodexManagedHookCommandFor(opts WindowsCodexMachineRequirementsOptions, event string) string {
+	if contract := strings.TrimSpace(opts.HookContractID); contract != "" {
+		return windowsCodexBoundManagedHookCommand(opts.HookBinary, event, contract)
+	}
+	return windowsCodexManagedHookCommand(opts.HookBinary)
+}
+
 func windowsCodexExpectedMachineGroup(group struct {
 	eventType string
 	matcher   string
 	timeout   int
-}, hookBinary string) map[string]interface{} {
-	command := windowsCodexManagedHookCommand(hookBinary)
+}, opts WindowsCodexMachineRequirementsOptions) map[string]interface{} {
+	command := windowsCodexManagedHookCommandFor(opts, group.eventType)
 	handler := map[string]interface{}{
 		"type":            "command",
 		"command":         command,
@@ -324,15 +361,26 @@ func reconcileWindowsCodexRequirements(
 				return nil, false, fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, rawGroups)
 			}
 		}
+		if strings.TrimSpace(opts.HookContractID) != "" {
+			// An earlier standalone build published the unbound command,
+			// which fails closed without reaching the gateway; drop it.
+			current := make([]interface{}, 0, len(groups))
+			for _, candidate := range groups {
+				if !windowsCodexMachineGroupIsUnboundStandalone(candidate, expected, opts) {
+					current = append(current, candidate)
+				}
+			}
+			groups = current
+		}
 		found := false
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			groups = append(groups, windowsCodexExpectedMachineGroup(expected, opts.HookBinary))
+			groups = append(groups, windowsCodexExpectedMachineGroup(expected, opts))
 		}
 		hooks[expected.eventType] = groups
 	}
@@ -396,7 +444,7 @@ func verifyWindowsCodexRequirementsBytes(
 		}
 		found := 0
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 				found++
 			}
 		}
@@ -418,7 +466,50 @@ func windowsCodexMachineGroupMatches(
 		matcher   string
 		timeout   int
 	},
-	hookBinary string,
+	opts WindowsCodexMachineRequirementsOptions,
+) bool {
+	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommandFor(opts, expected.eventType))
+}
+
+// windowsCodexMachineGroupIsUnboundStandalone reports a group an earlier
+// standalone build published with the unbound command. It is DefenseClaw's
+// own content; only standalone options (HookContractID set) ask.
+func windowsCodexMachineGroupIsUnboundStandalone(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	opts WindowsCodexMachineRequirementsOptions,
+) bool {
+	return strings.TrimSpace(opts.HookContractID) != "" &&
+		windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommand(opts.HookBinary))
+}
+
+// windowsCodexMachineGroupOwned reports any DefenseClaw managed group:
+// the current command, or on standalone the earlier unbound one.
+func windowsCodexMachineGroupOwned(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	opts WindowsCodexMachineRequirementsOptions,
+) bool {
+	return windowsCodexMachineGroupMatches(raw, expected, opts) ||
+		windowsCodexMachineGroupIsUnboundStandalone(raw, expected, opts)
+}
+
+func windowsCodexMachineGroupHasCommand(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	command string,
 ) bool {
 	group, ok := raw.(map[string]interface{})
 	if !ok || len(group) != 1 && len(group) != 2 {
@@ -440,7 +531,6 @@ func windowsCodexMachineGroupMatches(
 	if !ok || len(handler) != 4 {
 		return false
 	}
-	command := windowsCodexManagedHookCommand(hookBinary)
 	if handler["type"] != "command" || handler["command"] != command ||
 		handler["command_windows"] != command {
 		return false
@@ -471,7 +561,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	for _, expected := range codexHookGroups {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 				return true, nil
 			}
 		}
@@ -501,13 +591,13 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
 			for _, candidate := range baselineGroups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts) {
 					baselineCount++
 				}
 			}
 			currentCount := 0
 			for _, candidate := range groups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts) {
 					currentCount++
 				}
 			}
@@ -518,7 +608,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			filtered := make([]interface{}, 0, len(groups)-removeCount)
 			for index := len(groups) - 1; index >= 0; index-- {
 				candidate := groups[index]
-				if removeCount > 0 && windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if removeCount > 0 && windowsCodexMachineGroupOwned(candidate, expected, opts) {
 					removeCount--
 					continue
 				}

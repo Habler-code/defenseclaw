@@ -119,6 +119,14 @@ func WindowsCodexManagedHookCommand(hookBinary string) string {
 	return windowsCodexManagedHookCommand(hookBinary)
 }
 
+// WindowsCodexStandaloneManagedHookCommand renders the standalone profile's
+// Codex machine-requirements command for one event: it binds the event and
+// hookContract the hook requires and waits for the GUI-subsystem launcher,
+// exactly as the standalone requirements writer publishes it.
+func WindowsCodexStandaloneManagedHookCommand(hookBinary, event, hookContract string) string {
+	return windowsCodexBoundManagedHookCommand(hookBinary, event, hookContract)
+}
+
 // PowerShellQuoteLiteral returns one inert single-quoted PowerShell literal.
 func PowerShellQuoteLiteral(value string) string {
 	return powershellQuoteLiteral(value)

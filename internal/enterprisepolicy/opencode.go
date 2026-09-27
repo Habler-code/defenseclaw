@@ -117,6 +117,8 @@ func mergeOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
 	return rendered, exact && len(kept) == len(list), err
 }
 
+// stripOpenCodeConfig is the ownership stripFunc for the managed OpenCode
+// config.
 func stripOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
 	doc, err := decodeOrderedObject(current)
 	if err != nil {
@@ -143,7 +145,7 @@ func stripOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
 		return nil, true, nil
 	}
 	rendered, err := encodeOrdered(doc)
-	return rendered, false, err
+	return rendered, true, err
 }
 
 func inspectOpenCode(opts Options, current []byte, state *State) error {
@@ -189,6 +191,12 @@ func (t opencodeTarget) Reconcile(opts Options) (State, error) {
 		state.detail("no managed OpenCode plugin artifact is installed; OpenCode uses the per-user plugin, guardian repair and the foreign-plugin guard")
 		return state, nil
 	}
+	var created []string
+	if policy.Ownership == config.MachinePolicyOwnershipMerge {
+		if created, err = takeBackPolicyPath(opts, path, &state); err != nil {
+			return state, err
+		}
+	}
 	current, exists, err := readPolicyFile(opts, path)
 	if err != nil {
 		return state, err
@@ -200,7 +208,9 @@ func (t opencodeTarget) Reconcile(opts Options) (State, error) {
 			state.finish()
 			return state, nil
 		}
-		changed, err := publishWithRecord(opts, opencodeConnector, path, current, exists, rendered, exact, &state)
+		changed, err := publishWithRecord(opts, opencodeConnector, path, current, exists, rendered, exact, func(current []byte) ([]byte, bool, error) {
+			return stripOpenCodeConfig(opts, current)
+		}, &state, created...)
 		if err != nil {
 			return state, err
 		}
@@ -252,7 +262,7 @@ func (t opencodeTarget) RemoveOwned(opts Options) (State, error) {
 	state := State{Connector: opencodeConnector, Route: RouteMachinePolicy, Paths: []string{path}}
 	err = restoreOrStrip(opts, opencodeConnector, path, func(current []byte) ([]byte, bool, error) {
 		return stripOpenCodeConfig(opts, current)
-	}, &state)
+	}, false, &state)
 	if errors.Is(err, os.ErrNotExist) {
 		err = nil
 	}

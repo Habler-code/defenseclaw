@@ -137,6 +137,20 @@ func ensurePolicyDir(opts Options, dir string) ([]string, error) {
 	return created, nil
 }
 
+// reclaimPolicyDirs, clearPolicyFileName and displaceUntrustedPolicyFiles
+// are Windows-only: every unix ancestor must already be root-owned and not
+// group/other-writable, so no unprivileged user can create or occupy a
+// vendor path and there is nothing to take back.
+func reclaimPolicyDirs(Options, string) (policyTakeBack, error) { return policyTakeBack{}, nil }
+
+func clearPolicyFileName(Options, string) (string, error) { return "", nil }
+
+func displaceUntrustedPolicyFiles(Options, string, string, *State) {}
+
+// validatePolicyLeafDir is covered on unix by the ancestor walk, which
+// already applies the strict rules to every directory.
+func validatePolicyLeafDir(Options, string) error { return nil }
+
 // atomicWrite writes data to a same-directory temporary file and renames
 // it over path. public selects 0644 (vendor policy) versus 0600 (records).
 func atomicWrite(_ Options, path string, data []byte, public bool) error {

@@ -51,25 +51,18 @@ func (codexTarget) Paths(opts Options) ([]string, error) {
 	return []string{path}, nil
 }
 
-// codexHookCommand is the event-less form of the managed Codex command:
-// the Windows command and the prefix every unix event command starts with.
-func codexHookCommand(opts Options) string {
-	if opts.goos() == "windows" {
-		return connector.WindowsCodexManagedHookCommand(opts.HookBinary)
-	}
-	return shellQuote(opts.HookBinary) + " hook --connector codex --enterprise-managed"
-}
-
 // codexHookCommandForEvent is the command Codex runs for one managed event.
-// The unix hook binds each Codex invocation to its installer-declared event
-// and hook contract and fails closed without them, so every event group
-// names both (live on RHEL an event-less command blocked every Codex
-// prompt).
+// The hook binds each Codex invocation to its installer-declared event and
+// hook contract and fails closed without them, so every event group names
+// both (live on RHEL an event-less command blocked every Codex prompt). On
+// Windows it is the standalone requirements writer's command, which also
+// waits for the GUI-subsystem launcher so its decision reaches Codex.
 func codexHookCommandForEvent(opts Options, event string) string {
+	contract := codexMachinePolicyContract(opts)
 	if opts.goos() == "windows" {
-		return codexHookCommand(opts)
+		return connector.WindowsCodexStandaloneManagedHookCommand(opts.HookBinary, event, contract)
 	}
-	return codexHookCommand(opts) + " --event " + event + " --hook-contract " + codexMachinePolicyContract(opts)
+	return shellQuote(opts.HookBinary) + " hook --connector codex --enterprise-managed --event " + event + " --hook-contract " + contract
 }
 
 // codexMachinePolicyContract is the hook contract the machine-wide Codex
@@ -155,6 +148,27 @@ func stripCodexOwned(raw []byte) []byte {
 	text := out.String()
 	// Drop the separator newline DefenseClaw added before its tail block.
 	return []byte(strings.TrimRight(text, "\n") + trailingNewline(text))
+}
+
+// codexHasOwned reports whether raw carries a DefenseClaw region or marked
+// line.
+func codexHasOwned(raw []byte) bool {
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == codexHeadBegin || trimmed == codexTailBegin || strings.HasSuffix(trimmed, codexOwnedMark) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexStrip is the ownership stripFunc for requirements.toml: an
+// administrator file without DefenseClaw content is returned untouched.
+func codexStrip(current []byte) ([]byte, bool, error) {
+	if !codexHasOwned(current) {
+		return current, false, nil
+	}
+	return stripCodexOwned(current), true, nil
 }
 
 func trailingNewline(text string) string {
@@ -571,7 +585,7 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 			ownedBefore = before.OwnedEntries > 0
 		}
 	}
-	changed, err := publishWithRecord(opts, codexConnector, path, current, exists, rendered, ownedBefore, &state)
+	changed, err := publishWithRecord(opts, codexConnector, path, current, exists, rendered, ownedBefore, codexStrip, &state)
 	if err != nil {
 		return state, err
 	}
@@ -624,10 +638,7 @@ func (codexTarget) RemoveOwned(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := State{Connector: codexConnector, Route: RouteMachinePolicy, Paths: []string{path}}
-	err = restoreOrStrip(opts, codexConnector, path, func(current []byte) ([]byte, bool, error) {
-		stripped := stripCodexOwned(current)
-		return stripped, len(bytes.TrimSpace(stripped)) == 0, nil
-	}, &state)
+	err = restoreOrStrip(opts, codexConnector, path, codexStrip, false, &state)
 	return state, err
 }
 

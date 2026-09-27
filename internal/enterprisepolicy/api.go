@@ -13,6 +13,7 @@ package enterprisepolicy
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 )
@@ -24,7 +25,11 @@ type Result struct {
 	// DefenseClaw entries are actually in place after this pass; the
 	// lifecycle records exactly this set in the runtime descriptor.
 	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
-	Changed                 bool     `json:"changed"`
+	// Retired reports the connectors whose earlier DefenseClaw entries this
+	// pass removed because they are no longer published through machine
+	// policy (disabled, ownership: off, or moved off the route).
+	Retired []State `json:"retired,omitempty"`
+	Changed bool    `json:"changed"`
 }
 
 // Complete reports whether every machine-policy connector is covered.
@@ -72,6 +77,14 @@ func Publish(opts Options, connectors []string) (Result, error) {
 		result.States = append(result.States, state)
 	}
 	result.MachinePolicyConnectors = reconciledConnectors(result.States)
+	retired, err := retireUnpublished(opts, MachinePolicyConnectors(opts, connectors), targetNames())
+	if err != nil {
+		errs = append(errs, err)
+	}
+	result.Retired = retired
+	for _, state := range retired {
+		result.Changed = result.Changed || state.Changed
+	}
 	if opts.PublicPolicyPath != "" {
 		changed, err := WritePublicPolicy(opts, connectors)
 		if err != nil {
@@ -80,6 +93,78 @@ func Publish(opts Options, connectors []string) (Result, error) {
 		result.Changed = result.Changed || changed
 	}
 	return result, errors.Join(errs...)
+}
+
+func targetNames() []string {
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// retireUnpublished removes DefenseClaw's entries from every candidate
+// target that still holds an ownership record but is no longer intended,
+// so disabling a connector or setting ownership: off takes DefenseClaw's
+// hooks and lock out of the vendor policy at once instead of leaving them
+// until uninstall. verify_only connectors stay intended (DefenseClaw still
+// verifies them), so their record and entries are kept.
+func retireUnpublished(opts Options, intended, candidates []string) ([]State, error) {
+	if opts.StateDir == "" {
+		return nil, nil
+	}
+	keep := map[string]bool{}
+	for _, name := range intended {
+		keep[name] = true
+	}
+	var retired []State
+	var errs []error
+	for _, name := range candidates {
+		if keep[name] {
+			continue
+		}
+		target, ok := TargetFor(name)
+		if !ok {
+			continue
+		}
+		recorded, err := hasOwnershipRecord(opts, name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		if !recorded {
+			continue
+		}
+		state, err := target.RemoveOwned(opts)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("retire %s machine policy: %w", name, err))
+		}
+		state.detail("%s is no longer published through machine policy; removed DefenseClaw's entries", name)
+		retired = append(retired, state)
+	}
+	return retired, errors.Join(errs...)
+}
+
+// hasOwnershipRecord reports whether DefenseClaw recorded writing
+// connector's machine policy.
+func hasOwnershipRecord(opts Options, connector string) (bool, error) {
+	names := []string{connector}
+	if connector == ConnectorCursor && opts.goos() == "windows" {
+		names = append(names, cursorAdapterRecord)
+	}
+	for _, name := range names {
+		path, err := recordPath(opts, name)
+		if err != nil {
+			return false, err
+		}
+		if _, err := os.Lstat(path); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func reconcileOne(opts Options, name string) (State, error) {
@@ -125,11 +210,7 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 // machine policy target (whether or not it is still enabled) and deletes
 // the public summary.
 func RemoveAll(opts Options) (Result, error) {
-	names := make([]string, 0, len(targets))
-	for name := range targets {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := targetNames()
 	result := Result{}
 	var errs []error
 	for _, name := range names {

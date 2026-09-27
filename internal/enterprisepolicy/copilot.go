@@ -116,6 +116,9 @@ func inspectCopilot(opts Options, state *State) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := validatePolicyLeafDir(opts, platformPath(opts, dir)); err != nil {
+		state.conflict("%v; unprivileged users can add policy files there that Copilot may load for every user", err)
+	}
 	names := []string{}
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".json") && !strings.HasPrefix(entry.Name(), ".") {
@@ -130,9 +133,15 @@ func inspectCopilot(opts Options, state *State) error {
 		if err != nil {
 			// Copilot itself skips policy files that are not root-owned or
 			// are group/world-writable, so an untrusted file is not in force.
-			if name == DefenseClawDropInName {
+			switch {
+			case name == DefenseClawDropInName:
 				state.conflict("%v; Copilot silently ignores policy files that are not root-owned or are group/world-writable", err)
-			} else {
+			case opts.goos() == "windows":
+				// Copilot's handling of policy files an unprivileged user
+				// controls is only verified on unix; on Windows such a file
+				// may run as machine policy for every user.
+				state.conflict("%s is not administrator-controlled and Copilot may load it as a policy hook for every user; remove it: %v", file, err)
+			default:
 				state.detail("%s is not trusted and Copilot ignores it: %v", file, err)
 			}
 			continue
@@ -205,11 +214,24 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		if err != nil {
 			return state, err
 		}
-		current, exists, err := readPolicyFile(opts, paths[0])
+		created, err := takeBackPolicyPath(opts, paths[0], &state)
 		if err != nil {
 			return state, err
 		}
-		changed, err := publishWithRecord(opts, copilotConnector, paths[0], current, exists, rendered, exists && bytes.Equal(current, rendered), &state)
+		displaceUntrustedPolicyFiles(opts, platformPath(opts, dirFor(opts, paths[0])), DefenseClawDropInName, &state)
+		current, exists, err := readPolicyFile(opts, paths[0])
+		var untrusted *untrustedPolicyFileError
+		if errors.As(err, &untrusted) && validateTrustedAncestors(opts, platformPath(opts, paths[0])) == nil {
+			// DefenseClaw owns this drop-in name, and its directory is
+			// trusted: a file there that an unprivileged principal controls is
+			// neither DefenseClaw's nor the administrator's. Replace it.
+			state.detail("replacing %s: %v", paths[0], untrusted.err)
+			current, exists, err = nil, true, nil
+		}
+		if err != nil {
+			return state, err
+		}
+		changed, err := publishWithRecord(opts, copilotConnector, paths[0], current, exists, rendered, exists && bytes.Equal(current, rendered), copilotStrip(opts), &state, created...)
 		if err != nil {
 			return state, err
 		}
@@ -252,10 +274,35 @@ func (t copilotTarget) RemoveOwned(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := State{Connector: copilotConnector, Route: RouteMachinePolicy, Paths: paths}
-	err = restoreOrStrip(opts, copilotConnector, paths[0], func([]byte) ([]byte, bool, error) {
-		return nil, true, nil
-	}, &state)
+	err = restoreOrStrip(opts, copilotConnector, paths[0], copilotStrip(opts), true, &state)
 	return state, err
+}
+
+// copilotStrip treats a drop-in carrying a DefenseClaw policy hook as
+// DefenseClaw's whole file; any other content under the drop-in name is
+// left alone.
+func copilotStrip(opts Options) stripFunc {
+	return wholeFileStrip(func(current []byte) bool {
+		doc, err := decodeOrderedObject(current)
+		if err != nil {
+			return false
+		}
+		hooksValue, _ := doc.get("hooks")
+		hooks, _ := hooksValue.(*object)
+		if hooks == nil {
+			return false
+		}
+		for _, event := range hooks.keys {
+			value, _ := hooks.get(event)
+			list, _ := value.([]any)
+			for _, handler := range list {
+				if copilotHandlerIsOwned(opts, handler) {
+					return true
+				}
+			}
+		}
+		return false
+	})
 }
 
 func (copilotTarget) Export(opts Options, format string) ([]byte, error) {

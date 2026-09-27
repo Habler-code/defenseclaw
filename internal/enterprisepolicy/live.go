@@ -25,10 +25,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -45,8 +47,12 @@ type LiveOptions struct {
 	UID         int
 	GID         int
 	Timeout     time.Duration
-	// GatewayLog is the gateway JSONL log searched for the canary nonce.
-	GatewayLog string
+	// AuditDB is the gateway's audit database; its v8 event history holds
+	// the record a DefenseClaw hook leaves when it reports a tool call.
+	AuditDB string
+	// HookRecords searches that event history; nil uses AuditDB. Tests
+	// replace it.
+	HookRecords func(context.Context, audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error)
 	// Credential applies the target user's credentials to cmd (unix
 	// setuid when running as root); nil runs as the current process.
 	Credential func(cmd *exec.Cmd) error
@@ -147,8 +153,8 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 	if err != nil {
 		return err
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: 64 << 10}
+	stderr := newLimitedBuffer(64 << 10)
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start codex app-server: %w", err)
 	}
@@ -293,14 +299,19 @@ func walkJSON(raw json.RawMessage, visit func(map[string]any)) {
 }
 
 // verifyClaudeLive runs Claude Code, as the user, against a local
-// Messages API stub that asks for one harmless Bash call carrying a nonce.
-// The managed PreToolUse hook reaches the gateway, which logs the nonce;
-// seeing it in the gateway log proves the effective policy loaded
-// DefenseClaw's hooks regardless of which managed source Claude chose.
+// Messages API stub that asks for one harmless Bash call whose tool call id
+// is derived from a nonce. DefenseClaw's managed PreToolUse hook reports the
+// call to the gateway, which records a tool.invocation.requested event in
+// its v8 event history (the audit database). Finding that record proves the
+// effective policy loaded DefenseClaw's hooks regardless of which managed
+// source Claude chose. The tool call id is an identifier, which every
+// built-in redaction profile keeps; the tool arguments may be redacted.
 func verifyClaudeLive(ctx context.Context, opts Options, lo LiveOptions, result *LiveResult) error {
+	started := time.Now()
 	nonce := newNonce()
 	result.Nonce = nonce
-	stub, err := startMessagesStub(nonce)
+	toolCallID := canaryToolCallID(nonce)
+	stub, err := startMessagesStub(nonce, toolCallID)
 	if err != nil {
 		return err
 	}
@@ -313,31 +324,60 @@ func verifyClaudeLive(ctx context.Context, opts Options, lo LiveOptions, result 
 			return err
 		}
 	}
-	var output bytes.Buffer
-	cmd.Stdout = &limitedBuffer{buf: &output, limit: 1 << 20}
-	cmd.Stderr = &limitedBuffer{buf: &output, limit: 2 << 20}
+	// One serialized buffer backs both streams: exec copies them on separate
+	// goroutines, and output past the cap is discarded so the client never
+	// blocks on a full pipe.
+	output := newLimitedBuffer(2 << 20)
+	cmd.Stdout = output
+	cmd.Stderr = output
 	runErr := cmd.Run()
 	if stub.requests() == 0 {
 		result.problem("Claude Code never reached the local Messages stub: %v %s", runErr, strings.TrimSpace(truncate(output.String(), 400)))
 		return nil
 	}
 	result.evidence("Claude Code sent %d Messages requests to the local stub", stub.requests())
-	if lo.GatewayLog == "" {
-		result.problem("no gateway log configured; search the gateway log for %s to confirm hook contact", nonce)
+	find := lo.HookRecords
+	if find == nil && strings.TrimSpace(lo.AuditDB) != "" {
+		find = func(ctx context.Context, query audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
+			return audit.FindHookToolInvocation(ctx, lo.AuditDB, query)
+		}
+	}
+	if find == nil {
+		result.problem("no gateway audit database configured; search its event history for the tool.invocation.requested record with tool call id %s to confirm hook contact", toolCallID)
 		return nil
 	}
-	found, err := fileContains(lo.GatewayLog, nonce, 64<<20)
+	evidence, err := find(ctx, audit.HookToolInvocationQuery{
+		Connector: ConnectorClaudeCode, ToolCallID: toolCallID, Since: started, UserID: liveTargetUID(lo),
+	})
 	switch {
 	case err != nil:
-		result.problem("read gateway log %s: %v", lo.GatewayLog, err)
-	case found:
+		result.problem("read the gateway event history: %v", err)
+	case evidence.Matched:
 		result.HookContact = "yes"
-		result.evidence("the gateway recorded the canary tool call %s", nonce)
+		result.evidence("the gateway recorded the canary tool call %s from Claude Code for this user", toolCallID)
+	case len(evidence.Mismatches) > 0:
+		result.HookContact = "no"
+		result.problem("the canary tool call %s reached the gateway only as %s; that does not prove DefenseClaw's managed hooks ran for this user", toolCallID, strings.Join(evidence.Mismatches, ", "))
 	default:
 		result.HookContact = "no"
-		result.problem("the gateway did not see the canary tool call: Claude Code ran without DefenseClaw's managed hooks (a higher-precedence source such as server-managed settings may be shadowing them)")
+		result.problem("the gateway did not record the canary tool call %s: Claude Code ran without DefenseClaw's managed hooks (a higher-precedence source such as server-managed settings may be shadowing them), or tool.activity log collection is off", toolCallID)
 	}
 	return nil
+}
+
+// canaryToolCallID is the tool_use id the stub gives the canary call; Claude
+// Code passes it to the PreToolUse hook as tool_use_id.
+func canaryToolCallID(nonce string) string {
+	return "toolu_" + strings.ReplaceAll(nonce, "-", "_")
+}
+
+// liveTargetUID is the target's decimal POSIX uid, which hooks report as
+// user.id; empty skips the user check (Windows hooks report a SID).
+func liveTargetUID(lo LiveOptions) string {
+	if runtimeGOOS() == "windows" || lo.UID < 0 {
+		return ""
+	}
+	return strconv.Itoa(lo.UID)
 }
 
 type messagesStub struct {
@@ -355,7 +395,7 @@ func (s *messagesStub) requests() int {
 
 func (s *messagesStub) Close() { _ = s.server.Close() }
 
-func startMessagesStub(nonce string) (*messagesStub, error) {
+func startMessagesStub(nonce, toolCallID string) (*messagesStub, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -373,7 +413,7 @@ func startMessagesStub(nonce string) (*messagesStub, error) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id": "msg_canary_1", "type": "message", "role": "assistant", "model": "claude-canary",
 				"content": []any{map[string]any{
-					"type": "tool_use", "id": "toolu_canary", "name": "Bash",
+					"type": "tool_use", "id": toolCallID, "name": "Bash",
 					"input": map[string]any{"command": "echo " + nonce, "description": "DefenseClaw live policy check"},
 				}},
 				"stop_reason": "tool_use",
@@ -391,26 +431,4 @@ func startMessagesStub(nonce string) (*messagesStub, error) {
 	stub.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = stub.server.Serve(listener) }()
 	return stub, nil
-}
-
-func fileContains(path, needle string, limit int64) (bool, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return false, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return false, err
-	}
-	if info.Size() > limit {
-		if _, err := file.Seek(info.Size()-limit, io.SeekStart); err != nil {
-			return false, err
-		}
-	}
-	data, err := io.ReadAll(io.LimitReader(file, limit))
-	if err != nil {
-		return false, err
-	}
-	return bytes.Contains(data, []byte(needle)), nil
 }
