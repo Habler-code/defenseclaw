@@ -38,7 +38,15 @@ func stubWindowsEnterpriseDeployments(t *testing.T, states map[string]winpath.En
 		}
 		return winpath.EnterpriseDeployment{Profile: profile, State: state}, nil
 	}
-	t.Cleanup(func() { windowsEnterpriseDeploymentInspector = original })
+	// Keep the host's installed config (and its enterprise.trust) out of
+	// profile resolution unless a test installs one.
+	originalConfig := windowsEnterpriseInstalledConfigPath
+	missing := filepath.Join(t.TempDir(), "installed-config.yaml")
+	windowsEnterpriseInstalledConfigPath = func() (string, error) { return missing, nil }
+	t.Cleanup(func() {
+		windowsEnterpriseDeploymentInspector = original
+		windowsEnterpriseInstalledConfigPath = originalConfig
+	})
 }
 
 func TestWindowsEnterpriseProfileDefaultsToSecureClientWithUnchangedArguments(t *testing.T) {
@@ -171,6 +179,178 @@ func TestWindowsEnterpriseStandaloneArguments(t *testing.T) {
 	}
 	if defaulted.trustMode != "authenticode" || defaulted.productVersion != strings.TrimSpace(appVersion) {
 		t.Fatalf("defaults: trust %q version %q", defaulted.trustMode, defaulted.productVersion)
+	}
+}
+
+func writeWindowsEnterpriseTrustConfig(t *testing.T, dir, name, trust string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	body := "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" + trust
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func windowsEnterpriseArgValue(args []string, name string) string {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == name {
+			return args[index+1]
+		}
+	}
+	return ""
+}
+
+// enterprise.trust in the applied config is enforced, not only validated:
+// its signer pin reaches the installer, a conflicting --allowed-signer is
+// refused, and mode authenticode refuses a hash-pinned run.
+func TestWindowsEnterpriseConfiguredTrust(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, nil)
+	dir := t.TempDir()
+	signer := strings.Repeat("ab", 32)
+	other := strings.Repeat("cd", 32)
+	manifest := `C:\stage\payload-trust.json`
+	pinned := writeWindowsEnterpriseTrustConfig(t, dir, "pinned.yaml",
+		"  trust:\n    mode: authenticode\n    allowed_signers: [\""+strings.ToUpper(signer)+"\"]\n")
+	hashPinned := writeWindowsEnterpriseTrustConfig(t, dir, "hash.yaml", "  trust:\n    mode: hash_pinned\n")
+
+	opts := &windowsEnterpriseLifecycleOptions{configPath: pinned}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", opts); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(opts.allowedSigners, []string{signer}) {
+		t.Fatalf("configured signers %q", opts.allowedSigners)
+	}
+	if got := windowsEnterpriseArgValue(windowsEnterprisePowerShellArgs("install", opts), "-AllowedSigners"); got != signer {
+		t.Fatalf("installer -AllowedSigners %q, want %q", got, signer)
+	}
+
+	same := &windowsEnterpriseLifecycleOptions{configPath: pinned, allowedSigners: []string{strings.ToUpper(signer)}}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", same); err != nil {
+		t.Fatalf("matching flag and config signers: %v", err)
+	}
+
+	for name, tc := range map[string]struct {
+		opts windowsEnterpriseLifecycleOptions
+		want string
+	}{
+		"conflicting signer": {
+			opts: windowsEnterpriseLifecycleOptions{configPath: pinned, allowedSigners: []string{other}},
+			want: "conflicts with enterprise.trust.allowed_signers",
+		},
+		"hash-pinned run under authenticode": {
+			opts: windowsEnterpriseLifecycleOptions{configPath: pinned, trustMode: "hash_pinned", payloadManifest: manifest},
+			want: "admits only Authenticode-signed payloads",
+		},
+		"unknown mode": {
+			opts: windowsEnterpriseLifecycleOptions{configPath: writeWindowsEnterpriseTrustConfig(t, dir, "mode.yaml", "  trust:\n    mode: signed\n")},
+			want: "enterprise.trust.mode",
+		},
+		"malformed signer": {
+			opts: windowsEnterpriseLifecycleOptions{configPath: writeWindowsEnterpriseTrustConfig(t, dir, "signer.yaml", "  trust:\n    allowed_signers: [abc]\n")},
+			want: "not a SHA-256 certificate thumbprint",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := tc.opts
+			err := resolveWindowsEnterpriseLifecycleProfile("ensure", &opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !errors.Is(err, errWindowsEnterpriseInvalidArguments) {
+				t.Fatalf("err = %v, want invalid arguments containing %q", err, tc.want)
+			}
+		})
+	}
+
+	unsigned := &windowsEnterpriseLifecycleOptions{configPath: hashPinned, trustMode: "hash_pinned", payloadManifest: manifest}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", unsigned); err != nil || unsigned.trustMode != "hash_pinned" {
+		t.Fatalf("hash_pinned config with a hash-pinned run: trust %q, %v", unsigned.trustMode, err)
+	}
+	signed := &windowsEnterpriseLifecycleOptions{configPath: hashPinned}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", signed); err != nil || signed.trustMode != "authenticode" {
+		t.Fatalf("hash_pinned config with a signed run: trust %q, %v", signed.trustMode, err)
+	}
+}
+
+// Without --config a mutation keeps the installed config's trust, so a Setup
+// /ensure or a remediation run cannot drop the administrator's signer pin;
+// read-only actions do not consult it.
+func TestWindowsEnterpriseInstalledConfigTrustAppliesToMutations(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	signer := strings.Repeat("ef", 32)
+	installed := writeWindowsEnterpriseTrustConfig(t, t.TempDir(), "config.yaml",
+		"  trust:\n    mode: authenticode\n    allowed_signers: ["+signer+"]\n")
+	windowsEnterpriseInstalledConfigPath = func() (string, error) { return installed, nil }
+
+	ensure := &windowsEnterpriseLifecycleOptions{profile: "standalone"}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", ensure); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ensure.allowedSigners, []string{signer}) {
+		t.Fatalf("ensure signers %q", ensure.allowedSigners)
+	}
+	status := &windowsEnterpriseLifecycleOptions{profile: "standalone"}
+	if err := resolveWindowsEnterpriseLifecycleProfile("status", status); err != nil || len(status.allowedSigners) != 0 {
+		t.Fatalf("status signers %q, %v", status.allowedSigners, err)
+	}
+	unsigned := &windowsEnterpriseLifecycleOptions{profile: "standalone", trustMode: "hash_pinned", payloadManifest: `C:\stage\payload-trust.json`}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", unsigned); err == nil || !strings.Contains(err.Error(), "admits only Authenticode-signed payloads") {
+		t.Fatalf("unsigned Setup over an authenticode config: %v", err)
+	}
+}
+
+// A no-flag run on a hash-pinned deployment (the MDM remediation and the
+// generic wrapper call the installed CLI without --trust-mode) must keep the
+// marker's TrustMode at hash_pinned, or every MDM script would demand an
+// Authenticode signature the payload never had.
+func TestWindowsEnterpriseRegistrationKeepsTheRecordedTrustMode(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, nil)
+	originalRunner := windowsEnterpriseStandaloneRunner
+	originalObserver := windowsEnterpriseStandaloneObserver
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneRunner = originalRunner
+		windowsEnterpriseStandaloneObserver = originalObserver
+	})
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		body, _ := json.Marshal(map[string]any{
+			"schema_version": 1, "ok": true, "action": "repair", "installed": true,
+			"gateway_ready": true, "guardian_ready": true, "security_complete": true,
+			"installed_version": "1.4.0", "trust_mode": "hash_pinned", "errors": []string{},
+		})
+		return windowsEnterpriseStandaloneRun{Output: body}, nil
+	}
+	var observed string
+	windowsEnterpriseStandaloneObserver = func(_ *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) string {
+		observed = windowsEnterpriseMarkerTrustMode(opts)
+		return ""
+	}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", jsonOutput: true}
+	if err := resolveWindowsEnterpriseLifecycleProfile("repair", opts); err != nil {
+		t.Fatal(err)
+	}
+	if opts.trustMode != "authenticode" {
+		t.Fatalf("precondition: a no-flag run defaults to authenticode, got %q", opts.trustMode)
+	}
+	if err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "repair", opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs("repair", opts)); err != nil {
+		t.Fatal(err)
+	}
+	if observed != "hash_pinned" {
+		t.Fatalf("marker TrustMode %q, want the recorded hash_pinned", observed)
+	}
+
+	for _, tc := range []struct {
+		opts *windowsEnterpriseLifecycleOptions
+		want string
+	}{
+		{opts: nil, want: "authenticode"},
+		{opts: &windowsEnterpriseLifecycleOptions{trustMode: "hash_pinned"}, want: "hash_pinned"},
+		{opts: &windowsEnterpriseLifecycleOptions{trustMode: "authenticode", deploymentTrustMode: "Authenticode"}, want: "authenticode"},
+		{opts: &windowsEnterpriseLifecycleOptions{trustMode: "authenticode", deploymentTrustMode: "bogus"}, want: "authenticode"},
+	} {
+		if got := windowsEnterpriseMarkerTrustMode(tc.opts); got != tc.want {
+			t.Fatalf("trust mode for %+v = %q, want %q", tc.opts, got, tc.want)
+		}
 	}
 }
 
@@ -894,13 +1074,15 @@ func TestWindowsEnterpriseConfigTrustIsApplied(t *testing.T) {
 		{name: "config signers pin authenticode", opts: windowsEnterpriseLifecycleOptions{configPath: signers}, wantMode: "authenticode", wantSigners: []string{signerA, signerB}},
 		{name: "matching flag signers", opts: windowsEnterpriseLifecycleOptions{configPath: signers, allowedSigners: []string{signerB, signerA}}, wantMode: "authenticode", wantSigners: []string{signerB, signerA}},
 		{name: "conflicting flag signers", opts: windowsEnterpriseLifecycleOptions{configPath: signers, allowedSigners: []string{signerA}}, wantErr: "conflicts with enterprise.trust.allowed_signers"},
-		{name: "conflicting trust mode", opts: windowsEnterpriseLifecycleOptions{configPath: signers, trustMode: "hash_pinned", payloadManifest: `C:\m.json`}, wantErr: "conflicts with enterprise.trust.mode"},
 		// The unsigned Setup always passes --trust-mode hash_pinned; a
-		// config that requires authenticode says how to resolve it.
-		{name: "unsigned Setup under an authenticode config", opts: windowsEnterpriseLifecycleOptions{configPath: signers, trustMode: "hash_pinned", payloadManifest: `C:\m.json`}, wantErr: "deploy the signed Setup, or set enterprise.trust.mode to hash_pinned or remove it"},
-		{name: "authenticode flag under a hash_pinned config", opts: windowsEnterpriseLifecycleOptions{configPath: pinned, trustMode: "authenticode"}, wantErr: "pass --trust-mode hash_pinned with --payload-manifest"},
-		{name: "config hash_pinned needs a manifest", opts: windowsEnterpriseLifecycleOptions{configPath: pinned}, wantErr: "requires --payload-manifest"},
-		{name: "config hash_pinned with a manifest", opts: windowsEnterpriseLifecycleOptions{configPath: pinned, payloadManifest: `C:\m.json`}, wantMode: "hash_pinned"},
+		// config that requires authenticode refuses it and says how to
+		// resolve it.
+		{name: "unsigned Setup under an authenticode config", opts: windowsEnterpriseLifecycleOptions{configPath: signers, trustMode: "hash_pinned", payloadManifest: `C:\m.json`}, wantErr: "use a signed Setup or set enterprise.trust.mode hash_pinned"},
+		// hash_pinned, like an unset mode, admits the unsigned payload by its
+		// pins and still verifies a signed payload by its signature.
+		{name: "signed run under a hash_pinned config", opts: windowsEnterpriseLifecycleOptions{configPath: pinned, trustMode: "authenticode"}, wantMode: "authenticode"},
+		{name: "no flag under a hash_pinned config", opts: windowsEnterpriseLifecycleOptions{configPath: pinned}, wantMode: "authenticode"},
+		{name: "unsigned Setup under a hash_pinned config", opts: windowsEnterpriseLifecycleOptions{configPath: pinned, trustMode: "hash_pinned", payloadManifest: `C:\m.json`}, wantMode: "hash_pinned"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := tc.opts

@@ -133,6 +133,9 @@ type EnterpriseDeployment struct {
 	// is then EnterpriseDeploymentAbsent): something other than an
 	// administrator could have written it.
 	Untrusted string
+	// TrustMode is the payload trust standalone metadata records
+	// ("authenticode" or "hash_pinned"); Secure Client metadata has none.
+	TrustMode string
 }
 
 // classifyEnterpriseMetadata interprets deployment.json. Metadata without an
@@ -153,4 +156,22 @@ func classifyEnterpriseMetadata(body []byte) (EnterpriseDeploymentState, string)
 		return EnterpriseDeploymentTombstone, record.ProductVersion
 	}
 	return EnterpriseDeploymentInstalled, record.ProductVersion
+}
+
+// enterpriseMetadataTrustMode reads the payload trust deployment.json
+// records. The lifecycle keeps admitting a hash-pinned deployment's payload
+// by these pins on later runs without a payload manifest, including over an
+// uninstall tombstone, so callers read it for both states.
+func enterpriseMetadataTrustMode(body []byte) string {
+	var record struct {
+		TrustMode string `json:"trust_mode"`
+	}
+	trimmed := body
+	if len(trimmed) >= 3 && trimmed[0] == 0xef && trimmed[1] == 0xbb && trimmed[2] == 0xbf {
+		trimmed = trimmed[3:]
+	}
+	if err := json.Unmarshal(trimmed, &record); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(record.TrustMode))
 }

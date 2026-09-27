@@ -412,6 +412,22 @@ dc_busy_output() {
     printf '%s' "$1" | grep -Eqi 'could not get lock|dpkg frontend lock|lock-frontend|transaction lock|another install|is in use by another|waiting for cache lock'
 }
 
+# dc_require_product_version <release version>: refuse a source that is not
+# the --product-version pin. Runs before the package manager: the package's
+# own maintainer scripts apply the deployment as soon as it is installed.
+dc_require_product_version() {
+    [ -n "$DC_PRODUCT_VERSION" ] || return 0
+    [ "$1" = "${DC_PRODUCT_VERSION#v}" ] ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_version_mismatch "the source is version $1, not $DC_PRODUCT_VERSION; nothing was installed"
+}
+
+# dc_package_release_version <package version>: the release version a deb or
+# rpm version names. The epoch and the Debian revision are dropped and the
+# "~" packages use for a prerelease reads as "-", so 1:1.4.0~rc1-1 is 1.4.0-rc1.
+dc_package_release_version() {
+    printf '%s' "$1" | sed -e 's/^[0-9][0-9]*://' -e 's/-[^-]*$//' -e 's/~/-/'
+}
+
 # dc_install_package: install the staged package when its version differs
 # from the installed one; sets DC_CHANNEL_FLAG for the lifecycle.
 dc_install_package() {
@@ -426,6 +442,7 @@ dc_install_package() {
             arch=$(dpkg-deb -f "$file" Architecture 2>/dev/null || true)
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .deb is '$package', not $DC_LINUX_PACKAGE"
             [ "$arch" = "$(dpkg --print-architecture)" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .deb is for $arch"
+            dc_require_product_version "$(dc_package_release_version "$version")"
             installed=$(dpkg-query -W -f='${Status} ${Version}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
             if [ "$installed" = "install ok installed $version" ]; then
                 dc_log "package $version already installed"
@@ -444,6 +461,7 @@ dc_install_package() {
             package=$(rpm -qp --qf '%{NAME}' "$file" 2>/dev/null || true)
             version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$file" 2>/dev/null || true)
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .rpm is '$package', not $DC_LINUX_PACKAGE"
+            dc_require_product_version "$(dc_package_release_version "$version")"
             installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
             if [ "$installed" = "$version" ]; then
                 dc_log "package $version already installed"
@@ -465,6 +483,7 @@ dc_install_package() {
                 dc_fail_result "$DC_EXIT_FAILURE" mdm_package_invalid "pkgutil could not expand the package"
             version=$(sed -n "s/.*<pkg-ref id=\"$DC_MACOS_PACKAGE_ID\" version=\"\([^\"]*\)\".*/\1/p" "$expanded/Distribution" 2>/dev/null | head -n 1)
             [ -n "$version" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the package does not contain $DC_MACOS_PACKAGE_ID"
+            dc_require_product_version "$version"
             installed=$(pkgutil --pkg-info "$DC_MACOS_PACKAGE_ID" 2>/dev/null | sed -n 's/^version: //p')
             if [ "$installed" = "$version" ]; then
                 dc_log "package $version already installed"
@@ -482,9 +501,6 @@ dc_install_package() {
             return 0
             ;;
     esac
-    if [ -n "$DC_PRODUCT_VERSION" ] && [ "${version%%-*}" != "${DC_PRODUCT_VERSION#v}" ]; then
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_version_mismatch "the source is version $version, not $DC_PRODUCT_VERSION"
-    fi
 }
 
 # dc_extract_payload: unpack the payload archive into staging without

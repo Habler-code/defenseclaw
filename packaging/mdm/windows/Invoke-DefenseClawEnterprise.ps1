@@ -418,6 +418,36 @@ function New-WrapperStaging {
     return $path
 }
 
+function Test-WrapperAdminOnlyAncestors {
+    # True when no folder above $Path can be renamed, deleted or
+    # re-permissioned by a non-administrator, none lets one delete its
+    # children, and none below the volume root is a reparse point. Then no
+    # other account can swap the file between the ACL check and the copy
+    # (the Unix wrapper's dc_trusted_path checks the same chain). Creating
+    # new entries, which a volume root allows by default, cannot move an
+    # existing folder and is accepted.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    # DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_ALL and DeleteSubdirectoriesAndFiles.
+    $dangerous = [int64](0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40)
+    $current = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($Path))
+    while ($current) {
+        $parent = [System.IO.Path]::GetDirectoryName($current)
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if ($parent -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+        $acl = Get-Acl -LiteralPath $current -ErrorAction Stop
+        $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+        if ($script:DefenseClawAdminSids -notcontains $owner) { return $false }
+        foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            if (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+            if ($script:DefenseClawAdminSids -contains $rule.IdentityReference.Value) { continue }
+            if (([int64]$rule.FileSystemRights -band $dangerous) -ne 0) { return $false }
+        }
+        $current = $parent
+    }
+    return $true
+}
+
 function Copy-WrapperInput {
     # Copies a bounded input into staging. Config and credentials must come
     # from an administrator-only location because nothing verifies them
@@ -433,6 +463,9 @@ function Copy-WrapperInput {
     }
     if ($RequireAdminOnly -and -not (Test-DefenseClawAdminOnlyItem -Path $Source)) {
         Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' "$Label is writable by a non-administrator: $Source"
+    }
+    if ($RequireAdminOnly -and -not (Test-WrapperAdminOnlyAncestors -Path $Source)) {
+        Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' "a folder above $Label can be renamed, deleted or re-permissioned by a non-administrator, or is a link: $Source; stage it in an administrator-only folder"
     }
     if ($item.Length -gt $Limit) { Exit-Wrapper $script:ExitInvalid 'mdm_input_too_large' "$Label exceeds $Limit bytes" }
     [System.IO.File]::Copy($Source, $Destination, $false)
@@ -546,6 +579,11 @@ if ($normalizedAction -ne 'ensure' -and ($ConfigPath -or $ConfigFromStdin -or $S
 }
 if ($ProductVersion -and $ProductVersion -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$') {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-ProductVersion must be a release version such as 1.2.3'
+}
+if ($ProductVersion -and $SetupPath) {
+    # Setup takes no version pin and carries its own payload version, so the
+    # pin would be silently ignored; its SHA-256 pins an exact release.
+    Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-ProductVersion applies only to the installed CLI (no -SetupPath); pin a staged Setup to one release with -Sha256'
 }
 
 $staging = New-WrapperStaging

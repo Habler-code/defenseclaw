@@ -18,9 +18,10 @@
 
 Checks the latest release at most once a day and stays silent unless both
 stdout and stderr are terminals. Disabled by ``DEFENSECLAW_NO_UPDATE_CHECK=1``,
-by ``CI``, by ``update_check: false`` in config.yaml, or on Windows by the
-``DisableSelfUpdate`` enterprise policy that also stops install.ps1. Never
-raises.
+by ``CI``, by ``update_check: false`` in config.yaml, on Windows by the
+``DisableSelfUpdate`` enterprise policy that also stops install.ps1, and on
+any computer whose DefenseClaw is managed by the organization, where
+``defenseclaw upgrade`` always refuses. Never raises.
 """
 
 from __future__ import annotations
@@ -90,8 +91,12 @@ def _disabled() -> bool:
 
 
 def _self_update_disabled_by_policy() -> bool:
-    if os.name != "nt":
-        return _managed_host_disables_self_update()
+    if _managed_host():
+        return True
+    return os.name == "nt" and _windows_self_update_policy()
+
+
+def _windows_self_update_policy() -> bool:
     try:
         import winreg
 
@@ -150,17 +155,14 @@ def _data_dir() -> str:
     return os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
 
 
-def _managed_host_disables_self_update() -> bool:
-    """A standalone managed host turns notices off unless its descriptor opts out."""
+def _managed_host() -> bool:
+    """A managed deployment keeps notices off, whatever disable_self_update says.
 
-    from defenseclaw.upgrade_shim import managed_descriptor
+    ``defenseclaw upgrade`` and ``rollback`` refuse on every managed host (the
+    organization installs and updates DefenseClaw there), so a notice telling
+    the user to run it would only lead to a refusal.
+    """
 
-    path = managed_descriptor()
-    if not path:
-        return False
-    try:
-        with open(path, encoding="utf-8") as stream:
-            descriptor = json.load(stream)
-    except (OSError, ValueError):
-        return True
-    return not (isinstance(descriptor, dict) and descriptor.get("disable_self_update") is False)
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    return bool(managed_deployment())

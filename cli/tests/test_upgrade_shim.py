@@ -410,6 +410,8 @@ def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch:
 
     def open_key(_root, path, _reserved, _access):
         opened.append(path)
+        if path == upgrade_shim.WINDOWS_MANAGED_MARKER_KEY:
+            raise OSError("no managed deployment on this host")
         return FakeKey()
 
     fake_winreg = types.SimpleNamespace(
@@ -423,7 +425,9 @@ def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch:
     monkeypatch.setattr(update_notice.os, "name", "nt")
 
     assert update_notice.available_message() is None
-    assert opened == [r"SOFTWARE\Policies\Cisco\DefenseClaw"]
+    # The managed-deployment marker is checked first; without it the
+    # DisableSelfUpdate policy still silences the notice.
+    assert opened == [upgrade_shim.WINDOWS_MANAGED_MARKER_KEY, r"SOFTWARE\Policies\Cisco\DefenseClaw"]
 
 
 def test_notice_gives_up_on_a_slow_network(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

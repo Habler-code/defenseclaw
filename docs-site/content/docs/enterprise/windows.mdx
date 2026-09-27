@@ -73,18 +73,21 @@ restarts indefinitely after a failure.
 
 ## Payload trust
 
-Pick one trust mode with `--trust-mode` (or `enterprise.trust.mode`):
+Pick one trust mode with `--trust-mode`; `enterprise.trust` in the config
+can only narrow it (see below):
 
 | Mode | Use it when | How it works |
 | --- | --- | --- |
 | `authenticode` (default) | You have a signed release, or you re-sign the payload with your own certificate | Every binary and script must carry a valid signature. Add `--allowed-signer <sha256-thumbprint>` (repeatable) to accept only specific signers |
 | `hash_pinned` | You deploy an unsigned build | Pass `--payload-manifest <file>`: an administrator-owned JSON file of SHA-256 digests (`{"schema_version":1,"files":{"<name>":"<sha256>"}}`). The CLI verifies the installer, module and payload before PowerShell starts |
 
-When both are set, `--trust-mode` and `enterprise.trust.mode` must agree, or
-the run fails with `1639` and names the conflict. The unsigned Setup always
-passes `--trust-mode hash_pinned`, so leave `enterprise.trust.mode` empty (or
-set it to `hash_pinned`) in a config you deploy with it. Set `authenticode` in
-the config only when every Setup you deploy is signed.
+`enterprise.trust.mode: authenticode` in the config refuses a hash-pinned
+run with `1639`, and so does a run over a deployment that was installed
+hash-pinned: without a payload manifest the lifecycle re-admits that
+deployment's payload by its recorded pins. Leave the mode unset or set
+`hash_pinned` while you deploy unsigned builds.
+`enterprise.trust.allowed_signers` works like `--allowed-signer`; when both
+are given they must list the same thumbprints.
 
 Hash-pinned payloads do not satisfy WDAC or AppLocker rules that require a
 publisher. Sign or re-sign when those rules are in force.

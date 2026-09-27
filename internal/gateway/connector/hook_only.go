@@ -2933,7 +2933,9 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 		return removeGeminiConfigEntries(path, hookScript, geminiOwnedHookCommands(opts, hookScript)...)
 	case "cursor":
 		return removeJSONHookReferences(path, cursorOwnedHookCommands(opts)...)
-	case "copilot", "openhands":
+	case "copilot":
+		return removeCopilotHookReferences(path, hookScript)
+	case "openhands":
 		return removeJSONHookReferences(path, hookScript)
 	case "devin":
 		return removeDevinHookReferences(path, devinOwnedHookCommands(opts, hookScript)...)
@@ -5462,11 +5464,13 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 			return err
 		}
 	}
+	// A missing config reads as an empty document; teardown must not create
+	// one for a user who never had it.
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	cfg, err := readYAMLObject(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
 	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
@@ -6303,12 +6307,17 @@ func appendUniqueGeminiHookGroup(raw interface{}, hookScript string, group map[s
 	return append(list, group)
 }
 
+// removeJSONHookReferences removes DefenseClaw's handlers from an agent's
+// JSON hooks file. The file is the agent's (and the operator's), so teardown
+// for a user who never had one leaves it absent instead of writing "{}";
+// readJSONObject reads a missing file as an empty document, so the absence is
+// checked first.
 func removeJSONHookReferences(path string, hookScripts ...string) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	cfg, err := readJSONObject(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
 		return err
 	}
 	pruned, _ := removeHookScriptReferences(cfg, hookScripts...).(map[string]interface{})
@@ -6318,12 +6327,56 @@ func removeJSONHookReferences(path string, hookScripts ...string) error {
 	return writeJSONObject(path, pruned)
 }
 
+// removeCopilotHookReferences removes DefenseClaw's Copilot handlers from
+// its own hooks file (<hooks>/defenseclaw.json, which Copilot loads with
+// every other *.json there). Teardown for a user who never had the file must
+// not create one, and a file left with nothing but the schema version (or an
+// empty document an earlier teardown wrote) is DefenseClaw's leftover and is
+// deleted; operator handlers in it are kept.
+func removeCopilotHookReferences(path, hookScript string) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	pruned, _ := removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
+	if pruned == nil {
+		pruned = map[string]interface{}{}
+	}
+	if strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return writeJSONObject(path, pruned)
+}
+
+// copilotHooksDocumentEmpty reports a Copilot hooks document that holds no
+// handler and nothing but its schema version.
+func copilotHooksDocumentEmpty(cfg map[string]interface{}) bool {
+	for key, value := range cfg {
+		if key == "version" {
+			continue
+		}
+		if hooks, ok := value.(map[string]interface{}); key == "hooks" && ok && len(hooks) == 0 {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func removeGeminiConfigEntries(path, hookScript string, ownedHookScripts ...string) error {
+	// A missing settings file reads as an empty document; teardown must not
+	// create one for a user who never had it.
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	cfg, err := readGeminiSettingsObject(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
 		return err
 	}
 	ownedHookScripts = uniqueNonEmptyStrings(append([]string{hookScript}, ownedHookScripts...))

@@ -133,7 +133,7 @@ enterprise:
       claudecode:
         higher_precedence_sources: fail   # fail | warn
   trust:                            # Windows payload trust
-    mode: ""                        # "" follows the Setup | authenticode | hash_pinned
+    mode: ""                        # "" or hash_pinned | authenticode; see below
     allowed_signers: []
   coexistence:
     per_user_install: migrate       # migrate | block | ignore
@@ -162,11 +162,30 @@ directly. The gateway reads `enterprise.network` when it starts, so a config
 reload that changes it is reported as restart-required and the gateway keeps
 the previous proxy until it restarts.
 
-Leave `trust.mode` empty unless you want to require one mode. The unsigned
-Windows Setup always installs a hash-pinned payload, so a config that sets
-`trust.mode: authenticode` makes every Setup `/install` and `/ensure` fail with
-`1639` until you deploy the signed Setup or change the value. See
-[Payload trust](/docs/enterprise/windows#payload-trust).
+`enterprise.trust` applies on Windows. `mode: authenticode` admits only
+Authenticode-signed payloads, so the Windows lifecycle refuses with exit code
+`1639`, before any change:
+
+- a hash-pinned run, such as the unsigned
+  `DefenseClawSetup-Enterprise-Standalone-x64.exe` (it passes
+  `--trust-mode hash_pinned`), whether the config is supplied or already
+  installed;
+- an install, upgrade, repair or `ensure` over a deployment that was installed
+  hash-pinned. That deployment keeps admitting its installed payload by the
+  recorded SHA-256 pins, so it stays hash-pinned. To move it to
+  `authenticode`, remove it with `uninstall --purge` and install a signed
+  Setup.
+
+If you deploy the unsigned Setup, set `mode: hash_pinned` or leave `mode`
+unset. `allowed_signers` restricts signed payloads to the listed signer
+certificates, like `--allowed-signer`.
+
+`enterprise.coexistence.disable_self_update` controls only the Windows
+`HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate` policy value,
+which also stops the per-user installer on that computer. Setting it to
+`false` does not bring back update notices or `defenseclaw upgrade` on any
+OS: on every host with a managed deployment the notice stays off and
+`defenseclaw upgrade` and `rollback` refuse.
 
 An inline `cisco_ai_defense.api_key` is rejected in the standalone profile.
 Store the key with `defenseclaw-gateway enterprise secret set --name

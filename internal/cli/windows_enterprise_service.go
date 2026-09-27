@@ -97,10 +97,6 @@ type windowsEnterpriseLifecycleOptions struct {
 	payloadManifest string
 	allowedSigners  []string
 	productVersion  string
-	// configTrustMode and configAllowedSigners are enterprise.trust from the
-	// supplied --config; only the standalone profile applies them.
-	configTrustMode      string
-	configAllowedSigners []string
 	// ignoredDeploymentRecords lists deployment records profile resolution
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.

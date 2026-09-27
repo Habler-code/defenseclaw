@@ -680,11 +680,13 @@ jobs:
 
   unix-standalone-lifecycle:
     # The standalone Linux and macOS lifecycle engine, its units and the
-    # Unix peer-identity code. Linux-only and darwin-only tests run on their
-    # own OS, and the systemd units get a static systemd-analyze check.
+    # Unix peer-identity code. The go-test jobs run on Linux and go-build
+    # only cross-compiles darwin, so the macOS-only code (LOCAL_PEERCRED,
+    # dscl identity, launchd layout) runs here on its own OS, and the
+    # systemd units get a static systemd-analyze check on Linux.
     name: Unix Standalone Lifecycle (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -696,17 +698,23 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - name: Lifecycle, unit and identity tests
+      - name: Go tests of the standalone lifecycle packages
         shell: bash
         run: >-
-          go test -count=1
+          go test -count=1 -timeout 20m
           ./internal/enterpriseunix/...
           ./internal/unixidentity/...
           ./internal/peercred/...
-      - name: systemd-analyze verify
+          ./internal/managed/...
+          ./internal/enterprisehooks/...
+          ./internal/enterprisepolicy/...
+          ./internal/ipc/...
+      - name: systemd-analyze verify the packaged units
+        # systemd-analyze exits 0 on unknown keys and bad values, so the
+        # script fails on any diagnostic it prints.
         if: runner.os == 'Linux'
         shell: bash
-        run: scripts/verify-systemd-units.sh
+        run: ./scripts/test-systemd-units.sh
 
   secure-client-golden:
     # Production Secure Client (release-defenseclaw-enterprise-26.8.4) ships

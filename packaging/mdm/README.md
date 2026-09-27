@@ -48,14 +48,27 @@ already matches, so an MDM can run it on every check-in.
 2. **Write the administrator config.** Start from `enterprise.profile:
    standalone` (see the enterprise documentation). Never put credentials in
    it: the standalone profile rejects an inline `cisco_ai_defense.api_key`.
-3. **Run the wrapper as SYSTEM or root** from your MDM:
+3. **Run the wrapper as SYSTEM or root** from your MDM. Stage the config
+   (and any credential file) in a folder that only administrators can
+   change: the wrappers refuse a file when the file or any folder above it
+   can be renamed, deleted or re-permissioned by another account. On
+   Windows client editions a folder created directly under `C:\` inherits
+   "Authenticated Users: Modify" (Windows Server does not add that entry,
+   but the same commands work there), so remove the inheritance first:
 
    ```powershell
    # Windows (PowerShell 7)
+   New-Item -ItemType Directory C:\Staging
+   icacls C:\Staging /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
    pwsh -NoProfile -File Invoke-DefenseClawEnterprise.ps1 `
      -SetupPath C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe -Sha256 <pin> `
      -ConfigPath C:\Staging\config.yaml
    ```
+
+   `-ProductVersion` pins the version the installed CLI converges to when
+   you run the wrapper without `-SetupPath`; a staged Setup is pinned to one
+   release by its `-Sha256`, and the wrapper refuses `-ProductVersion`
+   together with `-SetupPath`.
 
    ```sh
    # Linux (deb or rpm) and macOS (pkg)

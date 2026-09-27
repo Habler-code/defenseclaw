@@ -178,6 +178,85 @@ def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path:
         assert directory.stat().st_mode & 0o777 == 0o755, directory
 
 
+_PACKAGE_TOOL_STUBS = {
+    # Each stub answers the queries dc_install_package makes and records any
+    # install in $DC_TEST_LOG.
+    "dpkg-deb": """case "$3" in Package) echo defenseclaw-enterprise ;; Version) echo "$DC_TEST_VERSION" ;; Architecture) echo amd64 ;; esac""",
+    "dpkg": """case "$1" in --print-architecture) echo amd64 ;; -i) echo "dpkg -i" >>"$DC_TEST_LOG" ;; esac""",
+    "dpkg-query": "exit 1",
+    "rpm": """case "$1" in
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    -q) exit 1 ;;
+    -U) echo "rpm -U" >>"$DC_TEST_LOG" ;;
+esac""",
+    "pkgutil": """case "$1" in
+    --expand) mkdir -p "$3" && printf '<pkg-ref id="com.cisco.defenseclaw.enterprise" version="%s" onConclusion="none">x.pkg</pkg-ref>\\n' "$DC_TEST_VERSION" >"$3/Distribution" ;;
+    *) exit 1 ;;
+esac""",
+    "installer": 'echo "installer -pkg" >>"$DC_TEST_LOG"',
+}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("source", "package_version", "pin", "installs"),
+    [
+        ("defenseclaw-enterprise.deb", "1.5.0", "1.4.0", False),
+        ("defenseclaw-enterprise.deb", "1.4.0", "v1.4.0", True),
+        ("defenseclaw-enterprise.deb", "1:1.4.0~rc1-1", "1.4.0-rc1", True),
+        ("defenseclaw-enterprise.deb", "1.4.0~rc1", "1.4.0", False),
+        ("defenseclaw-enterprise.rpm", "1.5.0-1", "1.4.0", False),
+        ("defenseclaw-enterprise.rpm", "1.4.0~rc1-1", "1.4.0-rc1", True),
+        ("defenseclaw-enterprise.pkg", "1.5.0", "1.4.0", False),
+        ("defenseclaw-enterprise.pkg", "1.4.0-rc1", "1.4.0", False),
+        ("defenseclaw-enterprise.pkg", "1.4.0", "1.4.0", True),
+        ("defenseclaw-enterprise.deb", "1.5.0", "", True),
+    ],
+)
+def test_unix_wrapper_checks_the_product_version_before_the_package_manager(
+    source: str, package_version: str, pin: str, installs: bool, tmp_path: Path
+) -> None:
+    # The package's maintainer scripts apply the deployment as soon as the
+    # package manager installs it, so a --product-version mismatch must stop
+    # the wrapper before dpkg, rpm or installer runs.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(
+        _shell_function(text, name)
+        for name in ("dc_busy_output", "dc_require_product_version", "dc_package_release_version", "dc_install_package")
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in _PACKAGE_TOOL_STUBS.items():
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+        stub.chmod(0o755)
+    log = tmp_path / "install.log"
+    script = f"""
+DC_SCRIPT_OS={"darwin" if source.endswith(".pkg") else "linux"}
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
+DC_LINUX_PACKAGE=defenseclaw-enterprise DC_MACOS_PACKAGE_ID=com.cisco.defenseclaw.enterprise
+DC_PRODUCT_VERSION='{pin}' DC_STAGE='{tmp_path}' DC_STAGED_SOURCE='{tmp_path / source}'
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+dc_log() {{ :; }}
+dc_extract_payload() {{ :; }}
+{functions}
+dc_install_package
+echo installed-ok
+"""
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DC_TEST_VERSION": package_version, "DC_TEST_LOG": str(log)}
+    for shell in ("sh", "bash"):
+        if log.exists():
+            log.unlink()
+        result = subprocess.run([shell, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        if installs:
+            assert result.returncode == 0 and "installed-ok" in result.stdout, (shell, result.stdout, result.stderr)
+            assert log.exists(), (shell, "the package manager did not run")
+        else:
+            assert result.returncode == 1, (shell, result.stdout, result.stderr)
+            assert "FAIL mdm_version_mismatch" in result.stdout, (shell, result.stdout)
+            assert not log.exists(), (shell, "the package manager ran before the version check", log.read_text())
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_unix_detect_formats_without_an_installation() -> None:
     if os.geteuid() == 0 and Path("/opt/defenseclaw/bin/defenseclaw-gateway").exists():
@@ -275,6 +354,101 @@ def test_generic_windows_wrapper_requires_powershell_7() -> None:
     # Credentials only through stdin or an administrator-only file.
     assert "'--from-stdin'" in text and "-StandardInputPath $secret" in text
     assert "-RequireAdminOnly" in text
+
+
+def _pwsh7() -> str | None:
+    candidates = [shutil.which("pwsh.exe")]
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidates.append(str(Path(program_files) / "PowerShell" / "7" / "pwsh.exe"))
+    return next((c for c in candidates if c and Path(c).is_file()), None)
+
+
+_ANCESTOR_PROBE = r"""
+$ErrorActionPreference = 'Stop'
+__FUNCTIONS__
+function New-ProbeDirectory([string]$Path, [string]$Sddl) {
+    $security = [System.Security.AccessControl.DirectorySecurity]::new()
+    $security.SetSecurityDescriptorSddlForm($Sddl)
+    [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($Path), $security)
+}
+function New-ProbeFile([string]$Path) {
+    [System.IO.File]::WriteAllText($Path, "deployment_mode: managed_enterprise`n")
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetSecurityDescriptorSddlForm('D:P(A;;FA;;;SY)(A;;FA;;;BA)')
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+$adminOnly = 'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+$root = Join-Path ([Environment]::GetFolderPath('Windows')) ('Temp\dc-mdm-ancestors-' + [Guid]::NewGuid().ToString('N'))
+try {
+    New-ProbeDirectory $root $adminOnly
+    New-ProbeDirectory (Join-Path $root 'good') $adminOnly
+    New-ProbeFile (Join-Path $root 'good\config.yaml')
+    # Authenticated Users may modify (and so rename) this folder; the file in
+    # it is still administrator-only.
+    New-ProbeDirectory (Join-Path $root 'open') 'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1301bf;;;AU)'
+    New-ProbeFile (Join-Path $root 'open\config.yaml')
+    $null = New-Item -ItemType Junction -Path (Join-Path $root 'link') -Target (Join-Path $root 'good')
+    $result = [ordered]@{}
+    foreach ($name in 'good', 'open', 'link') {
+        $file = Join-Path $root "$name\config.yaml"
+        $result[$name] = [ordered]@{
+            item = [bool](Test-DefenseClawAdminOnlyItem -Path $file)
+            ancestors = [bool](Test-WrapperAdminOnlyAncestors -Path $file)
+        }
+    }
+    $result | ConvertTo-Json -Compress
+} finally {
+    $link = Join-Path $root 'link'
+    if (Test-Path -LiteralPath $link) { [System.IO.Directory]::Delete($link) }
+    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+"""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL behaviour")
+def test_generic_windows_wrapper_checks_every_folder_above_config_and_secret(tmp_path: Path) -> None:
+    # An account that can rename a folder above an administrator-only config
+    # can swap the file between the ACL check and the copy, so the wrapper
+    # checks the whole chain like the Unix dc_trusted_path.
+    engine = _pwsh7()
+    assert engine, "Windows CI must provide PowerShell 7"
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    start = text.index("function Test-WrapperAdminOnlyAncestors {")
+    ancestors = text[start : text.index("\nfunction Copy-WrapperInput", start)]
+    probe = tmp_path / "ancestor-probe.ps1"
+    probe.write_text(_ANCESTOR_PROBE.replace("__FUNCTIONS__", _shared_region(text) + "\n" + ancestors), encoding="utf-8")
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    verdicts = json.loads(result.stdout.strip().splitlines()[-1])
+    assert verdicts["good"] == {"item": True, "ancestors": True}, verdicts
+    assert verdicts["open"] == {"item": True, "ancestors": False}, verdicts
+    assert verdicts["link"]["ancestors"] is False, verdicts
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs the Windows wrapper")
+def test_generic_windows_wrapper_refuses_a_product_version_pin_for_a_staged_setup(tmp_path: Path) -> None:
+    # Setup takes no version pin; a -ProductVersion given with -SetupPath
+    # used to be accepted and silently ignored.
+    engine = _pwsh7()
+    assert engine, "Windows CI must provide PowerShell 7"
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1"),
+         "-SetupPath", str(tmp_path / "DefenseClawSetup-Enterprise-Standalone-x64.exe"), "-Sha256", "0" * 64,
+         "-ProductVersion", "1.4.0"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    document = json.loads([line for line in result.stdout.splitlines() if line.startswith("{")][-1])
+    codes = [error["code"] for error in document["errors"]]
+    host_refusals = {"mdm_not_elevated", "powershell7_untrusted", "unsupported_architecture", "powershell_constrained_language", "loader_environment_present"}
+    if host_refusals.intersection(codes):
+        pytest.skip(f"this host cannot run the wrapper: {document['errors'][0]['message']}")
+    assert result.returncode == 1639, result.stdout
+    assert codes == ["mdm_invalid_arguments"], document
+    assert "-ProductVersion applies only to the installed CLI" in document["errors"][0]["message"], document
 
 
 def test_windows_scripts_use_the_standalone_setup_and_marker() -> None:

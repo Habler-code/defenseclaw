@@ -2023,7 +2023,7 @@
     {
       "name": "DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR",
       "category": "test_fixture",
-      "purpose": "Points install.sh at a temporary managed runtime descriptor so tests can prove the per-user installer refuses to run on a computer whose DefenseClaw is managed by the organization.",
+      "purpose": "Adds a temporary managed runtime descriptor to the ones install.sh checks, so tests can prove the per-user installer refuses to run on a computer whose DefenseClaw is managed by the organization.",
       "default": "unset (Linux /etc/defenseclaw/managed-runtime.json; macOS /opt/cisco/defenseclaw/etc/managed-runtime.json)",
       "accepted_values": [
         "absolute path",
@@ -2038,7 +2038,7 @@
         }
       ],
       "since": "1.0.0",
-      "security_note": "Test-only. Setting it only skips the per-user installer's refusal; the per-user gateway still refuses to start on a managed host."
+      "security_note": "Test-only. It can only add a descriptor path: install.sh always checks the platform descriptor as well, so setting it never skips the managed-host refusal."
     },
     {
       "name": "DEFENSECLAW_INSTALL_ROOT",

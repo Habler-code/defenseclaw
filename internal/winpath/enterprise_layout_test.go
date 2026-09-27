@@ -108,3 +108,17 @@ func TestClassifyEnterpriseMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestEnterpriseMetadataTrustMode(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"installed":true,"trust_mode":"hash_pinned"}`:             "hash_pinned",
+		"\ufeff" + `{"installed":false,"trust_mode":"Hash_Pinned"}`: "hash_pinned",
+		`{"installed":true,"trust_mode":"authenticode"}`:            "authenticode",
+		`{"installed":true}`: "",
+		`not json`:           "",
+	} {
+		if got := enterpriseMetadataTrustMode([]byte(body)); got != want {
+			t.Fatalf("%q: trust mode %q, want %q", body, got, want)
+		}
+	}
+}

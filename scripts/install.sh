@@ -238,17 +238,21 @@ esac
 # A computer whose DefenseClaw is managed by the organization is installed
 # and updated through its MDM. A per-user copy would compete with the managed
 # services for the gateway port and the agents' hooks, so stop before
-# changing anything. DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR is for tests.
-managed_descriptor="${DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR:-}"
-if [[ -z "${managed_descriptor}" ]]; then
-    case "${OS}" in
-        linux) managed_descriptor=/etc/defenseclaw/managed-runtime.json ;;
-        darwin) managed_descriptor=/opt/cisco/defenseclaw/etc/managed-runtime.json ;;
-    esac
+# changing anything. The platform descriptor is always checked: the
+# environment can only add a path (DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR, for
+# tests), never replace it, so a user cannot talk the installer past the check.
+case "${OS}" in
+    linux) managed_descriptors=(/etc/defenseclaw/managed-runtime.json) ;;
+    darwin) managed_descriptors=(/opt/cisco/defenseclaw/etc/managed-runtime.json) ;;
+esac
+if [[ -n "${DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR:-}" ]]; then
+    managed_descriptors+=("${DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR}")
 fi
-if [[ -f "${managed_descriptor}" && ! -L "${managed_descriptor}" ]]; then
-    die "This computer's DefenseClaw is managed by your organization (${managed_descriptor}); your IT department installs and updates it. Nothing was changed."
-fi
+for managed_descriptor in "${managed_descriptors[@]}"; do
+    if [[ -f "${managed_descriptor}" && ! -L "${managed_descriptor}" ]]; then
+        die "This computer's DefenseClaw is managed by your organization (${managed_descriptor}); your IT department installs and updates it. Nothing was changed."
+    fi
+done
 
 # ── Which version does this installer install? ───────────────────────────────
 

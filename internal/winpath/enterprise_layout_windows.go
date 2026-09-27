@@ -47,8 +47,14 @@ func InspectEnterpriseDeployment(profile string) (EnterpriseDeployment, error) {
 	if err != nil {
 		return EnterpriseDeployment{}, err
 	}
-	deployment := EnterpriseDeployment{Profile: roots.Profile, MetadataPath: roots.MetadataPath}
-	info, err := os.Lstat(roots.MetadataPath)
+	return InspectEnterpriseDeploymentAt(roots.Profile, roots.MetadataPath)
+}
+
+// InspectEnterpriseDeploymentAt reads the deployment metadata at an exact
+// path, such as a certification scope's <state-root>\install\deployment.json.
+func InspectEnterpriseDeploymentAt(profile, metadataPath string) (EnterpriseDeployment, error) {
+	deployment := EnterpriseDeployment{Profile: profile, MetadataPath: metadataPath}
+	info, err := os.Lstat(metadataPath)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		deployment.State = EnterpriseDeploymentAbsent
@@ -59,11 +65,11 @@ func InspectEnterpriseDeployment(profile string) (EnterpriseDeployment, error) {
 		deployment.State = EnterpriseDeploymentUnknown
 		return deployment, nil
 	case err != nil:
-		return EnterpriseDeployment{}, fmt.Errorf("inspect enterprise deployment metadata %s: %w", roots.MetadataPath, err)
+		return EnterpriseDeployment{}, fmt.Errorf("inspect enterprise deployment metadata %s: %w", metadataPath, err)
 	case !info.Mode().IsRegular():
-		return EnterpriseDeployment{}, fmt.Errorf("enterprise deployment metadata is not a regular file: %s", roots.MetadataPath)
+		return EnterpriseDeployment{}, fmt.Errorf("enterprise deployment metadata is not a regular file: %s", metadataPath)
 	}
-	file, err := os.Open(roots.MetadataPath)
+	file, err := os.Open(metadataPath)
 	if err != nil {
 		deployment.State = EnterpriseDeploymentUnknown
 		return deployment, nil
@@ -75,5 +81,6 @@ func InspectEnterpriseDeployment(profile string) (EnterpriseDeployment, error) {
 		return deployment, nil
 	}
 	deployment.State, deployment.ProductVersion = classifyEnterpriseMetadata(body)
+	deployment.TrustMode = enterpriseMetadataTrustMode(body)
 	return deployment, nil
 }
