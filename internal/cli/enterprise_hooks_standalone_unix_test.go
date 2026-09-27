@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -444,12 +445,14 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 	origPreflight, origManifestTrust, origRuntime := enterpriseHooksMutationIdentityPreflight, enterpriseHookManifestFileTrustCheck, enterpriseHookStandaloneRuntimeCheck
 	origOwner, origDirTrust, origFileTrust, origStateTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck
 	origToken, origOTLP, origRunner, origLog := enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog
+	origUserToken, origUserTokenLoader, origTransport := enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport
 	origCheckHome := enterpriseHookCheckHome
 	t.Cleanup(func() {
 		cfg, enterpriseHookManifest = origCfg, origManifest
 		enterpriseHooksMutationIdentityPreflight, enterpriseHookManifestFileTrustCheck, enterpriseHookStandaloneRuntimeCheck = origPreflight, origManifestTrust, origRuntime
 		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck = origOwner, origDirTrust, origFileTrust, origStateTrust
 		enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog = origToken, origOTLP, origRunner, origLog
+		enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport = origUserToken, origUserTokenLoader, origTransport
 		enterpriseHookCheckHome = origCheckHome
 		enterprisehooks.SetStandaloneUnix(false)
 		enterprisehooks.SetStandaloneResolver(nil)
@@ -465,8 +468,21 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 	enterpriseHookAuthorizationDirTrustCheck = noopPath
 	enterpriseHookAuthorizationFileTrustCheck = noopPath
 	enterpriseHookGuardianStateFileTrustCheck = noopPath
-	enterpriseHookScopedTokenMinter = func(string, string) (string, error) { return "scoped-token", nil }
-	enterpriseHookScopedOTLPTokenMinter = func(string, string) (string, error) { return "otlp-token", nil }
+	// The standalone guardian must not mint the connector-scoped
+	// credentials every user would share.
+	enterpriseHookScopedTokenMinter = func(string, string) (string, error) {
+		t.Error("standalone reconcile minted a connector-scoped hook token")
+		return "", errors.New("connector-scoped token")
+	}
+	enterpriseHookScopedOTLPTokenMinter = func(string, string) (string, error) {
+		t.Error("standalone reconcile minted a connector-scoped OTLP token")
+		return "", errors.New("connector-scoped token")
+	}
+	enterpriseHookUserTokenMinter = standaloneTestUserTokens
+	enterpriseHookUserTokenLoader = standaloneTestUserTokens
+	enterpriseHookStandaloneHookTransport = func() (string, int, error) {
+		return "/run/defenseclaw-hook/hook.sock", 995, nil
+	}
 	enterpriseHookWorkerLog = io.Discard
 	enterprisehooks.SetStandaloneUnix(true)
 	enterprisehooks.SetStandaloneResolver(resolver)
@@ -490,6 +506,12 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 		return response, nil
 	}
 	return f
+}
+
+// standaloneTestUserTokens stands in for the per-user credential
+// derivation: distinct, recognizable values per connector and identity.
+func standaloneTestUserTokens(_, connectorName, identity string) (string, string, error) {
+	return "hook-" + connectorName + "-" + identity, "otlp-" + connectorName + "-" + identity, nil
 }
 
 func standaloneTestConfig(dataDir string) *config.Config {
@@ -906,13 +928,6 @@ func TestStandaloneVerifyAcceptsOnlyRecordedPendingTargets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	origLoadToken, origLoadOTLP := enterpriseHookStandaloneTokenLoader, enterpriseHookStandaloneOTLPTokenLoader
-	t.Cleanup(func() {
-		enterpriseHookStandaloneTokenLoader, enterpriseHookStandaloneOTLPTokenLoader = origLoadToken, origLoadOTLP
-	})
-	enterpriseHookStandaloneTokenLoader = func(string, string) (string, error) { return "scoped-token", nil }
-	enterpriseHookStandaloneOTLPTokenLoader = func(string, string) (string, error) { return "", nil }
-
 	publish([]enterpriseHookReconcileRow{protectedRow("alice", alice, "codex"), {User: "bob", UserHome: bob, Connector: "codex", Pending: true}})
 	run, err := runEnterpriseHookVerifyAttempt(context.Background())
 	if err != nil {
@@ -920,6 +935,11 @@ func TestStandaloneVerifyAcceptsOnlyRecordedPendingTargets(t *testing.T) {
 	}
 	if run.AuthorizationErr != nil || run.Failures != 0 || run.Pending != 1 || !run.Rows[0].OK || !run.Rows[1].Pending {
 		t.Fatalf("recorded pending target: rows=%+v failures=%d pending=%d auth=%v", run.Rows, run.Failures, run.Pending, run.AuthorizationErr)
+	}
+	// Verification expects alice's own per-user credentials.
+	verified := f.workerTargets()["codex@"+alice].Options
+	if verified.APIToken != "hook-codex-"+strconv.Itoa(uid) || verified.HookCredentialIdentity != strconv.Itoa(uid) {
+		t.Fatalf("verify options are not bound to alice's uid: %+v", verified)
 	}
 
 	// The guardian never recorded bob pending: an unavailable home now is

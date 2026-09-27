@@ -96,9 +96,12 @@ not used: macOS clears it at boot and `_defenseclaw` cannot write it.
    to be owned by root or the service account and writable by no one else,
    connects to `/opt/cisco/defenseclaw/run/hook.sock`, and requires the
    `LOCAL_PEERCRED` uid to be 0 or the service uid before sending.
-4. There is no TCP fallback on macOS: an unprivileged process cannot learn the
-   owner of another process's TCP socket without parsing private kernel
-   structures, so the hook fails closed instead.
+4. There is no TCP fallback. A descriptor that names no hook socket fails
+   closed (`enterprise_managed_hook_socket_missing`), and the guardian
+   renders per-user hooks and in-agent plugins only for the socket.
+5. Consumers that still use the TCP API (Codex, Claude Code, Gemini CLI and
+   OpenHands telemetry) authenticate with credentials bound to the user's
+   uid (see L-08); the gateway attributes their events to that uid.
 
 ### Enrollment
 
@@ -116,9 +119,9 @@ logged-in sessions, home owners under `/Users` and
 | M-02 | W-02 | A user replaces a binary, config, policy, secret, manifest, ledger or descriptor | Root ownership of every file and ancestor under `/opt/cisco/defenseclaw`; trusted-path checks on read | Write and swap attempts; `verify` |
 | M-03 | W-04 | A user downgrades the mode or profile | Mode and profile pinned in each plist's `EnvironmentVariables`; config must agree | Config and profile tests |
 | M-04 | W-05 | A compromised gateway edits policy or the ledger | `_defenseclaw` has no write access to `etc/`, `hook-guardian-state/` or `bin/` | File-mode verification |
-| M-05 | W-25 | A user wins the gateway's endpoint during a restart | The hook uses only the socket, in a directory no other user can write, and verifies the peer uid before sending | `managed_standalone_transport_test.go`, `api_uds_unix_test.go`; squat-and-restart race on a host |
+| M-05 | W-25 | A user wins the gateway's endpoint during a restart | Hooks, in-agent plugins and the Codex notify bridge use only the socket, in a directory no other user can write, and verify the peer uid before sending; the gateway serves the socket even while another process holds the TCP port. The TCP telemetry exporters do not verify the listener (residual 6) | `managed_standalone_transport_test.go`, `api_uds_unix_test.go`, `api_run_hook_socket_unix_test.go`; squat-and-restart race on a host |
 | M-06 | — | A user pre-creates the socket or its directory, or the directory disappears at boot | The directory is `/opt/cisco/defenseclaw/run`, created by the lifecycle for `_defenseclaw` inside the root-owned install tree, so it persists across reboot and no other user can create entries; the gateway refuses a directory with any other owner or a group/other write bit and replaces only a stale socket it owns | `internal/gateway/api_uds_unix_test.go`; reboot test on a host |
-| M-07 | W-28 | An unenrolled uid uses a per-user connector's hook | Hook-socket authorization against the ledger (as L-08) | `managed_hook_peer_test.go` |
+| M-07 | W-28 | An unenrolled uid uses a per-user connector's hook, or one user's TCP credential posts events attributed to another | Hook-socket authorization against the ledger; per-user TCP credentials bound to the uid (as L-08). A telemetry credential an exporter sent to a process holding the port stays usable by that process (residual 6) | `managed_hook_peer_test.go`, `user_scoped_credentials_test.go` |
 | M-08 | W-06 | Root follows a user symlink inside a home | The root guardian refuses in-process home access; the worker acts as the user | Worker and standalone tests |
 | M-09 | — | TCC blocks the worker from reading the agent's configuration | Agent configs live in dotdirs in the home, which TCC does not protect; an optional PPPC profile granting Full Disk Access to the hook guardian is documented for sites that relocate them | Host run with each connector <!-- verify-after-merge: M10 --> |
 | M-10 | W-26, W-49 | A user disables Codex or Claude Code hooks | `/etc/codex/requirements.toml` with `allow_managed_hooks_only` and `[features] hooks = true`; `/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json` with `allowManagedHooksOnly` | Machine-policy tests; `enterprise policy verify --live` |
@@ -141,3 +144,16 @@ logged-in sessions, home owners under `/Users` and
    requirements; sign with a Developer ID and notarize, or re-sign.
 5. The vendor residuals in the
    [enterprise threat model](ENTERPRISE-THREAT-MODEL.md#residual-risks) apply.
+6. The gateway binds `127.0.0.1:18970` itself (launchd socket activation
+   needs `launch_activate_socket(3)`, which the cgo-free release build does
+   not call), so during every gateway restart a local user can bind the
+   port. Hooks and plugins use the hook socket and are
+   unaffected. The Codex, Claude Code, Gemini CLI, OpenHands and OmniGent
+   telemetry exporters do not verify the listener: the holder receives
+   their telemetry, which can include prompt text, and the sending user's
+   per-user telemetry credential, and can replay that credential once the
+   gateway is back to post telemetry attributed to that user for that
+   connector until the user leaves enrollment. The credentials do not
+   rotate, and a telemetry credential never authenticates hook, inspect or
+   management routes or another connector
+   ([R7](ENTERPRISE-THREAT-MODEL.md#residual-risks)).

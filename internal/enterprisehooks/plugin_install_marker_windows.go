@@ -9,6 +9,8 @@ package enterprisehooks
 import (
 	"fmt"
 	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // Standalone uninstall revokes every enrollment and removes the services, but
@@ -39,6 +41,25 @@ func windowsStandalonePluginInstallMarker(connectorName string) (string, error) 
 		return "", fmt.Errorf("enterprise hooks: refusing noncanonical standalone install marker %s", root)
 	}
 	return root, nil
+}
+
+// applyWindowsStandalonePluginOptions sets the options a standalone render of
+// an in-agent plugin connector (OpenCode, Amp) carries: the install marker
+// above, and the listener proof. Those plugins reach the gateway over
+// loopback TCP and, unlike the hook binary, cannot compare the listener
+// with the SCM gateway process, so they make it prove it can derive the
+// user's per-user credential before sending that credential or any hook
+// payload (connector.UserScopedListenerProof). Hook-binary connectors, the
+// machine-policy connectors and Secure Client get neither.
+func applyWindowsStandalonePluginOptions(connectorName string, setup *connector.SetupOpts) error {
+	marker, err := windowsStandalonePluginInstallMarker(connectorName)
+	if err != nil {
+		return err
+	}
+	setup.ManagedInstallMarker = marker
+	hookBinary, perUser := windowsStandalonePerUserConnector(connectorName)
+	setup.ManagedListenerProof = perUser && !hookBinary && windowsEnterpriseStandaloneProcess()
+	return nil
 }
 
 // ensureWindowsStandalonePluginInstallMarker creates the install marker, as a

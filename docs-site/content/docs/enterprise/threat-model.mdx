@@ -68,8 +68,8 @@ given unrestricted sudo or administrator rights is an administrator.
 | User → services | Stop, disable or replace a service | Query-only SCM access; root-owned units and plists; indefinite restart |
 | User → admin state | Edit config, policy, secrets, manifest, ledger | Administrator-only write on every file and parent; untrusted inputs rejected at load |
 | Gateway → admin state | A compromised gateway widens its own policy | Read-only config, policy and ledger for the gateway identity |
-| Hook → gateway | A user impersonates the gateway during a restart | No byte sent before the listener is proven: SCM PID on Windows; `SO_PEERCRED`/`LOCAL_PEERCRED` uid on the hook socket; exact-connection owner uid on Linux TCP; PID 1 holds Linux sockets across restarts |
-| Gateway → caller | An unenrolled user uses a per-user connector | Kernel uid checked against the root-owned authorization ledger |
+| Hook → gateway | A user impersonates the gateway during a restart | No credential or payload sent before the listener is proven: SCM PID for Windows hooks; a listener proof (an HMAC only the gateway can compute from the user's credential) for the Windows OpenCode and Amp plugins; `SO_PEERCRED`/`LOCAL_PEERCRED` uid on the hook socket, which Linux and macOS hooks and plugins use exclusively (no TCP fallback); PID 1 holds Linux sockets across restarts |
+| Gateway → caller | An unenrolled user uses a per-user connector, or one user's credential posts events attributed to another | Kernel uid checked against the root-owned authorization ledger on the hook socket; on TCP, per-user credentials bound to the uid or SID, accepted only while the ledger protects that user, with events attributed to that identity and conflicting identity headers refused |
 | Guardian → user home | Root follows a user-planted link | Windows writes under the user's token; Linux and macOS use a worker running as the user |
 | Enumerator → manifest | Directory outage revokes users; uid reuse | Only a definitive not-found revokes, after several misses; uid and home identity |
 | Guardian → vendor policy | Administrator policy overwritten | DefenseClaw-owned entries only, with ownership records and preimages |
@@ -98,6 +98,8 @@ given unrestricted sudo or administrator rights is an administrator.
 | OpenCode's managed-plugin-last order is observed, not documented | OpenCode |
 | Hermes cannot fail closed; Copilot command-hook timeouts fail open | Hermes, Copilot |
 | A user holding the gateway endpoint while it is down can block hooks (they fail closed) but cannot forge an allow | All platforms |
+| A user holding the gateway's TCP port while it is down receives what the agents' own telemetry exporters send, including the sending user's per-user telemetry credential, and can then post telemetry attributed to that user until the user leaves enrollment | Codex, Claude Code, Gemini CLI, OpenHands and OmniGent telemetry; every restart on macOS and Windows, Linux only while an administrator has the socket unit stopped |
+| In the Secure Client profile hook and telemetry credentials are shared per connector, so one user can post events attributed to another user of the same connector | Secure Client, Windows and macOS |
 | Unsigned, hash-pinned builds do not satisfy WDAC, AppLocker or Gatekeeper publisher rules | Windows, macOS |
 | Cloud or MDM vendor policy can override local machine policy | Codex, Claude Code |
 | A compromised privileged DefenseClaw service holds administrator-equivalent power | All platforms |

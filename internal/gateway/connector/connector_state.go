@@ -290,6 +290,12 @@ type HookRegistrationPosture struct {
 	// transport.
 	HookSocket           string `json:"hook_socket,omitempty"`
 	HookSocketServiceUID int    `json:"hook_socket_service_uid,omitempty"`
+	// HookCredentialBinding records which per-user credentials the hooks
+	// were rendered with: the bound identity and a truncated digest of the
+	// credentials (see hookCredentialBinding). Empty for every install that
+	// does not bind credentials to a user. HookCredentialDrifted compares
+	// it with the configured credentials.
+	HookCredentialBinding string `json:"hook_credential_binding,omitempty"`
 }
 
 // LoadActiveConnector reads the previously active connector name from
@@ -1156,6 +1162,7 @@ func newHookContractLockEntry(
 			ClaudeCodeEnforcement: opts.ClaudeCodeEnforcement,
 			HookSocket:            hookSocket,
 			HookSocketServiceUID:  hookSocketServiceUID,
+			HookCredentialBinding: hookCredentialBinding(opts),
 		},
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1451,6 +1458,36 @@ func HookTransportDrifted(lock HookContractLockEntry, opts SetupOpts) bool {
 		haveUID = 0
 	}
 	return haveSocket != wantSocket || haveUID != wantUID
+}
+
+// hookCredentialBinding is the non-secret record of the per-user
+// credentials opts renders: the bound identity and the first 16 bytes of a
+// SHA-256 over the credentials. The lock sits in the user's own data
+// directory next to credentials the user already holds, so the digest
+// discloses nothing new; it only lets verification notice that the
+// credentials changed. Empty when opts binds no identity.
+func hookCredentialBinding(opts SetupOpts) string {
+	identity := strings.TrimSpace(opts.HookCredentialIdentity)
+	if identity == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte("defenseclaw.hook-credential-binding.v1\x00" + identity + "\x00" +
+		strings.TrimSpace(opts.APIToken) + "\x00" + strings.TrimSpace(opts.OTLPPathToken)))
+	return identity + ":" + hex.EncodeToString(digest[:16])
+}
+
+// HookCredentialDrifted reports whether the hooks recorded by lock were
+// rendered with other credentials than opts selects: the connector-scoped
+// credential shared by every user (a lock without a binding), another
+// user's, or credentials derived from an older key. Like
+// HookTransportDrifted it is a repair signal for Unix verification, which
+// does not compare hook or agent configuration bytes.
+func HookCredentialDrifted(lock HookContractLockEntry, opts SetupOpts) bool {
+	have := ""
+	if posture := lock.RegistrationPosture; posture != nil {
+		have = posture.HookCredentialBinding
+	}
+	return have != hookCredentialBinding(opts)
 }
 
 func cursorHookContractUnchanged(previous, current HookContractLockEntry) bool {

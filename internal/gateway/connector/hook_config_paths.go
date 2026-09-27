@@ -352,6 +352,14 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	if guard := managedPluginForeignHookGuardMarker(opts, "const DC_FOREIGN_GUARD = ", ";\n"); guard != nil {
 		markers = append(markers, guard, []byte(`if (blocked) throw new Error(blocked);`))
 	}
+	// A plugin rendered before the listener proof existed would still send
+	// its credential to whoever holds the TCP port; it is repaired.
+	if managedPluginListenerProof(opts) {
+		markers = append(markers,
+			[]byte("const DC_LISTENER_PROOF = \"1\";\n"),
+			[]byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);"),
+		)
+	}
 	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {
 			return false, nil

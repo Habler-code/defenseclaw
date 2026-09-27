@@ -69,6 +69,10 @@ type InstallOptions struct {
 	// transport.
 	ManagedHookSocket string
 	ManagedServiceUID int
+	// HookCredentialIdentity is the uid the standalone Unix guardian bound
+	// APIToken and OTLPPathToken to (see connector.SetupOpts). Empty for
+	// every other install.
+	HookCredentialIdentity string
 	// ForeignHookGuardBinary is the administrator-owned hook binary the
 	// standalone Amp and OpenCode plugins run for the foreign-hook guard
 	// (see connector.SetupOpts). Empty everywhere else.
@@ -186,10 +190,11 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		HILTEnabled:       opts.HILTEnabled,
 		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
-		// The configured transport, compared below with the one the
-		// installed hooks were rendered for.
-		ManagedHookSocket: strings.TrimSpace(opts.ManagedHookSocket),
-		ManagedServiceUID: opts.ManagedServiceUID,
+		// The configured transport and credential binding, compared below
+		// with the ones the installed hooks were rendered for.
+		ManagedHookSocket:      strings.TrimSpace(opts.ManagedHookSocket),
+		ManagedServiceUID:      opts.ManagedServiceUID,
+		HookCredentialIdentity: strings.TrimSpace(opts.HookCredentialIdentity),
 		// Verification requires the guard line the standalone Amp and
 		// OpenCode plugins carry, so a plugin rendered without it (before
 		// the guard existed, or edited) fails and the guardian re-renders it.
@@ -260,6 +265,13 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// the guardian's verify-or-repair pass reinstall them.
 			if connector.HookTransportDrifted(lock, setupOpts) {
 				return fmt.Errorf("enterprise hooks: connector %s hooks were installed for a different gateway transport than the configured hook socket", conn.Name())
+			}
+			// The same holds for credentials: hooks rendered with the
+			// connector-scoped credential every user shared, or with another
+			// user's or an older key's credentials, are reinstalled with the
+			// target's own per-user credentials.
+			if connector.HookCredentialDrifted(lock, setupOpts) {
+				return fmt.Errorf("enterprise hooks: connector %s hooks were installed with credentials that are not bound to this user", conn.Name())
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),
@@ -351,8 +363,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		HILTEnabled:       opts.HILTEnabled,
 		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
-		ManagedHookSocket: strings.TrimSpace(opts.ManagedHookSocket),
-		ManagedServiceUID: opts.ManagedServiceUID,
+		ManagedHookSocket:      strings.TrimSpace(opts.ManagedHookSocket),
+		ManagedServiceUID:      opts.ManagedServiceUID,
+		HookCredentialIdentity: strings.TrimSpace(opts.HookCredentialIdentity),
 		// Only the standalone guardian sets this, for Amp and OpenCode.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 	}

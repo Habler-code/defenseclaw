@@ -1823,6 +1823,27 @@ func managedPluginForeignHookGuardMarker(opts SetupOpts, declaration, terminator
 	return []byte(declaration + `"` + javaScriptStringContent(binary) + `"` + terminator)
 }
 
+// managedPluginListenerProof reports whether an in-agent plugin must make
+// the loopback TCP listener prove it is the gateway before sending its
+// per-user credential (UserScopedListenerProof). Only a managed install that
+// asks for it and keeps the TCP transport renders it; a plugin on the hook
+// socket verifies the socket's owner instead.
+func managedPluginListenerProof(opts SetupOpts) bool {
+	if !opts.ManagedEnterprise || !opts.ManagedListenerProof {
+		return false
+	}
+	socket, _ := managedPluginHookSocket(opts)
+	return socket == ""
+}
+
+// managedPluginListenerProofJS is the rendered DC_LISTENER_PROOF value.
+func managedPluginListenerProofJS(opts SetupOpts) string {
+	if managedPluginListenerProof(opts) {
+		return "1"
+	}
+	return ""
+}
+
 // managedPluginInstallMarker returns the install marker an in-agent plugin
 // checks before failing closed, or "" when unused. Only a managed install
 // with an absolute marker renders one.
@@ -1867,6 +1888,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		ServiceUID:         serviceUID,
 		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
 		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
+		ListenerProofJS:    managedPluginListenerProofJS(opts),
 		FailMode:           failMode,
 		Managed:            opts.ManagedEnterprise,
 	})

@@ -168,6 +168,42 @@ func TestStandaloneHookRuntimeUntrustedDescriptorFailsClosed(t *testing.T) {
 	}
 }
 
+// A descriptor that names no hook socket must fail closed: the standalone
+// hook has no loopback TCP fallback and never reads a token.
+func TestStandaloneHookRuntimeWithoutHookSocketFailsClosed(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			withStandaloneHookRuntime(t, goos,
+				func(string) (*managed.RuntimeDescriptor, error) {
+					descriptor := testDescriptor()
+					descriptor.HookSocket = ""
+					return descriptor, nil
+				},
+				noMarkers, "/nonexistent-secure-client")
+			if enterpriseManagedHookRuntimeNoop("codex") {
+				t.Fatal("a descriptor without a hook socket is never a no-op")
+			}
+			if reason := enterpriseManagedHookRuntimeFailureReason(); reason != standaloneRuntimeReasonHookSocketMissing {
+				t.Fatalf("reason = %q, want %q", reason, standaloneRuntimeReasonHookSocketMissing)
+			}
+			if !enterpriseManagedHookRuntimeForceClosed() {
+				t.Fatal("a descriptor without a hook socket must force the hook closed")
+			}
+			if _, _, _, ok := enterpriseManagedHookRuntimeConnection("codex"); ok {
+				t.Fatal("a descriptor without a hook socket must not yield a TCP endpoint")
+			}
+			opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+			if opts.ManagedRuntimeFailure != standaloneRuntimeReasonHookSocketMissing || opts.ManagedStandalone || opts.ManagedUnixSocket != "" {
+				t.Fatalf("fail-closed options wrong: failure=%q standalone=%v socket=%q",
+					opts.ManagedRuntimeFailure, opts.ManagedStandalone, opts.ManagedUnixSocket)
+			}
+			if opts.FailMode != "closed" || !opts.StrictAvailability {
+				t.Fatalf("hook must fail closed: fail=%q strict=%v", opts.FailMode, opts.StrictAvailability)
+			}
+		})
+	}
+}
+
 func TestStandaloneHookRuntimeKeepsSecureClientMacFailClosed(t *testing.T) {
 	secureClient := t.TempDir()
 	withStandaloneHookRuntime(t, "darwin",

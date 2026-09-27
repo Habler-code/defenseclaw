@@ -263,6 +263,89 @@ func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
 	}
 }
 
+// TestVerifyFailsWhenHooksCarryCredentialsNotBoundToTheUser covers the move
+// to per-user credentials: hooks rendered with the connector-scoped
+// credential every user shared, or with another user's or an older key's
+// credentials, must fail Verify so the guardian reinstalls them with the
+// target's own credentials.
+func TestVerifyFailsWhenHooksCarryCredentialsNotBoundToTheUser(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	shared := InstallOptions{
+		ConnectorName:     "codex",
+		UserHome:          home,
+		OwnerUID:          os.Getuid(),
+		OwnerGID:          os.Getgid(),
+		APIAddr:           "127.0.0.1:18970",
+		ProxyAddr:         "127.0.0.1:4000",
+		APIToken:          strings.Repeat("a", 64),
+		OTLPPathToken:     strings.Repeat("b", 64),
+		GuardrailMode:     "action",
+		HookFailMode:      "closed",
+		AgentVersion:      "codex-cli 0.142.0",
+		Registry:          connector.NewDefaultRegistry(),
+		ManagedHookSocket: "/var/run/defenseclaw/hook.sock",
+		ManagedServiceUID: 461,
+	}
+	perUser := shared
+	perUser.APIToken = strings.Repeat("c", 64)
+	perUser.OTLPPathToken = strings.Repeat("d", 64)
+	perUser.HookCredentialIdentity = "1001"
+	const credentialDrift = "not bound to this user"
+
+	if _, err := Install(context.Background(), shared); err != nil {
+		t.Fatalf("Install (connector-scoped): %v", err)
+	}
+	if _, err := Verify(context.Background(), perUser); err == nil || !strings.Contains(err.Error(), credentialDrift) {
+		t.Fatalf("Verify (connector-scoped install, per-user configured) = %v, want credential drift", err)
+	}
+	if _, err := Install(context.Background(), perUser); err != nil {
+		t.Fatalf("Install (per-user): %v", err)
+	}
+	if _, err := Verify(context.Background(), perUser); err != nil {
+		t.Fatalf("Verify (per-user install, per-user configured): %v", err)
+	}
+	data, err := os.ReadFile(codexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Bearer "+perUser.OTLPPathToken) || strings.Contains(string(data), shared.OTLPPathToken) {
+		t.Fatalf("codex config does not carry only the per-user OTLP credential:\n%s", data)
+	}
+	lock, err := os.ReadFile(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(lock), perUser.APIToken) || strings.Contains(string(lock), perUser.OTLPPathToken) {
+		t.Fatal("the hook contract lock must not contain a credential")
+	}
+	if !strings.Contains(string(lock), `"hook_credential_binding": "1001:`) {
+		t.Fatalf("the hook contract lock does not record the credential binding:\n%s", lock)
+	}
+
+	otherUser := perUser
+	otherUser.HookCredentialIdentity = "1002"
+	rotated := perUser
+	rotated.OTLPPathToken = strings.Repeat("e", 64)
+	for name, opts := range map[string]InstallOptions{
+		"connector-scoped configured": shared,
+		"another user":                otherUser,
+		"rotated key":                 rotated,
+	} {
+		if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), credentialDrift) {
+			t.Fatalf("Verify (per-user install, %s) = %v, want credential drift", name, err)
+		}
+	}
+}
+
 func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)

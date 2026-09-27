@@ -97,6 +97,7 @@ type enterpriseHookWorkerOptions struct {
 	RecoveryHookContractEntryUpdatedAt string `json:"recovery_hook_contract_entry_updated_at,omitempty"`
 	ManagedHookSocket                  string `json:"managed_hook_socket,omitempty"`
 	ManagedServiceUID                  int    `json:"managed_service_uid,omitempty"`
+	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 }
 
@@ -426,6 +427,7 @@ func (o enterpriseHookWorkerOptions) installOptions(registry *connector.Registry
 		RecoveryHookContractEntryUpdatedAt: o.RecoveryHookContractEntryUpdatedAt,
 		ManagedHookSocket:                  o.ManagedHookSocket,
 		ManagedServiceUID:                  o.ManagedServiceUID,
+		HookCredentialIdentity:             o.HookCredentialIdentity,
 		ForeignHookGuardBinary:             o.ForeignHookGuardBinary,
 	}
 }
@@ -452,6 +454,7 @@ func enterpriseHookWorkerOptionsFrom(opts enterprisehooks.InstallOptions) enterp
 		RecoveryHookContractEntryUpdatedAt: opts.RecoveryHookContractEntryUpdatedAt,
 		ManagedHookSocket:                  opts.ManagedHookSocket,
 		ManagedServiceUID:                  opts.ManagedServiceUID,
+		HookCredentialIdentity:             opts.HookCredentialIdentity,
 		ForeignHookGuardBinary:             opts.ForeignHookGuardBinary,
 	}
 }

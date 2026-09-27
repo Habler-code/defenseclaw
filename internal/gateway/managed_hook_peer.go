@@ -67,12 +67,14 @@ func managedHookPeerFromContext(ctx context.Context) (managedHookPeer, bool) {
 }
 
 // managedHookLedgerTarget is one row of the guardian authorization ledger as
-// the hook socket needs it. UID is optional: the guardian names users, and a
-// ledger that also records the numeric uid lets directory users match
-// without a name lookup.
+// the hook socket and the per-user credentials need it. UID is optional: the
+// guardian names users, and a ledger that also records the numeric uid lets
+// directory users match without a name lookup. SID is set only by the
+// Windows guardian; the hook socket never consults it.
 type managedHookLedgerTarget struct {
 	User      string `json:"user,omitempty"`
 	UID       *int   `json:"uid,omitempty"`
+	SID       string `json:"sid,omitempty"`
 	Connector string `json:"connector"`
 	OK        bool   `json:"ok"`
 }
@@ -229,6 +231,9 @@ type managedHookLedgerLoader struct {
 	size     int64
 	ledger   managedHookLedger
 	err      error
+	// generation increases on every re-read, so a consumer that derives
+	// state from the ledger can tell a cached answer from a new one.
+	generation uint64
 }
 
 func newManagedHookLedgerLoader(path string) *managedHookLedgerLoader {
@@ -236,20 +241,27 @@ func newManagedHookLedgerLoader(path string) *managedHookLedgerLoader {
 }
 
 func (l *managedHookLedgerLoader) Load() (managedHookLedger, error) {
+	ledger, _, err := l.LoadGeneration()
+	return ledger, err
+}
+
+// LoadGeneration is Load plus the generation of the answer.
+func (l *managedHookLedgerLoader) LoadGeneration() (managedHookLedger, uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	info, statErr := os.Stat(l.path)
 	now := l.now()
 	if statErr == nil && !l.loadedAt.IsZero() && now.Sub(l.loadedAt) < l.ttl &&
 		info.ModTime().Equal(l.modTime) && info.Size() == l.size {
-		return l.ledger, l.err
+		return l.ledger, l.generation, l.err
 	}
 	l.loadedAt = now
 	if statErr == nil {
 		l.modTime, l.size = info.ModTime(), info.Size()
 	}
 	l.ledger, l.err = readManagedHookLedger(l.path)
-	return l.ledger, l.err
+	l.generation++
+	return l.ledger, l.generation, l.err
 }
 
 func readManagedHookLedger(path string) (managedHookLedger, error) {

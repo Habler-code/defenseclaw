@@ -178,6 +178,11 @@ type APIServer struct {
 	hookAPITokenMu sync.RWMutex
 	hookAPITokens  map[string]string
 
+	// userScopedCredentials authenticates the standalone profile's per-user
+	// connector credentials on the TCP API (user_scoped_credentials.go).
+	userScopedCredentialsOnce sync.Once
+	userScopedCredentials     *userScopedCredentialStore
+
 	// hookRegistrationRepair is the narrow authenticated bridge from a fresh
 	// connector SessionStart to the Sidecar-owned hook guard. The Sidecar owns
 	// connector selection and SetupOpts; the API never resolves an ambient
@@ -3351,11 +3356,21 @@ func authenticatedInspectConnector(ctx context.Context) string {
 // tokenAuth wraps a handler with Bearer token authentication. Management
 // clients may use Authorization, X-DefenseClaw-Token, or the proxy-compatible
 // X-DC-Auth header; all are compared against the same gateway token.
-// GET /health is exempt to allow unauthenticated health checks.
+// GET /health is exempt to allow unauthenticated health checks. In the
+// standalone profile the listener proof route answers before authentication
+// and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == connector.UserScopedListenerProofPath && a.userScopedCredentialsRequired() {
+			// A standalone in-agent plugin on loopback TCP makes the
+			// listener prove it is the gateway before it sends its per-user
+			// credential (user_scoped_listener_proof.go). Every other
+			// profile keeps the ordinary authentication below.
+			a.serveUserScopedListenerProof(w, r)
 			return
 		}
 		route := r.Pattern
@@ -3417,12 +3432,23 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// does; a leaked connector configuration must never grant management API
 		// authority. Gemini CLI still uses the path form below because its native
 		// exporter cannot set an authorization header.
+		// The standalone profile accepts connector credentials only when they
+		// are bound to one user (user_scoped_credentials.go): a request that
+		// presents one is attributed to that user, and a connector-wide
+		// credential, which every user of the connector used to hold, no
+		// longer authenticates.
+		userScoped := a.userScopedCredentialsRequired()
 		if isUnscopedOTLPEndpointPath(r.URL.Path) && connector.IsLoopback(r) {
 			source := normalizeConnectorTelemetrySource(r.Header.Get(otelSourceHeader))
 			if scope, validSource := connector.OTLPPathTokenScopeForConnector(source); validSource {
+				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedOTLPCredential, string(scope), token); ok {
+					r.Header.Set(otelSourceHeader, string(scope))
+					a.serveUserScoped(w, r, route, identity, next, nil)
+					return
+				}
 				scoped := a.lookupOTLPPathToken(string(scope))
 				if scoped != "" {
-					if token != "" && constantTimeStringMatch(token, scoped) {
+					if !userScoped && token != "" && constantTimeStringMatch(token, scoped) {
 						// Preserve only the canonical source name used to select the
 						// credential so attribution cannot drift through an alias.
 						r.Header.Set(otelSourceHeader, string(scope))
@@ -3437,6 +3463,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 		}
 		if pathToken, source, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
+			if token == "" {
+				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedOTLPCredential, source, pathToken); ok {
+					a.serveUserScoped(w, r, route, identity, next, nil)
+					return
+				}
+			}
 			scoped := a.lookupOTLPPathToken(source)
 			if scoped != "" {
 				if token != "" {
@@ -3444,7 +3476,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
-				if constantTimeStringMatch(pathToken, scoped) {
+				if !userScoped && constantTimeStringMatch(pathToken, scoped) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -3464,7 +3496,13 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
-			if a.hookAPITokenMatches(hookScope, token) {
+			if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+				a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
+					return withAuthenticatedHookConnector(ctx, hookScope)
+				})
+				return
+			}
+			if !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedHookConnector(
 					PromoteSessionIfAuthenticated(r.Context()),
 					hookScope,
@@ -3489,7 +3527,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			if a.connectorRegistry != nil {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
-			if registered && a.hookAPITokenMatches(hookScope, token) {
+			if registered {
+				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+					a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
+						return withAuthenticatedInspectConnector(ctx, hookScope)
+					})
+					return
+				}
+			}
+			if registered && !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedInspectConnector(
 					PromoteSessionIfAuthenticated(r.Context()),
 					hookScope,

@@ -63,13 +63,17 @@ type templateData struct {
 	// plugin runs for the standalone foreign-hook guard, escaped for a
 	// JavaScript double-quoted string; empty skips the check.
 	ForeignHookGuardJS string
-	FailMode           string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
-	Managed            bool
-	TokenFile          string
-	ScopedToken        bool
-	ConnectorName      string
-	HookBinaryPS       string // absolute launcher path, escaped for a PowerShell single-quoted literal
-	HookTimeoutMS      int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
+	// ListenerProofJS is "1" when an in-agent plugin on loopback TCP must
+	// make the listener prove it is the gateway before sending its per-user
+	// credential (UserScopedListenerProof); empty skips the proof.
+	ListenerProofJS string
+	FailMode        string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
+	Managed         bool
+	TokenFile       string
+	ScopedToken     bool
+	ConnectorName   string
+	HookBinaryPS    string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS   int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
 	CursorHookTimeoutMS int

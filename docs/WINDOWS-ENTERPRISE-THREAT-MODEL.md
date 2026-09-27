@@ -218,8 +218,11 @@ Windows enterprise lifecycle transaction
 Interactive standard user / agent process
   |-- may read installed public executables
   |-- may edit or delete files the user owns
-  |-- may call loopback hook endpoints with a connector-scoped token
-  |      only when the connected peer PID is the live SCM gateway PID
+  |-- may call loopback hook endpoints with its own credential (standalone:
+  |      bound to the user's SID; Secure Client: connector-scoped, residual 16)
+  |      only when the connected peer PID is the live SCM gateway PID, or,
+  |      for the standalone OpenCode and Amp plugins, after the listener
+  |      proves it can derive that credential
   `-- has query-only SCM access
 ```
 
@@ -411,15 +414,29 @@ authority.
 
 ### Hook request
 
-1. A user-owned hook reads only its connector-scoped token.
+1. A user-owned hook reads only its own credential. In the standalone profile
+   the guardian derives it for that user's SID from a per-machine key the
+   user never sees; in the Secure Client profile it is connector-scoped.
 2. The request goes to a loopback-only endpoint and names its connector scope.
 3. Before sending a request, the managed hook resolves the exact running
    gateway PID from SCM and verifies that the connected loopback peer PID is
    that same process. A missing, stopped, changed, or mismatched PID is a
    fail-closed result. The standalone hook applies the same check, and before
-   the call it also runs the foreign-hook guard (W-50).
+   the call it also runs the foreign-hook guard (W-50). The standalone
+   OpenCode and Amp plugins call the gateway from the agent's own runtime and
+   cannot compare PIDs. Before each request they send only the credential's
+   SHA-256 and a fresh nonce to `/api/v1/hook-listener-proof` and require an
+   HMAC over the nonce keyed by their credential, which only the gateway can
+   derive. Any other answer is handled like an unreachable gateway (managed
+   plugins fail closed), and neither the credential nor the payload is sent.
+   The proof and the request are consecutive loopback requests, so a holder
+   would have to take the port in the instant between them, which requires
+   the gateway to stop exactly then.
 4. Constant-time token comparison authorizes only that connector's hook or
-   notification route.
+   notification route. In the standalone profile the gateway accepts only a
+   credential bound to a SID the authorization ledger protects, attributes
+   the request to that SID, and refuses (403) identity headers that name
+   another user; connector-wide credentials are not accepted.
 5. Management, status, configuration, policy, scan, and cross-connector routes
    reject the scoped credential.
 6. A managed invocation from a SID absent from protected enrollment state
@@ -443,7 +460,7 @@ authority.
 | W-11 | Predictable named mutex is pre-created and held by a standard user, or a reader holds the real transaction lock indefinitely | Codex policy transactions use the protected, no-reparse, single-link `%ProgramData%\OpenAI\Codex\.defenseclaw-managed-hooks.lock` with bounded `LockFileEx`; the retired predictable Global mutex is never opened. Lifecycle uses its independently protected file lock | Pre-create the exact retired Global name with both hostile and permissive DACLs and require zero influence. Hold the real file lock from a standard-user read handle, require bounded fail-closed verification with unchanged policy, release it, and require immediate recovery |
 | W-12 | One successful target hides another target's failure | Strict schema, exact counts, no duplicates/trailing fields, `ok=false` on any failure, all configured connectors covered | Partial-failure status, verify, and gateway-health tests |
 | W-13 | Old successful authorization remains valid after disablement, manifest change, guardian death, or hang | Guardian state is reconciled to the exact current protected manifest; disabled or absent rows are revoked and authorization has bounded age/future-skew checks. The enumerator preserves an existing disabled row; deleting an otherwise eligible row is not a durable exclusion because automatic discovery may publish it again | Disabled-row preservation, manifest-generation revocation, and stale/future ledger tests |
-| W-14 | Service token is read by a standard user or crosses connector scope | Exact gateway service SID gets runtime Modify; users get no token access; per-user token is connector-scoped | ACL denial plus route-scope matrix |
+| W-14 | Service token is read by a standard user, crosses connector scope, or is used by one user to post events attributed to another | Exact gateway service SID gets runtime Modify; users get no token access; per-user token is connector-scoped, and in the standalone profile bound to the user's SID (the gateway attributes the request to that SID and refuses conflicting identity headers). The Secure Client profile does not bind the token to a SID, so cross-user attribution remains open there (residual 16) | ACL denial plus route-scope matrix; `internal/gateway/user_scoped_credentials_test.go` |
 | W-15 | Upgrade failure leaves new binaries with old state or reports success | Serialized transaction, owned-deployment identity, rollback, exact postcondition verification, non-zero structured error | Injected failed-upgrade test and before/after equality |
 | W-16 | Higher-precedence Claude policy disables hooks or a lower user/project `disableAllHooks` source produces a false green | Enforce and validate the documented server-managed > HKLM/MDM > Program Files > HKCU precedence; do not treat a local `90-defenseclaw.json` as sufficient evidence | Real approved Claude 2.1.207 invocation against a local no-auth Messages stub with hostile user and project `disableAllHooks`; require managed hook contact or a blocked client operation |
 | W-17 | Normal installations silently change after adding enterprise support | All new enforcement branches require effective `managed_enterprise`; lifecycle install is explicit; the Windows process entry point returns before even consulting SCM service detection unless the protected installer-owned service-name marker is present; existing unmanaged hook self-heal remains active | Entrypoint seam proves the SCM detector and service executor are never called without the marker; full mode matrix, pre-install no-machine-mutation proof, and a disposable normal-mode hook deletion/replacement followed by exact live auto-heal |
@@ -454,7 +471,7 @@ authority.
 | W-22 | User-controlled loader environment, shared temp/cache/home content, PowerShell function, module, or preloaded helper type hijacks elevated lifecycle code | Fixed System32 PowerShell, strict environment/working directory, one unique protected directory for every writable temp/cache/home variable, pre-import module trust, module-qualified built-ins, randomized retained native-helper type | Poisoned loader/environment/module/function/type smokes, PowerShell ModuleAnalysisCache containment, and protected one-shot-directory ACL/use probes in Windows PowerShell 5.1 and PowerShell 7 |
 | W-23 | Authorization remains green with an extra removed/disabled target | Healthy status and verify require exact target-set equality, strict schema/counts, no duplicates, same reconcile identity, and freshness | Extra/stale/removed target tests for status, verify, and gateway readiness |
 | W-24 | A caller uses `-AllowUnsigned` with production names/roots, a near-miss certification scope, an action outside the lifecycle, or implicit core-only semantics to import or deploy untrusted code | Before module import, accept unsigned artifacts only for the seven lifecycle actions (`Install`, `Upgrade`, `Repair`, `Reconcile`, `Status`, `Verify`, `Uninstall`) and only with exact case-sensitive same-id certification service names, exact same-id Program Files/ProgramData certification roots, and a required same-id certification CODEX_HOME basename. Select core-only behavior through a separate explicit flag that is valid only for `Install`/`Upgrade`/`Repair`, requires the same scope, rejects production attestations and Codex targets, and is bound into transaction recovery; retain all fixed-NTFS, no-reparse, owner, and DACL source checks. The standalone profile's hash-pinned trust (W-45) is a separate production mode, not an extension of this switch | Bootstrap, module, public-CLI, recovery, and live-harness matrix tests: full unsigned uses home/no-core, Claude-only uses home/core, signed production and read-only use neither; negative production, mismatched-id, case-near-miss, nested-root, CODEX_HOME-near-miss, and flag-combination assertions |
-| W-25 | A standard-user fake listener wins the exact API port and returns a valid allow response while the gateway is stopped or restarting | Bind hook trust to both the connector token and the connected server PID; the PID must equal the exact current SCM gateway PID, not merely any process listening on loopback | Stop/crash the gateway, bind the exact port as a non-admin, return valid allow JSON, and race service restart; the hook must deny/fail closed and the fake listener must observe zero authenticated requests |
+| W-25 | A standard-user fake listener wins the exact API port and returns a valid allow response while the gateway is stopped or restarting | Bind hook trust to both the connector token and the connected server PID; the PID must equal the exact current SCM gateway PID, not merely any process listening on loopback. The standalone OpenCode and Amp plugins, which cannot read the PID, require the listener proof before sending the credential or payload. The Codex and Claude Code OTLP exporters verify nothing (residual 5) | Stop/crash the gateway, bind the exact port as a non-admin, return valid allow JSON, and race service restart; the hook must deny/fail closed and the fake listener must observe zero authenticated requests; `internal/gateway/connector/plugin_listener_proof_test.go` for the plugins |
 | W-26 | Codex managed-hook configuration is removed, redirected, or bypassed | Protect the machine requirements and enrollment state with administrator-owned ACLs, verify the exact ten-event policy, and require end-to-end managed-hook contact or a blocked operation in certification | Invoke the approved Codex client against a bounded local provider and require SessionStart/UserPromptSubmit audit evidence or a causal block |
 | W-27 | An old officially signed or custom unsigned agent avoids a newer managed-hook contract | When an enterprise opts into application control, allow only approved signed clients at or above the minimum versions. The hook-contract floors are the source of truth: `cli/defenseclaw/inventory/hook_contracts.json` (mirrored in `internal/gateway/connector/hook_contract.go`) currently starts Codex at 0.124.0, Claude Code at 2.1.154, Cursor at 2.4.0 and Copilot at 1.0.18. The Secure Client installer's own minimums in `internal/enterprisehooks/install_windows.go` (Codex 0.131.0, Claude Code 2.1.152, Cursor 1.7.0) are tracked for alignment in issue #901; the standalone profile takes its floors from the contract table. Certification records the floors of the tested build rather than this document | In the optional application-control profile, approved clients start and explicitly supplied old signed Codex/Claude and custom unsigned lookalikes fail process creation with an application-control denial |
 | W-28 | An unregistered interactive SID invokes the installed managed hook or reuses another target's state | Exact SID membership in protected connector enrollment state is checked before token use; absence is fail-closed and diagnostic | Run the installed managed hook under a temporary non-admin SID absent from the manifest; require non-zero, causal enrollment text, and byte/security-exact user trees |
@@ -676,9 +693,18 @@ authority.
    above as a residual risk. If an enterprise claims these controls, it must
    certify them independently.
 5. Local port squatting cannot forge an allow verdict because the connected
-   peer PID must be the exact SCM gateway PID, but it can still deny
-   availability. Target-owned file reads and comparisons are bounded, and an
-   authorized oversized runtime leaf is quarantined for repair, but disk-full,
+   peer PID must be the exact SCM gateway PID (the OpenCode and Amp plugins
+   require the listener proof instead), but it can still deny availability.
+   The Codex and Claude Code OTLP exporters verify neither: while a user
+   holds the port, that user receives their telemetry, which can include
+   prompt text, and the sending user's per-SID telemetry credential, and can
+   replay the credential once the gateway is back to post telemetry
+   attributed to that user for that connector until the user leaves
+   enrollment. The credentials do not rotate; a telemetry credential never
+   authenticates hook, inspect or management routes or another connector
+   ([R7](ENTERPRISE-THREAT-MODEL.md#residual-risks)). Target-owned file
+   reads and comparisons are bounded, and an authorized oversized runtime
+   leaf is quarantined for repair, but disk-full,
    handle exhaustion, continuously generated new data, and broader endpoint
    resource starvation remain availability residuals. SCM recovery, monitoring,
    and endpoint resource controls reduce but do not eliminate them.
@@ -688,11 +714,13 @@ authority.
    rewriting broad Windows/OneDrive/enterprise profile ACLs. Endpoint profile
    policy and monitoring must treat this broader self-denial as an endpoint
    availability event.
-7. A removed target may retain an old connector-scoped hook credential until
-   that connector token is rotated and remaining enabled targets are
-   reconciled. The credential cannot authorize management or another
-   connector's route, but decommission procedures must rotate it rather than
-   relying only on manifest removal.
+7. In the Secure Client profile a removed target may retain an old
+   connector-scoped hook credential until that connector token is rotated and
+   remaining enabled targets are reconciled. The credential cannot authorize
+   management or another connector's route, but decommission procedures must
+   rotate it rather than relying only on manifest removal. In the standalone
+   profile each credential is bound to one SID and stops authenticating when
+   the guardian's ledger drops that target.
 8. Static policy inspection cannot prove effective client behavior. Fleet
    acceptance must include real approved Codex and Claude invocations against
    the deployed policy stack and require managed hook contact or a blocked
@@ -730,6 +758,15 @@ authority.
     (Claude Code `--bare`, Amp plugin order, OpenCode plugin order, Hermes and
     Copilot fail-open behavior, higher-precedence cloud policy) apply to
     Windows unchanged.
+16. In the Secure Client profile hook and telemetry credentials are
+    connector-scoped: every user of a connector holds the same credential,
+    and the gateway attributes the request from its SID header. One user can
+    therefore post hook, inspection and telemetry events attributed to
+    another user of the same connector (W-14). The credential still cannot
+    reach management routes or another connector. The standalone profile
+    binds each credential to one SID; applying that to Secure Client is a
+    tracked follow-up, and until then Secure Client per-user attribution is
+    advisory ([R12](ENTERPRISE-THREAT-MODEL.md#residual-risks)).
 
 ## Certification gate
 

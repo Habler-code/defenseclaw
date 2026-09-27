@@ -130,9 +130,11 @@ type Options struct {
 	// listener runs as root or ManagedServiceUID. It is ignored outside
 	// ManagedEnterprise mode.
 	ManagedStandalone bool
-	// ManagedUnixSocket is the standalone hook socket. When set, the hook
-	// dials it instead of loopback TCP and sends no bearer token: the
-	// gateway authorizes the caller by its kernel-verified uid.
+	// ManagedUnixSocket is the standalone hook socket. The standalone hook
+	// dials only this socket and sends no bearer token: the gateway
+	// authorizes the caller by its kernel-verified uid. It is required with
+	// ManagedStandalone; an empty value fails closed rather than selecting
+	// loopback TCP.
 	ManagedUnixSocket string
 	// ManagedServiceUID is the gateway service account uid from the
 	// root-owned runtime descriptor.
@@ -273,13 +275,18 @@ func Run(ctx context.Context, opts Options) int {
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
+	if opts.ManagedEnterprise && opts.ManagedStandalone && strings.TrimSpace(opts.ManagedUnixSocket) == "" {
+		// The standalone profile has exactly one hook transport, the
+		// peer-authorized unix socket. Without it there is nothing this
+		// hook may contact: never fall back to loopback TCP or a token.
+		return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
+	}
 	if opts.HTTPClient == nil {
 		if opts.ManagedEnterprise {
 			var err error
 			if opts.ManagedStandalone {
 				opts.HTTPClient, err = managedStandaloneHTTPClient(
 					requestTimeout,
-					opts.APIAddr,
 					opts.ManagedUnixSocket,
 					opts.ManagedServiceUID,
 				)
@@ -310,7 +317,7 @@ func Run(ctx context.Context, opts Options) int {
 	}
 
 	var token string
-	if opts.ManagedEnterprise && opts.ManagedStandalone && opts.ManagedUnixSocket != "" {
+	if opts.ManagedEnterprise && opts.ManagedStandalone {
 		// The standalone hook socket authenticates this process by its
 		// kernel-verified uid. No bearer is read or sent, so there is no
 		// user-readable credential to steal or replay.

@@ -127,6 +127,10 @@ var (
 	enterpriseHooksRemoveManagedPolicy  = enterprisehooks.RemoveManagedPolicy
 	enterpriseHookScopedTokenMinter     = enterpriseHookScopedToken
 	enterpriseHookScopedOTLPTokenMinter = enterpriseHookScopedOTLPToken
+	// The standalone profile's per-user credentials (hook, OTLP) bound to
+	// one uid or SID; see connector.UserScopedHookAPIToken.
+	enterpriseHookUserTokenMinter = enterpriseHookUserScopedTokens
+	enterpriseHookUserTokenLoader = loadEnterpriseHookUserScopedTokens
 )
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
@@ -415,13 +419,14 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if proxyAddr == "" {
 		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
-	token, err := enterpriseHookScopedTokenMinter(cfg.DataDir, enterpriseHookConnector)
-	if err != nil {
-		return enterpriseHooksInstallError(cmd, err)
-	}
-	otlpToken, err := enterpriseHookScopedOTLPTokenMinter(cfg.DataDir, enterpriseHookConnector)
-	if err != nil {
-		return enterpriseHooksInstallError(cmd, err)
+	// The standalone Unix install resolves the target account in its
+	// worker path and derives the target's per-user credentials there.
+	token, otlpToken := "", ""
+	if !enterpriseHooksStandaloneUnixActive() {
+		token, otlpToken, err = enterpriseHookTargetTokens(cfg.DataDir, enterpriseHookConnector, target.sid, true)
+		if err != nil {
+			return enterpriseHooksInstallError(cmd, err)
+		}
 	}
 
 	previousProtection, err := previousEnterpriseHookProtection(
@@ -1350,10 +1355,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		token := ""
 		otlpToken := ""
 		if targetErr == nil {
-			token, targetErr = loadEnterpriseHookScopedToken(cfg.DataDir, target.Connector)
-		}
-		if targetErr == nil {
-			otlpToken, targetErr = loadEnterpriseHookScopedOTLPToken(cfg.DataDir, target.Connector)
+			token, otlpToken, targetErr = enterpriseHookTargetTokens(cfg.DataDir, target.Connector, resolved.sid, false)
 		}
 		if targetErr == nil {
 			opts := enterprisehooks.InstallOptions{
@@ -1659,18 +1661,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			}
 		}
 		if err == nil {
-			var tokenErr error
-			token, tokenErr = enterpriseHookScopedTokenMinter(cfg.DataDir, target.Connector)
-			if tokenErr != nil {
-				err = tokenErr
-			}
-		}
-		if err == nil {
-			var tokenErr error
-			otlpToken, tokenErr = enterpriseHookScopedOTLPTokenMinter(cfg.DataDir, target.Connector)
-			if tokenErr != nil {
-				err = tokenErr
-			}
+			token, otlpToken, err = enterpriseHookTargetTokens(cfg.DataDir, target.Connector, resolved.sid, true)
 		}
 		if err == nil {
 			opts := enterprisehooks.InstallOptions{
@@ -3282,6 +3273,100 @@ func loadEnterpriseHookScopedOTLPToken(dataDir, connectorName string) (string, e
 		return "", fmt.Errorf("enterprise hooks: scoped OTLP path token is missing for %s", connectorName)
 	}
 	return token, nil
+}
+
+// enterpriseHookUserScopedTokens returns the hook API and OTLP credentials
+// bound to one user identity (a uid on Unix, a SID on Windows), minting the
+// per-machine key on first use. The standalone guardian renders these into
+// the user's own hook directory and agent configuration instead of the
+// connector-scoped credentials every user of a connector would share, so the
+// gateway can attribute a TCP request to the user its credential belongs to.
+// The OTLP credential is empty for a connector without an OTLP source.
+func enterpriseHookUserScopedTokens(dataDir, connectorName, identity string) (string, string, error) {
+	return enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity, true)
+}
+
+// loadEnterpriseHookUserScopedTokens is enterpriseHookUserScopedTokens for
+// verification: it never mints the key.
+func loadEnterpriseHookUserScopedTokens(dataDir, connectorName, identity string) (string, string, error) {
+	return enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity, false)
+}
+
+func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, mint bool) (string, string, error) {
+	connectorName = strings.TrimSpace(connectorName)
+	if connectorName == "" {
+		return "", "", fmt.Errorf("enterprise hooks: connector is required before deriving per-user credentials")
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", "", fmt.Errorf("enterprise hooks: config data_dir is required before deriving per-user credentials")
+	}
+	if _, ok := connector.CanonicalUserScopedIdentity(identity); !ok {
+		return "", "", fmt.Errorf("enterprise hooks: per-user credentials need the target's uid or SID")
+	}
+	if err := validateEnterpriseHookUserTokenKeyLocation(dataDir); err != nil {
+		return "", "", err
+	}
+	var (
+		key string
+		err error
+	)
+	if mint {
+		key, err = connector.EnsureUserScopedTokenKey(dataDir)
+		if err == nil {
+			err = alignEnterpriseHookUserTokenKeyOwner(dataDir)
+		}
+	} else {
+		key, err = connector.LoadUserScopedTokenKey(dataDir)
+		if err == nil && key == "" {
+			err = errors.New("the per-user credential key is missing")
+		}
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("enterprise hooks: %w", err)
+	}
+	hookToken, err := connector.UserScopedHookAPIToken(key, connectorName, identity)
+	if err != nil {
+		return "", "", fmt.Errorf("enterprise hooks: derive per-user hook credential: %w", err)
+	}
+	otlpToken := ""
+	if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
+		otlpToken, err = connector.UserScopedOTLPPathToken(key, scope, identity)
+		if err != nil {
+			return "", "", fmt.Errorf("enterprise hooks: derive per-user OTLP credential: %w", err)
+		}
+	}
+	return hookToken, otlpToken, nil
+}
+
+// enterpriseHookTargetTokens returns the credentials one target's hooks are
+// rendered with. The standalone profile binds them to the target's identity
+// (the SID here; the Unix guardian passes the uid); every other profile,
+// Secure Client included, keeps the connector-scoped credentials.
+func enterpriseHookTargetTokens(dataDir, connectorName, identity string, mint bool) (string, string, error) {
+	if cfg != nil && cfg.StandaloneEnterprise() {
+		if mint {
+			return enterpriseHookUserTokenMinter(dataDir, connectorName, identity)
+		}
+		return enterpriseHookUserTokenLoader(dataDir, connectorName, identity)
+	}
+	var hookToken, otlpToken string
+	var err error
+	if mint {
+		hookToken, err = enterpriseHookScopedTokenMinter(dataDir, connectorName)
+		if err == nil {
+			otlpToken, err = enterpriseHookScopedOTLPTokenMinter(dataDir, connectorName)
+		}
+	} else {
+		hookToken, err = loadEnterpriseHookScopedToken(dataDir, connectorName)
+		if err == nil {
+			otlpToken, err = loadEnterpriseHookScopedOTLPToken(dataDir, connectorName)
+		}
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return hookToken, otlpToken, nil
 }
 
 func intPtrValue(p *int) int {

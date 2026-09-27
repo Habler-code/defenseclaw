@@ -217,38 +217,75 @@ func TestValidateStandaloneHookSocketPath(t *testing.T) {
 	}
 }
 
-func TestStandaloneTCPFallbackRefusesUntrustedOwner(t *testing.T) {
+// A standalone runtime without a hook socket must fail closed. It must not
+// fall back to loopback TCP, where another user can hold the port during a
+// gateway restart, and it must not read or send a bearer token.
+func TestStandaloneWithoutHookSocketNeverUsesTCP(t *testing.T) {
 	listener, sentBytes := rawRecordingListener(t, "tcp4", "127.0.0.1:0")
-	restore := standaloneTCPListenerUID
-	t.Cleanup(func() { standaloneTCPListenerUID = restore })
-	standaloneTCPListenerUID = func(net.Conn) (int, error) { return 4242, nil }
-	client, err := managedStandaloneHTTPClient(time.Second, listener.Addr().String(), "", 995)
-	if err != nil {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.Post("http://"+listener.Addr().String()+"/api/v1/codex/hook", "application/json", strings.NewReader("{}"))
-	if err == nil || !errors.Is(err, errManagedGatewayPeerUnverified) {
-		t.Fatalf("untrusted TCP owner error = %v", err)
+	if err := os.WriteFile(filepath.Join(hookDir, ".hook-claudecode.token"), []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injectedCalls := 0
+	for _, injected := range []bool{false, true} {
+		var out, errb bytes.Buffer
+		opts := Options{
+			Connector:          "claudecode",
+			Event:              "PreToolUse",
+			APIAddr:            listener.Addr().String(),
+			FailMode:           "closed",
+			Home:               home,
+			HookDir:            hookDir,
+			Stdin:              strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`),
+			Stdout:             &out,
+			Stderr:             &errb,
+			ManagedEnterprise:  true,
+			StrictAvailability: true,
+			ManagedStandalone:  true,
+			ManagedServiceUID:  os.Getuid(),
+			Token:              "must-not-be-sent",
+			Now:                func() time.Time { return time.Unix(0, 0).UTC() },
+		}
+		if injected {
+			opts.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				injectedCalls++
+				return nil, errors.New("unexpected request")
+			})}
+		}
+		if code := Run(t.Context(), opts); code == 0 {
+			t.Fatalf("injected=%v: a standalone hook without a socket must fail closed; stdout=%q stderr=%q", injected, out.String(), errb.String())
+		}
+		if !strings.Contains(out.String()+errb.String(), managedGatewayPeerUnverifiedReason) {
+			t.Fatalf("injected=%v: missing peer-unverified reason: stdout=%q stderr=%q", injected, out.String(), errb.String())
+		}
+	}
+	if injectedCalls != 0 {
+		t.Fatalf("hook sent %d requests through an injected client without a socket", injectedCalls)
 	}
 	if n := sentBytes(); n != 0 {
-		t.Fatalf("hook wrote %d bytes to an unverified TCP listener", n)
-	}
-	standaloneTCPListenerUID = func(net.Conn) (int, error) { return 0, errors.New("no owner") }
-	if _, err := client.Post("http://"+listener.Addr().String()+"/x", "application/json", strings.NewReader("{}")); !errors.Is(err, errManagedGatewayPeerUnverified) {
-		t.Fatalf("unknown TCP owner error = %v", err)
+		t.Fatalf("hook wrote %d bytes to the loopback TCP port", n)
 	}
 }
 
-func TestStandaloneLoopbackAddress(t *testing.T) {
-	for _, bad := range []string{"0.0.0.0:18970", "[::1]:18970", "localhost:18970", "10.0.0.1:18970", "127.0.0.1:0", "127.0.0.1"} {
-		if _, err := standaloneLoopbackAddress(bad); err == nil {
-			t.Errorf("%q accepted", bad)
-		}
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestStandaloneTransportRequiresSocketAndServiceUID(t *testing.T) {
+	if _, err := managedStandaloneHTTPClient(time.Second, "", 995); !errors.Is(err, errManagedGatewayPeerUnverified) {
+		t.Fatalf("empty socket error = %v", err)
 	}
-	if got, err := standaloneLoopbackAddress("127.0.0.1:18970"); err != nil || got != "127.0.0.1:18970" {
-		t.Fatalf("loopback rejected: %q %v", got, err)
-	}
-	if _, err := managedStandaloneHTTPClient(time.Second, "127.0.0.1:18970", "", -1); err == nil {
+	dir := shortSocketDir(t)
+	socket := filepath.Join(dir, "hook.sock")
+	startStandaloneHookServer(t, socket, `{"action":"allow"}`)
+	if _, err := managedStandaloneHTTPClient(time.Second, socket, -1); err == nil {
 		t.Fatal("negative service uid must be refused")
+	}
+	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); err != nil {
+		t.Fatalf("trusted socket refused: %v", err)
 	}
 }

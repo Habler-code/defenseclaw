@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,11 +26,6 @@ import (
 )
 
 // The verify-only token readers never mint; replaceable in tests.
-var (
-	enterpriseHookStandaloneTokenLoader     = loadEnterpriseHookScopedToken
-	enterpriseHookStandaloneOTLPTokenLoader = loadEnterpriseHookScopedOTLPToken
-)
-
 // runEnterpriseHookVerifyAttemptStandaloneUnix verifies the standalone
 // Unix guardian without mutating anything. Every per-user check runs in
 // the target user's worker; a target whose home is unavailable right now
@@ -83,7 +79,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 	}
 
 	apiAddr, proxyAddr := enterpriseHookListenAddrs()
-	hookSocket, serviceUID := enterpriseHookStandaloneHookTransport()
+	hookSocket, serviceUID, transportErr := enterpriseHookStandaloneHookTransport()
 	resolver := enterprisehooks.StandaloneResolver()
 	if caching, ok := resolver.(*unixidentity.CachingResolver); ok {
 		caching.Reset()
@@ -132,12 +128,12 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 			run.Rows = append(run.Rows, row)
 			continue
 		}
-		token, err := enterpriseHookStandaloneTokenLoader(cfg.DataDir, target.Connector)
-		if err != nil {
-			fail(err)
+		if transportErr != nil {
+			fail(transportErr)
 			continue
 		}
-		otlpToken, err := enterpriseHookStandaloneOTLPTokenLoader(cfg.DataDir, target.Connector)
+		identity := strconv.Itoa(account.UID)
+		token, otlpToken, err := enterpriseHookUserTokenLoader(cfg.DataDir, target.Connector, identity)
 		if err != nil {
 			fail(err)
 			continue
@@ -160,6 +156,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 
 			ManagedHookSocket:      hookSocket,
 			ManagedServiceUID:      serviceUID,
+			HookCredentialIdentity: identity,
 			ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 		}
 		index := len(run.Rows)

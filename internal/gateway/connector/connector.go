@@ -103,6 +103,14 @@ type SetupOpts struct {
 	// alongside root as the hook socket owner. Ignored unless
 	// ManagedHookSocket is set.
 	ManagedServiceUID int
+	// HookCredentialIdentity is the OS identity (uid) the standalone
+	// guardian bound APIToken and OTLPPathToken to. The hook contract lock
+	// records it with a digest of those credentials (never the credentials
+	// themselves) so verification can tell hooks rendered with the
+	// connector-scoped credential, another user's or an older key's
+	// credentials apart and have them repaired. Empty for every other
+	// install, whose locks are unchanged.
+	HookCredentialIdentity string
 	// ForeignHookGuardBinary is the administrator-owned hook binary a
 	// standalone managed in-agent plugin (Amp, OpenCode) runs before each
 	// tool call to evaluate the enterprise foreign-hook guard: those
@@ -119,6 +127,15 @@ type SetupOpts struct {
 	// stops failing closed. Ignored unless ManagedEnterprise is set and the
 	// path is absolute; empty keeps the fail mode unconditional.
 	ManagedInstallMarker string
+	// ManagedListenerProof makes a managed in-agent plugin (OpenCode, Amp)
+	// that keeps the loopback TCP transport ask the listener to prove it can
+	// derive the plugin's per-user hook credential before the plugin sends
+	// that credential or any hook payload (UserScopedListenerProof): a local
+	// user who holds the port while the gateway restarts then receives
+	// nothing to replay and cannot answer with a verdict. The Windows
+	// standalone guardian sets it; per-user installs, the Secure Client
+	// profile and the unix hook socket leave it false.
+	ManagedListenerProof bool
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,

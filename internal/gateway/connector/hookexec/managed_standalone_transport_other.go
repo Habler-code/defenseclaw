@@ -21,6 +21,6 @@ import (
 // managedStandaloneHTTPClient: the unix standalone transport does not exist
 // here (Windows uses the SCM service-PID check), so selecting it fails
 // closed.
-func managedStandaloneHTTPClient(time.Duration, string, string, int) (*http.Client, error) {
+func managedStandaloneHTTPClient(time.Duration, string, int) (*http.Client, error) {
 	return nil, fmt.Errorf("%w: standalone unix hook transport is unavailable on this platform", errManagedGatewayPeerUnverified)
 }

@@ -480,11 +480,9 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
 		setup.ManagedTargetSID = targetSID.String()
 	}
-	marker, err := windowsStandalonePluginInstallMarker(name)
-	if err != nil {
+	if err := applyWindowsStandalonePluginOptions(name, &setup); err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
-	setup.ManagedInstallMarker = marker
 	return windowsGenericManagedTarget{
 		home:           home,
 		dataDir:        dataDir,

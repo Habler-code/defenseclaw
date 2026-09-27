@@ -18,8 +18,10 @@ is given in the second column so reviewers can compare the two platforms.
   - `internal/cli/enterprise_unix*.go` (`defenseclaw-gateway enterprise linux …`, `enterprise secret …`)
   - `packaging/systemd/` (units, sockets, path unit, timer, sysusers)
   - `packaging/linux/` (`.deb` / `.rpm` maintainer scripts)
-  - `internal/gateway/api_uds_unix.go`, `internal/gateway/managed_hook_peer.go`
-  - `internal/gateway/connector/hookexec/managed_standalone_transport.go`, `tcp_owner_linux.go`
+  - `internal/gateway/api_uds_unix.go`, `internal/gateway/managed_hook_peer.go`,
+    `internal/gateway/user_scoped_credentials.go`
+  - `internal/gateway/connector/hookexec/managed_standalone_transport.go`,
+    `internal/gateway/connector/user_scoped_token.go`
   - `internal/peercred/`, `internal/systemd/`
   - `internal/unixidentity/`, `internal/enterprisehooks/enumerator_unix.go`,
     `internal/cli/enterprise_hooks_worker_*.go`
@@ -113,12 +115,22 @@ access. Status shows presence, modification time and a digest prefix only.
 3. It connects to `/run/defenseclaw-hook/hook.sock`, checks the socket
    directory is owned by root or the service account and writable by no one
    else, and requires the peer's `SO_PEERCRED` uid to be 0 or the service uid.
-   Only then does it send the request. If no socket is configured, it uses
-   `127.0.0.1:18970` and resolves the owner uid of the server side of that
-   exact connection through `NETLINK_SOCK_DIAG` (falling back to a bounded
-   `/proc/net/tcp` read).
+   Only then does it send the request. There is no TCP fallback: a
+   descriptor that names no socket fails closed
+   (`enterprise_managed_hook_socket_missing`). Per-user shell hooks, in-agent
+   plugins, the OmniGent bridge and the Codex notify bridge use the same
+   socket, and the guardian refuses to render them without it.
 4. The gateway reads the caller's uid from the socket and checks the
    authorization ledger (L-08).
+5. The remaining TCP consumers (the Codex, Claude Code, Gemini CLI,
+   OpenHands and OmniGent telemetry exporters) present credentials bound to
+   the user's uid. The guardian derives them from a per-machine key kept in
+   the gateway's data directory (`hooks/.user-scoped-token.key`) and renders
+   them into the user's own hook directory and agent configuration. The
+   gateway accepts them only while the ledger protects that uid, attributes
+   the request to it, and refuses identity headers that name another user
+   (L-08). The exporters are third-party code and do not verify the
+   listener (residual 3).
 
 ### Enrollment and repair
 
@@ -145,10 +157,10 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-02 | W-02 | A user replaces a binary, config, policy, secret, manifest, ledger or descriptor | Root ownership of every file and ancestor; the loader rejects untrusted config and policy inputs; the descriptor parser is strict and bounded | Write, rename, symlink-swap attempts; `verify` detects drift |
 | L-03 | W-04 | A user downgrades `managed_enterprise` or the profile through config or environment | `DEFENSECLAW_DEPLOYMENT_MODE` and `DEFENSECLAW_ENTERPRISE_PROFILE` pinned in every unit; config must agree; reload refuses a profile change | `internal/config/enterprise_test.go`, `internal/managed/profile_test.go` |
 | L-04 | W-05 | A compromised gateway edits policy or the ledger | `ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw -/var/lib/defenseclaw-hook-guardian`; empty capabilities; `ProtectHome=true` | `systemctl show` properties; write attempts from the service identity |
-| L-05 | W-25 | A user binds `127.0.0.1:18970` or the hook socket during a restart and returns an allow | PID 1 binds both sockets before any user process and holds them across restarts; the hook verifies the listener uid (socket: `SO_PEERCRED`; TCP: sock_diag owner of the exact 4-tuple) before writing | `internal/gateway/connector/hookexec/managed_standalone_transport_test.go`, `tcp_owner_linux_test.go`, `internal/systemd/systemd_test.go`; a squat-and-restart race on a host |
+| L-05 | W-25 | A user binds `127.0.0.1:18970` or the hook socket during a restart and returns an allow | PID 1 binds both sockets before any user process and holds them across restarts; hooks and plugins use only the hook socket and verify its `SO_PEERCRED` uid before writing; there is no TCP fallback | `internal/gateway/connector/hookexec/managed_standalone_transport_test.go`, `internal/cli/hook_trusted_state_unix_test.go`, `internal/systemd/systemd_test.go`; a squat-and-restart race on a host |
 | L-06 | — | A user pre-creates `/run/defenseclaw-hook/hook.sock` or its directory | The directory is created by PID 1 (root-owned, `0755`); the gateway's own bind (without activation) refuses a directory that is not owned by root or the service account or is writable by others, and replaces only a stale socket it owns | `internal/gateway/api_uds_unix_test.go` |
-| L-07 | W-14 | A user reads another user's hook token or the service's runtime state | `StateDirectoryMode=0700`, `RuntimeDirectoryMode=0750`, `UMask=0077`; tokens under each user's home with owner-only modes | Cross-user read attempts |
-| L-08 | W-28 | An unenrolled uid uses a per-user connector's hook route | Hook socket authorization: per-user connectors require a ledger row for that uid and connector; machine-policy connectors inspect every user unless `enrollment.unenrolled_users: deny`; uid 0 follows `enrollment.root`; `exempt_users` are inspected and logged | `internal/gateway/managed_hook_peer_test.go` |
+| L-07 | W-14 | A user reads another user's hook token or the service's runtime state | `StateDirectoryMode=0700`, `RuntimeDirectoryMode=0750`, `UMask=0077`; tokens under each user's home with owner-only modes; each user's tokens are bound to that user's uid, and the key they derive from stays in the service's data directory | Cross-user read attempts |
+| L-08 | W-28 | An unenrolled uid uses a per-user connector's hook route, or one user's credential posts events attributed to another | Hook socket authorization: per-user connectors require a ledger row for that uid and connector; machine-policy connectors inspect every user unless `enrollment.unenrolled_users: deny`; uid 0 follows `enrollment.root`; `exempt_users` are inspected and logged. TCP: only per-user credentials authenticate a connector route or OTLP source, only while the ledger protects that uid; the event is attributed to that uid and a request whose identity headers name anyone else is refused; connector-wide credentials are not accepted | `internal/gateway/managed_hook_peer_test.go`, `internal/gateway/user_scoped_credentials_test.go` |
 | L-09 | W-06 | The root guardian follows a user-planted symlink or races a check-then-act inside a home | The root guardian refuses in-process home access in the standalone profile; the per-user worker operates with the user's own kernel permissions, so a race gains nothing the user did not already have | `internal/enterprisehooks/standalone_unix_test.go`, worker tests |
 | L-10 | W-08 | A credential drop leaks into other goroutines | No `Seteuid` in the guardian process; the worker is a separate process started with the target credentials (`SysProcAttr.Credential`) | Worker tests |
 | L-11 | — | A home under a world-writable ancestor (for example `/tmp`) is swapped by another user | Refused with a reason before any mutation | `internal/enterprisehooks/home_unix.go` tests |
@@ -182,12 +194,21 @@ access. Status shows presence, modification time and a digest prefix only.
 1. Per-user registrations are user-owned. A user can remove them until the
    next repair (seconds with the watcher, at most one reconcile interval
    otherwise). Machine-policy connectors do not have this window.
-2. The TCP fallback depends on `NETLINK_SOCK_DIAG` or `/proc/net/tcp` being
-   readable; hosts that hide them (for example `hidepid` with a restrictive
-   group) force the hook onto the socket or fail closed.
-3. A user can hold the TCP port while the gateway is stopped by an
-   administrator (socket activation keeps it bound otherwise). The hook fails
-   closed; this is an availability issue only.
+2. A runtime descriptor without `hook_socket` (hand-edited, or left by a
+   broken install) makes every managed hook fail closed and every per-user
+   target fail repair; the lifecycle always writes it.
+3. A user can hold the TCP port while an administrator has stopped the
+   gateway's socket unit (socket activation keeps it bound otherwise). Hooks
+   and plugins use the socket and are unaffected. The Codex, Claude Code,
+   Gemini CLI, OpenHands and OmniGent telemetry exporters do not verify the
+   listener, so while the port is held their telemetry, which can include
+   prompt text, goes to the holder together with the sending user's
+   per-user telemetry credential. The holder can replay a captured
+   credential once the gateway is back to post telemetry attributed to that
+   user for that connector until the user leaves enrollment; the credentials
+   do not rotate. A telemetry credential never authenticates hook, inspect
+   or management routes or another connector
+   ([R7](ENTERPRISE-THREAT-MODEL.md#residual-risks)).
 4. The sensor helper and guardian run as root with capabilities. A compromise
    of either collapses into the trusted-administrator assumption.
 5. The vendor residuals in the

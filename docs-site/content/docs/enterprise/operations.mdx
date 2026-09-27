@@ -102,15 +102,29 @@ Deploy the new package or Setup executable and run `ensure`. On Windows, run
 the new release's staged CLI rather than the installed one. A failed upgrade
 rolls back to the previous version; the result's `errors` explain why.
 
+An upgrade from a release in which every user of a connector shared one hook
+and telemetry credential gives each user credentials bound to their uid or
+SID, and the new gateway refuses the shared ones:
+
+- On Windows the lifecycle restarts the guardian and waits for a fresh
+  reconcile, which re-renders the hooks and plugins of every user it covers,
+  before it starts the new gateway. A user who was signed out during the
+  upgrade is re-rendered by the guardian's pass at their next sign-in; until
+  that pass their managed hooks fail closed.
+- On every platform, an agent that was already running keeps the telemetry
+  credential it started with. The new gateway refuses it, so that agent's
+  telemetry is lost until the agent is restarted.
+
 ## Contain an incident
 
 To contain a compromised account, disable the account itself, then remove
-it from enrollment. On Windows a removed target can keep its old
-connector-scoped hook token until that connector's token is rotated; the
-token never reaches management routes or other connectors, but rotate it as
-part of decommissioning the user. Treat any sign of root or administrator
-compromise as an endpoint incident and reimage rather than repairing in
-place.
+it from enrollment. Each user's hook and telemetry credentials are bound to
+that user's uid or SID and authenticate only while the guardian's
+authorization ledger protects that user, so they stop working on the
+guardian's next pass after the removal; they never reach management routes,
+other connectors, or another user's identity. Treat any sign of root or
+administrator compromise as an endpoint incident and reimage rather than
+repairing in place.
 
 ## Decommission
 

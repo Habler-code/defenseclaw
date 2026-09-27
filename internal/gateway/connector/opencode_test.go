@@ -630,6 +630,7 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 			"{{.ServiceUID}}", "0",
 			"{{.ForeignHookGuardJS}}", "",
 			"{{.InstallMarkerJS}}", "",
+			"{{.ListenerProofJS}}", "",
 		).Replace(string(body))
 		if strings.Contains(text, "{{.") {
 			t.Fatalf("rendered %s plugin retains a template placeholder", failMode)

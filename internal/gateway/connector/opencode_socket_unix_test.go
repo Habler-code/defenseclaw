@@ -74,6 +74,7 @@ func TestOpenCodeBridgeUsesVerifiedManagedHookSocket(t *testing.T) {
 			"{{.ServiceUID}}", strconv.Itoa(serviceUID),
 			"{{.ForeignHookGuardJS}}", "",
 			"{{.InstallMarkerJS}}", "",
+			"{{.ListenerProofJS}}", "",
 		).Replace(string(body))
 		if strings.Contains(text, "{{.") {
 			t.Fatal("rendered plugin retains a template placeholder")
@@ -211,6 +212,7 @@ func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
 			"{{.ServiceUID}}", "0",
 			"{{.ForeignHookGuardJS}}", javaScriptStringContent(guard),
 			"{{.InstallMarkerJS}}", "",
+			"{{.ListenerProofJS}}", "",
 		).Replace(string(body))
 		plugin := filepath.Join(t.TempDir(), "plugin.mjs")
 		if err := os.WriteFile(plugin, []byte(text), 0o600); err != nil {

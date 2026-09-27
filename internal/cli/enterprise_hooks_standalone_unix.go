@@ -523,7 +523,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 	run.ManifestSHA256 = manifestSHA256
 	apiAddr, proxyAddr := enterpriseHookListenAddrs()
-	hookSocket, serviceUID := enterpriseHookStandaloneHookTransport()
+	hookSocket, serviceUID, transportErr := enterpriseHookStandaloneHookTransport()
 	resolver := enterprisehooks.StandaloneResolver()
 	if caching, ok := resolver.(*unixidentity.CachingResolver); ok {
 		caching.Reset()
@@ -662,12 +662,14 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 				HookContractEntryUpdatedAt: binding.EntryUpdatedAt,
 			}
 		}
-		token, err := enterpriseHookScopedTokenMinter(cfg.DataDir, target.Connector)
-		if err != nil {
-			failRow(err)
+		if transportErr != nil {
+			// Per-user hooks and plugins reach the gateway only through the
+			// hook socket; without it there is nothing safe to render.
+			failRow(transportErr)
 			continue
 		}
-		otlpToken, err := enterpriseHookScopedOTLPTokenMinter(cfg.DataDir, target.Connector)
+		identity := strconv.Itoa(account.UID)
+		token, otlpToken, err := enterpriseHookUserTokenMinter(cfg.DataDir, target.Connector, identity)
 		if err != nil {
 			failRow(err)
 			continue
@@ -693,6 +695,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 			ManagedHookSocket:                  hookSocket,
 			ManagedServiceUID:                  serviceUID,
+			HookCredentialIdentity:             identity,
 			ForeignHookGuardBinary:             standaloneForeignHookGuardBinary(target.Connector),
 		}
 		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
@@ -804,7 +807,8 @@ func enterpriseHookListenAddrs() (string, string) {
 }
 
 // enterpriseHookInstallTarget routes the single-target install through the
-// worker for the standalone profile.
+// worker for the standalone profile, with the same hook socket transport and
+// per-user credentials the guardian's reconcile renders.
 func enterpriseHookInstallTarget(ctx context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
 	if !enterpriseHooksStandaloneUnixActive() {
 		return enterprisehooks.Install(ctx, opts)
@@ -814,6 +818,18 @@ func enterpriseHookInstallTarget(ctx context.Context, opts enterprisehooks.Insta
 		return enterprisehooks.InstallResult{}, err
 	}
 	opts.UserHome, opts.OwnerUID, opts.OwnerGID = account.Home, account.UID, account.GID
+	hookSocket, serviceUID, err := enterpriseHookStandaloneHookTransport()
+	if err != nil {
+		return enterprisehooks.InstallResult{}, err
+	}
+	identity := strconv.Itoa(account.UID)
+	token, otlpToken, err := enterpriseHookUserTokenMinter(cfg.DataDir, opts.ConnectorName, identity)
+	if err != nil {
+		return enterprisehooks.InstallResult{}, err
+	}
+	opts.APIToken, opts.OTLPPathToken = token, otlpToken
+	opts.ManagedHookSocket, opts.ManagedServiceUID = hookSocket, serviceUID
+	opts.HookCredentialIdentity = identity
 	target := enterpriseHookWorkerTarget{Index: 0, Mode: enterpriseHookWorkerModeInstall, PreviouslyProtected: opts.AllowMissingHookConfigRepair, Options: enterpriseHookWorkerOptionsFrom(opts)}
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, map[int]*enterpriseHookWorkerJob{
 		account.UID: {Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true, Targets: []enterpriseHookWorkerTarget{target}}},
@@ -938,26 +954,34 @@ func enterpriseHookStandaloneConfigChanged(startup string, w io.Writer) bool {
 }
 
 // enterpriseHookStandaloneHookTransport returns the gateway's unix hook socket
-// and service uid from the root-owned runtime descriptor, so in-agent plugins
-// talk to the peer-authorized socket instead of the TCP API. ("", 0) keeps the
-// TCP transport. Replaced in tests.
-var enterpriseHookStandaloneHookTransport = func() (string, int) {
+// and service uid from the root-owned runtime descriptor. Per-user hooks and
+// in-agent plugins use only that peer-authorized socket: a descriptor that
+// cannot be read or names no socket is an error, never a TCP fallback.
+// Replaced in tests.
+var enterpriseHookStandaloneHookTransport = func() (string, int, error) {
 	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
 	if err != nil {
-		return "", 0
+		return "", 0, fmt.Errorf("enterprise hooks: standalone layout: %w", err)
 	}
 	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
 	if err != nil {
-		return "", 0
+		return "", 0, fmt.Errorf("enterprise hooks: the runtime descriptor that names the hook socket is unavailable: %w", err)
+	}
+	return standaloneHookTransportFromDescriptor(descriptor)
+}
+
+func standaloneHookTransportFromDescriptor(descriptor *managed.RuntimeDescriptor) (string, int, error) {
+	if descriptor == nil {
+		return "", 0, errors.New("enterprise hooks: the runtime descriptor is unavailable")
 	}
 	socket := strings.TrimSpace(descriptor.HookSocket)
-	if socket == "" {
-		socket = layout.HookSocketPath
+	if socket == "" || !filepath.IsAbs(socket) {
+		return "", 0, errors.New("enterprise hooks: the runtime descriptor names no hook socket; per-user hooks have no TCP fallback")
 	}
 	if descriptor.ServiceUID < 0 {
-		return socket, 0
+		return filepath.Clean(socket), 0, nil
 	}
-	return socket, descriptor.ServiceUID
+	return filepath.Clean(socket), descriptor.ServiceUID, nil
 }
 
 // enterpriseHookStandaloneMachinePolicySet names the connectors the

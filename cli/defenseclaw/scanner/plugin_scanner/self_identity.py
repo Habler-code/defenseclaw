@@ -65,8 +65,8 @@ _BRIDGE_PUBLICATION_SCHEMA = {
     },
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
-    "amp": "65b8f3ac75236edada4ddab08e39362f1e7c9e4dce138abc49e7bc8baf651732",
-    "opencode": "8ce0544604ed275f3095b34111d5fd9279ff6ebc59dc5d0be90b06c4934c8e61",
+    "amp": "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",
+    "opencode": "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",
 }
 _BRIDGE_DYNAMIC_LINES = {
     "amp": (
@@ -112,6 +112,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"\n',
             "marker",
         ),
+        (
+            b'const DC_LISTENER_PROOF: string = "',
+            b'"\n',
+            b'const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"\n',
+            "proof",
+        ),
     ),
     "opencode": (
         (
@@ -155,6 +161,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";\n',
             "marker",
+        ),
+        (
+            b'const DC_LISTENER_PROOF = "',
+            b'";\n',
+            b'const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";\n',
+            "proof",
         ),
     ),
 }
@@ -408,6 +420,9 @@ def _valid_bridge_dynamic_value(
         return value in {b"open", b"closed"}
     if kind == "uid":
         return value.isdigit() and len(value) <= 10
+    if kind == "proof":
+        # The Windows standalone listener proof is on ("1") or off ("").
+        return value in {b"", b"1"}
     if kind in {"socket", "guard", "marker"}:
         return _valid_bridge_managed_path(kind, value)
     if kind != "token":

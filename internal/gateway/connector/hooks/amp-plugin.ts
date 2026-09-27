@@ -17,6 +17,7 @@
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile } from 'node:child_process'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { lstat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
 import { dirname } from 'node:path'
@@ -44,6 +45,17 @@ const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
+// Windows standalone installs reach the gateway over loopback TCP, where a
+// local user can hold the port while the gateway restarts, and this plugin
+// cannot compare the listener with the gateway service the way the hook
+// binary does. "1" makes it ask the listener to prove it can derive this
+// user's credential before sending that credential or any hook payload: the
+// proof request carries only the credential's SHA-256 and a fresh nonce, so
+// an impostor gets nothing to replay and no chance to answer with a
+// verdict. Empty skips the proof (per-user installs, Secure Client, and the
+// hook socket, whose owner is verified instead).
+const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
+const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
@@ -143,10 +155,46 @@ async function verifyHookSocket(): Promise<void> {
 	}
 }
 
+// proveListener resolves once the TCP listener has proven it can derive
+// token (the gateway's listener proof); anything else rejects, and the
+// caller then sends the listener nothing else.
+async function proveListener(token: string, signal?: AbortSignal | null): Promise<void> {
+	if (!DC_TOKEN_PATTERN.test(token || "")) throw new Error("invalid scoped hook credential")
+	const nonce = randomBytes(32).toString("hex")
+	const response = await fetch(`http://${DC_API_ADDR}/api/v1/hook-listener-proof`, {
+		method: "GET",
+		headers: {
+			"X-DefenseClaw-Connector": "amp",
+			"X-DefenseClaw-Listener-Key-Id": createHash("sha256").update(token).digest("hex"),
+			"X-DefenseClaw-Listener-Nonce": nonce,
+		},
+		signal,
+	})
+	const proof = String(response.headers.get("x-defenseclaw-listener-proof") || "")
+	if (response.body) {
+		try {
+			await response.body.cancel()
+		} catch {
+			// Nothing is read from the proof response body.
+		}
+	}
+	const want = createHmac("sha256", token)
+		.update(`${DC_LISTENER_PROOF_DOMAIN}\u0000amp\u0000${nonce}`)
+		.digest("hex")
+	if (response.status !== 204 || proof.length !== want.length || !timingSafeEqual(Buffer.from(proof), Buffer.from(want))) {
+		throw new Error("the DefenseClaw gateway listener did not prove its identity")
+	}
+}
+
 // gatewayFetch posts over the verified managed hook socket when one is
-// configured (Bun's unix fetch option), and over TCP otherwise.
-async function gatewayFetch(path: string, init: RequestInit): Promise<Response> {
-	if (!DC_HOOK_SOCKET) return fetch(`http://${DC_API_ADDR}${path}`, init)
+// configured (Bun's unix fetch option), and over TCP otherwise; a TCP
+// request that carries a per-user credential first requires the listener
+// proof.
+async function gatewayFetch(path: string, init: RequestInit, token: string): Promise<Response> {
+	if (!DC_HOOK_SOCKET) {
+		if (DC_LISTENER_PROOF) await proveListener(token, init.signal)
+		return fetch(`http://${DC_API_ADDR}${path}`, init)
+	}
 	await verifyHookSocket()
 	if (!(globalThis as typeof globalThis & { Bun?: unknown }).Bun) {
 		throw new Error("the DefenseClaw hook socket needs the Bun runtime")
@@ -225,6 +273,8 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 			fail(safeError(error))
 		}
 	})
+}
+
 // deploymentRemoved reports whether the managed deployment that rendered this
 // plugin was uninstalled: its install marker is definitively absent. Any
 // other inspection result keeps the plugin enforcing.
@@ -410,7 +460,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				headers,
 				body,
 				signal: controller.signal,
-			})
+			}, token)
 			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
 
 			const data = await response.json() as GatewayResponse

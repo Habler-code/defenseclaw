@@ -122,6 +122,14 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if guard := managedPluginForeignHookGuardMarker(opts, "const DC_FOREIGN_GUARD: string = ", "\n"); guard != nil {
 		markers = append(markers, guard, []byte(`await foreignHookCheck("tool.call")`))
 	}
+	// A plugin rendered before the listener proof existed would still send
+	// its credential to whoever holds the TCP port; it is repaired.
+	if managedPluginListenerProof(opts) {
+		markers = append(markers,
+			[]byte("const DC_LISTENER_PROOF: string = \"1\"\n"),
+			[]byte("if (DC_LISTENER_PROOF) await proveListener(token, init.signal)"),
+		)
+	}
 	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {
 			return false, nil

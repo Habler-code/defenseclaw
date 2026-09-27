@@ -32,10 +32,15 @@ import (
 // DefenseClaw-owned vendor machine policy still names the hook for this
 // connector. A descriptor that is missing while that policy remains, or a
 // descriptor that fails its trust checks, fails closed.
+//
+// The hook socket is the only transport. A descriptor that names no hook
+// socket also fails closed: there is no loopback TCP fallback, because
+// another local user can hold that port while the gateway restarts.
 
 const (
 	standaloneRuntimeReasonInvalid           = "enterprise_managed_runtime_state_invalid"
 	standaloneRuntimeReasonDescriptorMissing = "enterprise_managed_runtime_descriptor_missing"
+	standaloneRuntimeReasonHookSocketMissing = "enterprise_managed_hook_socket_missing"
 )
 
 // Test seams.
@@ -77,6 +82,8 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	reason := ""
 	noop := false
 	switch {
+	case err == nil && loaded != nil && strings.TrimSpace(loaded.HookSocket) == "":
+		reason = standaloneRuntimeReasonHookSocketMissing
 	case err == nil:
 	case errors.Is(err, managed.ErrNoRuntimeDescriptor):
 		switch {
@@ -127,8 +134,9 @@ func enterpriseManagedHookRuntimeEndpoint(connectorName string) (string, string,
 
 // enterpriseManagedHookRuntimeConnection returns the descriptor's gateway
 // address. There is no service name and no scoped token: the standalone
-// transport authenticates the gateway by uid, and the gateway authenticates
-// this process by uid (or, on the TCP fallback, by the per-user token file).
+// transport reaches the gateway only through the hook socket, which
+// authenticates the gateway by uid, and the gateway authenticates this
+// process by its kernel-verified uid.
 func enterpriseManagedHookRuntimeConnection(connectorName string) (string, string, *string, bool) {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	standaloneHookRuntime.Lock()
@@ -166,14 +174,13 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	if opts.MaxBody <= 0 || opts.MaxBody > 1<<20 {
 		opts.MaxBody = 1 << 20
 	}
-	if descriptor.HookSocket != "" {
-		// Machine-policy connectors run this hook for users who have no
-		// per-user DefenseClaw directory. Anchor Home at the
-		// administrator-owned config directory: it always exists, and a user
-		// cannot create a .disabled sentinel there.
-		opts.Home = layout.ConfigDir
-		opts.HookDir = filepath.Join(layout.ConfigDir, "hooks")
-	}
+	// Machine-policy connectors run this hook for users who have no
+	// per-user DefenseClaw directory. Anchor Home at the
+	// administrator-owned config directory: it always exists, and a user
+	// cannot create a .disabled sentinel there. No token is read from it:
+	// the hook socket authenticates this process by uid.
+	opts.Home = layout.ConfigDir
+	opts.HookDir = filepath.Join(layout.ConfigDir, "hooks")
 }
 
 // standaloneMachinePolicyPresent reports whether DefenseClaw-owned vendor
