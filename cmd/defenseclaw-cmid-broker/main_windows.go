@@ -177,33 +177,22 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 	// Verify the library's Authenticode signer immediately before it is
 	// loaded, and keep it open without write or delete sharing until the
 	// provider's first refresh has loaded it.
-	library, err := cmidbroker.OpenTrustedLibrary(options.cmidLibraryPath, func(path string) error {
-		return validateBrokerPath(path, "CMID library", false)
-	})
+	provider, err := newVerifiedProvider(ctx, options.cmidLibraryPath, providerSteps{
+		verify: func(path string) (verifiedLibrary, error) {
+			library, err := cmidbroker.OpenTrustedLibrary(path, func(path string) error {
+				return validateBrokerPath(path, "CMID library", false)
+			})
+			if err != nil {
+				return nil, err
+			}
+			return library, nil
+		},
+		construct: func(path string) (cmidbroker.Provider, error) {
+			return cloudreg.New(cloudreg.Config{LibPath: path})
+		},
+	}, logger)
 	if err != nil {
-		logger.Printf("stage=provider-library-trust success=false error=%q", err.Error())
-		return fmt.Errorf("managed CMID library rejected: %w", err)
-	}
-	defer library.Close()
-	logger.Printf(
-		"stage=provider-library-trust success=true signer=%q signer_sha256=%s",
-		library.Signer().CommonName,
-		library.Signer().CertificateSHA256,
-	)
-	provider, err := cloudreg.New(cloudreg.Config{LibPath: options.cmidLibraryPath})
-	if err != nil || provider == nil {
-		logger.Print("stage=provider-construction success=false")
-		return errors.New("managed CMID provider construction failed")
-	}
-	refreshCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	err = provider.Refresh(refreshCtx)
-	cancel()
-	if closeErr := library.Close(); closeErr != nil {
-		logger.Print("stage=provider-library-release success=false")
-	}
-	if err != nil {
-		logger.Print("stage=provider-refresh success=false category=cmid_refresh_failed")
-		return errors.New("managed CMID provider readiness failed")
+		return err
 	}
 
 	server, err := cmidbroker.NewServer(serverConfig, provider, key[:], func(event cmidbroker.Event) {
