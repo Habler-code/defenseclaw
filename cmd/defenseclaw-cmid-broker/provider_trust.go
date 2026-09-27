@@ -43,8 +43,8 @@ type providerSteps struct {
 // Build every provider through here, including one for a library the broker
 // resolves after it starts (Cloud Management installed or moved cmidapi.dll):
 // the path is a parameter so each adopted library is verified before it is
-// loaded. TestBrokerConstructsProvidersOnlyFromVerifiedLibraries fails if the
-// broker reaches cloudreg.New any other way.
+// loaded. TestBrokerConstructsProvidersOnlyFromVerifiedLibraries fails if any
+// file in this package reaches cloudreg.New or OpenTrustedLibrary another way.
 func newVerifiedProvider(
 	ctx context.Context,
 	path string,

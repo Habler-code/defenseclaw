@@ -7,10 +7,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"log"
+	"os"
+	"path"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -176,63 +180,229 @@ func TestVerifiedProviderReleasesTheLibraryOnEveryFailure(t *testing.T) {
 	}
 }
 
+// Import paths of the two steps newVerifiedProvider composes. The guard below
+// matches on the path, so a renamed import is still recognised.
+const (
+	cloudregImportPath   = "github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
+	cmidbrokerImportPath = "github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
+)
+
+// guardedProviderSteps are the functions the broker may reach only from the
+// providerSteps field that names them.
+var guardedProviderSteps = []struct{ importPath, name, field string }{
+	{cloudregImportPath, "New", "construct"},
+	{cmidbrokerImportPath, "OpenTrustedLibrary", "verify"},
+}
+
 // The broker's source must build providers only through newVerifiedProvider:
 // cloudreg.New only inside a providerSteps.construct function and
 // cmidbroker.OpenTrustedLibrary only inside providerSteps.verify, with every
-// providerSteps handed straight to newVerifiedProvider. A merge that restores
-// a direct cloudreg.New -- for example a provider that discovers its library
-// after start-up and constructs it itself -- fails here instead of silently
-// loading cmidapi.dll on path trust alone.
+// providerSteps handed straight to newVerifiedProvider. Every non-test Go file
+// in the package is checked, whatever its build constraints, so a merge that
+// restores a direct cloudreg.New -- for example a provider that discovers its
+// library after start-up and constructs it itself, in main_windows.go or a new
+// file -- fails here instead of silently loading cmidapi.dll on path trust
+// alone.
 func TestBrokerConstructsProvidersOnlyFromVerifiedLibraries(t *testing.T) {
-	fileSet := token.NewFileSet()
-	file, err := parser.ParseFile(fileSet, "main_windows.go", nil, 0)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse main_windows.go: %v", err)
+		t.Fatalf("read the broker package: %v", err)
 	}
-	counts := map[string]int{}
-	var stack []ast.Node
-	ast.Inspect(file, func(node ast.Node) bool {
-		if node == nil {
-			stack = stack[:len(stack)-1]
-			return true
+	fileSet := token.NewFileSet()
+	var files []*ast.File
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
 		}
-		stack = append(stack, node)
-		switch typed := node.(type) {
-		case *ast.CallExpr:
-			for _, guarded := range []struct{ pkg, name, field string }{
-				{"cloudreg", "New", "construct"},
-				{"cmidbroker", "OpenTrustedLibrary", "verify"},
-			} {
-				if isPackageCall(typed, guarded.pkg, guarded.name) {
-					counts[guarded.pkg+"."+guarded.name]++
-					if !insideProviderStep(stack, guarded.field) {
-						t.Errorf("%s: %s.%s is called outside providerSteps.%s",
-							fileSet.Position(typed.Pos()), guarded.pkg, guarded.name, guarded.field)
-					}
-				}
-			}
-		case *ast.CompositeLit:
-			if identName(typed.Type) == "providerSteps" {
-				counts["providerSteps"]++
-				parent, ok := stack[len(stack)-2].(*ast.CallExpr)
-				if !ok || identName(parent.Fun) != "newVerifiedProvider" {
-					t.Errorf("%s: providerSteps is not passed directly to newVerifiedProvider",
-						fileSet.Position(typed.Pos()))
-				}
-			}
+		file, err := parser.ParseFile(fileSet, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
 		}
-		return true
-	})
-	for _, name := range []string{"cloudreg.New", "cmidbroker.OpenTrustedLibrary", "providerSteps"} {
-		if counts[name] == 0 {
-			t.Errorf("main_windows.go has no %s; the broker no longer builds a verified provider", name)
-		}
+		files = append(files, file)
+	}
+	for _, problem := range providerConstructionProblems(fileSet, files) {
+		t.Error(problem)
 	}
 }
 
-func isPackageCall(call *ast.CallExpr, pkg, name string) bool {
-	selector, ok := call.Fun.(*ast.SelectorExpr)
-	return ok && selector.Sel.Name == name && identName(selector.X) == pkg
+// compliantBrokerSource builds its provider the way main_windows.go does.
+const compliantBrokerSource = `package main
+
+import (
+	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
+)
+
+func run() {
+	newVerifiedProvider(nil, "", providerSteps{
+		verify: func(path string) (verifiedLibrary, error) {
+			return cmidbroker.OpenTrustedLibrary(path, nil)
+		},
+		construct: func(path string) (cmidbroker.Provider, error) {
+			return cloudreg.New(cloudreg.Config{LibPath: path})
+		},
+	}, nil)
+}
+`
+
+func TestProviderConstructionGuardFollowsTheImportAcrossFiles(t *testing.T) {
+	for _, test := range []struct{ name, source, want string }{
+		{
+			name: "renamed import in another file",
+			source: `package main
+
+import registry "github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
+
+func deferred(path string) { _, _ = registry.New(registry.Config{LibPath: path}) }
+`,
+			want: "deferred.go:5:37: cloudreg.New is used outside providerSteps.construct",
+		},
+		{
+			name: "function value",
+			source: `package main
+
+import "github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
+
+var open = cmidbroker.OpenTrustedLibrary
+`,
+			want: "deferred.go:5:12: cmidbroker.OpenTrustedLibrary is used outside providerSteps.verify",
+		},
+		{
+			name: "dot import",
+			source: `package main
+
+import . "github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
+
+func deferred(path string) { _, _ = New(Config{LibPath: path}) }
+`,
+			want: "deferred.go:3:8: " + cloudregImportPath + " is dot-imported",
+		},
+		{
+			name: "steps kept for later",
+			source: `package main
+
+var deferredSteps = providerSteps{}
+`,
+			want: "deferred.go:3:21: providerSteps is not passed directly to newVerifiedProvider",
+		},
+		{
+			name: "unrelated package with the same name",
+			source: `package main
+
+import cloudreg "example.com/unrelated/cloudreg"
+
+func deferred() { cloudreg.New() }
+`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fileSet := token.NewFileSet()
+			var files []*ast.File
+			for name, source := range map[string]string{
+				"main_windows.go": compliantBrokerSource,
+				"deferred.go":     test.source,
+			} {
+				file, err := parser.ParseFile(fileSet, name, source, parser.SkipObjectResolution)
+				if err != nil {
+					t.Fatalf("parse %s: %v", name, err)
+				}
+				files = append(files, file)
+			}
+			problems := providerConstructionProblems(fileSet, files)
+			if test.want == "" {
+				if len(problems) != 0 {
+					t.Fatalf("problems = %q, want none", problems)
+				}
+				return
+			}
+			if len(problems) != 1 || !strings.HasPrefix(problems[0], test.want) {
+				t.Fatalf("problems = %q, want one starting %q", problems, test.want)
+			}
+		})
+	}
+}
+
+// providerConstructionProblems reports each use of a guarded function outside
+// its providerSteps field, each providerSteps not handed straight to
+// newVerifiedProvider, and a package that no longer builds a verified provider.
+func providerConstructionProblems(fileSet *token.FileSet, files []*ast.File) []string {
+	var problems []string
+	counts := map[string]int{}
+	for _, file := range files {
+		imported := guardedImportNames(fileSet, file, &problems)
+		var stack []ast.Node
+		ast.Inspect(file, func(node ast.Node) bool {
+			if node == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			stack = append(stack, node)
+			switch typed := node.(type) {
+			case *ast.SelectorExpr:
+				importPath, ok := imported[identName(typed.X)]
+				if !ok {
+					break
+				}
+				for _, step := range guardedProviderSteps {
+					if step.importPath != importPath || typed.Sel.Name != step.name {
+						continue
+					}
+					qualified := path.Base(importPath) + "." + step.name
+					counts[qualified]++
+					if !insideProviderStep(stack, step.field) {
+						problems = append(problems, fmt.Sprintf("%s: %s is used outside providerSteps.%s",
+							fileSet.Position(typed.Pos()), qualified, step.field))
+					}
+				}
+			case *ast.CompositeLit:
+				if identName(typed.Type) == "providerSteps" {
+					counts["providerSteps"]++
+					parent, ok := stack[len(stack)-2].(*ast.CallExpr)
+					if !ok || identName(parent.Fun) != "newVerifiedProvider" {
+						problems = append(problems, fmt.Sprintf(
+							"%s: providerSteps is not passed directly to newVerifiedProvider",
+							fileSet.Position(typed.Pos())))
+					}
+				}
+			}
+			return true
+		})
+	}
+	for _, name := range []string{"cloudreg.New", "cmidbroker.OpenTrustedLibrary", "providerSteps"} {
+		if counts[name] == 0 {
+			problems = append(problems, fmt.Sprintf(
+				"the broker package has no %s; it no longer builds a verified provider", name))
+		}
+	}
+	return problems
+}
+
+// guardedImportNames maps the name each guarded package is imported under in
+// file to its import path. A dot import is reported, because its calls are
+// unqualified and cannot be told apart from the broker's own functions.
+func guardedImportNames(fileSet *token.FileSet, file *ast.File, problems *[]string) map[string]string {
+	names := map[string]string{}
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || (importPath != cloudregImportPath && importPath != cmidbrokerImportPath) {
+			continue
+		}
+		name := path.Base(importPath)
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		switch name {
+		case "_":
+			// Imported for its registration only; nothing can be called.
+		case ".":
+			*problems = append(*problems, fmt.Sprintf("%s: %s is dot-imported, so its calls cannot be checked",
+				fileSet.Position(spec.Pos()), importPath))
+		default:
+			names[name] = importPath
+		}
+	}
+	return names
 }
 
 func identName(expression ast.Expr) string {
