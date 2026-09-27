@@ -280,7 +280,7 @@ func (c *OmnigentConnector) setupLocked(ctx context.Context, opts SetupOpts) (re
 		return rollback(fmt.Errorf("omnigent resolve absolute scoped hook credential path: %w", err))
 	}
 	failMode := normalizeHookFailMode(opts.HookFailMode)
-	rendered := renderOmnigentPolicy(string(templateBytes), opts.APIAddr, tokenPath, failMode)
+	rendered := renderOmnigentPolicy(string(templateBytes), opts.APIAddr, tokenPath, failMode, opts.ManagedEnterprise)
 	if err := atomicWriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 		return rollback(fmt.Errorf("omnigent write policy module: %w", err))
 	}
@@ -844,12 +844,30 @@ func validateOmnigentInterpreter(path string) error {
 	return nil
 }
 
-func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string) string {
+// renderOmnigentPolicy fills the policy module's encoded constants. managed
+// marks a module that the enterprise guardian installed: its listener check
+// then trusts only the managed gateway (root, or the defenseclaw service
+// account on Linux), as the managed shell hooks and plugin bridges do,
+// instead of the hook user and root.
+func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string, managed bool) string {
 	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+	// The listener check comes from the embedded hooks/_hardening.sh, so it
+	// can only be missing in a defective build; the module then refuses
+	// every request as unverifiable instead of skipping the check.
+	listenerCheck, err := hookListenerCheckProgram()
+	if err != nil {
+		listenerCheck = ""
+	}
+	managedHook := ""
+	if managed {
+		managedHook = "1"
+	}
 	replacer := strings.NewReplacer(
 		"{{API_ADDR_B64}}", encode(strings.TrimSpace(apiAddr)),
 		"{{TOKEN_FILE_B64}}", encode(tokenFile),
 		"{{FAIL_MODE_B64}}", encode(normalizeHookFailMode(failMode)),
+		"{{LISTENER_CHECK_B64}}", encode(listenerCheck),
+		"{{MANAGED_HOOK_B64}}", encode(managedHook),
 	)
 	return replacer.Replace(template)
 }

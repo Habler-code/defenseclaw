@@ -620,11 +620,20 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	listenerCheck, err := hookListenerCheckProgram()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The plugin checks the gateway listener's owner before each request;
+	// point it at one the test account owns.
+	gatewayAddr := trustedHookListenerAddr(t)
 	render := func(failMode string) []byte {
 		t.Helper()
 		text := strings.NewReplacer(
-			"{{.APIAddr}}", "127.0.0.1:18970",
+			"{{.APIAddr}}", gatewayAddr,
 			"{{.TokenFileJS}}", javaScriptStringContent(tokenPath),
+			"{{.ListenerCheckJS}}", javaScriptStringContent(listenerCheck),
+			"{{if .Managed}}1{{end}}", "",
 			"{{.FailMode}}", failMode,
 		).Replace(string(body))
 		if strings.Contains(text, "{{.") {
@@ -644,7 +653,7 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	harness := filepath.Join("testdata", "opencode-plugin-contract.mjs")
-	output, err := exec.CommandContext(ctx, node, harness, openPlugin, closedPlugin).CombinedOutput()
+	output, err := exec.CommandContext(ctx, node, harness, openPlugin, closedPlugin, gatewayAddr).CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("executable OpenCode plugin contract timed out: %v\n%s", ctx.Err(), output)
 	}

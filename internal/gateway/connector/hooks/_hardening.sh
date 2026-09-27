@@ -734,21 +734,58 @@ defenseclaw_response_failure_reason() {
   esac
 }
 
+# --- BEGIN defenseclaw gateway listener check ---
+# Everything up to the END marker is self-contained POSIX sh: the Codex
+# notify bridge and the OpenCode, Amp and OmniGent plugins, which do not
+# source this helper, embed these exact bytes (hook_listener_check.go).
+#
 # defenseclaw_verify_gateway_listener runs before a hook sends its bearer
 # token. On Linux and macOS every loopback or wildcard listener on the
-# gateway port must belong to this user (the per-user gateway) or to root,
-# so another local user who binds the port while this user's gateway is
-# down never receives the token or the payload. Nothing listening is left
-# to curl, which then fails to connect. Other platforms, and gateway
-# addresses that are not local loopback, are out of scope and return 0.
-# On refusal it returns 1 with DEFENSECLAW_LISTENER_REASON set; callers
-# route that through their transport fail mode.
+# gateway port must belong to an owner the hook trusts, so another local
+# user who binds the port while the gateway is down never receives the
+# token or the payload:
+#
+#   - a per-user hook trusts this user (the per-user gateway) and root;
+#   - a managed hook (DEFENSECLAW_MANAGED_HOOK=1) trusts only the managed
+#     gateway: root on macOS (the LaunchDaemon), and root or the packaged
+#     "defenseclaw" service account on Linux (User= in
+#     packaging/systemd/defenseclaw-gateway.service). The hook user's own
+#     listener is refused, and on Linux a hook running in a nested user
+#     namespace, where socket owners are remapped and an unprivileged
+#     user can appear as uid 0, is refused. This is the trust set of the
+#     native managed transport (internal/gateway/connector/hookexec).
+#
+# The service account is resolved by its fixed name from the account
+# database, never from the environment: hooks inherit the agent's
+# environment, so an inherited value must not widen the trusted owners.
+# An inherited DEFENSECLAW_MANAGED_HOOK=1 in a per-user hook replaces this
+# user with root-controlled identities, so it cannot admit a listener that
+# another unprivileged user owns.
+#
+# A port nobody listens on is refused with "gateway unreachable", the
+# reason curl's failed connect would report. Leaving it to curl would let
+# another user hold the port with a socket that is bound but not yet
+# listening (such a socket is not in the listener table) and call
+# listen() once the check had passed.
+#
+# The check is a snapshot taken just before curl opens its own
+# connection; it is not bound to that connection. After it passes, a
+# different listener can receive the request only if the trusted gateway
+# stops listening and another user binds and listens on the port within
+# that gap. The native managed transport
+# (internal/gateway/connector/hookexec) verifies the connected socket
+# itself and has no such gap.
+#
+# Other platforms, and gateway addresses that are not local loopback, are
+# out of scope and return 0. On refusal it returns 1 with
+# DEFENSECLAW_LISTENER_REASON set; callers route that through their
+# transport fail mode.
 #
 # Usage:
 #   defenseclaw_verify_gateway_listener HOST:PORT
 DEFENSECLAW_LISTENER_REASON=""
 defenseclaw_verify_gateway_listener() {
-  local addr="${1:-}" host port self platform owners owner
+  local addr="${1:-}" host port self platform owners owner trusted service expected
   DEFENSECLAW_LISTENER_REASON=""
   case "$addr" in
     \[*\]:*) host="${addr%%]:*}"; host="${host#[}"; port="${addr##*]:}" ;;
@@ -777,6 +814,25 @@ defenseclaw_verify_gateway_listener() {
       return 1
       ;;
   esac
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES)
+      trusted="0"
+      expected="the managed gateway"
+      if [ "$platform" = Linux ]; then
+        if ! _defenseclaw_initial_user_namespace; then
+          DEFENSECLAW_LISTENER_REASON="hook runs in a nested user namespace; cannot verify the owner of the gateway listener on port ${port}"
+          return 1
+        fi
+        if service="$(_defenseclaw_managed_service_uid)"; then
+          trusted="0 ${service}"
+        fi
+      fi
+      ;;
+    *)
+      trusted="${self} 0"
+      expected="this user's gateway"
+      ;;
+  esac
   if [ "$platform" = Linux ]; then
     owners="$(_defenseclaw_listener_uids_linux "$port")" || owners="!"
   else
@@ -786,16 +842,43 @@ defenseclaw_verify_gateway_listener() {
     DEFENSECLAW_LISTENER_REASON="cannot verify the owner of the gateway listener on port ${port}"
     return 1
   fi
+  if [ -z "$owners" ]; then
+    DEFENSECLAW_LISTENER_REASON="gateway unreachable"
+    return 1
+  fi
   for owner in $owners; do
-    case "$owner" in
-      "$self"|0) ;;
+    case " ${trusted} " in
+      *" ${owner} "*) ;;
       *)
-        DEFENSECLAW_LISTENER_REASON="gateway port ${port} is held by ${owner}, not this user's gateway"
+        DEFENSECLAW_LISTENER_REASON="gateway port ${port} is held by ${owner}, not ${expected}"
         return 1
         ;;
     esac
   done
   return 0
+}
+
+# _defenseclaw_managed_service_uid prints the uid of the packaged Linux
+# gateway service account, resolved by name from the account database. It
+# fails when the account does not exist or resolves to root.
+_defenseclaw_managed_service_uid() {
+  local uid
+  uid="$(id -u defenseclaw 2>/dev/null)" || return 1
+  case "$uid" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  printf '%s\n' "$uid"
+}
+
+# _defenseclaw_initial_user_namespace [MAP] succeeds only when MAP (default
+# /proc/self/uid_map) is the initial user namespace's identity map,
+# "0 0 4294967295". /proc/net/tcp reports socket owners as seen from the
+# reader's user namespace, so only the initial namespace reports real ones.
+_defenseclaw_initial_user_namespace() {
+  local map="${1:-/proc/self/uid_map}" fields
+  [ -r "$map" ] || return 1
+  fields="$(awk '{ for (i = 1; i <= NF; i++) f = f " " $i; n += NF } END { printf "%d%s", n, f }' "$map" 2>/dev/null)" || return 1
+  [ "$fields" = "3 0 0 4294967295" ]
 }
 
 # _defenseclaw_listener_uids_linux PORT [TABLE...] prints the owner uid of
@@ -926,6 +1009,8 @@ _defenseclaw_listener_uids_darwin() {
     esac
   done
 }
+
+# --- END defenseclaw gateway listener check ---
 
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
 # connector's effective fail mode is closed, for guardian-installed managed

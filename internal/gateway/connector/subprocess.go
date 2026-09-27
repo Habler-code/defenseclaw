@@ -47,16 +47,19 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr       string
-	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
-	TokenFileJS   string // absolute token path, escaped for a JavaScript double-quoted string
-	FailMode      string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
-	Managed       bool
-	TokenFile     string
-	ScopedToken   bool
-	ConnectorName string
-	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
-	HookTimeoutMS int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
+	APIAddr     string
+	APIToken    string // gateway bearer token; empty when unconfigured (loopback-allow)
+	TokenFileJS string // absolute token path, escaped for a JavaScript double-quoted string
+	// ListenerCheckJS is hookListenerCheckProgram, escaped for a JavaScript
+	// double-quoted string; the plugin bridges run it before each request.
+	ListenerCheckJS string
+	FailMode        string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
+	Managed         bool
+	TokenFile       string
+	ScopedToken     bool
+	ConnectorName   string
+	HookBinaryPS    string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS   int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
 	CursorHookTimeoutMS int

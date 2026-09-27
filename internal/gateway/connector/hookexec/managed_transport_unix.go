@@ -41,6 +41,18 @@ var (
 // on the socket the kernel actually paired with this client, so a process
 // that bound the port while the gateway was restarting is refused before it
 // receives any data. The service name argument is Windows-only (SCM).
+//
+// Reachability: no production path builds this client yet. Run builds it
+// only for `defenseclaw hook --enterprise-managed` with a resolved managed
+// runtime connection. Setup renders --enterprise-managed only on Windows, and
+// the non-Windows resolver (internal/cli/hook_trusted_state_other.go) reports
+// no managed runtime state, so Run fails closed before it gets here. Managed
+// macOS and Linux hooks are the rendered shell scripts and plugin bridges.
+// They are protected by defenseclaw_verify_gateway_listener in
+// hooks/_hardening.sh, which trusts the same owners but checks the listener
+// table just before the request rather than the connected socket. This
+// transport is kept, and tested directly, so that the native binary can take
+// over those hooks without a separate peer check.
 func managedEnterpriseHTTPClient(
 	timeout time.Duration,
 	apiAddr string,

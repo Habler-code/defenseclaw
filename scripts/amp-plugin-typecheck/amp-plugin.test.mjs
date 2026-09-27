@@ -1,7 +1,33 @@
 import assert from "node:assert/strict"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import test from "node:test"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
-import defenseclawAmpPlugin from "../../internal/gateway/connector/hooks/amp-plugin.ts"
+// The plugin runs the hooks' listener-owner check (the marked block of
+// _hardening.sh) before every request. Substitute it as setup does
+// (hook_listener_check.go). The template's unrendered gateway address is not
+// a loopback host:port, so the check treats it as out of scope and these
+// fixtures reach the mocked fetch. The Go tests cover real listeners.
+const hooksDir = fileURLToPath(new URL("../../internal/gateway/connector/hooks/", import.meta.url))
+const helper = readFileSync(join(hooksDir, "_hardening.sh"), "utf8")
+const beginMarker = "# --- BEGIN defenseclaw gateway listener check ---\n"
+const endMarker = "# --- END defenseclaw gateway listener check ---\n"
+const begin = helper.indexOf(beginMarker)
+const end = helper.indexOf(endMarker)
+assert.ok(begin >= 0 && end > begin, "hooks/_hardening.sh has no listener check block")
+const listenerCheck = helper.slice(begin, end + endMarker.length) +
+	`defenseclaw_verify_gateway_listener "$1" || { printf '%s' "$DEFENSECLAW_LISTENER_REASON"; exit 1; }\n`
+const template = readFileSync(join(hooksDir, "amp-plugin.ts"), "utf8")
+assert.ok(template.includes('"{{.ListenerCheckJS}}"'), "amp-plugin.ts has no listener check placeholder")
+const renderedDir = mkdtempSync(join(tmpdir(), "dc-amp-plugin-"))
+process.on("exit", () => rmSync(renderedDir, { recursive: true, force: true }))
+const renderedPlugin = join(renderedDir, "amp-plugin.ts")
+writeFileSync(renderedPlugin, template
+	.replace('"{{.ListenerCheckJS}}"', JSON.stringify(listenerCheck))
+	.replace('"{{if .Managed}}1{{end}}"', '""'))
+const { default: defenseclawAmpPlugin } = await import(pathToFileURL(renderedPlugin).href)
 
 test("refreshes agent identity when a thread changes mode between turns", async () => {
 	const handlers = new Map()

@@ -18,6 +18,7 @@
 // /api/v1/opencode/hook; the response carries hook_output={decision,
 // reason}; decision "deny"/"block" aborts the tool.
 
+import { execFile } from "node:child_process";
 import { open } from "node:fs/promises";
 import { userInfo } from "node:os";
 
@@ -30,6 +31,10 @@ const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const DC_MAX_TOKEN_FILE_BYTES = 4096;
+const DC_LISTENER_CHECK = "{{.ListenerCheckJS}}";
+const DC_MANAGED_HOOK = "{{if .Managed}}1{{end}}";
+const DC_LISTENER_CHECK_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+const DC_LISTENER_UNVERIFIED = "cannot verify the owner of the gateway listener";
 
 // OpenCode v1.18.10-v1.18.19 passes the effective config (including its derived
 // plugin_origins list) to every plugin's config hook after external plugins
@@ -155,6 +160,42 @@ async function defenseclawToken() {
   }
 }
 
+// defenseclawListenerRefusal resolves to "" when the gateway port may receive
+// the scoped bearer, and otherwise to the reason it may not. It runs the
+// shell hooks' listener-owner check (DC_LISTENER_CHECK, the self-contained
+// block of hooks/_hardening.sh substituted at setup time) on Linux and macOS:
+// every listener on the port must belong to this user or root for a
+// per-user install, or to the managed gateway for a managed one, so another
+// local user who binds the port while the gateway is down never receives the
+// bearer or the payload. The check runs with a fixed PATH and environment,
+// so the agent's environment cannot choose the tools it relies on.
+function defenseclawListenerRefusal() {
+  if (process.platform !== "linux" && process.platform !== "darwin") return Promise.resolve("");
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        "/bin/sh",
+        ["-c", DC_LISTENER_CHECK, "defenseclaw-listener-check", DC_API_ADDR],
+        {
+          env: { PATH: DC_LISTENER_CHECK_PATH, LC_ALL: "C", DEFENSECLAW_MANAGED_HOOK: DC_MANAGED_HOOK },
+          timeout: 5000,
+          maxBuffer: 64 * 1024,
+          windowsHide: true,
+        },
+        (error, stdout) => {
+          if (!error) {
+            resolve("");
+            return;
+          }
+          resolve(String(stdout || "").trim() || DC_LISTENER_UNVERIFIED);
+        },
+      );
+    } catch (_) {
+      resolve(DC_LISTENER_UNVERIFIED);
+    }
+  });
+}
+
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   let token;
   try {
@@ -163,6 +204,15 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // Missing, unreadable, or malformed credentials are never safe at a
     // pre-execution boundary, even when transport fail-open was selected.
     if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
+    return null;
+  }
+  const refusal = await defenseclawListenerRefusal();
+  if (refusal) {
+    // The listener is not the trusted gateway. Treat it as a transport
+    // failure: nothing is sent, and the fail mode decides.
+    if (DC_FAIL_MODE === "closed") {
+      return { reason: "DefenseClaw hook failed closed (" + refusal + ")" };
+    }
     return null;
   }
   const controller = new AbortController();
@@ -229,6 +279,7 @@ async function defenseclawPostLoadHeartbeat(cwd) {
     // Load health is diagnostic only; tool hooks enforce credential failures.
     return;
   }
+  if (await defenseclawListenerRefusal()) return;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
@@ -264,6 +315,7 @@ async function defenseclawPostLifecycle(event, cwd) {
     // Lifecycle telemetry is observe-only; an unavailable credential skips it.
     return;
   }
+  if (await defenseclawListenerRefusal()) return;
   const properties = event.properties || {};
   const info = properties.info || {};
   const controller = new AbortController();

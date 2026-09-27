@@ -166,7 +166,7 @@ func TestOmnigentSetupAndTeardown(t *testing.T) {
 	if strings.Contains(module, scopedToken) || strings.Contains(module, base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
 		t.Fatal("policy module embeds the scoped credential instead of loading its sidecar")
 	}
-	for _, placeholder := range []string{"{{API_ADDR_B64}}", "{{TOKEN_FILE_B64}}", "{{FAIL_MODE_B64}}"} {
+	for _, placeholder := range []string{"{{API_ADDR_B64}}", "{{TOKEN_FILE_B64}}", "{{FAIL_MODE_B64}}", "{{LISTENER_CHECK_B64}}", "{{MANAGED_HOOK_B64}}"} {
 		if strings.Contains(module, placeholder) {
 			t.Fatalf("policy module contains unresolved template placeholder %s", placeholder)
 		}
@@ -812,7 +812,7 @@ func TestOmnigentPolicyBridgeFailMode(t *testing.T) {
 			if err := os.WriteFile(tokenPath, []byte(strings.Repeat("c", 64)+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode)
+			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode, false)
 			if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -868,7 +868,7 @@ print(json.dumps(module.defenseclaw_policy(event)))
 			root := t.TempDir()
 			tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("c", 64))
 			path := filepath.Join(root, "defenseclaw_omnigent_policy.py")
-			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode)
+			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode, false)
 			if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -924,7 +924,7 @@ print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})
 			root := t.TempDir()
 			tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("c", 64))
 			modulePath := filepath.Join(root, "defenseclaw_omnigent_policy.py")
-			rendered := renderOmnigentPolicy(string(templateBytes), gatewayAddr, tokenPath, mode)
+			rendered := renderOmnigentPolicy(string(templateBytes), gatewayAddr, tokenPath, mode, false)
 			if err := os.WriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -991,6 +991,7 @@ print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})
 				strings.TrimPrefix(server.URL, "http://"),
 				tokenPath,
 				tc.mode,
+				false,
 			)
 			if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
 				t.Fatal(err)
@@ -1037,6 +1038,7 @@ func TestOmnigentPostPhaseAlertContinuesInFailClosedMode(t *testing.T) {
 		strings.TrimPrefix(server.URL, "http://"),
 		tokenPath,
 		"closed",
+		false,
 	)
 	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
 		t.Fatal(err)
@@ -1194,7 +1196,7 @@ print(json.dumps(module.defenseclaw_policy({"type": "tool_call", "data": {"name"
 					t.Fatal(err)
 				}
 			}
-			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, "open")
+			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, "open", false)
 			if err := os.WriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -1223,7 +1225,7 @@ func TestOmnigentPolicyEventFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	modulePath := filepath.Join(t.TempDir(), "defenseclaw_omnigent_policy.py")
-	if err := os.WriteFile(modulePath, []byte(renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", "", "open")), 0o600); err != nil {
+	if err := os.WriteFile(modulePath, []byte(renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", "", "open", false)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixturePath := filepath.Join("testdata", "omnigent-policy-event.json")
@@ -1416,7 +1418,7 @@ print(json.dumps(module.defenseclaw_policy(event)))
 			root := t.TempDir()
 			tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("c", 64))
 			modulePath := filepath.Join(root, "defenseclaw_omnigent_policy.py")
-			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode)
+			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode, false)
 			if err := os.WriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 				t.Fatal(err)
 			}

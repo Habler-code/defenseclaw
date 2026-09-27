@@ -217,10 +217,22 @@ if [ "$artifact_kind" = plugin ]; then
     managed_artifact_mode='600'
 fi
 auth_record="${auth_dir}/protected_targets.json"
-server_ready="${target_home}/fake-gateway.ready"
-server_result="${target_home}/fake-gateway-result.json"
+# The managed hook trusts only the managed gateway's identity as the owner of
+# the gateway port: the packaged service account on Linux (the systemd unit's
+# User=defenseclaw) and root on macOS (the LaunchDaemon). The fake gateway
+# runs as that identity from a directory it owns, so the hook's listener-owner
+# check sees the owner a real install has.
+case "$(uname -s)" in
+    Darwin) fake_gateway_user='root' ;;
+    *) fake_gateway_user='defenseclaw' ;;
+esac
+fake_gateway_dir="${trusted_root}/defenseclaw-enterprise-ci-fake-${connector}-${run_id}"
+server_ready="${fake_gateway_dir}/ready"
+server_result="${fake_gateway_dir}/result.json"
+fake_gateway_token="${fake_gateway_dir}/expected.token"
 server_log="${target_home}/fake-gateway.log"
 fake_server_pid=''
+impostor_pid=''
 service_user_created=false
 service_group_created=false
 
@@ -228,10 +240,15 @@ cleanup() {
     local status=$?
     trap - EXIT
     if [ -n "$fake_server_pid" ] && kill -0 "$fake_server_pid" 2>/dev/null; then
-        kill "$fake_server_pid" 2>/dev/null || true
+        kill "$fake_server_pid" 2>/dev/null || sudo -n kill "$fake_server_pid" 2>/dev/null || true
         wait "$fake_server_pid" 2>/dev/null || true
     fi
+    if [ -n "$impostor_pid" ] && kill -0 "$impostor_pid" 2>/dev/null; then
+        kill "$impostor_pid" 2>/dev/null || true
+        wait "$impostor_pid" 2>/dev/null || true
+    fi
     sudo -n rm -rf -- "$root_prefix" >/dev/null 2>&1 || true
+    sudo -n rm -rf -- "$fake_gateway_dir" >/dev/null 2>&1 || true
     rm -rf -- "$target_home"
     case "$(uname -s)" in
         Darwin)
@@ -269,11 +286,18 @@ else
     chmod 0600 "$native_config"
 fi
 
-TOKEN_PATH="$user_token" \
-EXPECTED_PATH="$hook_request_path" \
-SERVER_READY="$server_ready" \
-SERVER_RESULT="$server_result" \
-python3 - >"$server_log" 2>&1 <<'PY' &
+[ ! -e "$fake_gateway_dir" ] || fail "fake gateway directory already exists: $fake_gateway_dir"
+sudo -n install -d -o "$fake_gateway_user" -m 0755 "$fake_gateway_dir"
+python_bin="$(command -v python3)"
+(
+    cd /
+    exec sudo -n -u "$fake_gateway_user" /usr/bin/env \
+        TOKEN_PATH="$fake_gateway_token" \
+        EXPECTED_PATH="$hook_request_path" \
+        SERVER_READY="$server_ready" \
+        SERVER_RESULT="$server_result" \
+        "$python_bin" -
+) >"$server_log" 2>&1 <<'PY' &
 import json
 import os
 import pathlib
@@ -307,10 +331,22 @@ class Handler(BaseHTTPRequestHandler):
         }
         with open(result_path, "w", encoding="utf-8") as handle:
             json.dump(result, handle)
+        response = b'{"action":"allow"}'
         self.send_response(200 if auth_ok and path_ok and body_ok else 401)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
         self.end_headers()
-        self.wfile.write(b'{"action":"allow"}')
+        self.wfile.write(response)
+        self.wfile.flush()
+        # Let the client close first so this port is not left in TIME_WAIT
+        # under the fake gateway's uid when the same-user listener below
+        # binds it (macOS refuses that bind across uids).
+        self.connection.settimeout(5)
+        try:
+            while self.connection.recv(4096):
+                pass
+        except OSError:
+            pass
 
     def log_message(self, *_args):
         return
@@ -661,6 +697,10 @@ if [ "$user_token_sidecar" = true ]; then
     [ "$(file_mtime "$native_config")" = "$config_mtime" ] || fail "no-op reconcile rewrote the native config"
 fi
 
+# The fake gateway cannot read the target user's home; give it the final
+# connector-scoped token the hook is expected to present.
+sudo -n install -o "$fake_gateway_user" -m 0600 "$user_token" "$fake_gateway_token"
+
 hook_stdout="${target_home}/hook.stdout"
 hook_stderr="${target_home}/hook.stderr"
 hook_completed=0
@@ -701,5 +741,78 @@ result = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if not all(result.get(key) is True for key in ("auth_ok", "path_ok", "body_ok")):
     raise SystemExit(f"managed hook request failed validation: {result}")
 PY
+
+# A listener the hook user owns is not the managed gateway. With the fake
+# gateway gone, bind the same port as the hook user: the managed shell hook
+# must fail closed before it sends the token or the payload, and the
+# listener must receive nothing. (The Amp plugin is validated above through
+# its constants, not by running it.)
+if [ "$artifact_kind" != plugin ]; then
+    impostor_ready="${target_home}/impostor.ready"
+    impostor_result="${target_home}/impostor-request"
+    python3 - "$api_port" "$impostor_ready" "$impostor_result" >"${target_home}/impostor.log" 2>&1 <<'PY' &
+import socket
+import sys
+
+import time
+
+port, ready, result = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+# A connection the fake gateway closed first can hold the port in TIME_WAIT
+# for up to a minute; keep trying rather than fail on a transient bind error.
+deadline = time.monotonic() + 60
+while True:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind(("127.0.0.1", port))
+        break
+    except OSError:
+        server.close()
+        if time.monotonic() > deadline:
+            raise
+        time.sleep(0.5)
+server.listen(1)
+open(ready, "w").close()
+server.settimeout(20)
+try:
+    conn, _ = server.accept()
+except socket.timeout:
+    raise SystemExit(0)
+conn.settimeout(5)
+with open(result, "wb") as handle:
+    try:
+        handle.write(conn.recv(65536))
+    except socket.timeout:
+        pass
+PY
+    impostor_pid=$!
+    if ! wait_for_file "$impostor_ready" 700; then
+        cat "${target_home}/impostor.log" >&2 || true
+        fail "same-user listener did not start"
+    fi
+    hook_completed=0
+    if [ "$connector" = 'codex' ]; then
+        printf '%s\n' "$hook_payload" | \
+            HOME="$target_home" \
+            "$hook_script" --event PreToolUse --hook-contract codex-hooks-v3 \
+            >"$hook_stdout" 2>"$hook_stderr" || hook_completed=$?
+    else
+        printf '%s\n' "$hook_payload" | \
+            HOME="$target_home" \
+            "$hook_script" >"$hook_stdout" 2>"$hook_stderr" || hook_completed=$?
+    fi
+    kill "$impostor_pid" 2>/dev/null || true
+    wait "$impostor_pid" 2>/dev/null || true
+    impostor_pid=''
+    [ ! -e "$impostor_result" ] || fail "managed hook sent a request to a listener the hook user owns"
+    [ "$hook_completed" -eq 2 ] || {
+        cat "$hook_stderr" >&2
+        fail "managed hook did not fail closed against a listener the hook user owns (exit $hook_completed)"
+    }
+    grep -q "held by $(id -u), not the managed gateway" "$hook_stderr" || {
+        cat "$hook_stderr" >&2
+        fail "managed hook refusal did not name the listener owner"
+    }
+fi
 
 printf 'enterprise hook hardening passed: os=%s connector=%s\n' "$(uname -s)" "$connector"

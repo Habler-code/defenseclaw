@@ -4,9 +4,26 @@
 package connector
 
 import (
+	"net"
 	"os"
 	"strings"
+	"testing"
 )
+
+// trustedHookListenerAddr returns the address of a loopback listener the
+// test account owns. Tests that replace curl with a stub point the hook here:
+// the hooks' listener-owner check refuses a port nobody listens on, and
+// accepts one held by the hook user for a per-user install. The stubs never
+// connect to it.
+func trustedHookListenerAddr(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener.Addr().String()
+}
 
 // sanitizedTestEnv returns os.Environ() with every DEFENSECLAW_* entry
 // removed. Hook shell scripts read a small pile of env vars

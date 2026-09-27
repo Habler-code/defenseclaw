@@ -7182,7 +7182,7 @@ func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
 	// silently slipped through. Run the generated script so we exercise
 	// the real runtime auth wiring, not the template shape.
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-abcdef123"); err != nil {
+	if err := WriteHookScriptsWithToken(dir, trustedHookListenerAddr(t), "tok-abcdef123"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
@@ -7199,7 +7199,7 @@ func TestWriteHookScriptsWithToken_EmptyTokenOmitsHeader(t *testing.T) {
 	// falling through to the loopback allow path. So the hook must omit
 	// the header entirely when no token is configured.
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", ""); err != nil {
+	if err := WriteHookScriptsWithToken(dir, trustedHookListenerAddr(t), ""); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
@@ -7215,7 +7215,7 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 	// working across rotations. ${DEFENSECLAW_GATEWAY_TOKEN:-<baked>} in
 	// the script expresses that.
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "baked-stale"); err != nil {
+	if err := WriteHookScriptsWithToken(dir, trustedHookListenerAddr(t), "baked-stale"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
@@ -7228,7 +7228,7 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 
 func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "scoped-token", NewCodexConnector()); err != nil {
+	if err := WriteHookScriptsForConnectorObject(dir, trustedHookListenerAddr(t), "scoped-token", NewCodexConnector()); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
 	}
 
@@ -7258,7 +7258,7 @@ func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "scoped-token", NewCodexConnector()); err != nil {
+			if err := WriteHookScriptsForConnectorObject(dir, trustedHookListenerAddr(t), "scoped-token", NewCodexConnector()); err != nil {
 				t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
 			}
 			if err := tc.mutate(filepath.Join(dir, ".hook-codex.token")); err != nil {

@@ -4,6 +4,8 @@
 package connector
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,7 +42,7 @@ func TestCodexNotifyBridgeKeepsCredentialAndPayloadOutOfCurlProcessState(t *test
 	}
 	if err := writeCodexNotifyBridge(SetupOpts{
 		DataDir:  dataDir,
-		APIAddr:  "127.0.0.1:18970",
+		APIAddr:  trustedHookListenerAddr(t),
 		APIToken: bakedSentinel,
 	}); err != nil {
 		t.Fatalf("writeCodexNotifyBridge: %v", err)
@@ -193,7 +195,7 @@ func TestCodexNotifyBridgeRejectsTokenLineBreakBeforeCurl(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("invalid\rtoken\n"), 0o600); err != nil {
 		t.Fatalf("write invalid scoped token: %v", err)
 	}
-	if err := writeCodexNotifyBridge(SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}); err != nil {
+	if err := writeCodexNotifyBridge(SetupOpts{DataDir: dataDir, APIAddr: trustedHookListenerAddr(t)}); err != nil {
 		t.Fatalf("writeCodexNotifyBridge: %v", err)
 	}
 
@@ -226,7 +228,7 @@ func TestCodexNotifyBridgeFailsOpenWithoutScopedToken(t *testing.T) {
 	}
 
 	dataDir := t.TempDir()
-	if err := writeCodexNotifyBridge(SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}); err != nil {
+	if err := writeCodexNotifyBridge(SetupOpts{DataDir: dataDir, APIAddr: trustedHookListenerAddr(t)}); err != nil {
 		t.Fatalf("writeCodexNotifyBridge: %v", err)
 	}
 	stubDir := t.TempDir()
@@ -250,6 +252,76 @@ func TestCodexNotifyBridgeFailsOpenWithoutScopedToken(t *testing.T) {
 	}
 	if _, err := os.Stat(invokedPath); !os.IsNotExist(err) {
 		t.Fatalf("missing-token notify invoked curl: %v", err)
+	}
+}
+
+// TestCodexNotifyBridgeSendsOnlyToTrustedListener runs the bridge's
+// listener-owner check against the live socket table: the scoped bearer and
+// the turn payload reach curl only when the gateway port is held by an owner
+// the hooks trust (this user for a per-user install), never when nothing
+// listens and never, for a managed install, when the listener is the hook
+// user's own.
+func TestCodexNotifyBridgeSendsOnlyToTrustedListener(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("the listener-owner check runs on Linux and macOS")
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("netstat"); err != nil {
+			t.Skip("netstat is required")
+		}
+	}
+	own := trustedHookListenerAddr(t)
+	closed, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedAddr := closed.Addr().String()
+	_ = closed.Close()
+
+	run := func(apiAddr string, managed bool) bool {
+		t.Helper()
+		dataDir := t.TempDir()
+		tokenPath, err := HookAPITokenFilePath(dataDir, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(tokenPath, []byte("codex-notify-listener-check-token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeCodexNotifyBridge(SetupOpts{DataDir: dataDir, APIAddr: apiAddr, ManagedEnterprise: managed}); err != nil {
+			t.Fatalf("writeCodexNotifyBridge: %v", err)
+		}
+		stubDir := t.TempDir()
+		invokedPath := filepath.Join(stubDir, "curl-invoked")
+		stub := "#!/bin/sh\n: > \"${CODEX_NOTIFY_INVOKED}\"\n"
+		if err := os.WriteFile(filepath.Join(stubDir, "curl"), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("/bin/bash", filepath.Join(dataDir, "notify-bridge.sh"), `{"type":"agent-turn-complete"}`)
+		cmd.Env = []string{
+			"PATH=" + stubDir + ":/usr/bin:/bin",
+			"CODEX_NOTIFY_INVOKED=" + invokedPath,
+			// An inherited value must not change a per-user bridge's owners.
+			"DEFENSECLAW_MANAGED_HOOK=" + fmt.Sprint(!managed),
+		}
+		if output, err := cmd.CombinedOutput(); err != nil || len(output) != 0 {
+			t.Fatalf("notify bridge = %v, output %q; want a silent exit 0", err, output)
+		}
+		_, err = os.Stat(invokedPath)
+		return err == nil
+	}
+
+	if !run(own, false) {
+		t.Fatal("per-user notify bridge did not send to the user's own listener")
+	}
+	if run(closedAddr, false) {
+		t.Fatal("notify bridge invoked curl for a port nobody listens on")
+	}
+	if os.Geteuid() != 0 && run(own, true) {
+		t.Fatal("managed notify bridge sent to a listener the hook user owns")
 	}
 }
 
