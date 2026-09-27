@@ -1322,7 +1322,10 @@ too, and a relative or `$CLAUDE_PROJECT_DIR` command runs that workspace's own
 script. Approve only handlers whose command is an absolute path to an
 executable that standard users cannot modify. The denial shown to the user
 includes the handler's command so it can be reviewed before approval; the
-message returned to the agent leaves it out.
+message returned to the agent leaves it out. Earlier releases do not recognize
+the allowlist in the protected Cursor machine state and refuse that state once
+it is non-empty, so before moving an endpoint to an earlier release, run
+`Uninstall` with the installed release and then install the earlier one.
 
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
