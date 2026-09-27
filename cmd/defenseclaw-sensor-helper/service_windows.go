@@ -23,6 +23,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 
 	"golang.org/x/sys/windows/svc"
 )
@@ -36,17 +37,36 @@ import (
 // Server 2025 before this existed. The same binary still runs from a
 // console for diagnostics, which is why the mode is detected rather than
 // chosen by a flag.
-func runUnderServiceManager(ctx context.Context, serve func(context.Context) error) error {
+//
+// Under SCM, serve's error never comes back from here: svc.Run returns only
+// the dispatcher's own result, and the handler reports the failure to SCM as
+// an exit code. The handler therefore writes that error to logger itself.
+func runUnderServiceManager(
+	ctx context.Context,
+	logger *slog.Logger,
+	serve func(context.Context) error,
+) error {
 	inService, err := svc.IsWindowsService()
 	if err != nil || !inService {
 		return serve(ctx)
 	}
-	return svc.Run("", &helperService{ctx: ctx, serve: serve})
+	return svc.Run("", &helperService{ctx: ctx, serve: serve, logger: logger})
 }
 
 type helperService struct {
-	ctx   context.Context
-	serve func(context.Context) error
+	ctx    context.Context
+	serve  func(context.Context) error
+	logger *slog.Logger
+}
+
+// logExit records why serve returned. It runs before the handler reports
+// StopPending, because once SCM sees the service stopped the process can end
+// at any time, and the exit code SCM shows (1) carries no reason.
+func (s *helperService) logExit(err error) {
+	if err == nil || s.logger == nil {
+		return
+	}
+	s.logger.Error("sensor helper exited", "error", err)
 }
 
 // Execute is the SCM entry point.
@@ -74,6 +94,7 @@ func (s *helperService) Execute(
 			// The listener stopped on its own. Reporting a non-zero exit
 			// code is what lets SCM's restart policy see a crash rather
 			// than an orderly stop.
+			s.logExit(err)
 			status <- svc.Status{State: svc.StopPending}
 			if err != nil {
 				return false, 1
@@ -86,7 +107,7 @@ func (s *helperService) Execute(
 			case svc.Stop, svc.Shutdown:
 				status <- svc.Status{State: svc.StopPending}
 				cancel()
-				<-failed
+				s.logExit(<-failed)
 				return false, 0
 			default:
 				// Anything else is not accepted above, so receiving it

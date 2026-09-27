@@ -23,11 +23,18 @@
 
 package main
 
-import "context"
+import (
+	"context"
+	"log/slog"
+)
 
 // runUnderServiceManager is a passthrough off Windows. systemd and launchd
 // supervise an ordinary process and signal it; there is no protocol to
-// speak.
-func runUnderServiceManager(ctx context.Context, serve func(context.Context) error) error {
+// speak. serve's error is returned to run, which logs it.
+func runUnderServiceManager(
+	ctx context.Context,
+	_ *slog.Logger,
+	serve func(context.Context) error,
+) error {
 	return serve(ctx)
 }

@@ -96,9 +96,11 @@ func run() error {
 
 	err := runHelper(logger, *socketPath, *homeDirs, *allowUIDs, *socketGID, *dataDir, *managedEnterprise)
 	if err != nil {
-		// Under the Service Control Manager this line is the only record of
-		// why the helper, and therefore the gateway that depends on it,
-		// did not come up.
+		// Under the Service Control Manager nothing reads stderr, so the
+		// log is the only record of why the helper, and therefore the
+		// gateway that depends on it, did not come up. An error from serve
+		// itself does not reach this line there: the service handler logs
+		// it (service_windows.go) and reports an exit code to SCM instead.
 		logger.Error("sensor helper exited", "error", err)
 	}
 	return err
@@ -131,7 +133,7 @@ func runHelper(
 	// else. Without it the service registers, fails to answer SCM, and is
 	// killed with error 1053 -- a helper that can never start, on the one
 	// platform whose gateway most needs it.
-	return runUnderServiceManager(ctx, func(ctx context.Context) error {
+	return runUnderServiceManager(ctx, logger, func(ctx context.Context) error {
 		return serve(ctx, path, uids, socketGID, splitList(homeDirs), logger)
 	})
 }
