@@ -900,6 +900,8 @@ start_gateway() {
 
 finish_swap() {
     local tmp
+    # The new install is live: a run killed from here on must not restore the old one.
+    rm -f "${SNAP}/COMPLETE"
     if [[ "${SNAP}" == "${DEFENSECLAW_HOME}/previous.new" && -n "${PREV_VERSION}" ]]; then
         keep_rolled_back_data
         rm -rf "${PREVIOUS}" && mv "${SNAP}" "${PREVIOUS}"
