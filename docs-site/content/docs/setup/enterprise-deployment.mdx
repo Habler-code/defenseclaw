@@ -1403,9 +1403,12 @@ marketplace entry that names a `hooks` path for a plugin whose `source` is not
 a local folder. So does a workspace whose folders cannot all be checked: a
 hook call that does not report `workspace_roots`, more than 32 distinct
 folders, or a folder that Cursor reports as a remote or relative path rather
-than a local one. Under the plugin folder, links, junctions and other reparse
-points, and more than 4096 folders in total, also deny; folders are checked at
-any depth. The guard does not scan the enterprise hooks file or team
+than a local one. Under the plugin folder, a link, junction or other reparse
+point that resolves to a folder, cannot be resolved, or stands in for a
+`hooks` folder, a `hooks\hooks.json` file or a `.cursor-plugin` folder also
+denies, as do more than 4096 folders in total; links to other files are
+ignored, and folders are checked at any depth. The guard does not scan the
+enterprise hooks file or team
 hooks from the Cursor dashboard, which administrators control, and it cannot
 see plugins that Cursor keeps outside `%USERPROFILE%\.cursor\plugins` or
 Claude Code plugins imported through Cursor's third-party settings. On Cursor
