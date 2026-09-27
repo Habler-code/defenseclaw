@@ -21,19 +21,6 @@ import (
 
 const maxLibrarySignerCertificateBytes = 64 << 10
 
-var (
-	wintrustDLL                        = windows.NewLazySystemDLL("wintrust.dll")
-	procWTHelperProvDataFromStateData  = wintrustDLL.NewProc("WTHelperProvDataFromStateData")
-	procWTHelperGetProvSignerFromChain = wintrustDLL.NewProc("WTHelperGetProvSignerFromChain")
-	procWTHelperGetProvCertFromChain   = wintrustDLL.NewProc("WTHelperGetProvCertFromChain")
-)
-
-// cryptProviderCert is the leading, stable part of CRYPT_PROVIDER_CERT.
-type cryptProviderCert struct {
-	size uint32
-	cert *windows.CertContext
-}
-
 // LibraryLease holds the Cloud Management identity library open without write
 // or delete sharing. While it is held, the file at the verified path cannot be
 // modified, renamed, or replaced, so a LoadLibrary of that path maps the bytes
@@ -139,44 +126,17 @@ func openTrustedLibrary(
 }
 
 func verifyLibraryAuthenticode(path *uint16, handle windows.Handle) (LibrarySigner, error) {
-	fileInfo := &windows.WinTrustFileInfo{
-		Size:     uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
-		FilePath: path,
-		// Verify the exact open file rather than re-resolving the path.
-		File: handle,
-	}
-	data := &windows.WinTrustData{
-		Size:                            uint32(unsafe.Sizeof(windows.WinTrustData{})),
-		UIChoice:                        windows.WTD_UI_NONE,
-		RevocationChecks:                windows.WTD_REVOKE_NONE,
-		UnionChoice:                     windows.WTD_CHOICE_FILE,
-		FileOrCatalogOrBlobOrSgnrOrCert: unsafe.Pointer(fileInfo),
-		StateAction:                     windows.WTD_STATEACTION_VERIFY,
-		// The broker starts at boot, possibly before the network. Revocation
-		// is not fetched, so availability does not depend on it; the chain,
-		// file digest, and timestamp are still verified.
-		ProvFlags: windows.WTD_CACHE_ONLY_URL_RETRIEVAL |
-			windows.WTD_REVOCATION_CHECK_NONE |
-			windows.WTD_DISABLE_MD2_MD4,
-		UIContext: windows.WTD_UICONTEXT_EXECUTE,
-	}
-	verifyErr := windows.WinVerifyTrustEx(
-		windows.InvalidHWND,
-		&windows.WINTRUST_ACTION_GENERIC_VERIFY_V2,
-		data,
-	)
+	// The broker starts at boot, possibly before the network. VerifyFile does
+	// not fetch revocation, so availability does not depend on it; the chain,
+	// file digest, and timestamp are still verified. It checks the exact open
+	// file rather than re-resolving the path.
+	verification, verifyErr := authenticode.VerifyFile(path, handle)
 	var signer LibrarySigner
 	var signerErr error
 	if verifyErr == nil {
-		signer, signerErr = verifiedLibrarySigner(data.StateData)
+		signer, signerErr = verifiedLibrarySigner(verification)
 	}
-	data.StateAction = windows.WTD_STATEACTION_CLOSE
-	closeErr := windows.WinVerifyTrustEx(
-		windows.InvalidHWND,
-		&windows.WINTRUST_ACTION_GENERIC_VERIFY_V2,
-		data,
-	)
-	runtime.KeepAlive(fileInfo)
+	closeErr := verification.Close()
 	runtime.KeepAlive(path)
 	if verifyErr != nil {
 		return LibrarySigner{}, fmt.Errorf("%w: %v", ErrLibrarySignature, verifyErr)
@@ -192,27 +152,12 @@ func verifyLibraryAuthenticode(path *uint16, handle windows.Handle) (LibrarySign
 
 // verifiedLibrarySigner reads the leaf certificate of the primary signer that
 // WinVerifyTrust just verified. It must run before the state is closed.
-func verifiedLibrarySigner(state windows.Handle) (LibrarySigner, error) {
-	if state == 0 {
-		return LibrarySigner{}, errors.New("WinVerifyTrust returned no verification state")
+func verifiedLibrarySigner(verification *authenticode.Verification) (LibrarySigner, error) {
+	certificate, err := verification.PrimarySignerCertificate()
+	if err != nil {
+		return LibrarySigner{}, err
 	}
-	provider, _, _ := procWTHelperProvDataFromStateData.Call(uintptr(state))
-	if provider == 0 {
-		return LibrarySigner{}, errors.New("WinVerifyTrust returned no provider data")
-	}
-	signer, _, _ := procWTHelperGetProvSignerFromChain.Call(provider, 0, 0, 0)
-	if signer == 0 {
-		return LibrarySigner{}, errors.New("WinVerifyTrust returned no primary signer")
-	}
-	certificate, _, _ := procWTHelperGetProvCertFromChain.Call(signer, 0)
-	if certificate == 0 {
-		return LibrarySigner{}, errors.New("WinVerifyTrust returned no signer certificate")
-	}
-	providerCert := *(**cryptProviderCert)(unsafe.Pointer(&certificate))
-	if uintptr(providerCert.size) < unsafe.Sizeof(cryptProviderCert{}) || providerCert.cert == nil {
-		return LibrarySigner{}, errors.New("WinVerifyTrust returned a malformed signer certificate")
-	}
-	return librarySignerFromContext(providerCert.cert)
+	return librarySignerFromContext(certificate)
 }
 
 // librarySignerFromContext identifies a signer certificate by the common name
