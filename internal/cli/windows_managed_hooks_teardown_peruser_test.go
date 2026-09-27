@@ -42,7 +42,7 @@ func TestWindowsManagedHooksTeardownTargetsAcceptPerUserOnlyInStandalone(t *test
 
 func TestWindowsManagedHooksTeardownPluginConnectorsHaveNoSelector(t *testing.T) {
 	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
-	for name, want := range map[string]bool{"copilot": true, "devin": true, "amp": false, "opencode": false, "codex": true} {
+	for name, want := range map[string]bool{"copilot": true, "devin": true, "amp": false, "opencode": true, "codex": true} {
 		target := windowsManagedHooksTeardownTarget{Connector: name, SID: "S-1-5-21-1-2-3-1017", DataDir: `C:\Users\u\.defenseclaw`}
 		if got := windowsManagedHooksTeardownSelectorExpected(target, nil, windowsManagedHooksActivated); got != want {
 			t.Fatalf("%s selector expected = %t, want %t", name, got, want)

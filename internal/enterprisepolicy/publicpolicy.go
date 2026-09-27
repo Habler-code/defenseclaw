@@ -81,16 +81,36 @@ func BuildPublicPolicy(opts Options, connectors []string) PublicPolicy {
 		allowed := append([]string{}, policy.AllowedHooks...)
 		sort.Strings(allowed)
 		summary.Connectors[name] = PublicConnectorPolicy{
-			// opts.Route: an installed administrator OpenCode plugin moves
-			// OpenCode onto machine policy, where the per-user plugin and
-			// per-user registration commands are foreign.
-			Route:        opts.Route(name),
+			Route:        publicRoute(opts, name),
 			ForeignHooks: policy.ForeignHooks,
 			Guard:        GuardApplies(name, policy),
 			AllowedHooks: allowed,
 		}
 	}
 	return summary
+}
+
+// publicRoute is the route the summary reports for connector. On machine
+// policy the per-user plugin and per-user registration commands are
+// foreign, so OpenCode is reported there only while OpenCode actually loads
+// the managed plugin: ownership is not off and OpenCode's managed config
+// names the trusted installed plugin (the check the Unix enumerator and the
+// Windows guardian route OpenCode rows by). An installed plugin file alone
+// is not enough: every deployment installs it, and until the config names it
+// the per-user plugin is DefenseClaw's own, which the guard must not deny on
+// or clean up.
+func publicRoute(opts Options, name string) string {
+	route := opts.Route(name)
+	if name != ConnectorOpenCode || route != RouteMachinePolicy {
+		return route
+	}
+	if opts.PolicyFor(name).Ownership == config.MachinePolicyOwnershipOff {
+		return RouteFor(name, opts.goos())
+	}
+	if present, err := opencodePresent(opts); err != nil || !present {
+		return RouteFor(name, opts.goos())
+	}
+	return RouteMachinePolicy
 }
 
 // MarshalPublicPolicy renders canonical bytes.

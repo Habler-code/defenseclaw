@@ -609,10 +609,11 @@ func windowsHookPathHasNoReparsePoints(path string) bool {
 }
 
 // windowsStandalonePerUserHookConnector reports whether name is a standalone
-// per-user connector whose runtime is this hook binary.
+// per-user connector whose runtime is this hook binary. OpenCode's managed
+// plugin (machine policy route) runs it for every event.
 func windowsStandalonePerUserHookConnector(name string) bool {
 	switch name {
-	case "copilot", "antigravity", "devin", "hermes":
+	case "copilot", "antigravity", "devin", "hermes", "opencode":
 		return true
 	default:
 		return false

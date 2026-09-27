@@ -1366,6 +1366,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Vendor policies are product files: they leave with the deployment,
 	// including the nested rule-pack directories.
 	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
+	// The managed OpenCode plugin left with the recorded files above.
+	_ = removeDirIfEmpty(env.P(openCodePluginDir(env.Layout)))
 	_ = removeDirIfEmpty(env.P(filepath.Dir(env.Layout.VendorPolicyDir)))
 	if env.GOOS == "darwin" {
 		if record != nil && record.Channel == ChannelPackage {

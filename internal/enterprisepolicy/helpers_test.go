@@ -22,6 +22,33 @@ import (
 
 const testHookBinary = "/opt/defenseclaw/bin/defenseclaw-hook"
 
+// testOpenCodePlugin is the canonical Linux path of the managed OpenCode
+// plugin, the path OpenCode's managed config names.
+const testOpenCodePlugin = "/opt/defenseclaw/share/opencode/defenseclaw.js"
+
+// installTestOpenCodePlugin installs this release's managed OpenCode plugin
+// at its canonical path inside the rooted test tree and returns the file.
+func installTestOpenCodePlugin(t *testing.T, opts *Options) string {
+	t.Helper()
+	opts.OpenCodePluginPath = testOpenCodePlugin
+	file := rooted(*opts, testOpenCodePlugin)
+	writeFile(t, file, string(openCodeManagedPlugin))
+	return file
+}
+
+// publishTestOptions are testOptions whose summary directory already exists.
+// Publish writes the summary under the host path PublicPolicyPath; a Windows
+// host joins it with backslashes, which the linux-rooted writer cannot split
+// into the parent directory it would create.
+func publishTestOptions(t *testing.T) Options {
+	t.Helper()
+	opts := testOptions(t)
+	if err := os.MkdirAll(filepath.Dir(opts.PublicPolicyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return opts
+}
+
 func testOptions(t *testing.T) Options {
 	t.Helper()
 	root := t.TempDir()

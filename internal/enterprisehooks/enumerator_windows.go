@@ -610,6 +610,10 @@ func windowsStandaloneMachinePolicyConnector(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "claudecode", "codex", "cursor", "copilot":
 		return true
+	case "opencode":
+		// The managed plugin runs for every user once OpenCode's machine
+		// policy is in force.
+		return windowsOpenCodeMachinePolicyInForce()
 	default:
 		return false
 	}

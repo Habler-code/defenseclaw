@@ -265,19 +265,92 @@ func TestPublicPolicyGuardFlags(t *testing.T) {
 	}
 }
 
-// An installed administrator OpenCode plugin moves OpenCode onto machine
-// policy; the summary the hook-time guard reads must say so, or the guard
-// would keep exempting the per-user plugin and per-user commands.
+// OpenCode's managed config naming the trusted managed plugin moves OpenCode
+// onto machine policy; the summary the hook-time guard reads must say so, or
+// the guard would keep exempting the per-user plugin and per-user commands.
 func TestPublicPolicyReportsTheOpenCodeMachinePolicyRoute(t *testing.T) {
-	opts := testOptions(t)
+	opts := publishTestOptions(t)
 	if route := BuildPublicPolicy(opts, []string{"opencode"}).Connectors["opencode"].Route; route != RoutePerUser {
 		t.Fatalf("without the artifact OpenCode is per-user, got %s", route)
 	}
-	opts.OpenCodePluginPath = filepath.Join(opts.Root, "opt/defenseclaw/share/opencode/defenseclaw.js")
-	writeFile(t, opts.OpenCodePluginPath, "export default {}")
-	if route := BuildPublicPolicy(opts, []string{"opencode"}).Connectors["opencode"].Route; route != RouteMachinePolicy {
-		t.Fatalf("with the artifact the summary must report machine policy, got %s", route)
+	installTestOpenCodePlugin(t, &opts)
+	if route := BuildPublicPolicy(opts, []string{"opencode"}).Connectors["opencode"].Route; route != RoutePerUser {
+		t.Fatalf("until the managed config names the installed plugin OpenCode is per-user, got %s", route)
 	}
+	if _, err := Publish(opts, []string{"opencode"}); err != nil {
+		t.Fatal(err)
+	}
+	if route := BuildPublicPolicy(opts, []string{"opencode"}).Connectors["opencode"].Route; route != RouteMachinePolicy {
+		t.Fatalf("with the published plugin the summary must report machine policy, got %s", route)
+	}
+	policy := writtenOpenCodeSummary(t, opts)
+	if policy.Route != RouteMachinePolicy {
+		t.Fatalf("written summary route %s, want machine policy", policy.Route)
+	}
+	if decision := EvaluateForeignHooks(perUserOpenCodeGuardRequest(t, policy)); !decision.Deny {
+		t.Fatalf("on machine policy the per-user DefenseClaw plugin is foreign: %+v", decision)
+	}
+}
+
+// Every deployment installs the managed OpenCode plugin file, so the file
+// alone must not move the summary onto machine policy. With ownership: off,
+// or when DefenseClaw cannot merge the administrator's managed config,
+// OpenCode still loads the per-user plugin (reconcile, verify and the
+// descriptor say per-user). A machine-policy summary there would make the
+// per-user plugin's guard deny every OpenCode tool call on DefenseClaw's own
+// plugin and make cleanup move it aside every cycle.
+func TestPublicPolicyKeepsOpenCodePerUserUntilItsManagedConfigNamesThePlugin(t *testing.T) {
+	ownershipOff := func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipOff }
+	for name, setup := range map[string]func(*testing.T, *Options){
+		"ownership off": func(t *testing.T, opts *Options) {
+			*opts = withPolicy(*opts, "opencode", ownershipOff)
+		},
+		"unmergeable managed config": func(t *testing.T, opts *Options) {
+			writeFile(t, rooted(*opts, "/etc/opencode/opencode.jsonc"), "// administrator note\n{\"plugin\": []}\n")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := publishTestOptions(t)
+			installTestOpenCodePlugin(t, &opts)
+			setup(t, &opts)
+			result, _ := Publish(opts, []string{"opencode"})
+			if len(result.MachinePolicyConnectors) != 0 {
+				t.Fatalf("OpenCode must not be published here: %+v", result)
+			}
+			policy := writtenOpenCodeSummary(t, opts)
+			if policy.Route != RoutePerUser || !policy.Guard {
+				t.Fatalf("written summary %+v, want the guarded per-user route", policy)
+			}
+			if decision := EvaluateForeignHooks(perUserOpenCodeGuardRequest(t, policy)); decision.Deny {
+				t.Fatalf("the per-user DefenseClaw plugin must stay DefenseClaw's: %+v", decision)
+			}
+		})
+	}
+}
+
+// writtenOpenCodeSummary reads OpenCode's entry of the summary Publish wrote.
+func writtenOpenCodeSummary(t *testing.T, opts Options) PublicConnectorPolicy {
+	t.Helper()
+	parsed, err := ParsePublicPolicy([]byte(readFile(t, opts.PublicPolicyPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := parsed.Connectors["opencode"]
+	if !ok {
+		t.Fatalf("summary has no OpenCode entry: %+v", parsed)
+	}
+	return policy
+}
+
+// perUserOpenCodeGuardRequest is the guard request of a user whose only
+// OpenCode plugin is the per-user DefenseClaw plugin the guardian installs.
+func perUserOpenCodeGuardRequest(t *testing.T, policy PublicConnectorPolicy) GuardRequest {
+	t.Helper()
+	req := guardRequest(t, "opencode", policy.ForeignHooks)
+	req.Policy = policy
+	req.AccountHome = req.Home
+	writeFile(t, filepath.Join(req.Home, ".config", "opencode", "plugins", "defenseclaw.js"), "// DefenseClaw")
+	return req
 }
 
 // Agents resolve project config up to the repository root however deep

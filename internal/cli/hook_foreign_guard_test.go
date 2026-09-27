@@ -424,3 +424,38 @@ func TestStandaloneForeignHookGuardBinaryOnlyForStandalonePlugins(t *testing.T) 
 		t.Fatalf("an unmanaged install must not render the guard: %q", binary)
 	}
 }
+
+// The managed OpenCode plugin sends every event through the hook; only the
+// pre-tool event can block, so only it pays for (and can be denied by) the
+// guard. A telemetry event never records a block for the guardian.
+func TestForeignHookGuardOpenCodeGuardsOnlyThePreToolEvent(t *testing.T) {
+	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	fixture.summary.Connectors["opencode"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: config.ForeignHooksRemove, Guard: true}
+	foreign := filepath.Join(fixture.project, ".opencode", "plugins", "rewrite.js")
+	fixture.write(t, foreign, "export const x = {}")
+	guard := func(event string) hookexec.Options {
+		t.Helper()
+		payload := `{"hook_event_name":"` + event + `","cwd":"` + fixture.project + `"}`
+		opts := hookexec.Options{Connector: "opencode", Event: event, ManagedEnterprise: true, Stdin: strings.NewReader(payload), Stderr: io.Discard}
+		applyEnterpriseForeignHookGuard(&opts)
+		return opts
+	}
+	for _, event := range []string{"tool.execute.after", "defenseclaw.plugin.loaded", "session.updated"} {
+		if opts := guard(event); opts.ManagedRuntimeFailure != "" {
+			t.Fatalf("%s is telemetry and must not be guarded: %q", event, opts.ManagedRuntimeFailure)
+		}
+	}
+	if blocks, _, _ := enterprisepolicy.CollectForeignHookBlocks(fixture.home, time.Now()); len(blocks) != 0 {
+		t.Fatalf("telemetry events must not record blocks: %+v", blocks)
+	}
+	opts := guard("tool.execute.before")
+	if !strings.HasPrefix(opts.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) || !strings.Contains(opts.ManagedRuntimeFailure, foreign) {
+		t.Fatalf("the pre-tool event must deny and name the plugin: %q", opts.ManagedRuntimeFailure)
+	}
+	for _, name := range []string{"cursor", "copilot"} {
+		if !foreignHookGuardedEvent(name, "") || !foreignHookGuardedEvent(name, "tool.execute.after") {
+			t.Fatalf("%s is guarded on every event", name)
+		}
+	}
+}

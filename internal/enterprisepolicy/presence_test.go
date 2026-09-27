@@ -17,9 +17,8 @@ import (
 )
 
 func TestMachinePolicyPresentTracksOwnedEntries(t *testing.T) {
-	opts := testOptions(t)
-	opts.OpenCodePluginPath = filepath.Join(opts.Root, "opt/defenseclaw/share/opencode/defenseclaw.js")
-	writeFile(t, opts.OpenCodePluginPath, "export default {}")
+	opts := publishTestOptions(t)
+	installTestOpenCodePlugin(t, &opts)
 	connectors := []string{"claudecode", "codex", "copilot", "cursor", "devin", "opencode"}
 	machine := []string{"claudecode", "codex", "copilot", "cursor", "opencode"}
 	for _, name := range connectors {

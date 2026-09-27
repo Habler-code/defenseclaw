@@ -22,10 +22,13 @@ import (
 // the guardian registers the administrator-owned hook binary in each enrolled
 // user's own agent configuration and repairs it.
 //
-// The value records whether the connector's runtime is the DefenseClaw hook
-// binary (true) or an in-agent plugin that calls the gateway itself (false).
-// Only hook-binary connectors get a protected runtime generation: a plugin
-// never executes defenseclaw-hook.exe, so it cannot consume one.
+// The value records whether the connector's runtime executes the DefenseClaw
+// hook binary (true) or is only an in-agent plugin that calls the gateway
+// itself (false). Only hook-binary connectors get a protected runtime
+// generation and a per-user machine enrollment: a plugin that never executes
+// defenseclaw-hook.exe cannot consume one. OpenCode counts as a hook-binary
+// connector: on the machine policy route its managed plugin runs the hook
+// binary for every event, so every OpenCode row publishes a generation.
 //
 // The Secure Client profile never manages these connectors.
 var windowsStandalonePerUserConnectors = map[string]bool{
@@ -33,8 +36,20 @@ var windowsStandalonePerUserConnectors = map[string]bool{
 	"antigravity": true,
 	"devin":       true,
 	"hermes":      true,
-	"opencode":    false,
+	"opencode":    true,
 	"amp":         false,
+}
+
+// windowsStandaloneInAgentPluginConnector reports whether the connector's
+// per-user registration is an in-agent plugin file (Amp, OpenCode) rendered
+// with the standalone install marker.
+func windowsStandaloneInAgentPluginConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "amp", "opencode":
+		return true
+	default:
+		return false
+	}
 }
 
 // windowsStandaloneRuntimeOnlyConnectors are per-user connectors whose hook
@@ -42,7 +57,9 @@ var windowsStandalonePerUserConnectors = map[string]bool{
 // %ProgramData%\GitHub\Copilot\policy.d before every other source), so the
 // guardian writes only their per-user DefenseClaw runtime and never the
 // user's own agent configuration. A second, user-level registration would
-// run the hook twice.
+// run the hook twice. OpenCode joins them while its machine policy is in
+// force (windowsStandaloneRuntimeOnlyInstall); its removal stays on the
+// per-user path, which also removes a plugin left from the per-user route.
 var windowsStandaloneRuntimeOnlyConnectors = map[string]bool{
 	"copilot": true,
 }

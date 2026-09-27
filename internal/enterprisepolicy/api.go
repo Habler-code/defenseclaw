@@ -175,6 +175,9 @@ func reconcileOne(opts Options, name string) (State, error) {
 		if route == RoutePerUser {
 			state.detail("per-user registration of the admin hook binary, repaired by the guardian")
 		}
+		if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
+			openCodePerUserFallback(opts, policy, &state)
+		}
 		return state, nil
 	}
 	target, _ := TargetFor(name)
@@ -192,7 +195,12 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	for _, name := range connectors {
 		route := opts.Route(name)
 		if route != RouteMachinePolicy {
-			result.States = append(result.States, State{Connector: name, Route: route, ForeignHooks: opts.PolicyFor(name).ForeignHooks})
+			state := State{Connector: name, Route: route, ForeignHooks: opts.PolicyFor(name).ForeignHooks}
+			if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
+				// Say why OpenCode is not on its machine policy route.
+				openCodePerUserFallback(opts, opts.PolicyFor(name), &state)
+			}
+			result.States = append(result.States, state)
 			continue
 		}
 		target, _ := TargetFor(name)

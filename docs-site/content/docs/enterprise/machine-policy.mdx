@@ -24,7 +24,7 @@ machine policy but cannot change it, so there is no repair window.
 | Claude Code | Machine policy + lock | `/etc/claude-code/managed-settings.d/90-defenseclaw.json` | `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` | `/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json` |
 | Cursor | Machine policy + foreign-hook guard | `/etc/cursor/hooks.json` | `%ProgramData%\Cursor\hooks.json` | `/Library/Application Support/Cursor/hooks.json` |
 | GitHub Copilot CLI | Machine policy + foreign-hook guard | `/etc/github-copilot/policy.d/90-defenseclaw.json` | `%ProgramData%\GitHub\Copilot\policy.d\90-defenseclaw.json` | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
-| OpenCode | Machine policy when the managed plugin is installed, else per user; foreign-plugin guard | `/etc/opencode` | `%ProgramData%\opencode` | `/Library/Application Support/opencode` |
+| OpenCode | Machine policy through the managed plugin (per user while the plugin is missing or untrusted, ownership is `off`, or the managed config does not name it); foreign-plugin guard | `/etc/opencode` | `%ProgramData%\opencode` | `/Library/Application Support/opencode` |
 | Amp, Devin | Per user + foreign-hook guard | — | — | — |
 | Antigravity, Hermes | Per user | — | — | — |
 | OpenHands, Omnigent | Per user on Linux and macOS; refused on Windows | — | — | — |
@@ -34,6 +34,44 @@ machine policy but cannot change it, so there is no repair window.
 Per-user connectors register the administrator-owned hook binary
 (`defenseclaw-hook --connector <name> --enterprise-managed`) in each enrolled
 user's configuration, and the guardian repairs it.
+
+## Managed OpenCode plugin
+
+The standalone payload ships a managed OpenCode plugin at
+`<InstallRoot>/share/opencode/defenseclaw.js`
+(`/opt/defenseclaw/share/opencode/defenseclaw.js` on Linux,
+`/opt/cisco/defenseclaw/share/opencode/defenseclaw.js` on macOS,
+`C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js` on
+Windows). The Linux and macOS lifecycle installs it with the deployment's
+files; on Windows the guardian writes it from the payload binaries. OpenCode's
+managed config names it, so it runs in every user's OpenCode and users cannot
+edit or delete it. OpenCode itself can still start without it: see
+[Vendor limits](#vendor-limits).
+
+- The plugin is the same file on every host and holds no credential. Each
+  event runs the administrator-owned `defenseclaw-hook` beside it, which
+  reaches the gateway the same way the other machine-policy hooks do (the
+  peer-authorized hook socket on Linux and macOS, the user's protected
+  runtime on Windows) and applies the foreign-plugin guard.
+- It fails closed: a tool call is blocked when the hook binary cannot run,
+  answers with an error, or the gateway is unreachable. After uninstall it
+  allows calls again.
+- OpenCode uses this route only while the file is administrator-owned
+  (root on Linux and macOS; Administrators, LocalSystem or TrustedInstaller
+  on Windows), no other user can change it, and OpenCode's managed config
+  names it. Otherwise DefenseClaw keeps the per-user plugin and `policy show`
+  says why. The payload installs the file even with `ownership: off`; that
+  alone does not change the route, and the foreign-plugin guard keeps the
+  per-user DefenseClaw plugin as DefenseClaw's own.
+- `verify` and `policy show` report a plugin whose content differs from the
+  installed release. `ensure` (Linux and macOS) or the next guardian pass
+  (Windows) restores it.
+- A per-user DefenseClaw plugin left from the per-user route counts as a
+  foreign plugin once the managed plugin is in place; the guardian removes it
+  with `foreign_hooks: remove` (the default).
+- On Windows each enrolled user gets only a protected per-user runtime for
+  OpenCode, as for Copilot, and OpenCode tool calls from a user without an
+  OpenCode enrollment are blocked.
 
 ## What DefenseClaw writes
 
@@ -147,6 +185,15 @@ These come from the vendors and apply everywhere:
 - GitHub Copilot command hooks that time out fail open, even policy hooks.
 - OpenCode runs the managed plugin after user and project plugins; this
   order is observed, not documented.
+- OpenCode pure mode (`opencode --pure` or `OPENCODE_PURE=1`) loads no
+  plugins, the managed plugin included, and `OPENCODE_TEST_MANAGED_CONFIG_DIR`,
+  which release builds honor, replaces the managed config directory. A session
+  started either way never calls DefenseClaw's hooks, on the machine-policy
+  and the per-user route alike, so its tool calls are not inspected. `verify`
+  and `policy show` still report OpenCode covered, because the entry is in
+  place; their details name this limit. `OPENCODE_CONFIG_CONTENT` and
+  `OPENCODE_DISABLE_DEFAULT_PLUGINS` do not remove the managed plugin
+  (observed with OpenCode 1.18.32).
 - Amp has no machine plugin location.
 - Cursor applies the enterprise `hooks.json` only on plans that support
   enterprise hooks; confirm on a real client.

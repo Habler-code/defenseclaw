@@ -18,6 +18,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Payload binaries. The ACP mediator is optional.
@@ -71,6 +74,7 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 			{Path: l.BinDir, Mode: 0o755, Owner: root},
 			{Path: filepath.Dir(l.VendorPolicyDir), Mode: 0o755, Owner: root},
 			{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
+			{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 			{Path: l.ConfigDir, Mode: 0o755, Owner: root},
 			{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 			{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
@@ -89,6 +93,7 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		{Path: l.BinDir, Mode: 0o755, Owner: root},
 		{Path: filepath.Dir(l.VendorPolicyDir), Mode: 0o755, Owner: root},
 		{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
+		{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 		{Path: l.ConfigDir, Mode: 0o755, Owner: root},
 		{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 		{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
@@ -152,6 +157,8 @@ func machinePolicyDirs(goos, connector string) []string {
 			return []string{"/Library/Application Support/Cursor"}
 		case "copilot":
 			return []string{"/etc/github-copilot", "/etc/github-copilot/policy.d"}
+		case "opencode":
+			return []string{"/Library/Application Support/opencode"}
 		}
 		return nil
 	}
@@ -164,8 +171,16 @@ func machinePolicyDirs(goos, connector string) []string {
 		return []string{"/etc/cursor"}
 	case "copilot":
 		return []string{"/etc/github-copilot", "/etc/github-copilot/policy.d"}
+	case "opencode":
+		return []string{"/etc/opencode"}
 	}
 	return nil
+}
+
+// openCodePluginDir holds the managed OpenCode plugin the lifecycle renders
+// (<InstallRoot>/share/opencode).
+func openCodePluginDir(l managed.StandaloneLayout) string {
+	return filepath.Dir(enterprisepolicy.OpenCodeManagedPluginPath(l))
 }
 
 // MachinePolicyConnectors are the connectors whose DefenseClaw hooks can be

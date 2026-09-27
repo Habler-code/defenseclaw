@@ -29,7 +29,9 @@ func TestWindowsStandalonePerUserBuiltinRejectsImpostors(t *testing.T) {
 func TestWindowsStandalonePerUserConnectorRuntimeKinds(t *testing.T) {
 	for name, wantHookBinary := range map[string]bool{
 		"copilot": true, "antigravity": true, "devin": true, "hermes": true,
-		"opencode": false, "amp": false,
+		// The managed OpenCode plugin runs the hook binary; Amp has no
+		// machine route and stays plugin-only.
+		"opencode": true, "amp": false,
 	} {
 		hookBinary, ok := windowsStandalonePerUserConnector(name)
 		if !ok || hookBinary != wantHookBinary {
@@ -39,6 +41,11 @@ func TestWindowsStandalonePerUserConnectorRuntimeKinds(t *testing.T) {
 	for _, name := range []string{"codex", "claudecode", "cursor", "openhands", ""} {
 		if _, ok := windowsStandalonePerUserConnector(name); ok {
 			t.Fatalf("%q classified as per-user", name)
+		}
+	}
+	for name, want := range map[string]bool{"amp": true, "OpenCode": true, "copilot": false, "devin": false, "codex": false} {
+		if got := windowsStandaloneInAgentPluginConnector(name); got != want {
+			t.Fatalf("%s in-agent plugin = %t, want %t", name, got, want)
 		}
 	}
 }

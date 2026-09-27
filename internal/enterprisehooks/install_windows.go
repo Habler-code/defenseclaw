@@ -61,7 +61,11 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 	case "copilot":
 		result, err = installWindowsRuntimeOnlyManagedResult(ctx, opts)
 	default:
-		result, err = installWindowsGenericManagedResult(ctx, opts)
+		if windowsStandaloneRuntimeOnlyInstall(opts.ConnectorName) {
+			result, err = installWindowsRuntimeOnlyManagedResult(ctx, opts)
+		} else {
+			result, err = installWindowsGenericManagedResult(ctx, opts)
+		}
 	}
 	return result, true, err
 }
@@ -114,6 +118,9 @@ func verifyWindowsManagedResult(ctx context.Context, opts InstallOptions) (Insta
 	case "copilot":
 		return verifyWindowsRuntimeOnlyManagedResult(ctx, opts)
 	default:
+		if windowsStandaloneRuntimeOnlyInstall(opts.ConnectorName) {
+			return verifyWindowsRuntimeOnlyManagedResult(ctx, opts)
+		}
 		return verifyWindowsGenericManagedResult(ctx, opts)
 	}
 }

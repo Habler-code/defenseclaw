@@ -71,9 +71,8 @@ func (m *policyManager) options(cfg *config.Config) (enterprisepolicy.Options, e
 	opts.Root = env.Root
 	opts.StateDir = env.P(opts.StateDir)
 	opts.PublicPolicyPath = env.P(opts.PublicPolicyPath)
-	if env.Root != "" {
-		opts.OpenCodePluginPath = ""
-	}
+	// OpenCodePluginPath stays canonical: it is the path OpenCode's managed
+	// config names; enterprisepolicy inspects it under Root.
 	opts.SkipTrustChecks = m.skipTrust
 	opts.Now = env.Now
 	return opts, opts.Validate()
@@ -84,6 +83,10 @@ func (m *policyManager) Intended(cfg *config.Config) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Every transaction renders the managed OpenCode plugin with the
+	// deployment's files before it publishes, so the plan puts OpenCode on
+	// machine policy even on the first install, before the file exists.
+	opts.OpenCodePluginPlanned = true
 	return enterprisepolicy.MachinePolicyConnectors(opts, enterprisepolicy.StandaloneConnectors(cfg)), nil
 }
 

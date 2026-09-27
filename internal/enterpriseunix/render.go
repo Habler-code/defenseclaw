@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
@@ -76,6 +77,9 @@ func (e *Env) renderFiles(in renderInputs) ([]desiredFile, error) {
 	for _, policy := range vendorPolicies {
 		add(filepath.Join(e.Layout.VendorPolicyDir, filepath.FromSlash(policy.Path)), policy.Data, 0o644, root, "vendor-policy")
 	}
+	// The managed OpenCode plugin, readable by every user. OpenCode's
+	// managed config names it once it is installed (machine policy route).
+	add(enterprisepolicy.OpenCodeManagedPluginPath(e.Layout), enterprisepolicy.OpenCodeManagedPlugin(), 0o644, root, "opencode-plugin")
 
 	switch e.GOOS {
 	case "linux":

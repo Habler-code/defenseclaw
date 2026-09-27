@@ -11,6 +11,8 @@
 package enterprisepolicy
 
 import (
+	"bytes"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
@@ -28,17 +30,41 @@ import (
 // after user and project plugins (it saw the final input). That ordering is
 // observed, not documented, so the foreign-plugin guard stays on.
 //
-// The route needs an administrator-owned managed plugin artifact
-// (Options.OpenCodePluginPath); without one OpenCode stays per-user.
+// The route needs the administrator-owned managed plugin artifact
+// (Options.OpenCodePluginPath, the file OpenCodeManagedPlugin returns). The
+// standalone payload installs it on every platform; without a trusted copy
+// OpenCode falls back to the per-user route.
 const opencodeConnector = ConnectorOpenCode
 
 type opencodeTarget struct{}
 
 func (opencodeTarget) Name() string { return opencodeConnector }
 
+// openCodeManagedPlugin is the managed OpenCode plugin this release ships.
+// It holds no per-user or per-host value: every call goes through the
+// administrator-owned hook binary beside it (<InstallRoot>/bin), which
+// resolves the user's gateway transport from protected machine state.
+//
+//go:embed opencode_managed_plugin.js
+var openCodeManagedPlugin []byte
+
+// OpenCodeManagedPlugin returns the managed OpenCode plugin the standalone
+// payload installs at OpenCodeManagedPluginPath.
+func OpenCodeManagedPlugin() []byte {
+	return append([]byte(nil), openCodeManagedPlugin...)
+}
+
+// openCodeManagedPluginVendorLimit is the OpenCode behavior no machine file
+// can override (observed with OpenCode 1.18.32): pure mode drops managed
+// config plugins too, and a variable release builds honor replaces the
+// managed config directory. Such a session never calls DefenseClaw, so
+// status can report the entry in place while that session runs without it.
+const openCodeManagedPluginVendorLimit = "OpenCode skips the managed plugin in pure mode (--pure or OPENCODE_PURE=1) and when OPENCODE_TEST_MANAGED_CONFIG_DIR points at another directory; a session started that way runs without DefenseClaw's hooks on either route"
+
 // OpenCodeManagedPluginPath is where a standalone install places the
-// administrator-owned managed OpenCode plugin. The lifecycle passes it as
-// Options.OpenCodePluginPath only when the artifact is installed.
+// administrator-owned managed OpenCode plugin. StandaloneOptions always
+// sets it as Options.OpenCodePluginPath; OpenCode moves onto machine policy
+// only while a trusted file is installed there.
 func OpenCodeManagedPluginPath(layout managed.StandaloneLayout) string {
 	if layout.GOOS == "windows" {
 		return strings.TrimRight(layout.InstallRoot, `\`) + `\share\opencode\defenseclaw.js`
@@ -63,12 +89,86 @@ func OpenCodeManagedConfigPath(opts Options) (string, error) {
 	return joinFor(opts, dir, "opencode.json"), nil
 }
 
+// openCodeArtifactFile is where this process inspects the artifact.
+// OpenCodePluginPath is the path OpenCode loads, written into the managed
+// config; like every other unix machine path it is joined under Root in
+// rooted test trees.
+func (o Options) openCodeArtifactFile() string {
+	if o.goos() == "windows" {
+		return o.OpenCodePluginPath
+	}
+	return rooted(o, o.OpenCodePluginPath)
+}
+
+// openCodeArtifact reads the installed managed plugin. installed is true only
+// for a regular file that passes the machine policy trust rules (owned by an
+// administrator, not writable by other users, trusted ancestors): OpenCode
+// runs it for every user, so a file a standard user could write must never
+// become the machine route.
+func (o Options) openCodeArtifact() (data []byte, installed bool, err error) {
+	if o.OpenCodePluginPath == "" {
+		return nil, false, nil
+	}
+	data, exists, err := readPolicyFile(o, o.openCodeArtifactFile())
+	if err != nil || !exists {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
 func (o Options) openCodeArtifactInstalled() bool {
+	_, installed, err := o.openCodeArtifact()
+	return installed && err == nil
+}
+
+// openCodeMachineRoute reports whether OpenCode's route is machine policy:
+// the trusted artifact is installed, or the caller installs it before it
+// publishes (OpenCodePluginPlanned).
+func (o Options) openCodeMachineRoute() bool {
 	if o.OpenCodePluginPath == "" {
 		return false
 	}
-	info, err := os.Lstat(platformPath(o, o.OpenCodePluginPath))
-	return err == nil && info.Mode().IsRegular()
+	return o.OpenCodePluginPlanned || o.openCodeArtifactInstalled()
+}
+
+// InstallOpenCodeManagedPlugin writes the managed plugin this release ships
+// to OpenCodePluginPath, administrator-owned and readable by every user
+// (the Windows guardian installs it before it publishes OpenCode's managed
+// config; the unix lifecycle renders it with the deployment's files). An
+// existing copy is replaced unless it already matches. It reports whether it
+// wrote.
+func InstallOpenCodeManagedPlugin(opts Options) (bool, error) {
+	if strings.TrimSpace(opts.OpenCodePluginPath) == "" {
+		return false, errors.New("enterprise policy: the managed OpenCode plugin path is not set")
+	}
+	if err := validOpenCodePluginPath(opts); err != nil {
+		return false, fmt.Errorf("enterprise policy: %w", err)
+	}
+	current, installed, err := opts.openCodeArtifact()
+	if err == nil && installed && bytes.Equal(current, openCodeManagedPlugin) {
+		return false, nil
+	}
+	if _, err := writePolicyFile(opts, opts.openCodeArtifactFile(), openCodeManagedPlugin); err != nil {
+		return false, fmt.Errorf("enterprise policy: install the managed OpenCode plugin: %w", err)
+	}
+	return true, nil
+}
+
+// RemoveOpenCodeManagedPlugin deletes the installed managed plugin and the
+// share/opencode and share directories when they are left empty.
+func RemoveOpenCodeManagedPlugin(opts Options) error {
+	if strings.TrimSpace(opts.OpenCodePluginPath) == "" {
+		return nil
+	}
+	file := opts.openCodeArtifactFile()
+	if err := removePolicyFile(opts, file); err != nil {
+		return fmt.Errorf("enterprise policy: remove the managed OpenCode plugin: %w", err)
+	}
+	dir := dirFor(opts, file)
+	if err := removeDirIfEmpty(opts, dir); err != nil {
+		return err
+	}
+	return removeDirIfEmpty(opts, dirFor(opts, dir))
 }
 
 func (opencodeTarget) Paths(opts Options) ([]string, error) {
@@ -165,15 +265,43 @@ func inspectOpenCode(opts Options, current []byte, state *State) error {
 	if state.OwnedEntries != 1 {
 		state.conflict("OpenCode managed config has %d DefenseClaw plugin entries, want exactly one", state.OwnedEntries)
 	}
-	if !opts.openCodeArtifactInstalled() {
+	artifact, installed, artifactErr := opts.openCodeArtifact()
+	switch {
+	case artifactErr != nil:
+		state.conflict("managed OpenCode plugin %s is not trusted: %v", opts.OpenCodePluginPath, artifactErr)
+	case !installed:
 		state.conflict("managed OpenCode plugin %s is missing", opts.OpenCodePluginPath)
+	case !bytes.Equal(artifact, openCodeManagedPlugin):
+		state.conflict("managed OpenCode plugin %s does not match this release (sha256 %s, want %s)",
+			opts.OpenCodePluginPath, sha256Hex(artifact), sha256Hex(openCodeManagedPlugin))
 	}
 	state.detail("OpenCode ran the managed plugin after user and project plugins in live tests, but plugin order is not a documented contract; the foreign-plugin guard stays on")
+	state.detail("%s", openCodeManagedPluginVendorLimit)
 	return nil
 }
 
 func newOpenCodeState(opts Options, policy config.ResolvedConnectorPolicy, path string) State {
 	return State{Connector: opencodeConnector, Route: RouteMachinePolicy, Ownership: policy.Ownership, ForeignHooks: policy.ForeignHooks, Paths: []string{path}}
+}
+
+// openCodePerUserFallback moves state onto the per-user route, saying why,
+// when ownership is off or no trusted managed plugin is installed.
+func openCodePerUserFallback(opts Options, policy config.ResolvedConnectorPolicy, state *State) bool {
+	if policy.Ownership == config.MachinePolicyOwnershipOff {
+		state.Route = RoutePerUser
+		return true
+	}
+	_, installed, artifactErr := opts.openCodeArtifact()
+	if artifactErr == nil && installed {
+		return false
+	}
+	state.Route = RoutePerUser
+	if artifactErr != nil {
+		state.detail("managed OpenCode plugin %s is not trusted (%v); OpenCode uses the per-user plugin, guardian repair and the foreign-plugin guard", opts.OpenCodePluginPath, artifactErr)
+	} else {
+		state.detail("no managed OpenCode plugin artifact is installed; OpenCode uses the per-user plugin, guardian repair and the foreign-plugin guard")
+	}
+	return true
 }
 
 func (t opencodeTarget) Reconcile(opts Options) (State, error) {
@@ -186,9 +314,7 @@ func (t opencodeTarget) Reconcile(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newOpenCodeState(opts, policy, path)
-	if !opts.openCodeArtifactInstalled() || policy.Ownership == config.MachinePolicyOwnershipOff {
-		state.Route = RoutePerUser
-		state.detail("no managed OpenCode plugin artifact is installed; OpenCode uses the per-user plugin, guardian repair and the foreign-plugin guard")
+	if openCodePerUserFallback(opts, policy, &state) {
 		return state, nil
 	}
 	var created []string
@@ -234,8 +360,7 @@ func (t opencodeTarget) Verify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newOpenCodeState(opts, policy, path)
-	if !opts.openCodeArtifactInstalled() || policy.Ownership == config.MachinePolicyOwnershipOff {
-		state.Route = RoutePerUser
+	if openCodePerUserFallback(opts, policy, &state) {
 		return state, nil
 	}
 	current, exists, err := readPolicyFile(opts, path)

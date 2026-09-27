@@ -25,6 +25,28 @@ import (
 // reads. It republishes them before every reconcile, so a removed or edited
 // DefenseClaw entry is repaired within one cycle.
 
+func init() {
+	enterprisehooks.SetWindowsOpenCodeMachinePolicy(windowsOpenCodeMachinePolicy)
+}
+
+// windowsOpenCodeMachinePolicy is the OpenCode machine policy check the
+// guardian and enumerator route OpenCode rows by: OpenCode's managed config
+// path, and whether the trusted managed plugin is installed and named there.
+// Replaced in tests.
+var windowsOpenCodeMachinePolicy = func() (string, bool) {
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return "", false
+	}
+	opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
+	path, err := enterprisepolicy.OpenCodeManagedConfigPath(opts)
+	if err != nil {
+		return "", false
+	}
+	present, err := enterprisepolicy.MachinePolicyPresent(opts, enterprisepolicy.ConnectorOpenCode)
+	return path, err == nil && present
+}
+
 func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, bool, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return enterprisepolicy.Options{}, nil, false, nil

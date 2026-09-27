@@ -31,9 +31,10 @@ func IsWindowsGoOwned(connector string) bool {
 	return windowsGoOwnedTargets[connector]
 }
 
-// PublishWindowsGoOwned reconciles only the Go-owned Windows machine policy
-// targets among connectors and writes the public summary for every
-// connector, so the hook-side foreign-hook guard sees the whole policy.
+// PublishWindowsGoOwned installs the managed OpenCode plugin the payload
+// ships, reconciles only the Go-owned Windows machine policy targets among
+// connectors and writes the public summary for every connector, so the
+// hook-side foreign-hook guard sees the whole policy.
 func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 	if err := opts.Validate(); err != nil {
 		return Result{}, err
@@ -44,6 +45,16 @@ func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 	connectors = normalizeConnectors(connectors)
 	result := Result{}
 	var errs []error
+	if opts.OpenCodePluginPath != "" {
+		// The Windows Setup payload is the signed or hash-pinned binaries;
+		// the plugin they carry is written here, before OpenCode's managed
+		// config names it. A failure leaves OpenCode on the per-user route.
+		changed, err := InstallOpenCodeManagedPlugin(opts)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", ConnectorOpenCode, err))
+		}
+		result.Changed = result.Changed || changed
+	}
 	for _, name := range connectors {
 		if !windowsGoOwnedTargets[name] {
 			continue
@@ -81,14 +92,15 @@ func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 }
 
 // RemoveWindowsGoOwned removes the DefenseClaw entries of the Go-owned
-// Windows targets and the public summary. Administrator files are left
-// byte-identical.
+// Windows targets, the public summary and the managed OpenCode plugin.
+// Administrator files are left byte-identical.
 func RemoveWindowsGoOwned(opts Options) (Result, error) {
 	if opts.goos() != "windows" {
 		return Result{}, errors.New("RemoveWindowsGoOwned applies only to Windows")
 	}
 	result := Result{}
 	var errs []error
+	openCodeUnpublished := false
 	for _, name := range []string{ConnectorCopilot, ConnectorOpenCode} {
 		target, ok := TargetFor(name)
 		if !ok {
@@ -97,6 +109,8 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 		state, err := target.RemoveOwned(opts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		} else if name == ConnectorOpenCode {
+			openCodeUnpublished = true
 		}
 		result.Changed = result.Changed || state.Changed
 		result.States = append(result.States, state)
@@ -104,6 +118,13 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 	if opts.PublicPolicyPath != "" {
 		if err := removePolicyFile(opts, opts.PublicPolicyPath); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	// Only once OpenCode's managed config no longer names the plugin, so
+	// the config never points every user's OpenCode at a missing file.
+	if openCodeUnpublished {
+		if err := RemoveOpenCodeManagedPlugin(opts); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", ConnectorOpenCode, err))
 		}
 	}
 	return result, errors.Join(errs...)

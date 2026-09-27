@@ -200,11 +200,11 @@ func TestOpenCodeManagedPluginRoute(t *testing.T) {
 	if route := opts.Route("opencode"); route != RoutePerUser {
 		t.Fatalf("without an artifact OpenCode stays per-user, got %s", route)
 	}
-	opts.OpenCodePluginPath = filepath.Join(opts.Root, "opt/defenseclaw/share/opencode/defenseclaw.js")
+	opts.OpenCodePluginPath = testOpenCodePlugin
 	if route := opts.Route("opencode"); route != RoutePerUser {
 		t.Fatalf("a configured but missing artifact must stay per-user, got %s", route)
 	}
-	writeFile(t, opts.OpenCodePluginPath, "export default {}")
+	installTestOpenCodePlugin(t, &opts)
 	if route := opts.Route("opencode"); route != RouteMachinePolicy {
 		t.Fatalf("with an artifact OpenCode uses machine policy, got %s", route)
 	}

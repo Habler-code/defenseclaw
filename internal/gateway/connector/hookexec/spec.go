@@ -45,6 +45,12 @@ const (
 	// styleActionStderr: no stdout echo; on action=block write reason to
 	// stderr + exit 2. (windsurf-hook.sh)
 	styleActionStderr
+	// stylePluginBridge: echo the whole gateway response object as one JSON
+	// line and exit 0. An in-agent plugin that delegates to this runner (the
+	// managed OpenCode plugin) reads hook_output and mode from it exactly as
+	// it would from its own gateway call; failures print a hook_output deny.
+	// There is no .sh counterpart.
+	stylePluginBridge
 )
 
 // failResult is a fail-closed outcome: an optional connector-native JSON body
@@ -94,6 +100,18 @@ var specs = map[string]spec{
 		oversizedClosed:    failResult{exit: blockExit},
 		unreachableStrict:  failResult{exit: blockExit},
 		responseClosed:     failResult{exit: blockExit},
+	},
+	// The managed OpenCode plugin (machine policy) runs this binary for each
+	// event instead of calling the gateway itself, so the protected managed
+	// runtime selects the transport. Its failures are hook_output denials.
+	"opencode": {
+		connector: "opencode", hookName: "opencode-plugin", errLabel: "opencode",
+		subject: "opencode tool", endpoint: "/api/v1/opencode/hook",
+		outputField: "", style: stylePluginBridge,
+		defaultBlockReason: "DefenseClaw blocked this tool call.",
+		oversizedClosed:    failResult{body: openCodeDenyBody(tooLarge), exit: blockExit},
+		unreachableStrict:  failResult{body: openCodeDenyBody(failedClosed), exit: blockExit},
+		responseClosed:     failResult{body: openCodeDenyBody(failedClosed), exit: blockExit},
 	},
 	"claudecode": {
 		connector: "claudecode", hookName: "claude-code-hook", errLabel: "claude-code",
@@ -181,6 +199,11 @@ var specs = map[string]spec{
 		unreachableStrict: failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
 		responseClosed:    failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
 	},
+}
+
+// openCodeDenyBody is the managed OpenCode plugin's block answer.
+func openCodeDenyBody(reason string) string {
+	return `{"hook_output":{"decision":"deny","reason":` + mustJSONString(reason) + `}}`
 }
 
 func cursorFallbackOutput(event string, closed bool, reason string) string {

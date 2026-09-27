@@ -239,6 +239,116 @@ func TestDarwinInstallPublishesMachinePolicy(t *testing.T) {
 	}
 }
 
+// The payload ships the managed OpenCode plugin on Linux and macOS: the
+// lifecycle renders it into the install root, and the first install already
+// publishes OpenCode through machine policy and records it in the
+// descriptor (before this, OpenCode fell back to per-user hooks on every
+// host because nothing installed the plugin).
+func TestInstallShipsTheManagedOpenCodePlugin(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "opencode", "claudecode")})
+			requireOK(t, r)
+			plugin := enterprisepolicy.OpenCodeManagedPluginPath(h.env.Layout)
+			if got := h.read(plugin); got != string(enterprisepolicy.OpenCodeManagedPlugin()) {
+				t.Fatalf("%s does not hold the shipped managed plugin", plugin)
+			}
+			if got := h.mode(plugin); got != 0o644 {
+				t.Fatalf("managed plugin mode %04o, want 0644", got)
+			}
+			if got := h.mode(filepath.Dir(plugin)); got != 0o755 {
+				t.Fatalf("managed plugin directory mode %04o, want 0755", got)
+			}
+			config := "/etc/opencode/opencode.json"
+			if goos == "darwin" {
+				config = "/Library/Application Support/opencode/opencode.json"
+			}
+			if !strings.Contains(h.read(config), `"`+plugin+`"`) {
+				t.Fatalf("OpenCode managed config does not name %s:\n%s", plugin, h.read(config))
+			}
+			if got := descriptorConnectors(t, h); !reflect.DeepEqual(got, []string{"claudecode", "opencode"}) {
+				t.Fatalf("the first install must record OpenCode as machine policy, got %v", got)
+			}
+			if state, ok := r.MachinePolicy["opencode"]; !ok || len(state.Conflicts) != 0 {
+				t.Fatalf("OpenCode machine policy state: %+v (present %v)", state, ok)
+			}
+			if hasWarning(r, codeMachinePolicyIncomplete) {
+				t.Fatalf("unexpected incomplete warning: %+v", r.Warnings)
+			}
+			record, _ := h.env.loadDeployment()
+			if _, ok := record.Files[plugin]; !ok {
+				t.Fatalf("the managed plugin is not a recorded deployment file")
+			}
+
+			noop := h.run(Options{Action: ActionEnsure})
+			requireOK(t, noop)
+			if !noop.Noop {
+				t.Fatalf("ensure after install should be a no-op: %+v", noop.Warnings)
+			}
+			if err := os.WriteFile(h.env.P(plugin), []byte("export default {}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if problems := (&lifecycle{env: h.env, opts: Options{}, result: r}).verifyInstalled(t.Context(), record, false); !strings.Contains(strings.Join(problems, "\n"), plugin+" was modified after install") {
+				t.Fatalf("verify must report the edited plugin: %v", problems)
+			}
+			repaired := h.run(Options{Action: ActionEnsure})
+			requireOK(t, repaired)
+			if repaired.Noop || h.read(plugin) != string(enterprisepolicy.OpenCodeManagedPlugin()) {
+				t.Fatal("ensure did not restore the managed plugin")
+			}
+
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			if exists(h.env.P(plugin)) || exists(h.env.P(filepath.Dir(plugin))) {
+				t.Fatal("uninstall left the managed plugin behind")
+			}
+			if exists(h.env.P(config)) && strings.Contains(h.read(config), plugin) {
+				t.Fatalf("uninstall left DefenseClaw's OpenCode entry:\n%s", h.read(config))
+			}
+		})
+	}
+}
+
+// With OpenCode's machine policy ownership off the lifecycle still renders
+// the managed plugin file but leaves OpenCode on the per-user route (no
+// managed config entry, not in the descriptor). The guard summary must say
+// per-user too: on machine policy the per-user plugin's own foreign-plugin
+// check would deny every OpenCode tool call on DefenseClaw's own plugin.
+func TestOpenCodeOwnershipOffKeepsTheGuardSummaryPerUser(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			cfg := machinePolicyConfig(t, h, "opencode", "claudecode")
+			body, err := os.ReadFile(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			off := strings.Replace(string(body), "enterprise:\n  profile: standalone\n",
+				"enterprise:\n  profile: standalone\n  machine_policy:\n    connectors:\n      opencode:\n        ownership: \"off\"\n", 1)
+			if off == string(body) {
+				t.Fatal("test config has no enterprise block to extend")
+			}
+			if err := os.WriteFile(cfg, []byte(off), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
+			if !exists(h.env.P(enterprisepolicy.OpenCodeManagedPluginPath(h.env.Layout))) {
+				t.Fatal("the payload still renders the managed plugin")
+			}
+			if got := descriptorConnectors(t, h); !reflect.DeepEqual(got, []string{"claudecode"}) {
+				t.Fatalf("ownership off must keep OpenCode out of the descriptor, got %v", got)
+			}
+			summary, err := enterprisepolicy.ParsePublicPolicy([]byte(h.read(filepath.Join(h.env.Layout.ConfigDir, enterprisepolicy.PublicPolicyFileName))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := summary.Connectors["opencode"]; got.Route != enterprisepolicy.RoutePerUser || !got.Guard {
+				t.Fatalf("summary OpenCode entry %+v, want the guarded per-user route", got)
+			}
+		})
+	}
+}
+
 // envRunner records the environment the lifecycle passes to the gateway CLI.
 type envRunner struct {
 	*fakeRunner

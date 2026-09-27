@@ -26,11 +26,9 @@ import (
 
 // windowsStandalonePluginInstallMarker returns the install marker an in-agent
 // plugin connector (OpenCode, Amp) is rendered with in a standalone process.
-// Hook-binary connectors, the machine-policy connectors and Secure Client
-// get none.
+// Every other connector and Secure Client get none.
 func windowsStandalonePluginInstallMarker(connectorName string) (string, error) {
-	hookBinary, perUser := windowsStandalonePerUserConnector(connectorName)
-	if !perUser || hookBinary || !windowsEnterpriseStandaloneProcess() {
+	if !windowsStandaloneInAgentPluginConnector(connectorName) || !windowsEnterpriseStandaloneProcess() {
 		return "", nil
 	}
 	root, err := windowsStandaloneHookRuntimeRoot()
@@ -49,16 +47,17 @@ func windowsStandalonePluginInstallMarker(connectorName string) (string, error) 
 // loopback TCP and, unlike the hook binary, cannot compare the listener
 // with the SCM gateway process, so they make it prove it can derive the
 // user's per-user credential before sending that credential or any hook
-// payload (connector.UserScopedListenerProof). Hook-binary connectors, the
-// machine-policy connectors and Secure Client get neither.
+// payload (connector.UserScopedListenerProof). OpenCode counts even though
+// it is classed as a hook-binary connector for its machine policy route:
+// on the per-user route it still renders the TCP plugin. Every other
+// connector and Secure Client get neither.
 func applyWindowsStandalonePluginOptions(connectorName string, setup *connector.SetupOpts) error {
 	marker, err := windowsStandalonePluginInstallMarker(connectorName)
 	if err != nil {
 		return err
 	}
 	setup.ManagedInstallMarker = marker
-	hookBinary, perUser := windowsStandalonePerUserConnector(connectorName)
-	setup.ManagedListenerProof = perUser && !hookBinary && windowsEnterpriseStandaloneProcess()
+	setup.ManagedListenerProof = windowsStandaloneInAgentPluginConnector(connectorName) && windowsEnterpriseStandaloneProcess()
 	return nil
 }
 

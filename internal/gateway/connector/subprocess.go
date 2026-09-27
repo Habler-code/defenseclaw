@@ -677,6 +677,19 @@ func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, ma
 	)
 }
 
+// managedNativeHookRuntimeConnector reports whether a connector's hook is
+// administrator machine policy that runs the hook binary with a
+// runtime-only per-user footprint: Codex, Claude Code, Cursor, Copilot, and
+// OpenCode through its managed plugin on the standalone profile.
+func managedNativeHookRuntimeConnector(name string) bool {
+	switch name {
+	case "codex", "claudecode", "cursor", "copilot", "opencode":
+		return true
+	default:
+		return false
+	}
+}
+
 // ReconcileManagedNativeHookRuntime writes only DefenseClaw's connector-scoped
 // native runtime. It deliberately does not invoke the connector Setup method,
 // so Windows machine-policy connectors never read or modify the agent's
@@ -689,7 +702,7 @@ func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" && name != "copilot" {
+	if !managedNativeHookRuntimeConnector(name) {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -716,7 +729,7 @@ func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" && name != "copilot" {
+	if !managedNativeHookRuntimeConnector(name) {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")

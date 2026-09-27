@@ -91,10 +91,16 @@ type Options struct {
 	Policies map[string]config.ResolvedConnectorPolicy
 	// Now is injectable for tests.
 	Now func() time.Time
-	// OpenCodePluginPath is the absolute path of an administrator-owned
-	// managed OpenCode plugin artifact. When set, OpenCode moves from the
-	// per-user route to machine policy (see OpenCodeManagedPluginPath).
+	// OpenCodePluginPath is the absolute path of the administrator-owned
+	// managed OpenCode plugin artifact (see OpenCodeManagedPluginPath).
+	// OpenCode moves from the per-user route to machine policy while a
+	// trusted file is installed there.
 	OpenCodePluginPath string
+	// OpenCodePluginPlanned tells Route that the caller installs the managed
+	// OpenCode plugin before it publishes (the unix lifecycle renders it with
+	// the deployment's files), so planning puts OpenCode on machine policy
+	// before the file exists. Reconcile still requires the installed file.
+	OpenCodePluginPlanned bool
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
 }
@@ -262,11 +268,11 @@ func RouteFor(connector, goos string) string {
 }
 
 // Route is RouteFor with the options that can move a connector onto
-// machine policy (OpenCode needs the managed plugin artifact installed at
-// OpenCodePluginPath).
+// machine policy (OpenCode needs the trusted managed plugin artifact at
+// OpenCodePluginPath, or the caller's plan to install it).
 func (o Options) Route(connector string) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
-	if connector == ConnectorOpenCode && o.openCodeArtifactInstalled() {
+	if connector == ConnectorOpenCode && o.openCodeMachineRoute() {
 		return RouteMachinePolicy
 	}
 	return RouteFor(connector, o.goos())

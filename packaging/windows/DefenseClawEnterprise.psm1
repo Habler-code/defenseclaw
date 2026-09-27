@@ -16953,6 +16953,86 @@ function Get-DefenseClawStandaloneIPCSocketLeaves {
     )
 }
 
+function Get-DefenseClawStandaloneOpenCodePluginPaths {
+    <#
+        The managed OpenCode plugin a standalone deployment carries at
+        <InstallRoot>\share\opencode\defenseclaw.js (enterprisepolicy
+        OpenCodeManagedPluginPath) and its two directories. The guardian
+        writes it from the payload binaries before it publishes OpenCode's
+        managed config. Secure Client returns nothing and keeps its own
+        allow-list.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $null
+    }
+    $share = [IO.Path]::GetFullPath(
+        [IO.Path]::Combine([string]$Layout.InstallRoot, 'share')
+    ).TrimEnd('\')
+    $directory = [IO.Path]::Combine($share, 'opencode')
+    return @{
+        ShareDirectory = $share
+        PluginDirectory = $directory
+        PluginPath = [IO.Path]::Combine($directory, 'defenseclaw.js')
+    }
+}
+
+function Remove-DefenseClawStandaloneOpenCodeManagedPlugin {
+    <#
+        Standalone uninstall: after every DefenseClaw service is removed,
+        delete the managed OpenCode plugin and its share directories (the
+        guardian's teardown normally removed them already), so the
+        install-tree removal below sees only bin and libexec. A link, a
+        non-file plugin or anything else in those directories aborts the
+        uninstall. Secure Client is unchanged.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $paths = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
+    if ($null -eq $paths) {
+        return
+    }
+    $plugin = [string]$paths.PluginPath
+    # Every check runs before anything is deleted, so a refusal removes
+    # nothing.
+    $expected = @(
+        @([string]$paths.PluginDirectory, $plugin),
+        @([string]$paths.ShareDirectory, [string]$paths.PluginDirectory)
+    )
+    foreach ($pair in $expected) {
+        $directory = [string]$pair[0]
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory)) {
+            continue
+        }
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force
+        if (-not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "refusing to remove managed OpenCode path that is not a plain directory: $directory"
+        }
+        foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force)) {
+            $full = [IO.Path]::GetFullPath([string]$child.FullName)
+            if (-not [string]::Equals($full, [string]$pair[1], [StringComparison]::OrdinalIgnoreCase)) {
+                throw "refusing to remove unexpected managed OpenCode content: $full"
+            }
+            $plain = ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
+            if ([string]::Equals($full, $plugin, [StringComparison]::OrdinalIgnoreCase) -and
+                ($child.PSIsContainer -or -not $plain)) {
+                throw "refusing to remove managed OpenCode plugin that is not a plain file: $full"
+            }
+            if (-not $plain) {
+                throw "refusing to remove managed OpenCode path that is not a plain directory: $full"
+            }
+        }
+    }
+    if ([IO.File]::Exists($plugin)) {
+        [IO.File]::Delete($plugin)
+    }
+    foreach ($directory in @([string]$paths.PluginDirectory, [string]$paths.ShareDirectory)) {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory) {
+            [IO.Directory]::Delete($directory, $false)
+        }
+    }
+}
+
 function Test-DefenseClawStandaloneIPCSocketLeaf {
     <#
         True only for an allowed standalone socket leaf that is a plain
@@ -17044,6 +17124,13 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.InstallerPath,
         $Layout.ModulePath
     )
+    # Standalone also carries the managed OpenCode plugin under share\opencode.
+    $openCodePlugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
+    if ($null -ne $openCodePlugin) {
+        $allowedDirectories += [string]$openCodePlugin.ShareDirectory
+        $allowedDirectories += [string]$openCodePlugin.PluginDirectory
+        $allowedFiles += [string]$openCodePlugin.PluginPath
+    }
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Layout.InstallRoot -Recurse -Force) {
         if ($standaloneIPCLeaves.Count -gt 0 -and
             (Test-DefenseClawStandaloneIPCSocketLeaf -Item $item -Leaves $standaloneIPCLeaves)) {
@@ -21492,6 +21579,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             Remove-DefenseClawService -Name $Layout.BrokerServiceName
         }
         Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout
+        Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout
         $tombstone = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `

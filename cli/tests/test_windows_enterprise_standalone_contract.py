@@ -310,6 +310,39 @@ def test_standalone_uninstall_accepts_and_removes_only_its_ipc_directory() -> No
     assert "symbolic link named like the socket (removal)" in smoke
 
 
+def test_standalone_uninstall_accepts_and_removes_only_the_managed_opencode_plugin() -> None:
+    # The standalone guardian installs the managed OpenCode plugin from the
+    # payload binaries at <InstallRoot>\share\opencode\defenseclaw.js, the
+    # path enterprisepolicy.OpenCodeManagedPluginPath names. Without an
+    # allow-list entry uninstall refused "unexpected directory ... \share".
+    # The walk may accept only that file and its two directories in the
+    # standalone profile; removal happens after every service is gone and
+    # before the install tree is retired.
+    module = _text(MODULE)
+    opencode = _text(ROOT / "internal" / "enterprisepolicy" / "opencode.go")
+    assert "`\\share\\opencode\\defenseclaw.js`" in opencode
+    paths = _function_body(module, "Get-DefenseClawStandaloneOpenCodePluginPaths")
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in paths
+    assert "[IO.Path]::Combine([string]$Layout.InstallRoot, 'share')" in paths
+    assert "[IO.Path]::Combine($share, 'opencode')" in paths
+    assert "[IO.Path]::Combine($directory, 'defenseclaw.js')" in paths
+    removal = _function_body(module, "Remove-DefenseClawStandaloneOpenCodeManagedPlugin")
+    assert removal.index("unexpected managed OpenCode content") < removal.index("[IO.File]::Delete($plugin)")
+    assert "ReparsePoint" in removal
+    walk = _function_body(module, "Assert-DefenseClawManagedInstallTree")
+    assert "Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout" in walk
+    assert "$allowedFiles += [string]$openCodePlugin.PluginPath" in walk
+    uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
+    helper = uninstall.index("Remove-DefenseClawService -Name $Layout.SensorHelperServiceName")
+    removed = uninstall.index("Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout", helper)
+    retire = uninstall.index("Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout", removed)
+    assert helper < removed < retire
+    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-opencode-plugin-uninstall-smoke.ps1")
+    assert "Secure Client allow-list" in smoke
+    assert "symbolic link named like the plugin (removal)" in smoke
+    assert "refused removal still deleted content" in smoke
+
+
 def test_standalone_credential_store_permissions_return_after_a_reinstall() -> None:
     # A non-purge uninstall resets the retained credential store to
     # administrator-only ACLs; install, upgrade and reconcile give the gateway
@@ -363,6 +396,7 @@ STANDALONE_SMOKES = (
     "enterprise-profile-deployment-record-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
     "enterprise-standalone-ipc-uninstall-smoke.ps1",
+    "enterprise-standalone-opencode-plugin-uninstall-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",

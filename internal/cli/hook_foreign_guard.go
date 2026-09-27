@@ -60,6 +60,9 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		return
 	}
+	if !foreignHookGuardedEvent(opts.Connector, opts.Event) {
+		return
+	}
 	path, ok := hookForeignGuardSummaryPath()
 	if !ok {
 		return
@@ -108,6 +111,19 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 			fmt.Fprintf(stderr, "defenseclaw: warning: unapproved %s hook in %s (sha256:%s); your organization reports it but allows it to run\n", name, finding.Path, finding.Digest)
 		}
 	}
+}
+
+// foreignHookGuardedEvent reports whether the guard applies to an event.
+// The managed OpenCode plugin sends its load heartbeat, session lifecycle
+// and tool.execute.after telemetry through this hook too; none of them can
+// block, so only tool.execute.before is guarded (the plugin also runs
+// --foreign-hook-check once at load). Every other connector is guarded on
+// every event.
+func foreignHookGuardedEvent(connectorName, event string) bool {
+	if !strings.EqualFold(strings.TrimSpace(connectorName), enterprisepolicy.ConnectorOpenCode) {
+		return true
+	}
+	return strings.TrimSpace(event) == "tool.execute.before"
 }
 
 // standaloneForeignHookGuardBinary is the administrator-owned hook binary

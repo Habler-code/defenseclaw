@@ -12,7 +12,6 @@ package enterprisepolicy
 
 import (
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -127,8 +126,7 @@ func TestRemoveAfterReconcileKeepsLaterAdministratorEdits(t *testing.T) {
 			t.Skip("the unix plugin path is not absolute on Windows")
 		}
 		opts := testOptions(t)
-		opts.OpenCodePluginPath = filepath.Join(opts.Root, "opt/defenseclaw/share/opencode/defenseclaw.js")
-		writeFile(t, opts.OpenCodePluginPath, "export default {}")
+		installTestOpenCodePlugin(t, &opts)
 		path, _ := OpenCodeManagedConfigPath(opts)
 		writeFile(t, path, "{\n  \"plugin\": [\"company-audit\"]\n}\n")
 		mustReconcile(t, opencodeTarget{}, opts)

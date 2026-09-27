@@ -723,6 +723,16 @@ func (sp spec) decide(opts Options, body []byte) int {
 		}
 		return 0
 
+	case stylePluginBridge:
+		// The plugin applies the decision; hand it the response unchanged
+		// (compacted onto one line).
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, body); err != nil {
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
+		}
+		fmt.Fprintln(opts.Stdout, compact.String())
+		return 0
+
 	default:
 		return 0
 	}
@@ -973,6 +983,9 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		return sp.unreachableStrict.exit
 	case "openhands":
 		fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+message+`}`)
+		return sp.unreachableStrict.exit
+	case "opencode":
+		fmt.Fprintln(opts.Stdout, openCodeDenyBody(reason))
 		return sp.unreachableStrict.exit
 	}
 	if sp.failOpenOnly {

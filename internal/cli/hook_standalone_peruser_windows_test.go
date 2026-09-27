@@ -39,14 +39,15 @@ func TestStandaloneEnterpriseHookExecutableMatchesOnlyTheStandaloneBinary(t *tes
 }
 
 func TestHookConnectorFromArgsAcceptsStandalonePerUserHookConnectors(t *testing.T) {
-	for _, name := range []string{"copilot", "antigravity", "devin", "hermes", "codex", "claudecode", "cursor"} {
+	// OpenCode's managed plugin runs the hook binary for every event.
+	for _, name := range []string{"copilot", "antigravity", "devin", "hermes", "opencode", "codex", "claudecode", "cursor"} {
 		got, err := hookConnectorFromArgs([]string{"hook", "--connector", name})
 		if err != nil || got != name {
 			t.Fatalf("%s: got %q err=%v", name, got, err)
 		}
 	}
-	// Plugin connectors never execute the hook binary.
-	for _, name := range []string{"opencode", "amp", "openhands"} {
+	// A plugin-only connector never executes the hook binary.
+	for _, name := range []string{"amp", "openhands"} {
 		if _, err := hookConnectorFromArgs([]string{"hook", "--connector", name}); err == nil {
 			t.Fatalf("%s accepted as an enterprise-managed hook connector", name)
 		}

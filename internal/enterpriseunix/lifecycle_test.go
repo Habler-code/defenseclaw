@@ -491,6 +491,7 @@ func TestGuardianPathsDropinCoversHomeRootsAndMachinePolicy(t *testing.T) {
     codex: {}
     claudecode: {}
     antigravity: {}
+    opencode: {}
 `
 	body = strings.Replace(body, "enterprise:\n  profile: standalone\n", "enterprise:\n  profile: standalone\n  enrollment:\n    home_roots: [/srv/home]\n  network:\n    https_proxy: http://proxy.example.test:3128\n", 1)
 	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
@@ -499,7 +500,7 @@ func TestGuardianPathsDropinCoversHomeRootsAndMachinePolicy(t *testing.T) {
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 	requireOK(t, r)
 	dropin := h.read("/etc/systemd/system/" + unitGuardian + ".d/" + dropinPaths)
-	for _, want := range []string{"ReadWritePaths=-/srv/home", "ReadWritePaths=-/etc/codex", "ReadWritePaths=-/etc/claude-code"} {
+	for _, want := range []string{"ReadWritePaths=-/srv/home", "ReadWritePaths=-/etc/codex", "ReadWritePaths=-/etc/claude-code", "ReadWritePaths=-/etc/opencode"} {
 		if !strings.Contains(dropin, want) {
 			t.Fatalf("guardian drop-in lacks %q:\n%s", want, dropin)
 		}
@@ -511,19 +512,19 @@ func TestGuardianPathsDropinCoversHomeRootsAndMachinePolicy(t *testing.T) {
 	if !strings.Contains(network, "Environment=HTTPS_PROXY=http://proxy.example.test:3128") {
 		t.Fatalf("network drop-in: %s", network)
 	}
-	if !exists(h.env.P("/etc/codex")) || !exists(h.env.P("/etc/claude-code/managed-settings.d")) {
+	if !exists(h.env.P("/etc/codex")) || !exists(h.env.P("/etc/claude-code/managed-settings.d")) || !exists(h.env.P("/etc/opencode")) {
 		t.Fatal("machine policy parents not created")
 	}
 	record, _ := h.env.loadDeployment()
-	if !reflect.DeepEqual(record.CreatedDirs, []string{"/etc/claude-code", "/etc/claude-code/managed-settings.d", "/etc/codex"}) {
+	if !reflect.DeepEqual(record.CreatedDirs, []string{"/etc/claude-code", "/etc/claude-code/managed-settings.d", "/etc/codex", "/etc/opencode"}) {
 		t.Fatalf("created dirs %v", record.CreatedDirs)
 	}
 	descriptor, _ := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
-	if !reflect.DeepEqual(descriptor.MachinePolicyConnectors, []string{"claudecode", "codex"}) {
+	if !reflect.DeepEqual(descriptor.MachinePolicyConnectors, []string{"claudecode", "codex", "opencode"}) {
 		t.Fatalf("descriptor machine policy connectors %v", descriptor.MachinePolicyConnectors)
 	}
 	requireOK(t, h.run(Options{Action: ActionUninstall}))
-	if exists(h.env.P("/etc/codex")) {
+	if exists(h.env.P("/etc/codex")) || exists(h.env.P("/etc/opencode")) {
 		t.Fatal("uninstall kept an empty machine-policy parent it created")
 	}
 }

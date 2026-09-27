@@ -96,6 +96,7 @@ given unrestricted sudo or administrator rights is an administrator.
 | Claude Code `--bare` / `CLAUDE_CODE_SIMPLE=1` skip managed prompt and session hooks; tool hooks still run | Claude Code |
 | Amp has no machine plugin location and no defined plugin order | Amp |
 | OpenCode's managed-plugin-last order is observed, not documented | OpenCode |
+| OpenCode pure mode (`--pure`, `OPENCODE_PURE=1`) and `OPENCODE_TEST_MANAGED_CONFIG_DIR` start a session without any DefenseClaw plugin | OpenCode |
 | Hermes cannot fail closed; Copilot command-hook timeouts fail open | Hermes, Copilot |
 | A user holding the gateway endpoint while it is down can block hooks (they fail closed) but cannot forge an allow | All platforms |
 | A user holding the gateway's TCP port while it is down receives what the agents' own telemetry exporters send, including the sending user's per-user telemetry credential, and can then post telemetry attributed to that user until the user leaves enrollment | Codex, Claude Code, Gemini CLI, OpenHands and OmniGent telemetry; every restart on macOS and Windows, Linux only while an administrator has the socket unit stopped |

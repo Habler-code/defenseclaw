@@ -13,12 +13,63 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+// windowsOpenCodeMachinePolicy reports OpenCode's managed config path and
+// whether its machine policy is in force: the guardian installed the trusted
+// managed plugin and that config names it. enterprisepolicy owns the check
+// but imports this package on Windows, so the CLI installs it with
+// SetWindowsOpenCodeMachinePolicy. Unset, OpenCode stays on the per-user
+// route.
+var windowsOpenCodeMachinePolicy struct {
+	sync.Mutex
+	check func() (string, bool)
+}
+
+// SetWindowsOpenCodeMachinePolicy installs OpenCode's machine policy check.
+func SetWindowsOpenCodeMachinePolicy(check func() (policyPath string, inForce bool)) {
+	windowsOpenCodeMachinePolicy.Lock()
+	defer windowsOpenCodeMachinePolicy.Unlock()
+	windowsOpenCodeMachinePolicy.check = check
+}
+
+func windowsOpenCodeMachinePolicyState() (string, bool) {
+	windowsOpenCodeMachinePolicy.Lock()
+	check := windowsOpenCodeMachinePolicy.check
+	windowsOpenCodeMachinePolicy.Unlock()
+	if check == nil {
+		return "", false
+	}
+	return check()
+}
+
+// windowsOpenCodeMachinePolicyInForce reports whether OpenCode rows install
+// only the per-user runtime the managed plugin's hook calls resolve (like
+// Copilot) rather than the per-user plugin. Replaced in tests.
+var windowsOpenCodeMachinePolicyInForce = func() bool {
+	if !windowsEnterpriseStandaloneProcess() {
+		return false
+	}
+	_, inForce := windowsOpenCodeMachinePolicyState()
+	return inForce
+}
+
+// windowsStandaloneRuntimeOnlyInstall reports whether a row installs and
+// verifies only the per-user runtime: Copilot always, OpenCode while its
+// machine policy is in force.
+func windowsStandaloneRuntimeOnlyInstall(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if windowsStandaloneRuntimeOnlyConnector(name) {
+		return true
+	}
+	return name == "opencode" && windowsOpenCodeMachinePolicyInForce()
+}
 
 // windowsRuntimeOnlyPolicyPath is the vendor machine policy file that
 // carries the DefenseClaw hook for a runtime-only connector. The standalone
@@ -31,6 +82,13 @@ var windowsRuntimeOnlyPolicyPath = func(connectorName string) (string, error) {
 			return "", fmt.Errorf("enterprise hooks: resolve trusted ProgramData: %w", err)
 		}
 		return filepath.Join(programData, "GitHub", "Copilot", "policy.d", "90-defenseclaw.json"), nil
+	case "opencode":
+		// OpenCode's managed config, which names the managed plugin.
+		path, _ := windowsOpenCodeMachinePolicyState()
+		if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+			return "", errors.New("enterprise hooks: the OpenCode machine policy path is not resolved")
+		}
+		return filepath.Clean(path), nil
 	default:
 		return "", fmt.Errorf("enterprise hooks: %q has no Windows machine policy runtime", connectorName)
 	}
@@ -61,7 +119,7 @@ func resolveWindowsRuntimeOnlyTarget(opts InstallOptions) (windowsGenericManaged
 		return target, "", err
 	}
 	name := target.conn.Name()
-	if !windowsStandaloneRuntimeOnlyConnector(name) {
+	if !windowsStandaloneRuntimeOnlyInstall(name) {
 		return target, "", fmt.Errorf("enterprise hooks: connector %q is not a Windows machine policy runtime connector", name)
 	}
 	target.setup.HookFailMode = "closed"

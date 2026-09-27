@@ -8,6 +8,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,5 +60,22 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 	}
 	if strings.Join(collected, ",") != bob+","+alice {
 		t.Fatalf("block records must be collected for every user: %v", collected)
+	}
+}
+
+// The guardian routes OpenCode rows by OpenCode's machine policy: the
+// managed config under the trusted ProgramData, in force only while the
+// trusted managed plugin is installed and named there.
+func TestWindowsOpenCodeMachinePolicyCheckNamesTheManagedConfig(t *testing.T) {
+	layout, _, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		t.Skipf("no standalone layout: %v", err)
+	}
+	path, inForce := windowsOpenCodeMachinePolicy()
+	if dir := filepath.Join(programData, "opencode"); !strings.EqualFold(filepath.Dir(path), dir) {
+		t.Fatalf("OpenCode policy path = %q, want one in %s", path, dir)
+	}
+	if _, err := os.Lstat(enterprisepolicy.OpenCodeManagedPluginPath(layout)); errors.Is(err, os.ErrNotExist) && inForce {
+		t.Fatal("OpenCode machine policy reported in force without the managed plugin")
 	}
 }
