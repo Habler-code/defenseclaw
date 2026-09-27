@@ -181,7 +181,7 @@ tcp4       0      0  10.0.0.1.18970         *.*                    LISTEN       
 		// eight forged socket fields: the field count matches and only the
 		// column formats give it away. The rest of the row becomes a line
 		// that does not start with a protocol.
-		"newline-split row": darwin26Netstat(gateway("x:345 0 0 0 0 0 0 0 0\nq", 4242)),
+		"newline-split row":       darwin26Netstat(gateway("x:345 0 0 0 0 0 0 0 0\nq", 4242)),
 		"newline-split short row": darwin26Netstat(gateway("x\ntcp4", 4242)),
 		// Another socket's name (29 bytes) starts a gateway-port LISTEN
 		// line; the eight trailing fields it inherits leave it short.
@@ -196,11 +196,11 @@ tcp4       0      0  10.0.0.1.18970         *.*                    LISTEN       
 		}
 	}
 	for label, row := range map[string]string{
-		"non-numeric pid":  "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:12x 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
-		"empty pid":        "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw: 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
-		"short gencnt":     "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:7970 00100 00000006 10cb7 00000000 00000900 1 0 000000\n",
-		"non-hex options":  "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:7970 00100 0000000g 0000000000010cb7 00000000 00000900 1 0 000000\n",
-		"extra field":      "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 x gw:7970 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
+		"non-numeric pid": "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:12x 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
+		"empty pid":       "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw: 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
+		"short gencnt":    "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:7970 00100 00000006 10cb7 00000000 00000900 1 0 000000\n",
+		"non-hex options": "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 gw:7970 00100 0000000g 0000000000010cb7 00000000 00000900 1 0 000000\n",
+		"extra field":     "tcp4 0 0 127.0.0.1.18970 *.* LISTEN 0 0 1048576 1048576 x gw:7970 00100 00000006 0000000000010cb7 00000000 00000900 1 0 000000\n",
 	} {
 		if out, ok := parseDarwinNetstat(t, darwin26Netstat()+row); ok {
 			t.Fatalf("%s: lookup succeeded with pids %q, want refusal", label, out)
