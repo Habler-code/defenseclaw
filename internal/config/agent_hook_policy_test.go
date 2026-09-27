@@ -94,3 +94,65 @@ func TestManagedHookPolicyDefaultsAreSecure(t *testing.T) {
 		t.Fatal("legacy claude_code block opt-out was not honored")
 	}
 }
+
+// TestClaudeCodeAllowUnmanagedHooksReadsEitherBlock is the regression for
+// the documented opt-out being ignored: claude_code.allow_unmanaged_hooks
+// must hold when the config also has a connector_hooks.claudecode block
+// for another setting, and the connector_hooks form must work alone.
+func TestClaudeCodeAllowUnmanagedHooksReadsEitherBlock(t *testing.T) {
+	raw := []byte(`config_version: 8
+claude_code:
+  enabled: true
+  allow_unmanaged_hooks: true
+connector_hooks:
+  claudecode:
+    enabled: true
+    scan_on_stop: true
+`)
+	if _, err := ParseCompileObservabilityV8("managed-hook-policy-both-v8.yaml", raw,
+		ObservabilityV8CompileOptions{DefaultDataDir: "/tmp/defenseclaw"}); err != nil {
+		t.Fatalf("v8 compiler rejected both Claude Code blocks: %v", err)
+	}
+	var parsed Config
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.ConnectorHookConfig("claudecode").ScanOnStop {
+		t.Fatal("premise: connector_hooks.claudecode was not parsed")
+	}
+	if !parsed.ClaudeCodeAllowUnmanagedHooks() {
+		t.Fatal("claude_code.allow_unmanaged_hooks ignored beside a connector_hooks.claudecode block")
+	}
+	for name, cfg := range map[string]*Config{
+		"connector_hooks only": {ConnectorHooks: map[string]AgentHookConfig{
+			"claudecode": {AllowUnmanagedHooks: true},
+		}},
+		"connector_hooks opt-out with legacy block": {
+			ClaudeCode: AgentHookConfig{Enabled: true},
+			ConnectorHooks: map[string]AgentHookConfig{
+				"claudecode": {AllowUnmanagedHooks: true},
+			},
+		},
+	} {
+		if !cfg.ClaudeCodeAllowUnmanagedHooks() {
+			t.Errorf("%s: opt-out not honored", name)
+		}
+	}
+	for name, cfg := range map[string]*Config{
+		"both blocks without opt-out": {
+			ClaudeCode: AgentHookConfig{Enabled: true},
+			ConnectorHooks: map[string]AgentHookConfig{
+				"claudecode": {Enabled: true},
+			},
+		},
+		"another connector's flag": {ConnectorHooks: map[string]AgentHookConfig{
+			"cursor": {AllowUnmanagedHooks: true},
+			"codex":  {AllowUnmanagedHooks: true},
+		}},
+		"codex legacy block": {Codex: AgentHookConfig{AllowUnmanagedHooks: true}},
+	} {
+		if cfg.ClaudeCodeAllowUnmanagedHooks() {
+			t.Errorf("%s: opted out of the Claude managed-hooks-only lock", name)
+		}
+	}
+}
