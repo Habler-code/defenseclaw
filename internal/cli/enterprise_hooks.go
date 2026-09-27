@@ -516,6 +516,9 @@ var (
 	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
+	// A root guardian on Unix resolves each target's watch paths in the
+	// per-target worker, never with its own credentials.
+	enterpriseHookReconcileWatchPaths = enterprisehooks.ResolveWatchPaths
 	// Reconcile-level seams for the enrollment publication gate (#894).
 	enterpriseHookReconcileAwaitingFirstSignIn = enterpriseHookTargetAwaitingFirstSignIn
 	enterpriseHookReconcileStageDeferred       = stageEnterpriseHookDeferredManagedPolicies
@@ -1702,18 +1705,17 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 			}
 			err = applyEnterpriseHookMachinePolicyPreferences(&opts)
-			if err == nil {
-				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
-					for _, dir := range dirs {
-						watchDirs[dir] = struct{}{}
-					}
+			watch := enterpriseHookReconcileWatchPaths(ctx, opts)
+			if err == nil && watch.DirsErr == nil {
+				for _, dir := range watch.Dirs {
+					watchDirs[dir] = struct{}{}
 				}
 			}
-			if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
-				for _, f := range own.ExclusiveWriter {
+			if watch.OwnershipErr == nil {
+				for _, f := range watch.Ownership.ExclusiveWriter {
 					exclusiveFiles[f] = struct{}{}
 				}
-				for _, f := range own.SharedWriter {
+				for _, f := range watch.Ownership.SharedWriter {
 					sharedFiles[f] = struct{}{}
 				}
 			}

@@ -50,8 +50,9 @@ const (
 	targetWorkerTimeout         = 2 * time.Minute
 	targetWorkerWaitDelay       = 5 * time.Second
 
-	targetOperationInstall = "enterprise-hooks.install"
-	targetOperationVerify  = "enterprise-hooks.verify"
+	targetOperationInstall    = "enterprise-hooks.install"
+	targetOperationVerify     = "enterprise-hooks.verify"
+	targetOperationWatchPaths = "enterprise-hooks.watch-paths"
 
 	targetWorkerExitProtocol = 2
 	targetWorkerExitIdentity = 3
@@ -211,6 +212,39 @@ func init() {
 		}
 		return result, nil
 	})
+	RegisterTargetOperation(targetOperationWatchPaths, func(_ context.Context, target TargetCredentials, payload json.RawMessage) (any, error) {
+		opts, err := decodeTargetInstallRequest(target, payload)
+		if err != nil {
+			return nil, err
+		}
+		return resolveTargetWatchPaths(opts), nil
+	})
+}
+
+// targetWatchPathsResult carries WatchDirs and WatchOwnedFiles back from
+// the worker; each keeps its own error, as the in-process calls do.
+type targetWatchPathsResult struct {
+	Dirs            []string `json:"dirs,omitempty"`
+	DirsError       string   `json:"dirs_error,omitempty"`
+	ExclusiveWriter []string `json:"exclusive_writer,omitempty"`
+	SharedWriter    []string `json:"shared_writer,omitempty"`
+	OwnershipError  string   `json:"ownership_error,omitempty"`
+}
+
+func resolveTargetWatchPaths(opts InstallOptions) targetWatchPathsResult {
+	var result targetWatchPathsResult
+	if dirs, err := WatchDirs(opts); err != nil {
+		result.DirsError = err.Error()
+	} else {
+		result.Dirs = dirs
+	}
+	if ownership, err := WatchOwnedFiles(opts); err != nil {
+		result.OwnershipError = err.Error()
+	} else {
+		result.ExclusiveWriter = ownership.ExclusiveWriter
+		result.SharedWriter = ownership.SharedWriter
+	}
+	return result
 }
 
 func decodeTargetInstallRequest(target TargetCredentials, payload json.RawMessage) (InstallOptions, error) {
@@ -225,33 +259,40 @@ func decodeTargetInstallRequest(target TargetCredentials, payload json.RawMessag
 	return request.installOptions(), nil
 }
 
-// installThroughTargetWorker is the root path of Install and Verify on Unix.
-// The guardian only resolves the target's identity (read-only) and then
-// hands the whole operation, including every validation and repair, to a
-// worker running as that user.
-func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operation string) (InstallResult, error) {
+// targetWorkerInstallCall is a root guardian's request for one target's
+// Install-shaped worker operation, with the identity it resolved.
+type targetWorkerInstallCall struct {
+	target    TargetCredentials
+	connector string
+	dataDir   string
+	payload   json.RawMessage
+}
+
+// prepareTargetWorkerInstallCall resolves the target's identity (read-only)
+// and encodes opts for the worker, which does every validation and repair.
+func prepareTargetWorkerInstallCall(opts InstallOptions) (targetWorkerInstallCall, error) {
 	if targetWorkerActive.Load() {
-		return InstallResult{}, errTargetWorkerRecursion
+		return targetWorkerInstallCall{}, errTargetWorkerRecursion
 	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
-		return InstallResult{}, err
+		return targetWorkerInstallCall{}, err
 	}
 	uid, gid, err := resolveOwner(home, opts.OwnerUID, opts.OwnerGID)
 	if err != nil {
-		return InstallResult{}, err
+		return targetWorkerInstallCall{}, err
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
 	if name == "" {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector is required")
+		return targetWorkerInstallCall{}, fmt.Errorf("enterprise hooks: connector is required")
 	}
 	if opts.Registry != nil {
 		conn, ok := opts.Registry.Get(name)
 		if !ok {
-			return InstallResult{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
+			return targetWorkerInstallCall{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
 		}
 		if !connector.IsKnownBuiltinConnector(conn.Name()) {
-			return InstallResult{}, fmt.Errorf(
+			return targetWorkerInstallCall{}, fmt.Errorf(
 				"enterprise hooks: connector %q is not built in; a root guardian runs only built-in connectors in the per-target worker",
 				name,
 			)
@@ -263,13 +304,30 @@ func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operat
 	}
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
+		return targetWorkerInstallCall{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
 	}
 	payload, err := json.Marshal(newTargetInstallRequest(opts, home, uid, gid))
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: encode target install request: %w", err)
+		return targetWorkerInstallCall{}, fmt.Errorf("enterprise hooks: encode target install request: %w", err)
 	}
-	raw, err := targetWorkerRunner(ctx, TargetCredentials{UserHome: home, UID: uid, GID: gid}, operation, payload)
+	return targetWorkerInstallCall{
+		target:    TargetCredentials{UserHome: home, UID: uid, GID: gid},
+		connector: name,
+		dataDir:   dataDir,
+		payload:   payload,
+	}, nil
+}
+
+// installThroughTargetWorker is the root path of Install and Verify on Unix.
+// The guardian only resolves the target's identity (read-only) and then
+// hands the whole operation, including every validation and repair, to a
+// worker running as that user.
+func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operation string) (InstallResult, error) {
+	call, err := prepareTargetWorkerInstallCall(opts)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	raw, err := targetWorkerRunner(ctx, call.target, operation, call.payload)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -279,10 +337,48 @@ func installThroughTargetWorker(ctx context.Context, opts InstallOptions, operat
 	}
 	// The worker runs as the target user, so bind its answer to the target
 	// the guardian asked about.
-	if result.Connector != name || filepath.Clean(result.UserHome) != home || filepath.Clean(result.DataDir) != dataDir {
+	if result.Connector != call.connector || filepath.Clean(result.UserHome) != call.target.UserHome ||
+		filepath.Clean(result.DataDir) != call.dataDir {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: target worker returned a result for a different target")
 	}
 	return result, nil
+}
+
+// resolveWatchPathsThroughTargetWorker is the root path of ResolveWatchPaths
+// on Unix: the worker, running as the target user, computes WatchDirs and
+// WatchOwnedFiles.
+func resolveWatchPathsThroughTargetWorker(ctx context.Context, opts InstallOptions) (WatchPathSet, error) {
+	call, err := prepareTargetWorkerInstallCall(opts)
+	if err != nil {
+		return WatchPathSet{}, err
+	}
+	raw, err := targetWorkerRunner(ctx, call.target, targetOperationWatchPaths, call.payload)
+	if err != nil {
+		return WatchPathSet{}, err
+	}
+	var result targetWatchPathsResult
+	if err := decodeTargetOperationJSON(raw, &result); err != nil {
+		return WatchPathSet{}, fmt.Errorf("enterprise hooks: decode target worker watch paths: %w", err)
+	}
+	// The guardian watches these directories with its own credentials, so it
+	// accepts only what WatchDirs can return: clean absolute paths inside the
+	// target home. Owned files are only compared with event paths.
+	for _, dir := range result.Dirs {
+		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || !pathInside(call.target.UserHome, dir) {
+			return WatchPathSet{}, fmt.Errorf("enterprise hooks: target worker returned watch directory %q outside the target home", dir)
+		}
+	}
+	set := WatchPathSet{
+		Dirs:      result.Dirs,
+		Ownership: WatchOwnership{ExclusiveWriter: result.ExclusiveWriter, SharedWriter: result.SharedWriter},
+	}
+	if result.DirsError != "" {
+		set.DirsErr = errors.New(result.DirsError)
+	}
+	if result.OwnershipError != "" {
+		set.OwnershipErr = errors.New(result.OwnershipError)
+	}
+	return set, nil
 }
 
 // runTargetOperation validates the target and runs op with its credentials.

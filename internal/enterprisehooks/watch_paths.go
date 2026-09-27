@@ -5,12 +5,38 @@
 package enterprisehooks
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+// WatchPathSet is what a guardian watches for one target: the result of
+// WatchDirs and the result of WatchOwnedFiles, each with its own error.
+type WatchPathSet struct {
+	Dirs         []string
+	DirsErr      error
+	Ownership    WatchOwnership
+	OwnershipErr error
+}
+
+// ResolveWatchPaths returns WatchDirs and WatchOwnedFiles for one target.
+// Resolving them reads files in the target's home (the agent discovery cache
+// and connector config locations), so on Unix a root caller resolves both in
+// the per-target worker, running as the target user, exactly like Install
+// and Verify; a worker failure is reported in both errors. Other callers get
+// the in-process results.
+func ResolveWatchPaths(ctx context.Context, opts InstallOptions) WatchPathSet {
+	if set, handled := platformResolveWatchPaths(ctx, opts); handled {
+		return set
+	}
+	var set WatchPathSet
+	set.Dirs, set.DirsErr = WatchDirs(opts)
+	set.Ownership, set.OwnershipErr = WatchOwnedFiles(opts)
+	return set
+}
 
 // WatchDirs returns the existing user-owned directories that a privileged
 // enterprise guardian should watch for tamper/repair events. It performs the

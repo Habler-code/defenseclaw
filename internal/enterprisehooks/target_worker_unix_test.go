@@ -917,3 +917,154 @@ func TestRootGuardianRepairsThroughWorkerWithoutChangingItsOwnCredentials(t *tes
 		t.Fatal(err)
 	}
 }
+
+// Resolving watch paths reads files in the target's home, so a root guardian
+// resolves them only in the per-target worker and never in its own process.
+func TestRootWatchPathsResolveInTargetWorker(t *testing.T) {
+	target := currentTestTarget(t)
+	stubTargetProcessEUID(t, 0)
+	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
+	opts.AgentVersion = ""
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+
+	if _, err := WatchDirs(opts); !errors.Is(err, errRootTargetPathOperation) {
+		t.Fatalf("WatchDirs in a root process = %v, want refusal", err)
+	}
+	if _, err := WatchOwnedFiles(opts); !errors.Is(err, errRootTargetPathOperation) {
+		t.Fatalf("WatchOwnedFiles in a root process = %v, want refusal", err)
+	}
+
+	reply := targetWatchPathsResult{
+		Dirs:            []string{filepath.Join(target.UserHome, ".codex"), dataDir},
+		ExclusiveWriter: []string{filepath.Join(dataDir, "hooks", "codex-hook.sh")},
+		SharedWriter:    []string{filepath.Join(target.UserHome, ".codex", "config.toml")},
+	}
+	var operations []string
+	original := targetWorkerRunner
+	targetWorkerRunner = func(_ context.Context, workerTarget TargetCredentials, operation string, payload json.RawMessage) (json.RawMessage, error) {
+		options, err := decodeTargetInstallRequest(workerTarget, payload)
+		if err != nil {
+			return nil, err
+		}
+		if workerTarget != (TargetCredentials{UserHome: target.UserHome, UID: target.UID, GID: target.GID}) || options.AgentVersion != "" {
+			return nil, fmt.Errorf("worker asked for %+v with agent version %q", workerTarget, options.AgentVersion)
+		}
+		operations = append(operations, operation)
+		return json.Marshal(reply)
+	}
+	t.Cleanup(func() { targetWorkerRunner = original })
+
+	set := ResolveWatchPaths(context.Background(), opts)
+	if !slices.Equal(operations, []string{targetOperationWatchPaths}) {
+		t.Fatalf("worker operations = %v, want one %s", operations, targetOperationWatchPaths)
+	}
+	if set.DirsErr != nil || set.OwnershipErr != nil || !slices.Equal(set.Dirs, reply.Dirs) ||
+		!slices.Equal(set.Ownership.ExclusiveWriter, reply.ExclusiveWriter) ||
+		!slices.Equal(set.Ownership.SharedWriter, reply.SharedWriter) {
+		t.Fatalf("root ResolveWatchPaths = %+v, want the worker's answer %+v", set, reply)
+	}
+
+	// Each half keeps its own error, as the in-process calls do.
+	reply.Dirs, reply.DirsError = nil, "enterprise hooks: specific data dir failure"
+	set = ResolveWatchPaths(context.Background(), opts)
+	if set.DirsErr == nil || set.DirsErr.Error() != reply.DirsError || set.OwnershipErr != nil ||
+		!slices.Equal(set.Ownership.SharedWriter, reply.SharedWriter) {
+		t.Fatalf("root ResolveWatchPaths with a dirs failure = %+v", set)
+	}
+
+	// The guardian watches the returned directories itself, so one outside
+	// the target home is refused.
+	reply.DirsError = ""
+	reply.Dirs = []string{filepath.Dir(target.UserHome)}
+	set = ResolveWatchPaths(context.Background(), opts)
+	if set.DirsErr == nil || !strings.Contains(set.DirsErr.Error(), "outside the target home") || set.OwnershipErr == nil {
+		t.Fatalf("root ResolveWatchPaths accepted a watch dir outside the home: %+v", set)
+	}
+}
+
+// requireCodexWatchFixture creates the Codex config and hook directory that
+// WatchDirs and WatchOwnedFiles report for a codex target.
+func requireCodexWatchFixture(t *testing.T, home string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".defenseclaw", "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTargetWorkerSubprocessResolvesWatchPaths(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	target := currentTestTarget(t)
+	requireCodexWatchFixture(t, target.UserHome)
+	opts := codexInstallOptions(target.UserHome, target.UID, target.GID)
+	opts.AgentVersion = ""
+	// The worker reads the user's agent discovery cache for the version; a
+	// FIFO there must not hold it up.
+	if err := syscall.Mkfifo(filepath.Join(target.UserHome, ".defenseclaw", "agent_discovery.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantDirs, err := WatchDirs(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOwnership, err := WatchOwnedFiles(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	set, err := resolveWatchPathsThroughTargetWorker(ctx, opts)
+	if err != nil {
+		t.Fatalf("worker watch paths: %v", err)
+	}
+	if set.DirsErr != nil || set.OwnershipErr != nil || !slices.Equal(set.Dirs, wantDirs) ||
+		!reflect.DeepEqual(set.Ownership, wantOwnership) {
+		t.Fatalf("worker watch paths = %+v\nwant dirs %v ownership %+v", set, wantDirs, wantOwnership)
+	}
+}
+
+func TestRootGuardianResolvesWatchPathsInWorkerDespiteFIFOCache(t *testing.T) {
+	f := newRootWorkerFixture(t)
+	f.mkdirTarget(t, filepath.Join(f.home, ".defenseclaw"))
+	f.mkdirTarget(t, f.hookDir)
+	cache := filepath.Join(f.home, ".defenseclaw", "agent_discovery.json")
+	if err := syscall.Mkfifo(cache, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(cache, f.uid, f.gid); err != nil {
+		t.Fatal(err)
+	}
+	opts := codexInstallOptions(f.home, f.uid, f.gid)
+	opts.AgentVersion = ""
+	if _, err := WatchDirs(opts); !errors.Is(err, errRootTargetPathOperation) {
+		t.Fatalf("WatchDirs in the root guardian = %v, want refusal", err)
+	}
+	done := make(chan WatchPathSet, 1)
+	go func() { done <- ResolveWatchPaths(context.Background(), opts) }()
+	var set WatchPathSet
+	select {
+	case set = <-done:
+	case <-time.After(30 * time.Second):
+		if writer, err := os.OpenFile(cache, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = writer.Close()
+		}
+		<-done
+		t.Fatal("root ResolveWatchPaths blocked on a FIFO agent discovery cache")
+	}
+	if set.DirsErr != nil || set.OwnershipErr != nil {
+		t.Fatalf("root ResolveWatchPaths = %+v", set)
+	}
+	for _, want := range []string{filepath.Dir(f.codexConfig), filepath.Join(f.home, ".defenseclaw"), f.hookDir} {
+		if !slices.Contains(set.Dirs, want) {
+			t.Fatalf("root watch dirs = %v, missing %s", set.Dirs, want)
+		}
+	}
+	if !slices.Contains(set.Ownership.SharedWriter, f.codexConfig) {
+		t.Fatalf("root owned shared-writer files = %v, missing %s", set.Ownership.SharedWriter, f.codexConfig)
+	}
+}
