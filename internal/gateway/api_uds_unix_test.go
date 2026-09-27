@@ -293,6 +293,20 @@ func TestManagedHookSocketServesOnlyAuthorizedHookRoutes(t *testing.T) {
 	if status, body := post("/api/v1/claude-code/hook", nil, event); status == http.StatusForbidden || status == http.StatusUnauthorized {
 		t.Fatalf("enrolled per-user connector refused: %d %s", status, body)
 	}
+	session := map[string]any{
+		"key":           map[string]any{"connector": "claudecode", "session": "socket-session", "process": "agent-process"},
+		"session_start": true,
+		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: project hook",
+			"findings": []map[string]any{{"connector": "claudecode", "scope": "project", "path": "/repo/.claude/settings.json", "digest": "abcd"}}},
+	}
+	if status, body := post("/api/v1/foreign-hook-session/claudecode", nil, session); status != http.StatusOK || !strings.Contains(body, "restart the agent") {
+		t.Fatalf("hook socket did not record the session block: %d %s", status, body)
+	}
+	session["session_start"] = false
+	session["decision"] = map[string]any{"deny": false}
+	if status, body := post("/api/v1/foreign-hook-session/claudecode", nil, session); status != http.StatusOK || !strings.Contains(body, "Earlier in this agent session") {
+		t.Fatalf("hook socket lost the session block: %d %s", status, body)
+	}
 	if status, body := post("/api/v1/cursor/hook", nil, event); status != http.StatusForbidden || !strings.Contains(body, managedHookReasonUIDUnregistered) {
 		t.Fatalf("unenrolled per-user connector: %d %s", status, body)
 	}

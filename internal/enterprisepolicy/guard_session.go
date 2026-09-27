@@ -42,10 +42,9 @@ import (
 // process cannot be named. A restarted agent that resumes a session starts
 // clean; the process that held the old hooks stays blocked.
 //
-// The records live in the user's data directory under the account's home,
-// next to the block records, and like them are advisory: the user owns
-// them. They stop a snapshotted hook from keeping its effect after an edit;
-// the guard's other checks do not depend on them.
+// Standalone records live in the gateway's protected data directory, in a
+// namespace chosen from the transport-verified caller uid or SID. The
+// account-home path remains available to callers outside that profile.
 
 const (
 	sessionDirName = "foreign-hook-sessions"
@@ -119,7 +118,10 @@ func ForeignHookStateHash(findings []Finding) string {
 type SessionUpdate struct {
 	// AccountHome is the account's home from the system account database.
 	AccountHome string
-	Key         SessionKey
+	// StateDir selects gateway-owned storage. When set, failures to read or
+	// write the record deny the call instead of falling back to a fresh scan.
+	StateDir string
+	Key      SessionKey
 	// SessionStart marks the agent's session-start event, where the
 	// snapshot is taken.
 	SessionStart bool
@@ -130,8 +132,12 @@ type SessionUpdate struct {
 
 // SessionPath is the record for one key kind and ID under accountHome.
 func SessionPath(accountHome, connector, kind, id string) string {
+	return sessionPathInDir(filepath.Join(accountHome, ".defenseclaw", sessionDirName), connector, kind, id)
+}
+
+func sessionPathInDir(dir, connector, kind, id string) string {
 	name := kind + "-" + sha256Hex([]byte(connector + "\x00" + kind + "\x00" + id))[:40] + ".json"
-	return filepath.Join(accountHome, ".defenseclaw", sessionDirName, name)
+	return filepath.Join(dir, name)
 }
 
 const (
@@ -148,14 +154,22 @@ const (
 //   - otherwise the snapshot is recorded (replaced at a session start) and
 //     the scan's own decision stands.
 //
-// A record that exists but cannot be read counts as a denial: nothing
-// proves the session clean. Writes are best effort: the returned decision
-// never depends on one succeeding.
+// A record that exists but cannot be read counts as a denial. With StateDir
+// (the standalone gateway path), a failed read or write always denies the
+// call. The older account-home path retains its best-effort write behavior.
 func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	decision := update.Decision
 	home := strings.TrimSpace(update.AccountHome)
+	strict := update.StateDir != ""
+	dir := filepath.Join(home, ".defenseclaw", sessionDirName)
+	if strict {
+		dir = update.StateDir
+	}
 	key := update.Key
-	if home == "" || !filepath.IsAbs(home) || !key.valid() {
+	if !filepath.IsAbs(dir) || !key.valid() || (!strict && (home == "" || !filepath.IsAbs(home))) {
+		if strict {
+			return sessionUnavailableDecision(decision)
+		}
 		return decision
 	}
 	now := update.Now
@@ -171,12 +185,35 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		if id == "" {
 			return loaded{}, nil
 		}
-		path := SessionPath(home, key.Connector, kind, id)
+		path := sessionPathInDir(dir, key.Connector, kind, id)
 		record, exists, err := readSessionRecord(path)
+		if strict && err == nil && exists && !validGatewaySessionRecord(record, key, kind) {
+			err = fmt.Errorf("invalid session record")
+		}
 		return loaded{path: path, record: record, exists: exists}, err
 	}
 	process, processErr := load(sessionKindProcess, key.Process)
 	session, sessionErr := load(sessionKindSession, key.Session)
+	if strict && (processErr != nil || sessionErr != nil) {
+		return sessionUnavailableDecision(decision)
+	}
+	if strict {
+		newRecords := 0
+		for _, entry := range []loaded{process, session} {
+			if entry.path != "" && !entry.exists {
+				newRecords++
+			}
+		}
+		if err := gatewaySessionCapacity(dir, now, newRecords, process.path, session.path); err != nil {
+			return sessionUnavailableDecision(decision)
+		}
+	}
+	write := func(path string, record SessionRecord) bool {
+		if err := writeSessionRecord(path, record); err != nil {
+			return !strict
+		}
+		return true
+	}
 
 	var sticky *SessionRecord
 	switch {
@@ -232,9 +269,13 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 			switch {
 			case entry.path == "":
 			case entry.exists && entry.record.Blocked:
-				touchSessionRecord(entry.path, now)
+				if !touchSessionRecord(entry.path, now) && strict {
+					return sessionUnavailableDecision(decision)
+				}
 			default:
-				_ = writeSessionRecord(entry.path, blocked(entry))
+				if !write(entry.path, blocked(entry)) {
+					return sessionUnavailableDecision(decision)
+				}
 			}
 		}
 		decision.Reason = strings.TrimSpace(decision.Reason) + " " + sessionBlockNote
@@ -259,26 +300,55 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 			if entry.exists && entry.record.Started != "" {
 				carried.Started, carried.State = entry.record.Started, entry.record.State
 			}
-			_ = writeSessionRecord(entry.path, carried)
+			if !write(entry.path, carried) {
+				return sessionUnavailableDecision(decision)
+			}
 		}
 		for _, entry := range []loaded{process, session} {
 			if entry.exists && entry.record.Blocked {
-				touchSessionRecord(entry.path, now)
+				if !touchSessionRecord(entry.path, now) && strict {
+					return sessionUnavailableDecision(decision)
+				}
 			}
 		}
 		return stickySessionDecision(decision, key.Connector, *sticky)
 	}
 
 	if process.path != "" && !process.exists {
-		_ = writeSessionRecord(process.path, fresh(process))
+		if !write(process.path, fresh(process)) {
+			return sessionUnavailableDecision(decision)
+		}
 	}
 	if session.path != "" && (!session.exists || update.SessionStart) {
 		record := fresh(loaded{})
-		_ = writeSessionRecord(session.path, record)
+		if !write(session.path, record) {
+			return sessionUnavailableDecision(decision)
+		}
 	}
-	if update.SessionStart {
-		pruneSessionRecords(filepath.Join(home, ".defenseclaw", sessionDirName), now)
+	if update.SessionStart && !strict {
+		pruneSessionRecords(dir, now)
 	}
+	return decision
+}
+
+func validGatewaySessionRecord(record SessionRecord, key SessionKey, kind string) bool {
+	if record.Version != 1 || record.Connector != key.Connector || record.Started == "" ||
+		len(record.State) != len("sha256:")+64 || !strings.HasPrefix(record.State, "sha256:") ||
+		record.Blocked && record.Reason == "" && record.Path == "" {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339, record.Started); err != nil {
+		return false
+	}
+	if kind == sessionKindProcess {
+		return record.Process == key.Process
+	}
+	return record.Session == key.Session
+}
+
+func sessionUnavailableDecision(decision GuardDecision) GuardDecision {
+	decision.Deny = true
+	decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."
 	return decision
 }
 
@@ -401,12 +471,15 @@ func writePrivateUserFile(path string, data []byte) error {
 	return nil
 }
 
-func touchSessionRecord(path string, now time.Time) {
+func touchSessionRecord(path string, now time.Time) bool {
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) < sessionTouchAfter {
-		return
+	if err != nil || !info.Mode().IsRegular() {
+		return false
 	}
-	_ = os.Chtimes(path, now, now)
+	if now.Sub(info.ModTime()) < sessionTouchAfter {
+		return true
+	}
+	return os.Chtimes(path, now, now) == nil
 }
 
 // pruneSessionRecords removes records untouched for sessionRecordTTL and,
@@ -457,6 +530,59 @@ func pruneSessionRecords(dir string, now time.Time) {
 	for _, entry := range kept[:len(kept)-sessionDirLimit] {
 		_ = os.Remove(entry.path)
 	}
+}
+
+// gatewaySessionCapacity expires old gateway records and refuses new ones
+// beyond the per-user limit. It never evicts a live blocked record to make
+// room for a caller that can create arbitrary session IDs.
+func gatewaySessionCapacity(dir string, now time.Time, newRecords int, activePaths ...string) error {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		if newRecords > sessionDirLimit {
+			return fmt.Errorf("session record limit reached")
+		}
+		return nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("session store directory unavailable")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	kept := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		active := false
+		for _, current := range activePaths {
+			if current == path {
+				active = true
+				break
+			}
+		}
+		if !active && now.Sub(info.ModTime()) > sessionRecordTTL {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			continue
+		}
+		kept++
+	}
+	if kept+newRecords > sessionDirLimit {
+		return fmt.Errorf("session record limit reached")
+	}
+	return nil
 }
 
 func (r SessionRecord) bounded() SessionRecord {

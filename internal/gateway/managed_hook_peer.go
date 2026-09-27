@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -414,6 +415,7 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 // not reachable through it at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	limiter := perIPRateLimiter(20, 40)
 	inspectMux := http.NewServeMux()
 	inspectMux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)

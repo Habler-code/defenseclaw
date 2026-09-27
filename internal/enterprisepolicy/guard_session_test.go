@@ -281,3 +281,37 @@ func TestSessionStateIgnoresRequestsWithoutAHome(t *testing.T) {
 		}
 	}
 }
+
+func TestGatewaySessionStateDeniesWhenRecordCannotBeWrittenOrRead(t *testing.T) {
+	root := t.TempDir()
+	blockedParent := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	update := SessionUpdate{
+		StateDir: filepath.Join(blockedParent, "records"),
+		Key:      SessionKey{Connector: "claudecode", Session: "s-1"},
+		Decision: GuardDecision{},
+	}
+	if decision := ApplyForeignHookSession(update); !decision.Deny || !strings.Contains(decision.Reason, "cannot verify") {
+		t.Fatalf("unwritable gateway record must deny: %+v", decision)
+	}
+
+	update.StateDir = filepath.Join(root, "records")
+	if err := os.MkdirAll(update.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := sessionPathInDir(update.StateDir, "claudecode", sessionKindSession, "s-1")
+	if err := os.WriteFile(path, []byte("{bad"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if decision := ApplyForeignHookSession(update); !decision.Deny || !strings.Contains(decision.Reason, "cannot verify") {
+		t.Fatalf("unreadable gateway record must deny: %+v", decision)
+	}
+	if err := os.WriteFile(path, []byte(`{"v":1,"connector":"claudecode","session":"s-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if decision := ApplyForeignHookSession(update); !decision.Deny || !strings.Contains(decision.Reason, "cannot verify") {
+		t.Fatalf("incomplete gateway record must deny: %+v", decision)
+	}
+}

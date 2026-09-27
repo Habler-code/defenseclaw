@@ -70,13 +70,19 @@ func TestIdentityIsUnknownWithoutAnAgentAncestor(t *testing.T) {
 		"PowerShell in Windows Terminal":   chain("defenseclaw-hook.exe", "pwsh.exe", "WindowsTerminal.exe"),
 		"only shells up to pid 1":          {100: {PID: 100, Parent: 101, Name: "defenseclaw-hook", Start: 5}, 101: {PID: 101, Parent: 1, Name: "sh", Start: 4}},
 		"a missing parent":                 {100: {PID: 100, Parent: 101, Name: "defenseclaw-hook", Start: 5}},
-		"a parent with no name":            {100: {PID: 100, Parent: 101, Name: "defenseclaw-hook", Start: 5}, 101: {PID: 101, Parent: 102, Start: 4}},
 		"more shells than the walk allows": chain("defenseclaw-hook", "sh", "sh", "sh", "sh", "sh", "sh", "sh", "sh", "sh", "node"),
 	}
 	for name, processes := range cases {
 		if got := identityFrom(processes.lookup, 100); got != "" {
 			t.Errorf("%s: identity = %q, want unknown", name, got)
 		}
+	}
+}
+
+func TestIdentityUsesAnUnnamedAgentProcess(t *testing.T) {
+	processes := chain("defenseclaw-hook", "sh", "")
+	if got, want := identityFrom(processes.lookup, 100), processes[102].identity(); got != want {
+		t.Fatalf("unnamed agent identity = %q, want process identity %q", got, want)
 	}
 }
 

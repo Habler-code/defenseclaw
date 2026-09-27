@@ -317,6 +317,7 @@ func (a *APIServer) serveUserScoped(
 	mark func(context.Context) context.Context,
 ) {
 	ctx := PromoteSessionIfAuthenticated(r.Context())
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
 	if mark != nil {
 		ctx = mark(ctx)
 	}

@@ -59,7 +59,10 @@ foreign-hook guard closes that gap for agents without a vendor lock.
    sessions the same agent process clears, compacts or resumes into, because
    they keep the hooks the process loaded. Remove the hook, then restart the
    agent: a new agent process starts clean, including one that resumes the
-   old session. The snapshots live in `~/.defenseclaw/foreign-hook-sessions/`.
+   old session. The gateway keeps the snapshots in its protected data
+   directory, under `foreign-hook-sessions/`, keyed by the caller's verified
+   uid or SID. If the gateway cannot read or write a snapshot, the call is
+   denied.
 
 The guard reads files without following links and bounds their size. A file
 it cannot read or parse counts as unapproved, so a malformed hook file blocks
@@ -142,16 +145,17 @@ approved digests; it contains no secrets.
 
 - The guard knows the locations each vendor documents. A new location in a
   future agent release is outside the guard until DefenseClaw adds it.
-- The session snapshots and the recorded environment locations are files in
-  the user's own data directory. A user who deletes a snapshot, or a hook
-  that removes itself before DefenseClaw's session-start check reads the
-  files, is not held by the session block; the per-call check still denies
-  while a foreign hook is present. For Claude Code and Codex, the vendor lock
+- The gateway stores session snapshots in its protected data directory;
+  users cannot clear a block by deleting files in their home. The recorded
+  environment locations remain in the user's data directory. A hook that
+  removes itself before DefenseClaw's session-start check reads the files
+  is not held by the session block; the per-call check still denies while a
+  foreign hook is present. For Claude Code and Codex, the vendor lock
   (`managed_hooks_only: enforce`, the default) is the complete control.
 - The session block follows the agent process when DefenseClaw can name it
-  (the nearest parent of the hook that is not a shell or launcher). When it
-  cannot, only the session ID carries the block, so a session the same
-  process clears into starts without it.
+  (the nearest parent of the hook that is not a shell or launcher), using its
+  PID and start time even if the executable name is unavailable. If the OS
+  process lookup fails, only the session ID carries the block.
 - The guardian cleans an environment-moved location only after a DefenseClaw
   hook has run with that environment. A relative `OPENCODE_CONFIG` and
   `OPENCODE_CONFIG_CONTENT` are never cleaned; the hook still blocks while

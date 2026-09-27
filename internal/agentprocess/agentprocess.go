@@ -121,9 +121,12 @@ func identityFrom(lookup func(int) (Process, error), self int) string {
 			return ""
 		}
 		name := normalizedName(parent.Name)
-		if name == "" || sessionRootNames[name] {
+		if sessionRootNames[name] {
 			return ""
 		}
+		// Some process APIs cannot resolve an executable name even when they
+		// return a stable PID and start time. The name is only a hint for
+		// skipping wrappers; it must not be required to name the process.
 		if !transparent(name) {
 			return parent.identity()
 		}

@@ -12,6 +12,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,6 +58,10 @@ var hookForeignGuardRecordEnv = enterprisepolicy.RecordEnvRedirect
 // hookForeignGuardAgentProcess names the agent process that runs the hook,
 // which keeps the hooks it loaded for its lifetime (replaceable in tests).
 var hookForeignGuardAgentProcess = agentprocess.Identity
+
+// hookForeignGuardExchange is replaceable in tests. Production reaches the
+// standalone gateway over its authenticated hook transport.
+var hookForeignGuardExchange = exchangeForeignHookSession
 
 // applyEnterpriseForeignHookGuard denies a hook invocation on a standalone
 // managed host while an unapproved hook that could rewrite the tool call
@@ -233,10 +238,11 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 // take milliseconds.
 const hookForeignGuardMaxScan = 5 * time.Second
 
-// hookForeignGuardScanBudget is at most half the invocation's request
-// budget, so a denial is always delivered before the agent's timeout.
+// hookForeignGuardScanBudget gives the scan and gateway session exchange a
+// quarter of the request budget each, leaving at least half for the hook's
+// ordinary gateway request.
 func hookForeignGuardScanBudget(connector, event string) time.Duration {
-	budget := hookexec.RequestTimeout(connector, event) / 2
+	budget := hookexec.RequestTimeout(connector, event) / 4
 	if budget > hookForeignGuardMaxScan || budget <= 0 {
 		budget = hookForeignGuardMaxScan
 	}
@@ -284,21 +290,55 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		request.WorkingDirs = facts.workingDirs[1:]
 	}
 	decision := enterprisepolicy.EvaluateForeignHooks(request)
-	if policy.ForeignHooks != config.ForeignHooksRemove || accountHome == "" {
+	if policy.ForeignHooks != config.ForeignHooksRemove {
 		return decision, accountHome
 	}
 	now := time.Now()
-	if redirect, ok := enterprisepolicy.ObservedEnvRedirect(request); ok {
-		_ = hookForeignGuardRecordEnv(accountHome, name, redirect, now)
+	if accountHome != "" {
+		if redirect, ok := enterprisepolicy.ObservedEnvRedirect(request); ok {
+			_ = hookForeignGuardRecordEnv(accountHome, name, redirect, now)
+		}
 	}
-	decision = enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
-		AccountHome:  accountHome,
+	update := enterprisepolicy.SessionExchange{
 		Key:          enterprisepolicy.SessionKey{Connector: name, Session: facts.session, Process: hookForeignGuardAgentProcess()},
 		SessionStart: sessionStart,
 		Decision:     decision,
-		Now:          now,
-	})
+	}
+	decision, err := hookForeignGuardExchange(name, event, deadline, update)
+	if err != nil {
+		decision = enterprisepolicy.GuardDecision{
+			Deny:     true,
+			Reason:   "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent.",
+			Findings: update.Decision.Findings,
+		}
+	}
 	return decision, accountHome
+}
+
+func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	if enterpriseManagedHookRuntimeNoop(name) {
+		return enterprisepolicy.GuardDecision{}, fmt.Errorf("standalone hook runtime unavailable")
+	}
+	opts := buildHookOptionsForRuntime(name, event, "", "closed", true)
+	deadline := scanDeadline.Add(hookForeignGuardScanBudget(name, event))
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	data, err := json.Marshal(update)
+	if err != nil {
+		return enterprisepolicy.GuardDecision{}, err
+	}
+	response, err := hookexec.ExchangeForeignHookSession(ctx, opts, name, data)
+	if err != nil {
+		return enterprisepolicy.GuardDecision{}, err
+	}
+	var decision enterprisepolicy.GuardDecision
+	if err := json.Unmarshal(response, &decision); err != nil {
+		return enterprisepolicy.GuardDecision{}, err
+	}
+	if update.Decision.Deny && !decision.Deny || decision.Deny && decision.Reason == "" {
+		return enterprisepolicy.GuardDecision{}, fmt.Errorf("invalid session gateway decision")
+	}
+	return decision, nil
 }
 
 // hookForeignGuardSessionStart reports an agent's session-start event,

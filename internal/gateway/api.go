@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -62,10 +63,11 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health *SidecarHealth
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
+	health               *SidecarHealth
+	client               *Client
+	store                *audit.Store
+	logger               *audit.Logger
+	foreignHookSessionMu sync.Mutex
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -568,6 +570,14 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 }
 
 func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
+	if name, ok := strings.CutPrefix(path, enterprisepolicy.ForeignHookSessionPathPrefix); ok && name != "" && !strings.Contains(name, "/") {
+		if a.connectorRegistry != nil {
+			_, found := a.connectorRegistry.Get(name)
+			return name, found
+		}
+		_, found := sharedDefaultRegistry().Get(name)
+		return name, found
+	}
 	if path == "/api/v1/codex/notify" {
 		return "codex", true
 	}
@@ -866,6 +876,7 @@ func isAddrInUse(err error) bool {
 
 func (a *APIServer) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
+	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
 	mux.HandleFunc("/api/v1/admin/shutdown", a.handleShutdown)

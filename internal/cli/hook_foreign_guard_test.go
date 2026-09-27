@@ -67,6 +67,8 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	previousPath, previousLoad := hookForeignGuardSummaryPath, hookForeignGuardLoad
 	previousAccountHome, previousEnvHomes := hookForeignGuardAccountHome, hookForeignGuardEnvHomes
 	previousProcess := hookForeignGuardAgentProcess
+	previousExchange := hookForeignGuardExchange
+	gatewayState := t.TempDir()
 	hookForeignGuardSummaryPath = func() (string, bool) { return "/etc/defenseclaw/machine-policy.json", true }
 	hookForeignGuardLoad = func(string) (*enterprisepolicy.PublicPolicy, error) {
 		if fixture.loadErr != nil {
@@ -80,10 +82,20 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	hookForeignGuardAccountHome = func() string { return fixture.home }
 	hookForeignGuardEnvHomes = func() []string { return nil }
 	hookForeignGuardAgentProcess = func() string { return fixture.process }
+	hookForeignGuardExchange = func(_ string, _ string, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+		if exchange.Key.Session == "" && exchange.Key.Process == "" {
+			return exchange.Decision, nil
+		}
+		return enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
+			StateDir: filepath.Join(gatewayState, exchange.Key.Connector),
+			Key:      exchange.Key, SessionStart: exchange.SessionStart, Decision: exchange.Decision,
+		}), nil
+	}
 	t.Cleanup(func() {
 		hookForeignGuardSummaryPath, hookForeignGuardLoad = previousPath, previousLoad
 		hookForeignGuardAccountHome, hookForeignGuardEnvHomes = previousAccountHome, previousEnvHomes
 		hookForeignGuardAgentProcess = previousProcess
+		hookForeignGuardExchange = previousExchange
 	})
 	return fixture
 }

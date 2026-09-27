@@ -89,6 +89,42 @@ func TestForeignHookGuardKeepsDenyingASessionThatStartedWithAForeignHook(t *test
 	}
 }
 
+func TestForeignHookGuardUserSnapshotDeletionCannotClearTheBlock(t *testing.T) {
+	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+	fixture.guard("claudecode")
+	foreign := filepath.Join(fixture.project, ".claude", "settings.local.json")
+	fixture.write(t, foreign, claudeForeignHook)
+	start := fixture.runEvent(t, "claudecode", "SessionStart", "session_id", "s-1")
+	if start.ManagedRuntimeFailure == "" {
+		t.Fatal("foreign hook at session start must deny")
+	}
+	if err := os.Remove(foreign); err != nil {
+		t.Fatal(err)
+	}
+	// A user can remove the old user-owned record. Gateway-held state must
+	// still keep the process blocked after that file disappears.
+	if err := os.RemoveAll(filepath.Join(fixture.home, ".defenseclaw", "foreign-hook-sessions")); err != nil {
+		t.Fatal(err)
+	}
+	later := fixture.runEvent(t, "claudecode", "PreToolUse", "session_id", "s-1")
+	if !strings.Contains(later.ManagedRuntimeFailure, "restart the agent") {
+		t.Fatalf("deleting user-owned snapshots cleared the block: %q", later.ManagedRuntimeFailure)
+	}
+}
+
+func TestForeignHookGuardDeniesWhenGatewaySessionStateIsUnavailable(t *testing.T) {
+	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+	fixture.guard("claudecode")
+	fixture.process = "agent-process"
+	hookForeignGuardExchange = func(string, string, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+		return enterprisepolicy.GuardDecision{}, os.ErrPermission
+	}
+	decision := fixture.runEvent(t, "claudecode", "SessionStart", "session_id", "s-1")
+	if !strings.HasPrefix(decision.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) || !strings.Contains(decision.ManagedRuntimeFailure, "restart the agent") {
+		t.Fatalf("unavailable gateway state must block the hook: %q", decision.ManagedRuntimeFailure)
+	}
+}
+
 // Cursor names the session conversation_id, and Copilot sessionId; both
 // hold the block the same way.
 func TestForeignHookGuardReadsEachAgentsSessionID(t *testing.T) {
