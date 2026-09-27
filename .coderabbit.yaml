@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reviews at most 150 files per pull request and skips larger
+# ones entirely. Keep its review on product code: exclude tests, test
+# fixtures, test harness scripts and generated files, which CI already
+# exercises. Everything else (Go, PowerShell modules and installers, shell
+# hooks, workflows, schemas, hand-written docs) stays in scope.
+reviews:
+  path_filters:
+    - "!**/*_test.go"
+    - "!**/tests/**"
+    - "!cli/tests/**"
+    - "!**/testdata/**"
+    - "!testdata/**"
+    - "!scripts/test-*"
+    - "!**/*.pb.go"
+    - "!**/*_pb2.py"
+    - "!docs-site/content/docs/reference/env-vars.mdx"
