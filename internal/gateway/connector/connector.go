@@ -181,9 +181,9 @@ type SetupOpts struct {
 	ClaudeCodeAllowUnmanagedHooks bool
 
 	// CursorApprovedForeignHooks is the administrator allowlist
-	// (connector_hooks.cursor.approved_foreign_hooks) of sha256 handler
-	// digests that the managed Cursor hook accepts in user- or project-level
-	// hook files. nil means "not supplied by this caller": machine-policy
+	// (connector_hooks.cursor.approved_foreign_hooks) of sha256 approval
+	// digests that the managed Cursor hook accepts in user-, project- or
+	// plugin-level hook files. nil means "not supplied by this caller": machine-policy
 	// writers keep the allowlist already published in protected state. A
 	// non-nil (possibly empty) slice replaces it.
 	CursorApprovedForeignHooks []string
