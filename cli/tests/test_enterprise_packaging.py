@@ -118,6 +118,43 @@ def test_systemd_guardian_units_share_the_bounded_privilege_contract():
     assert "ReadWritePaths=/etc/defenseclaw/hook-guardian" in enumerator
 
 
+
+def _unit_values(lines: list[str], key: str) -> set[str]:
+    values: set[str] = set()
+    for line in lines:
+        if line.startswith(key + "="):
+            values.update(line.split("=", 1)[1].split())
+    return values
+
+
+def test_systemd_root_hook_units_keep_setid_capabilities_under_a_syscall_filter():
+    # systemd 255 (Ubuntu 24.04) drops CAP_SETUID from a service that names
+    # User= and sets SystemCallFilter= unless the capability is also ambient.
+    # The hook guardian, its reconcile run and the enumerator then refuse to
+    # start their per-user workers, the package's postinstall ensure fails
+    # verify and rolls back, and the deb never installs. The CI deb install
+    # lane (scripts/test-enterprise-unix-install.sh) runs this on the real
+    # systemd; this pins the unit contract.
+    checked = set()
+    for unit in sorted(SYSTEMD.glob("*.service")):
+        lines = _unit(unit.name)
+        needed = _unit_values(lines, "CapabilityBoundingSet") & {"CAP_SETUID", "CAP_SETGID"}
+        if not needed or not _unit_values(lines, "User") or not _unit_values(lines, "SystemCallFilter"):
+            continue
+        assert needed <= _unit_values(lines, "AmbientCapabilities"), unit.name
+        checked.add(unit.name)
+    assert checked == {
+        "defenseclaw-hook-enumerator.service",
+        "defenseclaw-hook-guardian-reconcile.service",
+        "defenseclaw-hook-guardian.service",
+    }
+    for name in checked:
+        # Ambient capabilities never widen the bounding set.
+        lines = _unit(name)
+        assert _unit_values(lines, "AmbientCapabilities") == {"CAP_SETGID", "CAP_SETUID"}, name
+        assert _unit_values(lines, "AmbientCapabilities") <= _unit_values(lines, "CapabilityBoundingSet"), name
+        assert "User=root" in lines and "NoNewPrivileges=true" in lines, name
+
 def test_systemd_sensor_helper_owns_its_socket_directory():
     lines = _unit("defenseclaw-sensor-helper.service")
     assert "RuntimeDirectory=defenseclaw-sensor" in lines

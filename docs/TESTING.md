@@ -76,6 +76,46 @@ lanes are `fresh`, `setup-import` (replacing a synthetic 0.8.x Setup install),
 needs an elevated shell), and `upgrade-previous` and `shim`, which need
 `-PreviousAssets`.
 
+## Enterprise Install Lanes
+
+The standalone managed-enterprise packages have their own install lanes.
+They install and remove system services, so run them only on a disposable
+host (a CI runner, a container or a throwaway VM), as root or from an
+elevated shell.
+
+| Script | What it does |
+| --- | --- |
+| `scripts/test-enterprise-unix-install.sh` | Installs a `.deb`, `.rpm` or macOS `.pkg` and applies a config that enables Claude Code and Codex, whose machine policy must be owned and locked. Checks that a second `ensure` is a no-op, and runs `verify`, `status` and the MDM `detect.sh`. Then uninstalls, checks that no service or machine-policy entry is left and that the config is kept, and purges |
+| `scripts/test-enterprise-linux-container.sh` | Runs the Linux lane in a container that boots systemd (`--image`), for a distribution other than the host's |
+| `scripts/test-enterprise-windows-install.ps1` | Runs the hash-pinned unsigned `DefenseClawSetup-Enterprise-Standalone-x64.exe` through `/ensure`, a no-op `/ensure`, `verify`, `status`, `detect.ps1`, the installed CLI's own `ensure` and `/uninstall`. Checks the four services, the HKLM marker, the Add/Remove Programs entry, and that the Codex requirements and the Claude Code managed-settings fragment name the DefenseClaw hook after `/ensure` and are gone after `/uninstall` |
+| `scripts/check_enterprise_lifecycle_result.py` | Checks one saved lifecycle result against what the step must produce. Every lane uses it. A step fails on any error and on any warning it does not allow (`--allow-warning`); `--complete` also requires `coverage_complete` and `security_complete` |
+
+```bash
+# Unsigned deb and rpm from the release config, then the rpm lane on RHEL 9.
+GORELEASER_CURRENT_TAG=v9.9.9 make packaging-linux-enterprise
+v=$(python3 -c 'import json; print(json.load(open("dist/metadata.json"))["version"])')
+scripts/test-enterprise-linux-container.sh \
+  --image registry.access.redhat.com/ubi9/ubi-init \
+  --package "dist/defenseclaw-enterprise-$v-linux-amd64.rpm" --version "$v"
+```
+
+On every pull request, `ci.yml` runs the deb lane on the Ubuntu 24.04
+runner, the rpm lane in RHEL 9 and RHEL 8 UBI containers, the pkg lane on
+`macos-latest` and the Windows lane on `windows-latest`. Each lane uploads
+its lifecycle results as an artifact.
+
+Standalone Windows enrolls a user for a connector only when it finds the
+connector's CLI in that user's profile, and the Windows runner has neither
+Claude Code nor Codex. The Windows lane therefore writes the npm package
+manifests listed in `testdata/enterprise_install_lane/windows-agents.json`
+into the runner account's profile, removes them at the end, and refuses a host
+where they already exist. Windows reports `security_complete` false until an
+administrator records the live Claude Code policy proof
+(`Repair -AttestClaudeEffectivePolicy`, see
+[WINDOWS-ENTERPRISE-CERTIFICATION.md](WINDOWS-ENTERPRISE-CERTIFICATION.md)),
+so the Windows lane requires `coverage_complete` and requires
+`security_complete` to stay false.
+
 ## CI Workflows
 
 Ordinary PRs stay fast, while the release dispatch tests the final signed
@@ -84,7 +124,7 @@ assets on every platform before publishing them. See the
 
 | Workflow | Purpose |
 |----------|---------|
-| `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR |
+| `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR, and the enterprise install lanes (deb, rpm, macOS pkg and Windows services) |
 | `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
 | `.github/workflows/release.yaml` | One manual build, sign, install-gate and publish pipeline for a reviewed `main` commit |

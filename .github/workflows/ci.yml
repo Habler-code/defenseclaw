@@ -716,6 +716,180 @@ jobs:
         shell: bash
         run: ./scripts/test-systemd-units.sh
 
+  # Standalone managed-enterprise install lanes: each one installs the real
+  # package on a disposable host with the real service manager, converges,
+  # verifies, runs the MDM detection script, uninstalls and checks what is
+  # left (scripts/test-enterprise-unix-install.sh and
+  # scripts/test-enterprise-windows-install.ps1).
+  enterprise-install-assets:
+    # The deb and rpm come from the release's own GoReleaser config (a
+    # snapshot of `make packaging-linux-enterprise`, unsigned) and the Windows
+    # Setup from the release's builder without a signing certificate, which
+    # is the hash-pinned standalone-unsigned flavor.
+    name: Enterprise Install Lane Assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      linux-version: ${{ steps.linux.outputs.version }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build the Linux packages with the release GoReleaser config
+        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
+        with:
+          version: "v2.15.4"
+          args: release --snapshot --clean --skip=sbom,sign,publish,validate
+        env:
+          # A snapshot needs no tag history; the version is 9.9.9-SNAPSHOT-<commit>.
+          GORELEASER_CURRENT_TAG: v9.9.9
+      - name: Collect the linux/amd64 packages
+        id: linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open("dist/metadata.json"))["version"])')
+          mkdir -p "$RUNNER_TEMP/enterprise-install-linux"
+          cp "dist/defenseclaw-enterprise-${version}-linux-amd64.deb" \
+            "dist/defenseclaw-enterprise-${version}-linux-amd64.rpm" "$RUNNER_TEMP/enterprise-install-linux/"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Build the hash-pinned unsigned Windows standalone Setup
+        shell: bash
+        run: packaging/windows/standalone/build-setup.sh --version 9.9.9 --out-dir "$RUNNER_TEMP/enterprise-install-windows"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: enterprise-install-linux
+          path: ${{ runner.temp }}/enterprise-install-linux/
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: enterprise-install-windows
+          path: ${{ runner.temp }}/enterprise-install-windows/
+          if-no-files-found: error
+          retention-days: 3
+
+  enterprise-linux-install:
+    # The deb installs on the Ubuntu 24.04 runner itself (systemd 255 is PID
+    # 1); the rpm installs in Red Hat UBI containers that boot systemd: RHEL 9
+    # (systemd 252) and RHEL 8 (systemd 239, the package's minimum).
+    name: Enterprise Install Lane (${{ matrix.lane }})
+    needs: enterprise-install-assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: deb
+            package: deb
+          - lane: rpm-el9
+            package: rpm
+            image: registry.access.redhat.com/ubi9/ubi-init@sha256:762319bbd0b15a4eff9078eb373b1f426de3e8b5560cf314715c62844b7b0fc8
+          - lane: rpm-el8
+            package: rpm
+            image: registry.access.redhat.com/ubi8/ubi-init@sha256:96fe60da3105dbd9a74cc6fbf3a17741e98fd96a572b22256644e93f0f6ba6a6
+    env:
+      LANE_VERSION: ${{ needs.enterprise-install-assets.outputs.linux-version }}
+      LANE_IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: enterprise-install-linux
+          path: ${{ runner.temp }}/enterprise-install
+      - name: Install, converge, verify and remove the deb on the runner
+        if: matrix.package == 'deb'
+        shell: bash
+        run: >-
+          sudo bash scripts/test-enterprise-unix-install.sh
+          --package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LANE_VERSION}-linux-amd64.deb"
+          --version "$LANE_VERSION" --results "$RUNNER_TEMP/lane-results"
+      - name: Install, converge, verify and remove the rpm in a UBI systemd container
+        if: matrix.package == 'rpm'
+        shell: bash
+        run: >-
+          bash scripts/test-enterprise-linux-container.sh --image "$LANE_IMAGE"
+          --package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LANE_VERSION}-linux-amd64.rpm"
+          --version "$LANE_VERSION" --results "$RUNNER_TEMP/lane-results"
+      - name: Make the lifecycle results readable
+        if: always()
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lane-results" 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-install-results-${{ matrix.lane }}
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  enterprise-macos-install:
+    name: Enterprise Install Lane (pkg)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build the unsigned standalone pkg
+        shell: bash
+        run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
+      - name: Install, converge, verify and remove the pkg
+        shell: bash
+        run: >-
+          sudo bash scripts/test-enterprise-unix-install.sh
+          --package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-9.9.9-darwin-arm64.pkg"
+          --version 9.9.9 --results "$RUNNER_TEMP/lane-results"
+      - name: Make the lifecycle results readable
+        if: always()
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lane-results" 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-install-results-pkg
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  enterprise-windows-install:
+    # Setup /ensure, /ensure (no-op), verify, status, detect.ps1, the
+    # installed CLI's ensure and /uninstall with the four Windows services.
+    name: Enterprise Install Lane (Windows services)
+    needs: enterprise-install-assets
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: enterprise-install-windows
+          path: ${{ runner.temp }}/enterprise-install
+      - name: Install, converge, verify and remove the standalone services
+        shell: pwsh
+        run: >-
+          ./scripts/test-enterprise-windows-install.ps1
+          -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
+          -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-install-results-windows
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
   secure-client-golden:
     # Production Secure Client (release-defenseclaw-enterprise-26.8.4) ships
     # the macOS and Windows managed_enterprise lifecycle. Linux CI already
