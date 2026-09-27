@@ -2731,10 +2731,15 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		// per-connector roster is the status command's "Agents" section, so
 		// we deliberately do NOT re-enumerate connector names here.
 		details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.currentConfig().ActiveConnectors()))
+		if s.currentConfig().StandaloneEnterprise() {
+			details["summary"] = "no OpenClaw fleet (managed standalone deployment)"
+			details["hint"] = "hooks and the local audit continue; a managed standalone gateway dials a fleet only with gateway.fleet_mode: enabled and a gateway.host on another machine"
+			connName = "managed standalone"
+		}
 		s.health.SetGateway(StateDisabled, "", details)
 		fmt.Fprintf(os.Stderr,
-			"[sidecar] gateway client disabled: connector=%q + loopback gateway.host=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
-			connName, s.currentConfig().Gateway.Host)
+			"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
+			connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode)
 		<-ctx.Done()
 		s.health.SetGateway(StateStopped, "", nil)
 		return nil
@@ -5598,11 +5603,27 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
+	fleetMode := strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode))
+	// A managed standalone deployment is hook-only. Its connectors come
+	// from guardrail.connectors, so configuredConnectorName falls back to
+	// claw.mode (default "openclaw") and the heuristic below would dial.
+	// The fleet client authenticates with the gateway's own API token,
+	// and on a managed host any local account can bind a loopback port
+	// such as the default 127.0.0.1:18789, so that dial would hand the
+	// token to whoever listens there. Dial only when the administrator
+	// enabled the fleet explicitly and pointed it at another machine.
+	if cfg.StandaloneEnterprise() {
+		switch fleetMode {
+		case "enabled", "on", "true":
+			return !isLoopbackGatewayHost(cfg.Gateway.Host)
+		}
+		return false
+	}
 	// Explicit operator override wins over the heuristic. We
 	// intentionally fall THROUGH for any unrecognized value (incl.
 	// typos) instead of returning a default, so a config typo can't
 	// silently flip fleet integration on or off in production.
-	switch strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode)) {
+	switch fleetMode {
 	case "enabled", "on", "true":
 		return true
 	case "disabled", "off", "false":
