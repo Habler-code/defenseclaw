@@ -112,7 +112,28 @@ func TestRootPreRunGatesOnlyTheForegroundGateway(t *testing.T) {
 }
 
 func TestPerUserGatewayGateIsInertWithoutEnterpriseDeployment(t *testing.T) {
-	if err := refusePerUserGatewayBesideEnterprise(); err != nil {
+	if err := hostPerUserGatewayRefusal(); err != nil {
 		t.Skipf("host has an enterprise deployment: %v", err)
+	}
+}
+
+// hostPerUserGatewayRefusal is the real start gate, kept for the host test
+// above. isolatePerUserGatewayGateFromHost replaces the gate for the rest of
+// the package.
+var hostPerUserGatewayRefusal func() error
+
+// isolatePerUserGatewayGateFromHost runs from TestMain. The start, restart,
+// and foreground tests exercise checks that run after the coexistence gate,
+// so they must not depend on whether the test host has the enterprise
+// DefenseClawGateway service registered, as Secure Client test hosts do.
+// Tests of the gate stub it themselves.
+func isolatePerUserGatewayGateFromHost() {
+	hostPerUserGatewayRefusal = refusePerUserGatewayBesideEnterprise
+	refusePerUserGatewayBesideEnterprise = func() error { return nil }
+}
+
+func TestGatewayCommandTestsDoNotDependOnHostEnterpriseDeployment(t *testing.T) {
+	if err := refusePerUserGatewayBesideEnterprise(); err != nil {
+		t.Fatalf("package tests run with the host start gate: %v", err)
 	}
 }
