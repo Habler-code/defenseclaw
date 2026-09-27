@@ -9940,6 +9940,72 @@ function Start-DefenseClawTransactionServices {
     }
 }
 
+function Start-DefenseClawRestoredStandaloneSensorHelper {
+    <#
+        Standalone transaction snapshots do not record the sensor helper, and
+        Restore-DefenseClawTransaction quiesces it (disabled and stopped) with
+        the other services. The restored gateway depends on it, so a rollback
+        that restarts a pre-existing gateway must first make the helper
+        startable and start it. Returns the helper's service name when it was
+        started, '' when there is nothing to start.
+    #>
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return ''
+    }
+    $gatewayRestored = @(
+        $Snapshot.services |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$_.name,
+                    [string]$Snapshot.gateway_service,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and [bool]$_.existed
+            }
+    ).Count -eq 1
+    if (-not $gatewayRestored) {
+        return ''
+    }
+    $name = Get-DefenseClawSensorHelperServiceName `
+        -GatewayServiceName ([string]$Snapshot.gateway_service)
+    if (-not (Test-DefenseClawServiceExists -Name $name)) {
+        return ''
+    }
+    Assert-DefenseClawStandaloneSensorHelperOwned -Name $name -Layout $Layout
+    Set-DefenseClawServiceStartMode -Name $name -StartMode 3
+    Start-DefenseClawService -Name $name
+    return $name
+}
+
+function Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy {
+    <#
+        After a rollback restarted the restored services, the sensor helper
+        takes the restored gateway's start mode (boot policy follows the
+        gateway), as in Restore-DefenseClawTransaction.
+    #>
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [AllowEmptyString()][string]$Name
+    )
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return
+    }
+    $gatewayStartMode = @(
+        $Snapshot.services |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$_.name,
+                    [string]$Snapshot.gateway_service,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )[0].start_mode
+    Set-DefenseClawServiceStartMode -Name $Name -StartMode ([int]$gatewayStartMode)
+}
+
 function Restore-DefenseClawTransactionWithManagedHooksRollback {
     param(
         [Parameter(Mandatory)][string]$SnapshotPath,
@@ -10046,6 +10112,14 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                 -State $snapshot `
                 -Path $SnapshotPath `
                 -Phase activating
+            # The deferred restart must bring back the standalone sensor
+            # helper the restore quiesced, like the non-deferred restart in
+            # Restore-DefenseClawTransaction: the gateway depends on it and
+            # otherwise cannot start, which failed every standalone
+            # managed-hook rollback and left the deployment down.
+            $restoredSensorHelper = Start-DefenseClawRestoredStandaloneSensorHelper `
+                -Snapshot $snapshot `
+                -Layout $Layout
             Start-DefenseClawTransactionServices `
                 -Services $snapshot.services `
                 -Layout $Layout `
@@ -10053,6 +10127,9 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                 -TrustInProcessQuiescence `
                 -GatewayServiceName ([string]$snapshot.gateway_service) `
                 -GuardianServiceName ([string]$snapshot.guardian_service)
+            Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy `
+                -Snapshot $snapshot `
+                -Name $restoredSensorHelper
         }
     }
     return $snapshot

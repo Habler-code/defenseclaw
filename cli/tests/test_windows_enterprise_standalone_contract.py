@@ -399,6 +399,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-opencode-plugin-uninstall-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
+    "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
