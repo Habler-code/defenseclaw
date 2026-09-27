@@ -309,14 +309,21 @@ Windows service exists), per-user releases that include the enterprise
 coexistence check refuse to run beside it. The refusal covers `install.ps1`,
 Setup install, upgrade, and repair, and the per-user gateway `start`,
 `restart`, and foreground run. Both products serve hooks on the same local
-port. Setup uninstall stays available, so an existing per-user copy can be
-removed.
+port. A per-user gateway from such a release that is already running when the
+service is registered checks every 5 seconds and stops itself, so the SCM
+gateway can take the port. Setup uninstall stays available, so an existing
+per-user copy can be removed. If Setup rolls back an interrupted per-user
+upgrade or repair after the deployment is installed, it restores the earlier
+files and leaves the per-user gateway stopped.
 
 A per-user install from an earlier release has no such check. Its logon helper
-and hook cold-start recovery still start the per-user gateway, the enterprise
-deployment does not detect or remove it, and the owned self-update policy
-keeps it on its release. Uninstall every pre-existing per-user copy, as each
-affected user, before or after deploying the enterprise product:
+and hook cold-start recovery still start the per-user gateway, and the
+enterprise deployment does not detect or remove it. Self-update does not move
+it to a release with the check: a native install honors the owned
+`DisableSelfUpdate` policy, and a legacy script install (0.8.3 or earlier) has
+no published Windows upgrade path to one. Uninstall every pre-existing
+per-user copy, as each affected user, before or after deploying the
+enterprise product:
 
 ```powershell
 & "$env:LOCALAPPDATA\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /uninstall /quiet
