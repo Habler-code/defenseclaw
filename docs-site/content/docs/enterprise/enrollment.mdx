@@ -63,7 +63,7 @@ the layouts of the common Node version managers and package managers:
 | OS | Also searched |
 | --- | --- |
 | Linux and macOS | nvm, fnm, Volta, asdf and mise Node installs, pnpm and yarn global directories, the npm prefix set in the user's `~/.npmrc`, Linuxbrew, the machine prefixes `/usr/local`, `/usr` and `/opt/homebrew`, and `agent_prefixes`. The extended search runs only in the worker that runs as the user, never as root. |
-| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`), Cursor under `C:\Program Files\Cursor`, and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. A Codex install from the Microsoft Store (MSIX) is not found. |
+| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`), Cursor under `C:\Program Files\Cursor`, the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed), and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. A Codex install from the Microsoft Store (MSIX) is not found. |
 
 An agent CLI installed anywhere else in a user's home (a custom `NVM_DIR`,
 `XDG_DATA_HOME` or `PNPM_HOME`, an `npm --prefix` given on the command line,
@@ -117,7 +117,10 @@ it with `security_complete: false`. `status` warns; `verify` fails.
 
 A per-user agent in this state runs without DefenseClaw hooks. A
 machine-policy agent refuses the unenrolled user on Windows, and on Linux
-and macOS with `unenrolled_users: deny`.
+and macOS with `unenrolled_users: deny`. Cursor on Windows is the exception while no
+user is enrolled for Cursor: its machine hooks file is published only while
+one is, so until then Cursor runs without DefenseClaw hooks, and the report
+says so (see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector)).
 
 On Linux and macOS a user who has never been enrolled and whose home is
 untrusted (group- or other-writable, a symlink, owned by another account, or

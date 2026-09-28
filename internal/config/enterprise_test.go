@@ -326,6 +326,12 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 		{name: "standalone explicit pack is kept", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: "/etc/defenseclaw/policies/guardrail/custom", want: "/etc/defenseclaw/policies/guardrail/custom"},
 		{name: "standalone with data_dir policies is unchanged", goos: "linux", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, want: dataDirPack},
 		{name: "secure client is unchanged", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileSecureClient, want: dataDirPack},
+		// WIN-F23: nothing stages a pack under a Windows data_dir, so the
+		// implicit default selects the embedded packs.
+		{name: "windows standalone implicit uses the embedded packs", goos: "windows", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: ""},
+		{name: "windows standalone without policy_dir uses the embedded packs", goos: "windows", pack: dataDirPack, profile: managed.ProfileStandalone, want: ""},
+		{name: "windows standalone implicit follows an administrator policy_dir", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: "/opt/defenseclaw/share/policies/guardrail/default"},
+		{name: "windows standalone explicit pack is kept", goos: "windows", policy: "/var/lib/defenseclaw/policies", pack: "/etc/defenseclaw/policies/guardrail/custom", profile: managed.ProfileStandalone, want: "/etc/defenseclaw/policies/guardrail/custom"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

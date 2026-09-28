@@ -321,7 +321,7 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 	cfg.declaredEnterpriseProfile = declared
 	cfg.Enterprise.Profile = profile
 	if cfg.StandaloneEnterprise() {
-		standaloneRulePackDefault(cfg, cfg.DataDir)
+		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 	}
 	return validateEnterpriseConfig(cfg)
 }
@@ -361,9 +361,13 @@ func (c *Config) DeclaredEnterpriseProfile() string {
 // config path, where the lifecycle installs the vendor rule packs, the
 // implicit pack is the vendor default pack when that policy_dir folder does
 // not exist or policy_dir is inside data_dir, so leaving rule_pack_dir unset
-// always names a pack that exists. An explicit rule_pack_dir is kept as
-// written.
-func standaloneRulePackDefault(cfg *Config, dataDir string) {
+// always names a pack that exists. On Windows nothing stages a pack under
+// data_dir (the Setup ships none), so there the implicit default selects the
+// gateway's embedded rule packs instead of a directory that never exists
+// (WIN-F23), unless an administrator's own policy_dir is outside data_dir.
+// An explicit rule_pack_dir is kept as written; on Windows one that equals
+// the implicit data_dir path also selects the embedded packs.
+func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {
 	implicit := filepath.Join(dataDir, "policies", "guardrail", "default")
 	if cfg.Guardrail.RulePackDir != implicit {
 		return
@@ -377,6 +381,8 @@ func standaloneRulePackDefault(cfg *Config, dataDir string) {
 	if !onLayout {
 		if policyPack != "" {
 			cfg.Guardrail.RulePackDir = policyPack
+		} else if goos == "windows" {
+			cfg.Guardrail.RulePackDir = ""
 		}
 		return
 	}

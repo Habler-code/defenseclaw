@@ -52,6 +52,13 @@ and verify coverage statically or by running the real client as a user.
 These commands never write machine policy; the install and reconcile
 lifecycle does.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Refuse an unavailable live check before the elevation pin, so the
+		// caller gets its reason instead of a refusal that points elsewhere.
+		if enterprisePolicyLive && cmd.Name() == "verify" {
+			if err := enterprisePolicyLiveAvailable(); err != nil {
+				return err
+			}
+		}
 		if err := pinStandaloneManagedEnv(); err != nil {
 			return err
 		}
