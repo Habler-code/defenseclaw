@@ -80,7 +80,7 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 		}
 		// Standalone writes every discovered row deferred, including users
 		// DefenseClaw has never touched. An absent canonical data directory,
-		// or one the account created itself before enrollment (WIN-F49),
+		// or one the account created itself before enrollment,
 		// holds no runtime, so it proves the pending state as well as a
 		// trusted empty one; the selector-absence proof below still runs.
 	}

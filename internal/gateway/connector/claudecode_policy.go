@@ -504,7 +504,7 @@ func readClaudeCodeManagedFileSettings() (*claudeCodeSettingsSource, error) {
 // that sets allowManagedHooksOnly to anything but true. Claude Code merges
 // managed-settings.json and then the managed-settings.d files in name order,
 // and a later file's scalar wins, so such a file turns the lock off although
-// DefenseClaw's drop-in carries it (WIN-F37). A lock missing from the drop-in
+// DefenseClaw's drop-in carries it. A lock missing from the drop-in
 // itself is the drop-in's own check.
 func ClaudeCodeManagedHooksOnlyOverride(ownDropIn string) error {
 	source, err := readClaudeCodeManagedFileSettings()

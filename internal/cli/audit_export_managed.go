@@ -28,7 +28,7 @@ var (
 // managed Windows deployment. There the audit database belongs to the
 // gateway service under ProgramData, not to the caller's profile, so without
 // this an administrator's export looked for %USERPROFILE%\.defenseclaw and
-// failed (WIN-F31). An administrator (elevated, or LocalSystem for an MDM
+// failed. An administrator (elevated, or LocalSystem for an MDM
 // agent) gets the managed configuration, data directory and service
 // identity pins, the same values the lifecycle passes to gateway commands;
 // the export then reads the database read-only. A standard account is told

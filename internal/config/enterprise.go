@@ -363,8 +363,8 @@ func (c *Config) DeclaredEnterpriseProfile() string {
 // not exist or policy_dir is inside data_dir, so leaving rule_pack_dir unset
 // always names a pack that exists. On Windows nothing stages a pack under
 // data_dir (the Setup ships none), so there the implicit default selects the
-// gateway's embedded rule packs instead of a directory that never exists
-// (WIN-F23), unless an administrator's own policy_dir is outside data_dir.
+// gateway's embedded rule packs instead of a directory that never exists,
+// unless an administrator's own policy_dir is outside data_dir.
 // An explicit rule_pack_dir is kept as written; on Windows one that equals
 // the implicit data_dir path also selects the embedded packs.
 func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {

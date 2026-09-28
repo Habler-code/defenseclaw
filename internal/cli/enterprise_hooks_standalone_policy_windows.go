@@ -38,7 +38,7 @@ func init() {
 // claudecode machine policy keeps the managed-hooks-only lock: everything
 // but an explicit managed_hooks_only: preserve (the default is enforce). The
 // standalone lifecycle renders allowManagedHooksOnly into the machine-wide
-// Claude Code drop-in from it (WIN-F37).
+// Claude Code drop-in from it.
 func windowsClaudeManagedHooksOnlyEnforced() bool {
 	if cfg == nil {
 		return true

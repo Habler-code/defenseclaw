@@ -1067,7 +1067,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		// ensure does on a host without a pending transaction, so the upgrade
 		// the MDM asked for still runs in this invocation. A recovery that
 		// left the restored release stopped because it could not be
-		// reactivated (WIN-F34) fails its repair on purpose: only this
+		// reactivated fails its repair on purpose: only this
 		// Setup's newer release can bring the services back.
 		followStatus, _, statusErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 		// A follow-up probe that cannot read the host leaves the completed

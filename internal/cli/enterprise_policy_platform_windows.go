@@ -29,7 +29,7 @@ import (
 // LocalSystem's) policy command at the standalone managed deployment, with
 // the same pins audit export uses, when the caller chose no config. Without
 // it `enterprise policy show|verify` read the administrator's own
-// %USERPROFILE%\.defenseclaw\config.yaml and exited 1 (WIN-F36). A standard
+// %USERPROFILE%\.defenseclaw\config.yaml and exited 1. A standard
 // account is told to use an elevated prompt: the managed config is
 // administrator-only.
 func pinStandaloneManagedEnv() error {

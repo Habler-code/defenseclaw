@@ -24,7 +24,7 @@ import (
 // retrying the bind and reports the API as failed instead of returning: the
 // sidecar keeps running after the API goroutine exits, so returning left the
 // service Running without a hook API until an administrator restarted it
-// again (WIN-F32). Replaceable in tests.
+// again. Replaceable in tests.
 var heldAPIPortRetriedWithoutHookSocket = true
 
 // newManagedHookSocketServer: the standalone hook socket is unix-only.

@@ -1447,7 +1447,7 @@ func validateWindowsServiceConfig(
 		}
 		report.Profile = managed.ProfileStandalone
 		// The gateway service compiles this file strictly at start; prove
-		// it can before the lifecycle starts it (WIN-F22). Secure Client
+		// it can before the lifecycle starts it. Secure Client
 		// keeps its historical validation.
 		if err := validateStandaloneGatewayConfig(configPath, expectedDataDir); err != nil {
 			return windowsServiceConfigValidation{}, err

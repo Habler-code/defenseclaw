@@ -893,8 +893,7 @@ func (a *APIServer) retriesHeldAPIPortWithoutHookSocket() bool {
 // "forbidden by its access permissions" failure (WSAEACCES) that Windows
 // returns when another account holds the port on the wildcard address
 // (0.0.0.0 or [::]): the gateway service account cannot bind 127.0.0.1
-// under another account's wildcard listener, so that is a held port too
-// (WIN-F32).
+// under another account's wildcard listener, so that is a held port too.
 func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
 	if hasHookSocket {
 		return isAddrInUse(err)

@@ -17,7 +17,7 @@ import (
 // true while the claudecode machine policy is managed_hooks_only: enforce,
 // the default, as the Unix drop-in rendered by enterprisepolicy does. Without
 // it a user or project hook that returns updatedInput changes the command
-// after DefenseClaw inspected the original (WIN-F37). Every standalone path
+// after DefenseClaw inspected the original. Every standalone path
 // that renders or verifies the machine-wide Claude policy applies the lock
 // through withWindowsClaudeManagedHooksOnly, so install, the guardian's
 // verify and repair, and deferred staging agree on one body. Secure Client

@@ -390,7 +390,7 @@ func windowsEnterpriseEventFor(result *enterprisestatus.Result) (uint32, string,
 // windowsEnterpriseEventRecord binds one Application-log event to the
 // lifecycle log line of the same run. Any account can write Application-log
 // entries under any source name, including "DefenseClaw Enterprise", so an
-// event alone proves nothing (WIN-F30). Each DefenseClaw event therefore ends
+// event alone proves nothing. Each DefenseClaw event therefore ends
 // with "record <id>", and the lifecycle log, which only administrators and
 // LocalSystem can write, stores the same id with the event ID and the
 // SHA-256 of the exact message: an entry without a record, or whose record

@@ -18,7 +18,7 @@ var windowsEnterpriseStandaloneLayoutForPreflight = managed.StandaloneWindowsLay
 
 // windowsEnterpriseStandaloneConfigPreflight refuses a standalone install or
 // ensure whose config the gateway service could not load, before anything
-// changes (WIN-F22). The compile runs with the pins the gateway service
+// changes. The compile runs with the pins the gateway service
 // starts with. A host whose trusted layout cannot be resolved is left to the
 // lifecycle's own checks.
 func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {

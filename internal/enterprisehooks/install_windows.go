@@ -558,7 +558,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 // stale, so every per-user install route must write it before it publishes
 // the lock: the full setup route and the runtime-only route alike. Without
 // it, a user who moves their own ~\.defenseclaw aside leaves a runtime-only
-// OpenCode row that no reconcile can republish (WIN-F34). Rows without a
+// OpenCode row that no reconcile can republish. Rows without a
 // selected executable, and connectors without protected admission, are
 // left unchanged. Callers hold the target user's impersonation token.
 func recordWindowsManagedSetupSelection(target windowsGenericManagedTarget) error {

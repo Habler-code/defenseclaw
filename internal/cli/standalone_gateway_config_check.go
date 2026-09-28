@@ -21,7 +21,7 @@ import (
 // the gateway would load. Before, a config the gateway could not load was
 // installed, and the administrator saw only SCM's "Failed to start service"
 // while the reason stayed in a gateway log a failed first install's rollback
-// deletes (WIN-F22). dataDir is the service's DEFENSECLAW_HOME. The error
+// deletes. dataDir is the service's DEFENSECLAW_HOME. The error
 // names the file, the location in it and the reason, from the same safe
 // diagnostic `config-v8 validate` prints. Environment-backed secret
 // references are the gateway's to resolve in its own service identity, so
