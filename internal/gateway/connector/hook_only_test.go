@@ -1218,6 +1218,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if conn.Name() == "hermes" {
 				opts = prepareHermesSetupAdmissionFixture(t, opts)
 			}
+			if conn.Name() == "openhands" {
+				opts = prepareOpenHandsSetupAdmissionFixture(t, opts)
+			}
 			if err := conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
@@ -2527,50 +2530,58 @@ func newOpenHandsTokenLifecycleFixture(t *testing.T) (*hookOnlyConnector, SetupO
 		APIAddr:      "127.0.0.1:18970",
 		APIToken:     "gateway-token-must-not-be-published",
 	}
-	if runtime.GOOS == "darwin" {
-		trustedDir := filepath.Join(root, "trusted")
-		if err := os.MkdirAll(trustedDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		executable := filepath.Join(trustedDir, "openhands")
-		if err := os.WriteFile(executable, []byte("OpenHands executable fixture\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
-		if !ok {
-			t.Fatal("capture OpenHands setup-selected executable evidence")
-		}
-		now := time.Now().UTC().Truncate(time.Second)
-		receipt := agentSelectionReceipt{
-			SchemaVersion: agentSelectionSchemaVersion,
-			UpdatedAt:     now.Format(time.RFC3339),
-			Selections: map[string]agentSelectionEvidence{
-				"openhands": {
-					Connector:         "openhands",
-					Source:            "setup-selected",
-					Executable:        stablePath,
-					RawVersion:        "OpenHands CLI 1.16.0",
-					NormalizedVersion: "1.16.0",
-					SHA256:            digest,
-					SelectedAt:        now.Format(time.RFC3339),
-					ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
-				},
-			},
-		}
-		body, err := json.Marshal(receipt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(opts.DataDir, agentSelectionFile), body, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		opts.AgentVersion = "OpenHands CLI 1.16.0"
-		opts.AgentExecutable = stablePath
+	return NewOpenHandsConnector(), prepareOpenHandsSetupAdmissionFixture(t, opts), configPath
+}
+
+// prepareOpenHandsSetupAdmissionFixture gives opts the protected
+// setup-selected executable receipt that OpenHands Setup requires on macOS.
+func prepareOpenHandsSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return opts
 	}
-	return NewOpenHandsConnector(), opts, configPath
+	trustedDir := filepath.Join(testenv.PrivateTempDir(t), "trusted")
+	if err := os.MkdirAll(trustedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(trustedDir, "openhands")
+	if err := os.WriteFile(executable, []byte("OpenHands executable fixture\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("capture OpenHands setup-selected executable evidence")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{
+			"openhands": {
+				Connector:         "openhands",
+				Source:            "setup-selected",
+				Executable:        stablePath,
+				RawVersion:        "OpenHands CLI 1.16.0",
+				NormalizedVersion: "1.16.0",
+				SHA256:            digest,
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opts.DataDir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts.AgentVersion = "OpenHands CLI 1.16.0"
+	opts.AgentExecutable = stablePath
+	return opts
 }
 
 func TestOpenHandsDarwinExporterTokenLifecycle(t *testing.T) {
