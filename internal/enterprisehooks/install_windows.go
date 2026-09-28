@@ -535,6 +535,43 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	}, nil
 }
 
+// recordWindowsManagedSetupSelection hashes the guardian-selected image of a
+// per-user connector with protected executable admission (Amp, Hermes,
+// OpenCode) as the target user and records it in that user's
+// agent_selection.json receipt. The connector's contract publication binds
+// to the receipt when the user's protected contract lock is missing or
+// stale, so every per-user install route must write it before it publishes
+// the lock: the full setup route and the runtime-only route alike. Without
+// it, a user who moves their own ~\.defenseclaw aside leaves a runtime-only
+// OpenCode row that no reconcile can republish (WIN-F34). Rows without a
+// selected executable, and connectors without protected admission, are
+// left unchanged. Callers hold the target user's impersonation token.
+func recordWindowsManagedSetupSelection(target windowsGenericManagedTarget) error {
+	if target.conn == nil || strings.TrimSpace(target.setup.AgentExecutable) == "" ||
+		!connector.ProtectedSetupSelectionConnector(target.conn.Name()) {
+		return nil
+	}
+	if err := connector.WriteManagedSetupAgentSelection(
+		target.dataDir,
+		target.conn.Name(),
+		target.setup.AgentExecutable,
+		target.setup.AgentVersion,
+	); err != nil {
+		return fmt.Errorf("enterprise hooks: record managed %s executable selection: %w", target.conn.Name(), err)
+	}
+	return nil
+}
+
+// removeWindowsManagedSetupSelectionReceipt deletes the selection receipt
+// and its lock file from a data directory that the failing install created
+// itself. Best effort: the directory removal that follows reports anything
+// left behind.
+func removeWindowsManagedSetupSelectionReceipt(dataDir string) {
+	for _, name := range []string{"agent_selection.json", "agent_selection.json.lock"} {
+		_ = os.Remove(filepath.Join(dataDir, name))
+	}
+}
+
 func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
@@ -602,15 +639,8 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			}
 			// Hash the guardian-selected image as the target user and record
 			// it where the connector's executable admission reads it.
-			if target.setup.AgentExecutable != "" {
-				if err := connector.WriteManagedSetupAgentSelection(
-					target.dataDir,
-					target.conn.Name(),
-					target.setup.AgentExecutable,
-					target.setup.AgentVersion,
-				); err != nil {
-					return fmt.Errorf("enterprise hooks: record managed %s executable selection: %w", target.conn.Name(), err)
-				}
+			if err := recordWindowsManagedSetupSelection(target); err != nil {
+				return err
 			}
 			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
 			if err := target.conn.Setup(ctx, target.setup); err != nil {
