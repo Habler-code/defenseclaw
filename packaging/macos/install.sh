@@ -963,19 +963,24 @@ if [[ -L "${POLICIES_DST}/guardrail" ]]; then
   die "guardrail policies destination is a symlink; refusing to overwrite: ${POLICIES_DST}/guardrail"
 fi
 _guardrail_stage="${POLICIES_DST}/guardrail.new"
-_guardrail_old="${POLICIES_DST}/guardrail.old"
-# Clean any stray staging directories from an aborted prior install.
-# `.new` is always safe to wipe — it is the destination we're about to
-# populate. `.old` is only safe to wipe when the live destination
-# exists: if a prior invocation's swap AND rollback both failed, the
-# previous rule packs survive only at `.old`, so unconditionally
-# removing it here would delete the last working copy before the fresh
-# `cp -R` succeeds. Preserve `.old` in that case and let the atomic
-# swap below reconcile it.
+# Unique-per-run rescue path. Rationale: a prior invocation whose swap
+# succeeded but whose gateway startup was NOT verified (--skip-launchd,
+# aborted run, or a doubly-broken swap+rollback) leaves its rescue
+# tree at `${POLICIES_DST}/guardrail.old-<its pid>-<its ts>/`. If we
+# reused a single `.old` path here, the next live-to-old mv would
+# overwrite that prior baseline with the (possibly bad) current live
+# tree — losing the last-known-good copy. A fresh path per run means
+# any accumulated rescue trees survive intact through this swap and
+# are all cleaned in a single sweep after wait_for_launchd_running
+# succeeds — i.e., only once verified startup confirms the freshly-
+# published rule packs actually work.
+_guardrail_old="${POLICIES_DST}/guardrail.old-$$-$(date +%Y%m%d%H%M%S)"
+# Clean stray staging from an aborted prior install. Any `.old-*`
+# trees present are prior rescue baselines and are DELIBERATELY not
+# touched here — they're cleaned by the post-verification sweep
+# further down, after the freshly-published tree has proven to boot
+# the gateway. `_guardrail_stage` is always safe to wipe.
 rm -rf -- "${_guardrail_stage}"
-if [[ -e "${POLICIES_DST}/guardrail" ]]; then
-  rm -rf -- "${_guardrail_old}"
-fi
 cp -R "${POLICIES_SRC}/guardrail" "${_guardrail_stage}" \
   || { rm -rf -- "${_guardrail_stage}"; die "could not stage guardrail rule packs at ${_guardrail_stage}"; }
 chown -R root:wheel "${_guardrail_stage}"
@@ -1014,8 +1019,11 @@ if ! /bin/mv -f -- "${_guardrail_stage}" "${POLICIES_DST}/guardrail"; then
   rm -rf -- "${_guardrail_stage}"
   die "could not publish new guardrail tree at ${POLICIES_DST}/guardrail"
 fi
-rm -rf -- "${_guardrail_old}"
-unset _guardrail_stage _guardrail_old
+# Rescue tree cleanup is DEFERRED to after wait_for_launchd_running
+# succeeds — see the sweep below the gateway-up probe. Removing
+# ${_guardrail_old} here would strand the operator without a rollback
+# path if the gateway then fails to start with the new rule packs.
+unset _guardrail_stage
 # Multi-user hook wiring: the hook-guardian LaunchDaemon reads its
 # per-tick manifest from ${GUARDIAN_MANIFEST_DIR}/targets.yaml. Creating
 # the directory unconditionally keeps the guardian's LoadManifest happy
@@ -1186,7 +1194,25 @@ log "waiting for gateway to come up"
 if ! wait_for_launchd_running; then
   warn "gateway did not reach running state within 15s; recent stderr:"
   tail -20 "${LOGS_DIR}/gateway.err.log" 2>/dev/null | sed 's/^/    /' >&2 || true
-  die "${LAUNCHD_LABEL} failed to start; see ${LOGS_DIR}/gateway.err.log"
+  # Do NOT clean the guardrail rescue tree(s) here — if the gateway
+  # did not come up with the freshly-published rule packs, the operator
+  # may want to roll back to the last known-good tree at ${_guardrail_old}
+  # (and to any older `.old-*` trees preserved by prior unverified runs).
+  die "${LAUNCHD_LABEL} failed to start; see ${LOGS_DIR}/gateway.err.log — freshly-published guardrail rule packs are at ${POLICIES_DST}/guardrail; prior-run rescue trees preserved under ${POLICIES_DST}/guardrail.old-*"
+fi
+
+# Verified live: the gateway is running with the freshly-published
+# rule packs. Only now is it safe to delete the rescue tree(s) —
+# earlier deletion would strand the operator without a rollback path
+# if startup panicked on the new packs. Clean THIS run's rescue tree
+# plus any stale `.old-*` trees left behind by prior invocations that
+# never reached verification (--skip-launchd, aborted run, doubly-
+# broken swap+rollback). find is used rather than a shell glob so
+# `nullglob` state doesn't matter and unmatched patterns are silent.
+if [[ -n "${_guardrail_old:-}" ]]; then
+  find "${POLICIES_DST}" -mindepth 1 -maxdepth 1 -type d -name 'guardrail.old-*' \
+    -exec rm -rf -- {} + 2>/dev/null || true
+  unset _guardrail_old
 fi
 
 # ---- per-user hook wiring (multi-user, via hook guardian) --------------

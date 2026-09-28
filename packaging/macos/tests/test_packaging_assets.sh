@@ -745,21 +745,28 @@ t_install_reconciles_existing_state() {
     "managed bundle refuses a symlink at the guardrail policies destination"
   assert_contains "${body}" '_guardrail_stage="${POLICIES_DST}/guardrail.new"' \
     "managed bundle stages the new guardrail tree in a sibling directory"
-  assert_contains "${body}" '_guardrail_old="${POLICIES_DST}/guardrail.old"' \
-    "managed bundle stages the retired guardrail tree in a sibling directory for rollback"
+  # Unique-per-run rescue path — prevents a prior invocation's rescue
+  # tree from being clobbered by the current live-to-old mv on retries.
+  assert_contains "${body}" '_guardrail_old="${POLICIES_DST}/guardrail.old-$$-$(date +%Y%m%d%H%M%S)"' \
+    'managed bundle uses a unique-per-run rescue path so prior .old-* trees survive intact'
   assert_contains "${body}" 'staged guardrail rule packs are missing the required default profile' \
     "managed bundle sanity-checks the staged tree before swapping the live one"
   assert_contains "${body}" 'could not publish new guardrail tree' \
     "managed bundle surfaces publication failure with an actionable message"
-  # When both the swap AND its rollback fail, the previous rule packs
-  # survive ONLY at ${_guardrail_old}. The next install must not delete
-  # that tree before its own cp succeeds, and the current install must
-  # surface the rescue path so an operator can recover.
-  assert_contains "${body}" 'if [[ -e "${POLICIES_DST}/guardrail" ]]; then
-  rm -rf -- "${_guardrail_old}"' \
-    'managed bundle preserves ${_guardrail_old} when the live guardrail is missing (rescue path across invocations)'
   assert_contains "${body}" 'previous rule packs are preserved at ${_guardrail_old}' \
     'managed bundle names the rescue path in the double-failure die message'
+
+  # Deferred rescue cleanup: the last-known-good rule packs must survive
+  # past the freshly-published tree's swap all the way through the
+  # gateway startup probe (wait_for_launchd_running). If the gateway
+  # fails to start with the new packs, the rescue tree(s) must still be
+  # on disk for the operator to roll back to.
+  assert_contains "${body}" 'Rescue tree cleanup is DEFERRED to after wait_for_launchd_running' \
+    "managed bundle defers guardrail rescue-tree cleanup until after gateway startup verifies"
+  assert_contains "${body}" "-name 'guardrail.old-*'" \
+    "managed bundle sweeps ALL prior-run rescue trees at once after successful verification"
+  assert_contains "${body}" 'prior-run rescue trees preserved under ${POLICIES_DST}/guardrail.old-*' \
+    'managed bundle names the rescue-tree location in the wait-for-launchd die so operators can roll back'
 
   # Skip-flag / legacy bootout guardrails: bootout must match the
   # bootstrap path that will run in this invocation. --skip-launchd
