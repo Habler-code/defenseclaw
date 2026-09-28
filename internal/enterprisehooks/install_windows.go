@@ -428,6 +428,8 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
 		HookExecutable:     hookExecutable,
+
+		CursorApprovedForeignHooks: opts.CursorApprovedForeignHooks,
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setup); err != nil {
 		return windowsGenericManagedTarget{}, err
