@@ -58,6 +58,9 @@ var standaloneHookRuntime struct {
 	layout     managed.StandaloneLayout
 	descriptor *managed.RuntimeDescriptor
 	reason     string
+	// secureClientHost marks a macOS Secure Client host, whose
+	// --enterprise-managed failures keep their historical results.
+	secureClientHost bool
 }
 
 func trustedNativeHookHome() (string, bool) { return "", false }
@@ -81,6 +84,7 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	}
 	reason := ""
 	noop := false
+	secureClientHost := false
 	switch {
 	case err == nil && loaded != nil && strings.TrimSpace(loaded.HookSocket) == "":
 		reason = standaloneRuntimeReasonHookSocketMissing
@@ -91,6 +95,7 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 			// A Secure Client host never uses this runtime; keep its
 			// historical fail-closed result for --enterprise-managed.
 			reason = standaloneRuntimeReasonInvalid
+			secureClientHost = true
 		case standaloneMachinePolicyPresent(standaloneHookGOOS, connectorName):
 			reason = standaloneRuntimeReasonDescriptorMissing
 		default:
@@ -105,6 +110,7 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	standaloneHookRuntime.layout = layout
 	standaloneHookRuntime.descriptor = loaded
 	standaloneHookRuntime.reason = reason
+	standaloneHookRuntime.secureClientHost = secureClientHost
 	if noop || reason != "" {
 		standaloneHookRuntime.descriptor = nil
 	}
@@ -151,18 +157,30 @@ func enterpriseManagedHookRuntimeConnection(connectorName string) (string, strin
 // applyStandaloneManagedHookTransport binds the managed options to the
 // descriptor after buildHookOptionsForRuntime resolved the endpoint:
 // the unix socket and service uid select the verified transport, and the
-// inherited environment may only tighten the result.
+// inherited environment may only tighten the result. When the standalone
+// runtime failed its checks it selects no transport and only marks the
+// options as the standalone profile's (ManagedStandalone), so the failure
+// gets that profile's fail-closed results; a Secure Client host is never
+// marked.
 func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName string) {
-	if opts == nil || !opts.ManagedEnterprise || opts.ManagedRuntimeFailure != "" {
+	if opts == nil || !opts.ManagedEnterprise {
 		return
 	}
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	standaloneHookRuntime.Lock()
 	descriptor := standaloneHookRuntime.descriptor
 	layout := standaloneHookRuntime.layout
-	matches := standaloneHookRuntime.prepared && standaloneHookRuntime.reason == "" &&
-		standaloneHookRuntime.connector == connectorName
+	prepared := standaloneHookRuntime.prepared && standaloneHookRuntime.connector == connectorName
+	failed := standaloneHookRuntime.reason != ""
+	secureClientHost := standaloneHookRuntime.secureClientHost
 	standaloneHookRuntime.Unlock()
+	if opts.ManagedRuntimeFailure != "" {
+		if prepared && failed && !secureClientHost {
+			opts.ManagedStandalone = true
+		}
+		return
+	}
+	matches := prepared && !failed
 	if !matches || descriptor == nil {
 		return
 	}

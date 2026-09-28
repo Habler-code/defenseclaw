@@ -239,7 +239,7 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 		const fail = (why: string) => {
 			void deploymentRemoved().then(removed => resolve(removed
 				? ""
-				: foreignCheckFailure(event, why)))
+				: `DefenseClaw could not check for unapproved plugins (${why}), so this tool call is blocked.`))
 		}
 		try {
 			const child = execFile(
@@ -273,18 +273,6 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 			fail(safeError(error))
 		}
 	})
-}
-
-// foreignCheckFailure is the block reason when the foreign-plugin check
-// itself could not run. Amp loads plugins once, so a check that failed at
-// load keeps blocking for the life of this process; that reason says to
-// restart the agent.
-function foreignCheckFailure(event: string, why: string): string {
-	const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer"
-	if (event === "session.load") {
-		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Restart the agent once DefenseClaw is available.`
-	}
-	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
 }
 
 // deploymentRemoved reports whether the managed deployment that rendered this

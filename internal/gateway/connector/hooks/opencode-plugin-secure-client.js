@@ -312,7 +312,7 @@ function defenseclawForeignHookCheck(event, cwd) {
     const fail = (why) => {
       void defenseclawDeploymentRemoved().then((removed) => resolve(removed
         ? ""
-        : defenseclawForeignCheckFailure(event, why)));
+        : "DefenseClaw could not check for unapproved plugins (" + why + "), so this tool call is blocked."));
     };
     try {
       const child = execFile(
@@ -348,54 +348,6 @@ function defenseclawForeignHookCheck(event, cwd) {
       fail(err && err.message ? err.message : String(err));
     }
   });
-}
-
-// defenseclawForeignCheckFailure is the block reason when the foreign-plugin
-// check itself could not run. OpenCode loads plugins once, so a check that
-// failed at load keeps blocking for the life of this process; that reason
-// says to restart the agent.
-function defenseclawForeignCheckFailure(event, why) {
-  const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer";
-  if (event === "defenseclaw.plugin.loaded") {
-    return "DefenseClaw could not check for unapproved plugins when the agent started (" + detail +
-      "), so this tool call is blocked. Restart the agent once DefenseClaw is available.";
-  }
-  return "DefenseClaw could not check for unapproved plugins (" + detail + "), so this tool call is blocked.";
-}
-
-// defenseclawBlockError is the error a blocked tool call fails with. OpenCode
-// shows it as the tool's error and hands it to the model, so it says that
-// DefenseClaw blocked the call under policy and that the call did not run.
-function defenseclawBlockError(reason) {
-  const text = String(reason || "").trim();
-  if (/^DefenseClaw\b/.test(text)) return new Error(text);
-  return new Error("DefenseClaw blocked this tool call under policy, so it did not run: " + (text || "no reason was given"));
-}
-
-// defenseclawConfirmNotice is the notice for a verdict that asks for the
-// user's confirmation (human-in-the-loop). This bridge cannot ask, so the
-// call runs; the notice keeps that from happening silently.
-function defenseclawConfirmNotice(data) {
-  if (!data || String(data.raw_action || "").toLowerCase() !== "confirm" || data.action === "block") return "";
-  const severity = data.severity && data.severity !== "NONE" ? " (" + data.severity + ")" : "";
-  const reason = data.reason ? ": " + data.reason : "";
-  return "DefenseClaw flagged this tool call for review" + severity + reason +
-    ". OpenCode cannot ask you to confirm it here, so it runs; DefenseClaw recorded it.";
-}
-
-// defenseclawShowNotice shows a notice in the OpenCode TUI. It is best
-// effort: without a TUI client, or when the notice cannot be shown, nothing
-// else changes.
-function defenseclawShowNotice(client, message) {
-  if (!message) return;
-  try {
-    const shown = client && client.tui && typeof client.tui.showToast === "function"
-      ? client.tui.showToast({ body: { message, variant: "warning" } })
-      : undefined;
-    if (shown && typeof shown.catch === "function") shown.catch(() => {});
-  } catch (_) {
-    // A notice never blocks or fails the tool call.
-  }
 }
 
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
@@ -453,7 +405,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
+    return { reason: "", mode: data && data.mode || "" };
   } catch (err) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
@@ -542,7 +494,7 @@ async function defenseclawPostLifecycle(event, cwd) {
   }
 }
 
-export const DefenseClaw = async ({ client, directory, worktree }) => {
+export const DefenseClaw = async ({ directory, worktree }) => {
   const cwd = directory || worktree || "";
   // OpenCode loads plugins once at startup: a foreign plugin present now
   // keeps running for this process even if its file is deleted later, so a
@@ -571,7 +523,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
       const blocked = (await defenseclawStartupGuard) || (await defenseclawForeignHookCheck("tool.execute.before", cwd));
-      if (blocked) throw defenseclawBlockError(blocked);
+      if (blocked) throw new Error(blocked);
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(
         "tool.execute.before",
@@ -583,8 +535,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
         mcpIdentity,
         true,
       );
-      if (verdict && verdict.reason) throw defenseclawBlockError(verdict.reason);
-      if (verdict && verdict.notice) defenseclawShowNotice(client, verdict.notice);
+      if (verdict && verdict.reason) throw new Error(verdict.reason);
       if (verdict && verdict.mode === "action" && mcpIdentity.status === "ambiguous") {
         throw new Error("DefenseClaw refused an OpenCode tool with ambiguous MCP server identity.");
       }

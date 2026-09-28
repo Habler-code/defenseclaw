@@ -64,9 +64,22 @@ _BRIDGE_PUBLICATION_SCHEMA = {
         "digest_filename": "opencode-plugin.js",
     },
 }
+# SHA-256 of each bridge template in internal/gateway/connector/hooks: the
+# current one and the copy the Secure Client profile renders
+# (*-secure-client.*), which its release pins.
 _BRIDGE_TEMPLATE_DIGESTS = {
-    "amp": "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",
-    "opencode": "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",
+    "amp": frozenset(
+        {
+            "e95c2fb223e0b84b3515f425ea7f0b0b89293076a70da5030e6ab1a7bcf66d2c",  # amp-plugin.ts
+            "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
+        }
+    ),
+    "opencode": frozenset(
+        {
+            "8e0b8c867cdf387f9659603f4282a0837e8a4e7397f893a600f918720046ed49",  # opencode-plugin.js
+            "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
+        }
+    ),
 }
 _BRIDGE_DYNAMIC_LINES = {
     "amp": (
@@ -448,8 +461,8 @@ def _matches_immutable_bridge_template(
     """Verify all non-rendered bridge bytes against a packaged fingerprint."""
 
     specifications = _BRIDGE_DYNAMIC_LINES.get(connector)
-    expected_digest = _BRIDGE_TEMPLATE_DIGESTS.get(connector)
-    if specifications is None or expected_digest is None:
+    expected_digests = _BRIDGE_TEMPLATE_DIGESTS.get(connector)
+    if specifications is None or expected_digests is None:
         return False
     lines = payload.splitlines(keepends=True)
     for prefix, suffix, canonical, kind in specifications:
@@ -470,7 +483,7 @@ def _matches_immutable_bridge_template(
         ):
             return False
         lines[index] = canonical
-    return hashlib.sha256(b"".join(lines)).hexdigest() == expected_digest
+    return hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests
 
 
 def _matches_registered_bridge_publication(path: str, payload: bytes) -> bool:

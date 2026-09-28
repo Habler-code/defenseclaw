@@ -332,7 +332,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		// The administrator-owned runtime failed trust validation. Do not read its
 		// sidecar/token or contact any endpoint derived from those files; hand an
 		// unavailable strict runtime directly to hookexec's fail-closed boundary.
-		return hookexec.Options{
+		opts := hookexec.Options{
 			Connector:             connector,
 			Event:                 event,
 			FailMode:              "closed",
@@ -340,6 +340,10 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			ManagedEnterprise:     true,
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
+		// Marks a failed Unix standalone runtime as the standalone profile's
+		// (no transport is selected); a no-op elsewhere.
+		applyStandaloneManagedHookTransport(&opts, connector)
+		return opts
 	}
 	home, trustedNativeState := trustedNativeHookHome()
 	if !trustedNativeState {

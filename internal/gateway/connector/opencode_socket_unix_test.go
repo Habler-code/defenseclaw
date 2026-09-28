@@ -27,10 +27,6 @@ func TestOpenCodeBridgeUsesVerifiedManagedHookSocket(t *testing.T) {
 	if err != nil {
 		t.Skip("node is required for the executable OpenCode plugin contract")
 	}
-	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Unix socket paths are length-limited; keep the directory short.
 	root, err := os.MkdirTemp("/tmp", "dcoc")
 	if err != nil {
@@ -66,19 +62,14 @@ func TestOpenCodeBridgeUsesVerifiedManagedHookSocket(t *testing.T) {
 
 	run := func(serviceUID int) string {
 		t.Helper()
-		text := strings.NewReplacer(
-			"{{.APIAddr}}", "127.0.0.1:1",
-			"{{.TokenFileJS}}", javaScriptStringContent(filepath.Join(root, "missing.token")),
-			"{{.FailMode}}", "closed",
-			"{{.HookSocketJS}}", javaScriptStringContent(socketPath),
-			"{{.ServiceUID}}", strconv.Itoa(serviceUID),
-			"{{.ForeignHookGuardJS}}", "",
-			"{{.InstallMarkerJS}}", "",
-			"{{.ListenerProofJS}}", "",
-		).Replace(string(body))
-		if strings.Contains(text, "{{.") {
-			t.Fatal("rendered plugin retains a template placeholder")
-		}
+		text := renderOpenCodePluginTemplate(t, templateData{
+			APIAddr:      "127.0.0.1:1",
+			TokenFileJS:  javaScriptStringContent(filepath.Join(root, "missing.token")),
+			FailMode:     "closed",
+			HookSocketJS: javaScriptStringContent(socketPath),
+			ServiceUID:   serviceUID,
+			Managed:      true,
+		})
 		plugin := filepath.Join(root, "plugin-"+strconv.Itoa(serviceUID)+".mjs")
 		if err := os.WriteFile(plugin, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
@@ -101,7 +92,7 @@ try {
 	// The test's own uid owns the socket directory, standing in for the
 	// gateway service account.
 	got := run(os.Getuid())
-	if !strings.Contains(got, "THREW:blocked over the hook socket") {
+	if !strings.Contains(got, "THREW:DefenseClaw blocked this tool call under policy, so it did not run: blocked over the hook socket") {
 		t.Fatalf("trusted socket result = %q, want the gateway block reason", got)
 	}
 	mu.Lock()
@@ -179,10 +170,6 @@ func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
 	if err != nil {
 		t.Skip("node is required for the executable OpenCode plugin contract")
 	}
-	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var mu sync.Mutex
 	requests := 0
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -204,16 +191,13 @@ func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
 	}
 	run := func(guard string) string {
 		t.Helper()
-		text := strings.NewReplacer(
-			"{{.APIAddr}}", listener.Addr().String(),
-			"{{.TokenFileJS}}", javaScriptStringContent(tokenPath),
-			"{{.FailMode}}", "closed",
-			"{{.HookSocketJS}}", "",
-			"{{.ServiceUID}}", "0",
-			"{{.ForeignHookGuardJS}}", javaScriptStringContent(guard),
-			"{{.InstallMarkerJS}}", "",
-			"{{.ListenerProofJS}}", "",
-		).Replace(string(body))
+		text := renderOpenCodePluginTemplate(t, templateData{
+			APIAddr:            listener.Addr().String(),
+			TokenFileJS:        javaScriptStringContent(tokenPath),
+			FailMode:           "closed",
+			ForeignHookGuardJS: javaScriptStringContent(guard),
+			Managed:            true,
+		})
 		plugin := filepath.Join(t.TempDir(), "plugin.mjs")
 		if err := os.WriteFile(plugin, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
@@ -237,7 +221,7 @@ for (const call of ["c1", "c2"]) {
 
 	deny, dir := fakeForeignHookGuard(t, `{"deny":true,"reason":"enterprise_foreign_hook_blocked: The project file /work/repo/.opencode/plugins/x.js adds a plugin"}`)
 	got := run(deny)
-	if strings.Count(got, "THREW:enterprise_foreign_hook_blocked") != 2 {
+	if strings.Count(got, "THREW:DefenseClaw blocked this tool call under policy, so it did not run: enterprise_foreign_hook_blocked") != 2 {
 		t.Fatalf("a denying guard must abort every call: %q", got)
 	}
 	args, _ := os.ReadFile(filepath.Join(dir, "args"))
@@ -247,7 +231,7 @@ for (const call of ["c1", "c2"]) {
 	}
 
 	sticky, _ := fakeForeignHookGuard(t, `{"deny":true,"reason":"blocked at load"}`, `{"deny":false}`)
-	if got := run(sticky); strings.Count(got, "THREW:blocked at load") != 2 {
+	if got := run(sticky); strings.Count(got, "THREW:DefenseClaw blocked this tool call under policy, so it did not run: blocked at load") != 2 {
 		t.Fatalf("a denial at load must hold for the process: %q", got)
 	}
 

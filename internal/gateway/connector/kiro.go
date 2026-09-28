@@ -4,7 +4,9 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -90,6 +92,13 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := removeStaleKiroDefaultOverlay(command); err != nil {
 		return fmt.Errorf("kiro remove stale kiro_default overlay: %w", err)
 	}
+	if kiroManaged(opts) {
+		// Before the setting below names the defenseclaw agent, while it can
+		// still name the user's own default agent.
+		if err := c.reclaimEarlierKiroFootprint(opts, command); err != nil {
+			return fmt.Errorf("kiro reclaim earlier per-user footprint: %w", err)
+		}
+	}
 	settingsPath := kiroSettingsPath()
 	if err := captureManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath); err != nil {
 		return fmt.Errorf("kiro capture settings backup: %w", err)
@@ -107,21 +116,9 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	command := c.hookCommand(opts)
 	var errs []error
 	for _, path := range c.hookCleanupPaths(opts) {
-		logical := kiroBackupLogicalName(path)
-		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("kiro restore hook %s: %w", path, err))
-			continue
+		if err := c.reclaimKiroHookFile(opts, path, command); err != nil {
+			errs = append(errs, err)
 		}
-		if restored {
-			discardManagedFileBackup(opts.DataDir, c.Name(), logical)
-			continue
-		}
-		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("kiro remove hook %s: %w", path, err))
-			continue
-		}
-		discardManagedFileBackup(opts.DataDir, c.Name(), logical)
 	}
 	written := map[string]bool{}
 	for _, path := range c.agentConfigPaths(opts) {
@@ -139,21 +136,9 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 				continue
 			}
 		}
-		logical := kiroAgentBackupLogicalName(path)
-		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("kiro restore agent %s: %w", path, err))
-			continue
+		if err := c.reclaimKiroAgentFile(opts, path, command); err != nil {
+			errs = append(errs, err)
 		}
-		if restored {
-			discardManagedFileBackup(opts.DataDir, c.Name(), logical)
-			continue
-		}
-		if removeErr := removeKiroV2AgentHooks(path, command); removeErr != nil && !os.IsNotExist(removeErr) {
-			errs = append(errs, fmt.Errorf("kiro remove agent hooks %s: %w", path, removeErr))
-			continue
-		}
-		discardManagedFileBackup(opts.DataDir, c.Name(), logical)
 	}
 	if err := removeStaleKiroDefaultOverlay(command); err != nil {
 		errs = append(errs, fmt.Errorf("kiro remove stale kiro_default overlay: %w", err))
@@ -196,6 +181,84 @@ func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 		return fmt.Errorf("kiro teardown incomplete: %s still selects %s", kiroDefaultAgentSettingKey, kiroManagedAgentName)
 	}
 	return nil
+}
+
+// reclaimKiroHookFile puts one v3 hook file back as Setup found it when it is
+// unchanged since, and otherwise removes only DefenseClaw's entries; either
+// way its backup record is settled.
+func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string) error {
+	logical := kiroBackupLogicalName(path)
+	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
+	if err != nil {
+		return fmt.Errorf("kiro restore hook %s: %w", path, err)
+	}
+	if !restored {
+		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("kiro remove hook %s: %w", path, err)
+		}
+	}
+	discardManagedFileBackup(opts.DataDir, c.Name(), logical)
+	return nil
+}
+
+// reclaimKiroAgentFile is reclaimKiroHookFile for a CLI 2.x agent file.
+func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command string) error {
+	logical := kiroAgentBackupLogicalName(path)
+	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
+	if err != nil {
+		return fmt.Errorf("kiro restore agent %s: %w", path, err)
+	}
+	if !restored {
+		if err := removeKiroV2AgentHooks(path, command); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
+		}
+	}
+	discardManagedFileBackup(opts.DataDir, c.Name(), logical)
+	return nil
+}
+
+// reclaimEarlierKiroFootprint removes what an earlier per-user footprint
+// wrote that the managed footprint does not: DefenseClaw's hooks in the
+// user's own default agent, and the workspace copy of the v3 hook file.
+// Managed Setup then makes the defenseclaw agent the default, after which
+// teardown could no longer tell which agent the earlier build hooked; and a
+// workspace copy under the machine-wide workspace directory is shared by
+// every enrolled user. A file that holds no DefenseClaw entry is left byte
+// for byte; one Kiro cannot parse runs no hooks and is left for teardown
+// and VerifyClean to report.
+func (c *KiroConnector) reclaimEarlierKiroFootprint(opts SetupOpts, command string) error {
+	var errs []error
+	written := map[string]bool{}
+	for _, path := range c.agentConfigPaths(opts) {
+		written[filepath.Clean(path)] = true
+	}
+	for _, path := range kiroEarlierDefaultAgentPaths(opts.DataDir) {
+		if written[filepath.Clean(path)] {
+			continue
+		}
+		if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil || !present {
+			continue
+		}
+		if err := c.reclaimKiroAgentFile(opts, path, command); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	configured := map[string]bool{}
+	for _, path := range c.hookConfigPaths(opts) {
+		configured[filepath.Clean(path)] = true
+	}
+	for _, path := range c.hookCleanupPaths(opts) {
+		if configured[filepath.Clean(path)] {
+			continue
+		}
+		if present, err := kiroV3FileReferencesHook(path, command); err != nil || !present {
+			continue
+		}
+		if err := c.reclaimKiroHookFile(opts, path, command); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (c *KiroConnector) Authenticate(r *http.Request) bool {
@@ -434,7 +497,7 @@ func (c *KiroConnector) hookConfigPaths(opts SetupOpts) []string {
 
 // hookCleanupPaths are the v3 hook files teardown reclaims: the files Setup
 // writes plus, for a managed install, a workspace copy an earlier build
-// wrote there.
+// wrote there (managed Setup reclaims that copy too).
 func (c *KiroConnector) hookCleanupPaths(opts SetupOpts) []string {
 	paths := c.hookConfigPaths(opts)
 	if workspace := kiroWorkspaceHooksPath(opts); workspace != "" {
@@ -464,7 +527,9 @@ func kiroWorkspaceHooksPath(opts SetupOpts) string {
 // edits the user's agents: it writes only the defenseclaw agent and makes it
 // the default (patchKiroDefaultAgentSetting), so bare `kiro-cli` runs a
 // hooked agent; an agent the user picks explicitly runs without DefenseClaw's
-// hooks (documented residual).
+// hooks (documented residual). The only change a managed Setup makes to a
+// user's agent is removing hooks an earlier per-user footprint added there
+// (reclaimEarlierKiroFootprint).
 func (c *KiroConnector) agentConfigPaths(opts SetupOpts) []string {
 	paths := []string{kiroManagedAgentPath()}
 	if kiroManaged(opts) {
@@ -477,14 +542,46 @@ func (c *KiroConnector) agentConfigPaths(opts SetupOpts) []string {
 }
 
 // agentCleanupPaths are the agent files teardown and VerifyClean check: the
-// files Setup writes plus, for a managed install, the user's default agent,
-// in case an earlier build added hooks there.
+// files Setup writes plus the user's default agents an earlier build may
+// have added hooks to (kiroEarlierDefaultAgentPaths).
 func (c *KiroConnector) agentCleanupPaths(opts SetupOpts) []string {
 	paths := c.agentConfigPaths(opts)
-	if custom := kiroConfiguredDefaultAgentPath(); custom != "" {
-		paths = append(paths, custom)
+	paths = append(paths, kiroEarlierDefaultAgentPaths(opts.DataDir)...)
+	return uniqueNonEmptyStrings(paths)
+}
+
+// kiroEarlierDefaultAgentPaths are the user's own default agents: the one
+// chat.defaultAgent names now and the one it named before DefenseClaw first
+// changed the setting (the pristine bytes of the settings backup). A
+// managed Setup replaces the setting, so after an upgrade from the per-user
+// footprint only the backup still names the agent that footprint hooked.
+func kiroEarlierDefaultAgentPaths(dataDir string) []string {
+	managedAgent := filepath.Clean(kiroManagedAgentPath())
+	var paths []string
+	for _, path := range []string{kiroConfiguredDefaultAgentPath(), kiroPristineDefaultAgentPath(dataDir)} {
+		if path != "" && filepath.Clean(path) != managedAgent {
+			paths = append(paths, path)
+		}
 	}
 	return uniqueNonEmptyStrings(paths)
+}
+
+// kiroPristineDefaultAgentPath is the custom default agent the settings file
+// named when DefenseClaw first captured it, or "".
+func kiroPristineDefaultAgentPath(dataDir string) string {
+	if strings.TrimSpace(dataDir) == "" {
+		return ""
+	}
+	backup, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, "kiro", kiroSettingsLogicalName))
+	if err != nil || backup.Connector != "kiro" || backup.LogicalName != kiroSettingsLogicalName ||
+		!backup.Existed || len(bytes.TrimSpace(backup.PristineBytes)) == 0 {
+		return ""
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(backup.PristineBytes, &cfg); err != nil {
+		return ""
+	}
+	return kiroDefaultAgentPathFromSettings(cfg)
 }
 
 func kiroManagedAgentPath() string {
@@ -504,9 +601,16 @@ func kiroConfiguredDefaultAgentPath() string {
 	if err != nil {
 		return ""
 	}
+	return kiroDefaultAgentPathFromSettings(cfg)
+}
+
+// kiroDefaultAgentPathFromSettings is the agent file a CLI settings object's
+// chat.defaultAgent names, or "" for none, a built-in agent, or a name that
+// is not a plain file name.
+func kiroDefaultAgentPathFromSettings(cfg map[string]interface{}) string {
 	name, _ := cfg[kiroDefaultAgentSettingKey].(string)
 	name = strings.TrimSpace(name)
-	if name == "" || kiroBuiltInAgentName(name) {
+	if name == "" || kiroBuiltInAgentName(name) || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 		return ""
 	}
 	return filepath.Join(kiroHomeDir(), "agents", name+".json")

@@ -599,7 +599,7 @@ func omnigentSitePackages(ctx context.Context, opts SetupOpts) (string, error) {
 	if pythonPath == "" {
 		return "", fmt.Errorf("omnigent connector: could not locate the Python interpreter beside %s", executable)
 	}
-	if err := validateOmnigentInterpreter(pythonPath); err != nil {
+	if err := validateOmnigentInterpreter(opts, pythonPath); err != nil {
 		return "", err
 	}
 	output, err := omnigentCommandOutput(
@@ -789,7 +789,7 @@ func validateOmnigentNativeFile(path, purpose string) error {
 	return nil
 }
 
-func validateOmnigentInterpreter(path string) error {
+func validateOmnigentInterpreter(opts SetupOpts, path string) error {
 	if runtime.GOOS == "windows" {
 		return validateOmnigentNativeFile(filepath.Clean(path), "Python interpreter")
 	}
@@ -829,6 +829,12 @@ func validateOmnigentInterpreter(path string) error {
 			break
 		}
 	}
+	if !trusted && opts.ManagedEnterprise {
+		// The standalone guardian: `uv tool install` and pipx put the
+		// interpreter under the user's home. Admit it when only this user
+		// can change it, and only while running as this user.
+		return validateOmnigentHomeInterpreter(path, resolved)
+	}
 	if !trusted {
 		return fmt.Errorf("omnigent connector: Python interpreter %s is not in a trusted install prefix; add its directory to DEFENSECLAW_TRUSTED_BIN_PREFIXES", resolved)
 	}
@@ -847,6 +853,95 @@ func validateOmnigentInterpreter(path string) error {
 		return fmt.Errorf("omnigent connector: Python interpreter directory %s is group/world-writable", filepath.Dir(resolved))
 	}
 	return nil
+}
+
+// validateOmnigentHomeInterpreter admits, for a managed install, a Python
+// interpreter under the user's home that no one but the user can change:
+// the interpreter and every directory from it up to the home, on both the
+// path DefenseClaw found and the path it resolves to, are owned by the uid
+// this process runs as, and none is writable by group or others. The
+// process must not be root, so the interpreter only ever runs as the user
+// who owns it (the standalone guardian applies per-user connectors in a
+// worker that runs as that user). The refusal names the administrator
+// setting, since a managed user cannot set DefenseClaw's environment.
+func validateOmnigentHomeInterpreter(found, resolved string) error {
+	const agentPrefixes = "enterprise.enrollment.agent_prefixes"
+	home := omnigentResolvedHome()
+	if home == "" || !omnigentPathWithin(resolved, home) {
+		return fmt.Errorf("omnigent connector: Python interpreter is outside the user's home and every trusted install prefix; an administrator can add its install prefix to %s: %s", agentPrefixes, resolved)
+	}
+	uid := os.Geteuid()
+	if uid <= 0 {
+		return fmt.Errorf("omnigent connector: a Python interpreter under a user's home runs only as that user, not as root: %s", resolved)
+	}
+	check := func(path string, symlinkOK bool) error {
+		for current := path; ; current = filepath.Dir(current) {
+			info, err := os.Lstat(current)
+			if err != nil {
+				return fmt.Errorf("omnigent connector: inspect Python interpreter path %s: %w", current, err)
+			}
+			owner, ok := pluginOwnerUID(info)
+			if !ok || int(owner) != uid {
+				return fmt.Errorf("omnigent connector: Python interpreter under the user's home is refused: %s is not owned by the user", current)
+			}
+			isLink := info.Mode()&os.ModeSymlink != 0
+			if isLink && !(symlinkOK && current == path) {
+				return fmt.Errorf("omnigent connector: Python interpreter under the user's home is refused: %s is a symbolic link", current)
+			}
+			if !isLink && info.Mode().Perm()&0o022 != 0 {
+				return fmt.Errorf("omnigent connector: Python interpreter under the user's home is refused: %s is writable by group or others (chmod go-w)", current)
+			}
+			if current == home || filepath.Dir(current) == current {
+				return nil
+			}
+		}
+	}
+	if err := check(resolved, false); err != nil {
+		return err
+	}
+	found, err := filepath.Abs(filepath.Clean(found))
+	if err != nil {
+		return fmt.Errorf("omnigent connector: resolve Python interpreter path: %w", err)
+	}
+	if found != resolved {
+		// The link DefenseClaw found (uv's tool environment) must be the
+		// user's too, or someone else could repoint it after this check.
+		if dir, err := filepath.EvalSymlinks(filepath.Dir(found)); err == nil {
+			found = filepath.Join(dir, filepath.Base(found))
+		}
+		if !omnigentPathWithin(found, home) {
+			return fmt.Errorf("omnigent connector: Python interpreter link is outside the user's home: %s", found)
+		}
+		if err := check(found, true); err != nil {
+			return err
+		}
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return fmt.Errorf("omnigent connector: stat Python interpreter %s: %w", resolved, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("omnigent connector: Python interpreter %s is not a regular file", resolved)
+	}
+	return nil
+}
+
+// omnigentResolvedHome is the user's home with symlinks resolved, or "".
+func omnigentResolvedHome() string {
+	home := strings.TrimSpace(homePath())
+	if home == "" || !filepath.IsAbs(home) {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
+	return filepath.Clean(home)
+}
+
+// omnigentPathWithin reports whether path is strictly inside dir.
+func omnigentPathWithin(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)
 }
 
 func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string) string {

@@ -1334,6 +1334,11 @@ func (c *hookOnlyConnector) setup(ctx context.Context, opts SetupOpts, hermesCon
 			return err
 		}
 	}
+	if c.name == "devin" {
+		if err := c.migrateDevinConfigTarget(opts, c.configPath(opts)); err != nil {
+			return err
+		}
+	}
 	if err := c.migrateManagedBackup(opts); err != nil {
 		return fmt.Errorf("%s managed backup migration: %w", c.name, err)
 	}
@@ -1368,20 +1373,38 @@ func (c *hookOnlyConnector) setup(ctx context.Context, opts SetupOpts, hermesCon
 // bytes are restored exactly; an operator-edited target receives surgical
 // removal of DefenseClaw entries and retains all foreign hooks.
 func (c *hookOnlyConnector) migrateOpenHandsConfigTarget(opts SetupOpts, target string) error {
+	return c.migrateConfigTarget(opts, target, "OpenHands")
+}
+
+// migrateDevinConfigTarget closes the previous ownership cycle when the
+// Devin hook config moved. Earlier builds resolved the macOS config root
+// with os.UserConfigDir (~/Library/Application Support/devin), which the
+// Devin CLI never reads; its config is ~/.config/devin/config.json. Without
+// this, Setup over the old receipt fails with a backup target mismatch on
+// every upgraded macOS host. Switching between the user-global config and
+// a workspace hooks.v1.json is handled the same way.
+func (c *hookOnlyConnector) migrateDevinConfigTarget(opts SetupOpts, target string) error {
+	return c.migrateConfigTarget(opts, target, "Devin")
+}
+
+// migrateConfigTarget restores or surgically cleans the file the "config"
+// receipt is bound to when Setup now targets another path, then discards the
+// receipt so patchConfig captures the new target.
+func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label string) error {
 	backup, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
 	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("load previous OpenHands config backup: %w", err)
+		return fmt.Errorf("load previous %s config backup: %w", label, err)
 	}
 	oldPath, err := validateManagedFileBackupTarget(backup, c.name, "config", backup.Path)
 	if err != nil {
-		return fmt.Errorf("validate previous OpenHands config backup: %w", err)
+		return fmt.Errorf("validate previous %s config backup: %w", label, err)
 	}
 	newPath, err := normalizeManagedTargetPath(target)
 	if err != nil {
-		return fmt.Errorf("resolve new OpenHands config target: %w", err)
+		return fmt.Errorf("resolve new %s config target: %w", label, err)
 	}
 	equal := oldPath == newPath
 	if runtime.GOOS == "windows" {
@@ -1392,13 +1415,13 @@ func (c *hookOnlyConnector) migrateOpenHandsConfigTarget(opts SetupOpts, target 
 	}
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", oldPath)
 	if err != nil {
-		return fmt.Errorf("restore previous OpenHands config target: %w", err)
+		return fmt.Errorf("restore previous %s config target: %w", label, err)
 	}
 	if restored {
 		return nil
 	}
 	if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
-		return fmt.Errorf("remove previous OpenHands hook entries: %w", err)
+		return fmt.Errorf("remove previous %s hook entries: %w", label, err)
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
 	return nil
@@ -1462,6 +1485,34 @@ func managedPluginForeignHookGuard(opts SetupOpts) string {
 	return filepath.Clean(binary)
 }
 
+// pluginSecureClientProfile reports a plugin rendered for the Secure Client
+// managed profile: a managed install without the standalone profile's
+// foreign-hook guard (standalone installs always render the guard). Its
+// plugin bytes stay as the Secure Client release pins them.
+func pluginSecureClientProfile(opts SetupOpts) bool {
+	return opts.ManagedEnterprise && managedPluginForeignHookGuard(opts) == ""
+}
+
+// secureClientPluginAssets are the plugin templates the Secure Client
+// profile renders instead of the current ones: copies of the templates its
+// release pins, kept byte for byte (the plugin scanner recognizes both).
+var secureClientPluginAssets = map[string]string{
+	"opencode-plugin.js": "opencode-plugin-secure-client.js",
+	"amp-plugin.ts":      "amp-plugin-secure-client.ts",
+}
+
+// pluginArtifactAssetFor is the embedded plugin template Setup renders for
+// opts. Both templates share the ownership marker line, so verification
+// reads either the same way.
+func (c *hookOnlyConnector) pluginArtifactAssetFor(opts SetupOpts) string {
+	if pluginSecureClientProfile(opts) {
+		if pinned, ok := secureClientPluginAssets[c.pluginArtifactAsset]; ok {
+			return pinned
+		}
+	}
+	return c.pluginArtifactAsset
+}
+
 // managedPluginForeignHookGuardMarker is the rendered line a standalone
 // managed plugin must carry; a plugin rendered before the guard existed
 // (or with another binary) fails verification and is repaired.
@@ -1514,9 +1565,10 @@ func managedPluginInstallMarker(opts SetupOpts) string {
 // plugin file is unchanged since setup it is removed (we created it);
 // if the operator hand-edited it, the backup restore leaves it alone.
 func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
-	tmpl, err := hookFS.ReadFile("hooks/" + c.pluginArtifactAsset)
+	asset := c.pluginArtifactAssetFor(opts)
+	tmpl, err := hookFS.ReadFile("hooks/" + asset)
 	if err != nil {
-		return fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
+		return fmt.Errorf("%s read plugin template %s: %w", c.name, asset, err)
 	}
 	tokenPath, err := HookAPITokenFilePath(opts.DataDir, c.name)
 	if err != nil {
@@ -1687,6 +1739,11 @@ func (c *hookOnlyConnector) hookCommandForOS(goos string, opts SetupOpts) string
 	unixCommand := filepath.Join(opts.DataDir, "hooks", c.scriptName)
 	if goos == "windows" && c.name == "hermes" && strings.TrimSpace(opts.HookExecutable) != "" {
 		return windowsHermesDirectHookCommand(opts.HookExecutable)
+	}
+	if c.name == "devin" {
+		if command := devinManagedHookCommand(goos, opts); command != "" {
+			return command
+		}
 	}
 	return hookInvocationCommandFor(goos, c.name, unixCommand)
 }

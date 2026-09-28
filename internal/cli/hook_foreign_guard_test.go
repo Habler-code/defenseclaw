@@ -434,10 +434,15 @@ func TestStandaloneForeignHookGuardBinaryOnlyForStandalonePlugins(t *testing.T) 
 			t.Fatalf("%s: standalone plugins run the admin hook binary, got %q", name, binary)
 		}
 	}
-	for _, name := range []string{"cursor", "codex", "devin", ""} {
+	for _, name := range []string{"cursor", "codex", ""} {
 		if binary := standaloneForeignHookGuardBinary(name); binary != "" {
-			t.Fatalf("%s: only plugin connectors get a guard binary, got %q", name, binary)
+			t.Fatalf("%s: only plugin connectors and Devin get a guard binary, got %q", name, binary)
 		}
+	}
+	// The Unix standalone Devin hook command runs the admin binary in
+	// managed mode; Windows already registers that binary for Devin.
+	if binary := standaloneForeignHookGuardBinary("devin"); (runtime.GOOS == "windows") != (binary == "") {
+		t.Fatalf("devin on %s: guard binary %q", runtime.GOOS, binary)
 	}
 	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
 	if binary := standaloneForeignHookGuardBinary("amp"); binary != "" {

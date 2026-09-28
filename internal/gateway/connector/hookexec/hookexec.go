@@ -169,7 +169,10 @@ type Options struct {
 	// ManagedStandalone selects the unix standalone-profile transport: the
 	// hook trusts the gateway only after the kernel reports that the
 	// listener runs as root or ManagedServiceUID. It is ignored outside
-	// ManagedEnterprise mode.
+	// ManagedEnterprise mode. It is also set, with ManagedRuntimeFailure,
+	// when the standalone runtime failed its checks: no transport is then
+	// selected, and the failure gets the standalone profile's fail-closed
+	// results (managedStandaloneStopEvent).
 	ManagedStandalone bool
 	// ManagedUnixSocket is the standalone hook socket. The standalone hook
 	// dials only this socket and sends no bearer token: the gateway
@@ -236,6 +239,7 @@ func Run(ctx context.Context, opts Options) int {
 		if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
 			return failForeignHookBlocked(opts, sp, reason)
 		}
+		resolveManagedStandaloneFailureEvent(&opts, sp)
 		return failUnreachable(
 			opts,
 			sp,
@@ -250,6 +254,7 @@ func Run(ctx context.Context, opts Options) int {
 	// disabled machine-policy home must block instead of bypassing enforcement.
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
 		if opts.ManagedEnterprise {
+			resolveManagedStandaloneFailureEvent(&opts, sp)
 			return failUnreachable(
 				opts,
 				sp,
@@ -261,6 +266,7 @@ func Run(ctx context.Context, opts Options) int {
 	}
 	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
 		if opts.ManagedEnterprise {
+			resolveManagedStandaloneFailureEvent(&opts, sp)
 			return failUnreachable(
 				opts,
 				sp,
@@ -904,12 +910,19 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 
 // handleOversized mirrors the per-connector oversized-payload branch.
 func handleOversized(opts Options, sp spec, failMode string) int {
+	if !sp.failOpenOnly && failMode == "closed" && managedStandaloneStopEvent(opts, sp) {
+		return allowManagedStandaloneStop(opts, sp, "stdin body exceeded cap", "transport")
+	}
 	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode)
+	closes := !sp.failOpenOnly && failMode == "closed"
+	if closes && managedStandaloneHook(opts) {
+		return failManagedStandaloneClosed(opts, sp, sp.oversizedClosed, "oversized", "stdin body exceeded cap")
+	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
 	if code, handled := managedCopilotFailClosed(opts, sp, "stdin body exceeded cap"); handled {
 		return code
 	}
-	if !sp.failOpenOnly && failMode == "closed" {
+	if closes {
 		return emitHookResult(opts, sp, sp.oversizedClosed)
 	}
 	return emitHookResult(opts, sp, sp.openAllow)
@@ -919,6 +932,9 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 // transport failures. Strict availability remains an unconditional closed
 // override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
+	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") && managedStandaloneStopEvent(opts, sp) {
+		return allowManagedStandaloneStop(opts, sp, reason, "transport")
+	}
 	logHookFailure(opts, sp, reason, "transport", failMode)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
@@ -927,6 +943,8 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: gateway unreachable, applying Antigravity's event-specific failure response: %s\n", reason)
+		} else if managedStandaloneHook(opts) {
+			return failManagedStandaloneClosed(opts, sp, sp.unreachableStrict, "transport", reason)
 		} else {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
@@ -951,8 +969,19 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
-	reason = responseFailureReason(reason)
+	if !managedStandaloneHook(opts) {
+		// The standalone hook socket carries no token, so the token-drift
+		// advice does not apply there.
+		reason = responseFailureReason(reason)
+	}
+	closes := !sp.failOpenOnly && failMode != "open"
+	if closes && managedStandaloneStopEvent(opts, sp) {
+		return allowManagedStandaloneStop(opts, sp, reason, "response")
+	}
 	logHookFailure(opts, sp, reason, "response", failMode)
+	if closes && managedStandaloneHook(opts) {
+		return failManagedStandaloneClosed(opts, sp, sp.responseClosed, "response", reason)
+	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
@@ -1105,6 +1134,130 @@ func foreignHookStopEvent(connector, event string) bool {
 		}
 	}
 	return false
+}
+
+// managedStandaloneStopEvent reports a stop or session-end event
+// (foreignHookStopEvent) of a Unix standalone managed hook. Failing such an
+// event closed denies nothing; it keeps the agent running, and every later
+// turn fails closed and stops again, so the agent loops on model turns until
+// DefenseClaw is back. On the standalone profile every fail-closed reason
+// (gateway unreachable or unverified, missing hook socket, invalid runtime,
+// unusable response) therefore gives these events the connector's neutral
+// allow, as the foreign-hook guard does. Tool and prompt events still fail
+// closed. Per-user hooks and the Secure Client profile never set
+// ManagedStandalone and keep their results.
+func managedStandaloneStopEvent(opts Options, sp spec) bool {
+	return opts.ManagedEnterprise && opts.ManagedStandalone && foreignHookStopEvent(sp.connector, opts.Event)
+}
+
+// allowManagedStandaloneStop answers a managed standalone stop event that
+// would have failed closed with the connector's neutral allow; the failure is
+// still logged, with the fail mode it got.
+func allowManagedStandaloneStop(opts Options, sp spec, reason, category string) int {
+	logHookFailure(opts, sp, reason, category, "open")
+	fmt.Fprintf(opts.Stderr,
+		"DefenseClaw is not blocking the %s event, because a block there would keep the agent running; prompts and tool calls stay blocked until DefenseClaw is available. (%s)\n",
+		strings.TrimSpace(opts.Event), reason)
+	return emitHookResult(opts, sp, sp.openAllow)
+}
+
+// managedStandaloneHook reports a Unix standalone managed hook. Per-user
+// hooks, the Secure Client profile and Windows never set ManagedStandalone.
+func managedStandaloneHook(opts Options) bool {
+	return opts.ManagedEnterprise && opts.ManagedStandalone
+}
+
+// failManagedStandaloneClosed delivers a Unix standalone managed hook's
+// fail-closed result with the plain text of managedStandaloneFailClosedText:
+// on stderr (the block message Claude Code shows) and as the reason in the
+// connector's native block body where it has one. The exit codes are the
+// connector's usual fail-closed ones.
+func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer, reason string) int {
+	text := managedStandaloneFailClosedText(opts.Event, layer, reason)
+	fmt.Fprintln(opts.Stderr, text)
+	switch sp.connector {
+	case "codex":
+		if result.exit == 0 {
+			return emit(opts.Stdout, result)
+		}
+		return emitCodexBlock(opts, text)
+	case "cursor":
+		fmt.Fprintln(opts.Stdout, cursorFallbackOutput(opts.Event, true, text))
+		return result.exit
+	case "devin":
+		fmt.Fprintln(opts.Stdout, `{"decision":"block","reason":`+mustJSONString(text)+`}`)
+		return result.exit
+	case "opencode":
+		fmt.Fprintln(opts.Stdout, openCodeDenyBody(text))
+		return result.exit
+	}
+	return emitHookResult(opts, sp, result)
+}
+
+// managedStandaloneFailClosedText is what a Unix standalone managed hook
+// says when it fails closed: that DefenseClaw blocked the prompt or tool
+// call, why in plain words, what to do, and the internal reason last in
+// parentheses, e.g. "DefenseClaw blocked this prompt: the DefenseClaw
+// gateway is not available. Try again in a moment; if this continues,
+// contact your administrator. (enterprise_managed_gateway_peer_unverified)".
+func managedStandaloneFailClosedText(event, layer, reason string) string {
+	var cause, advice string
+	switch {
+	case layer == "oversized":
+		cause, advice = "it is too large for DefenseClaw to inspect", "Make it smaller and try again."
+	case layer == "response":
+		cause, advice = "the DefenseClaw gateway returned an answer DefenseClaw could not use",
+			"Try again; if this continues, contact your administrator."
+	case strings.HasPrefix(reason, "enterprise_managed_runtime") ||
+		reason == "enterprise_managed_hook_socket_missing" ||
+		reason == "enterprise_machine_policy_summary_untrusted":
+		cause, advice = "DefenseClaw is not set up correctly on this computer", "Contact your administrator."
+	default:
+		cause, advice = "the DefenseClaw gateway is not available",
+			"Try again in a moment; if this continues, contact your administrator."
+	}
+	return "DefenseClaw blocked this " + hookEventSubject(event) + ": " + cause + ". " + advice + " (" + strings.TrimSpace(reason) + ")"
+}
+
+// hookEventSubject names what an agent hook event carries, in the words a
+// user knows: a prompt, a tool call or a tool result.
+func hookEventSubject(event string) string {
+	event = strings.TrimSpace(event)
+	switch strings.ToLower(event) {
+	case "userpromptsubmit", "beforesubmitprompt", "userpromptsubmitted", "userprompttransformed":
+		return "prompt"
+	case "pretooluse", "permissionrequest", "beforeshellexecution", "beforemcpexecution",
+		"beforereadfile", "beforetabfileread", "tool.execute.before":
+		return "tool call"
+	case "posttooluse", "posttoolusefailure", "aftershellexecution", "aftermcpexecution",
+		"afterfileedit", "tool.execute.after":
+		return "tool result"
+	case "sessionstart":
+		return "session start"
+	case "":
+		return "request"
+	default:
+		return event + " event"
+	}
+}
+
+// resolveManagedStandaloneFailureEvent names the event of a managed
+// standalone invocation that fails before its payload is read. The Claude
+// Code, Cursor and Devin commands do not bind their event, so it comes from
+// the payload, as in failForeignHookBlocked; the Codex, Copilot and
+// Antigravity commands bind it out of band. Other invocations are left
+// untouched, so their stdin is never read here.
+func resolveManagedStandaloneFailureEvent(opts *Options, sp spec) {
+	if opts == nil || !opts.ManagedEnterprise || !opts.ManagedStandalone || strings.TrimSpace(opts.Event) != "" {
+		return
+	}
+	switch sp.connector {
+	case "codex", "copilot", "antigravity":
+		return
+	}
+	if payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody); err == nil && !overflow {
+		opts.Event = resolveHookEvent("", payload)
+	}
 }
 
 // managedCopilotDenyMessage is the text Copilot shows for a managed local

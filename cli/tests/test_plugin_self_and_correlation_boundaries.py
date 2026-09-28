@@ -563,25 +563,25 @@ def test_bridge_rendered_with_the_listener_proof_stays_first_party(
 
 
 @pytest.mark.parametrize(
-    ("connector", "template_name"),
+    ("connector", "template_names"),
     [
-        ("amp", "amp-plugin.ts"),
-        ("opencode", "opencode-plugin.js"),
+        ("amp", ("amp-plugin.ts", "amp-plugin-secure-client.ts")),
+        ("opencode", ("opencode-plugin.js", "opencode-plugin-secure-client.js")),
     ],
 )
 def test_bridge_template_fingerprints_match_gateway_sources(
     connector: str,
-    template_name: str,
+    template_names: tuple[str, str],
 ) -> None:
+    # The current template and the pinned copy the Secure Client profile
+    # renders are both DefenseClaw's own bridge.
     repository_root = Path(__file__).resolve().parents[2]
-    payload = (
-        repository_root / "internal" / "gateway" / "connector" / "hooks" / template_name
-    ).read_bytes()
+    hooks = repository_root / "internal" / "gateway" / "connector" / "hooks"
+    digests = {
+        hashlib.sha256((hooks / name).read_bytes()).hexdigest() for name in template_names
+    }
 
-    assert (
-        hashlib.sha256(payload).hexdigest()
-        == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
-    )
+    assert digests == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
 
 
 def test_tampered_plugin_at_expected_install_path_is_not_exempt(

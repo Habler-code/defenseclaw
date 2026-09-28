@@ -34,6 +34,7 @@ func withStandaloneHookRuntime(
 		standaloneHookRuntime.prepared = false
 		standaloneHookRuntime.descriptor = nil
 		standaloneHookRuntime.reason = ""
+		standaloneHookRuntime.secureClientHost = false
 		standaloneHookRuntime.Unlock()
 	})
 }
@@ -133,7 +134,8 @@ func TestStandaloneHookRuntimeNoopOnlyAfterUninstall(t *testing.T) {
 		t.Fatal("missing descriptor with policy must force the hook closed")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "", true)
-	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonDescriptorMissing || opts.ManagedStandalone {
+	// No transport; the failure is marked as the standalone profile's.
+	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonDescriptorMissing || !opts.ManagedStandalone || opts.ManagedUnixSocket != "" {
 		t.Fatalf("fail-closed options wrong: %+v", opts)
 	}
 
@@ -193,7 +195,9 @@ func TestStandaloneHookRuntimeWithoutHookSocketFailsClosed(t *testing.T) {
 				t.Fatal("a descriptor without a hook socket must not yield a TCP endpoint")
 			}
 			opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
-			if opts.ManagedRuntimeFailure != standaloneRuntimeReasonHookSocketMissing || opts.ManagedStandalone || opts.ManagedUnixSocket != "" {
+			// No transport is selected; the failure is marked as the
+			// standalone profile's, whose stop events are not blocked.
+			if opts.ManagedRuntimeFailure != standaloneRuntimeReasonHookSocketMissing || !opts.ManagedStandalone || opts.ManagedUnixSocket != "" {
 				t.Fatalf("fail-closed options wrong: failure=%q standalone=%v socket=%q",
 					opts.ManagedRuntimeFailure, opts.ManagedStandalone, opts.ManagedUnixSocket)
 			}
@@ -214,6 +218,37 @@ func TestStandaloneHookRuntimeKeepsSecureClientMacFailClosed(t *testing.T) {
 	}
 	if reason := enterpriseManagedHookRuntimeFailureReason(); reason != standaloneRuntimeReasonInvalid {
 		t.Fatalf("reason = %q", reason)
+	}
+	// Its failures keep their results: never marked as the standalone
+	// profile's.
+	opts := buildHookOptionsForRuntime("claudecode", "", "", "", true)
+	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonInvalid || opts.ManagedStandalone {
+		t.Fatalf("Secure Client options: failure=%q standalone=%v", opts.ManagedRuntimeFailure, opts.ManagedStandalone)
+	}
+}
+
+// A standalone runtime that fails its checks (untrusted or missing
+// descriptor while machine policy remains) is still the standalone
+// profile's: the options select no transport but are marked standalone.
+func TestStandaloneHookRuntimeFailureIsMarkedStandalone(t *testing.T) {
+	withStandaloneHookRuntime(t, "linux",
+		func(string) (*managed.RuntimeDescriptor, error) {
+			return nil, errors.New("owner uid 1000 is not trusted")
+		},
+		noMarkers, "/nonexistent-secure-client")
+	if enterpriseManagedHookRuntimeNoop("claudecode") {
+		t.Fatal("an untrusted descriptor must never be a no-op")
+	}
+	opts := buildHookOptionsForRuntime("claudecode", "", "", "", true)
+	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonInvalid || !opts.ManagedStandalone ||
+		opts.ManagedUnixSocket != "" || opts.FailMode != "closed" || !opts.StrictAvailability {
+		t.Fatalf("options: failure=%q standalone=%v socket=%q fail=%q strict=%v",
+			opts.ManagedRuntimeFailure, opts.ManagedStandalone, opts.ManagedUnixSocket, opts.FailMode, opts.StrictAvailability)
+	}
+	// A different connector's invocation is not marked by this runtime.
+	other := buildHookOptionsForRuntime("codex", "Stop", "", "", true)
+	if other.ManagedStandalone {
+		t.Fatal("the runtime prepared for claudecode must not mark a codex invocation")
 	}
 }
 

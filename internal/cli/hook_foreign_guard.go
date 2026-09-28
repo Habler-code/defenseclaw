@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -148,15 +149,22 @@ func foreignHookGuardedEvent(connectorName, event string) bool {
 // standaloneForeignHookGuardBinary is the administrator-owned hook binary
 // the standalone Amp and OpenCode plugins run for the foreign-hook guard
 // (those plugins call the gateway directly, so the hook-time guard would
-// otherwise never run for them). Empty for every other connector and on
-// any non-standalone profile, so Secure Client and per-user installs render
-// the plugins unchanged.
+// otherwise never run for them), and on Linux and macOS the binary the
+// standalone Devin hook command runs in managed mode (the per-user
+// devin-hook.sh never ran the guard; Windows already registers the
+// administrator-owned binary for Devin). Empty for every other connector
+// and on any non-standalone profile, so Secure Client and per-user installs
+// render unchanged.
 func standaloneForeignHookGuardBinary(connectorName string) string {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return ""
 	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "amp", enterprisepolicy.ConnectorOpenCode:
+	case "devin":
+		if runtime.GOOS == "windows" {
+			return ""
+		}
 	default:
 		return ""
 	}

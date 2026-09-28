@@ -475,14 +475,10 @@ func TestOpenCodeSetup_FailModeDefaultsClosed(t *testing.T) {
 }
 
 func TestOpenCodeBridgeDistinguishesBlockingAndObserveOnlyHooks(t *testing.T) {
-	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
-	if err != nil {
-		t.Fatalf("read bridge: %v", err)
-	}
-	text := string(body)
+	text := renderOpenCodePluginTemplate(t, templateData{APIAddr: "127.0.0.1:18970", FailMode: "closed"})
 	beforeStart := strings.Index(text, `"tool.execute.before": async`)
 	beforeAwait := strings.Index(text, `const verdict = await defenseclawPost(`)
-	beforeThrow := strings.Index(text, `if (verdict && verdict.reason) throw new Error(verdict.reason);`)
+	beforeThrow := strings.Index(text, `if (verdict && verdict.reason) throw defenseclawBlockError(verdict.reason);`)
 	if beforeStart < 0 || beforeAwait < beforeStart || beforeThrow < beforeAwait {
 		t.Fatal("tool.execute.before must await the gateway verdict and throw synchronously on block")
 	}
@@ -611,10 +607,6 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	if err != nil {
 		t.Skip("node is required for the executable OpenCode plugin contract")
 	}
-	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := testenv.PrivateTempDir(t)
 	tokenPath := filepath.Join(dir, ".hook-opencode.token")
 	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
@@ -622,20 +614,11 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	}
 	render := func(failMode string) []byte {
 		t.Helper()
-		text := strings.NewReplacer(
-			"{{.APIAddr}}", "127.0.0.1:18970",
-			"{{.TokenFileJS}}", javaScriptStringContent(tokenPath),
-			"{{.FailMode}}", failMode,
-			"{{.HookSocketJS}}", "",
-			"{{.ServiceUID}}", "0",
-			"{{.ForeignHookGuardJS}}", "",
-			"{{.InstallMarkerJS}}", "",
-			"{{.ListenerProofJS}}", "",
-		).Replace(string(body))
-		if strings.Contains(text, "{{.") {
-			t.Fatalf("rendered %s plugin retains a template placeholder", failMode)
-		}
-		return []byte(text)
+		return []byte(renderOpenCodePluginTemplate(t, templateData{
+			APIAddr:     "127.0.0.1:18970",
+			TokenFileJS: javaScriptStringContent(tokenPath),
+			FailMode:    failMode,
+		}))
 	}
 	openPlugin := filepath.Join(dir, "opencode-open.mjs")
 	closedPlugin := filepath.Join(dir, "opencode-closed.mjs")

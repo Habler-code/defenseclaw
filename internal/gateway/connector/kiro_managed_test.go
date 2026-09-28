@@ -195,3 +195,125 @@ func TestKiroManagedSetupLeavesTheUsersDefaultAgentAlone(t *testing.T) {
 		t.Fatalf("per-user Setup must still hook the custom default agent: %v %v", present, err)
 	}
 }
+
+// writeKiroCustomDefaultAgent writes the user's own default agent and the CLI
+// settings that select it, and returns both paths and their bytes.
+func writeKiroCustomDefaultAgent(t *testing.T, home string) (custom, settings string, customBefore, settingsBefore []byte) {
+	t.Helper()
+	custom = filepath.Join(home, "agents", "mine.json")
+	settings = filepath.Join(home, "settings", "cli.json")
+	customBefore = []byte("{\n  \"name\": \"mine\",\n  \"tools\": [\"*\"]\n}\n")
+	settingsBefore = []byte("{\"chat.defaultAgent\": \"mine\"}\n")
+	for path, body := range map[string][]byte{custom: customBefore, settings: settingsBefore} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return custom, settings, customBefore, settingsBefore
+}
+
+// An upgrade from the per-user footprint (which hooked the user's custom
+// default agent and wrote the workspace copy) to the managed one: managed
+// Setup removes what the earlier footprint added to the user's agent and
+// the workspace copy before it makes the defenseclaw agent the default, and
+// Teardown then puts the user's setting back with nothing of DefenseClaw
+// left in their agent.
+func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	custom, settings, customBefore, settingsBefore := writeKiroCustomDefaultAgent(t, home)
+
+	perUser := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: workspace, HookFailMode: "closed"}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), perUser); err != nil {
+		t.Fatalf("per-user Setup: %v", err)
+	}
+	if hooked, err := kiroV2AgentReferencesAnyHook(custom, conn.hookCommand(perUser)); err != nil || !hooked {
+		t.Fatalf("per-user Setup must hook the custom default agent: %v %v", hooked, err)
+	}
+	workspaceCopy := filepath.Join(workspace, ".kiro", "hooks", kiroManagedHooksName)
+	if _, err := os.Stat(workspaceCopy); err != nil {
+		t.Fatalf("per-user Setup did not write the workspace copy: %v", err)
+	}
+
+	managed := perUser
+	managed.ManagedEnterprise = true
+	if err := conn.Setup(context.Background(), managed); err != nil {
+		t.Fatalf("managed Setup: %v", err)
+	}
+	if after, _ := os.ReadFile(custom); string(after) != string(customBefore) {
+		t.Fatalf("managed Setup left the earlier hooks in the user's agent:\n%s", after)
+	}
+	if _, err := os.Stat(workspaceCopy); !os.IsNotExist(err) {
+		t.Fatalf("managed Setup left the earlier workspace copy (err=%v)", err)
+	}
+	assertKiroDefaultAgentSetting(t, settings)
+	if present, err := conn.ownedHookContractPresent(managed); err != nil || !present {
+		t.Fatalf("managed hook registration present = %v, %v", present, err)
+	}
+	// A repeated managed Setup (the guardian's repair) changes nothing.
+	if err := conn.Setup(context.Background(), managed); err != nil {
+		t.Fatalf("repeated managed Setup: %v", err)
+	}
+
+	if err := conn.Teardown(context.Background(), managed); err != nil {
+		t.Fatalf("managed Teardown: %v", err)
+	}
+	if err := conn.VerifyClean(managed); err != nil {
+		t.Fatalf("managed VerifyClean: %v", err)
+	}
+	if after, _ := os.ReadFile(settings); string(after) != string(settingsBefore) {
+		t.Fatalf("teardown did not restore the user's default agent: %s", after)
+	}
+	if after, _ := os.ReadFile(custom); string(after) != string(customBefore) {
+		t.Fatalf("teardown left DefenseClaw in the user's agent:\n%s", after)
+	}
+}
+
+// A host where an earlier managed Setup already replaced chat.defaultAgent
+// without reclaiming the per-user footprint: teardown finds the user's agent
+// through the settings backup and removes the hooks left there.
+func TestKiroManagedTeardownFindsTheDefaultAgentAnEarlierSetupReplaced(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	custom, settings, customBefore, settingsBefore := writeKiroCustomDefaultAgent(t, home)
+
+	perUser := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "closed"}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), perUser); err != nil {
+		t.Fatalf("per-user Setup: %v", err)
+	}
+	// What the earlier managed Setup did: force the setting, record it.
+	if err := patchKiroDefaultAgentSetting(settings, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateManagedFileBackupPostHash(dataDir, "kiro", kiroSettingsLogicalName, settings); err != nil {
+		t.Fatal(err)
+	}
+	if hooked, err := kiroV2AgentReferencesAnyHook(custom, conn.hookCommand(perUser)); err != nil || !hooked {
+		t.Fatalf("precondition: the user's agent keeps the earlier hooks: %v %v", hooked, err)
+	}
+
+	managed := perUser
+	managed.ManagedEnterprise = true
+	if err := conn.Teardown(context.Background(), managed); err != nil {
+		t.Fatalf("managed Teardown: %v", err)
+	}
+	if err := conn.VerifyClean(managed); err != nil {
+		t.Fatalf("managed VerifyClean: %v", err)
+	}
+	if after, _ := os.ReadFile(custom); string(after) != string(customBefore) {
+		t.Fatalf("teardown left DefenseClaw in the user's agent:\n%s", after)
+	}
+	if after, _ := os.ReadFile(settings); string(after) != string(settingsBefore) {
+		t.Fatalf("teardown did not restore the user's default agent: %s", after)
+	}
+}
