@@ -90,12 +90,12 @@ func TestClaudeHKLMMergeAdmitsAndAuditsTheUnionOnWindows(t *testing.T) {
 	}
 
 	// #899 review: a row recorded below the merge floor (for example the
-	// installer's 2.1.154 placeholder for a user with no detected client)
+	// installer's 2.1.152 placeholder for a user with no detected client)
 	// is enrolled and audited like any other. The recorded version cannot
 	// show the running client; the lifecycle module withholds the Claude
 	// effective-policy claim until application control is attested at the
 	// merge floor.
-	for _, recorded := range []string{"2.1.241", "2.1.154"} {
+	for _, recorded := range []string{"2.1.241", "2.1.152"} {
 		row := opts
 		row.AgentVersion = recorded
 		if _, err := NewClaudeCodeConnector().ManagedHookPolicy(row); err != nil {

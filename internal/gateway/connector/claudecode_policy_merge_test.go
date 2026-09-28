@@ -59,16 +59,10 @@ func TestClaudeOSAdminPolicyAdmitsTheExportedMatrix(t *testing.T) {
 	}
 }
 
-func TestClaudeOSAdminPolicyRejectsAMatrixForAnotherContractOrHook(t *testing.T) {
-	// A v1 export lacks DirectoryAdded, which the v2 contract requires.
+func TestClaudeOSAdminPolicyRejectsAMatrixForAnotherHook(t *testing.T) {
+	// The signed 0.8.6 release has one Claude contract; a matrix bound to a
+	// different executable or data directory must still be rejected.
 	opts := claudeOSAdminTestOpts(t, "2.1.230")
-	stale := opts
-	stale.AgentVersion = "2.1.200"
-	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(
-		claudeOSAdminSettings(t, stale, nil), claudeOSAdminLabel, opts,
-	); err == nil {
-		t.Fatal("a matrix exported for an older hook contract was accepted")
-	}
 	other := opts
 	other.HookExecutable = filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
 	other.DataDir = filepath.Join(t.TempDir(), "defenseclaw")
@@ -81,7 +75,7 @@ func TestClaudeOSAdminPolicyRejectsAMatrixForAnotherContractOrHook(t *testing.T)
 
 // TestClaudeOSAdminPolicyMergeDoesNotTrustTheRecordedClientVersion is the
 // #899 review regression. The recorded agent_version is written once, at
-// discovery, and is often the installer's placeholder (2.1.154 for a user
+// discovery, and is often the installer's placeholder (2.1.152 for a user
 // with no detected client), so refusing on it failed every lifecycle on an
 // AVC-first host even after its users upgraded. It is not proof in the other
 // direction either. The client floor for merge is enforced host-wide by the
@@ -197,8 +191,8 @@ func TestClaudeCodeManagedHookPolicyDocumentMatchesTheInstalledRendering(t *test
 	if string(document) != string(rendered) {
 		t.Fatal("exported document differs from the policy the guardian installs")
 	}
-	if !strings.Contains(string(document), `"DirectoryAdded"`) {
-		t.Fatal("v2 export is missing the v2-only DirectoryAdded hook")
+	if !strings.Contains(string(document), `"PreToolUse"`) {
+		t.Fatal("export is missing the 0.8.6 contract's PreToolUse hook")
 	}
 	unmanaged := opts
 	unmanaged.ManagedEnterprise = false
