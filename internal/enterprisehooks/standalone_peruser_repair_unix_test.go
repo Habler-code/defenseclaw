@@ -296,6 +296,8 @@ func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
 	setStandaloneProfileForTest(t, true)
 	home := standaloneOpenHandsHome(t)
 	t.Setenv("HOME", home)
+	// Devin reads XDG_CONFIG_HOME, which CI runners set outside this home.
+	t.Setenv("XDG_CONFIG_HOME", "")
 	for _, config := range []string{".hermes/config.yaml", ".config/devin/config.json"} {
 		path := filepath.Join(home, config)
 		mustMkdir(t, filepath.Dir(path), 0o700)
