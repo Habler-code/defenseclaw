@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -162,6 +163,11 @@ func writeKiroCustomDefaultAgent(t *testing.T, home string) (custom, settings st
 // Teardown then puts the user's setting back with nothing of DefenseClaw
 // left in their agent.
 func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows enrolls Kiro through the ACP guard, not managed hooks, so
+		// no managed Setup follows a per-user one there.
+		t.Skip("managed Kiro hooks are enrolled on Linux and macOS only")
+	}
 	home := t.TempDir()
 	workspace := t.TempDir()
 	dataDir := t.TempDir()
@@ -253,6 +259,11 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 // the reclaim already took DefenseClaw's hooks out of the user's own
 // agent, which must not stay the default without them.
 func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows enrolls Kiro through the ACP guard, not managed hooks, so
+		// no managed Setup follows a per-user one there.
+		t.Skip("managed Kiro hooks are enrolled on Linux and macOS only")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a read-only folder")
 	}
