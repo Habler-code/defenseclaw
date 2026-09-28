@@ -735,8 +735,25 @@ fi
 # is still loaded (indicating something is actively re-registering it).
 launchd_bootout_until_gone() {
   local _label="$1" _tries=0 _max=6
+  # Require _quiet_target consecutive "absent" probes ~0.5 s apart before
+  # returning success. A supervisor may re-register the plist a beat
+  # after our bootout returned; the initial absence probe would be a
+  # false positive (the label was momentarily gone) and the caller's
+  # file mutation would then race the re-registration. Two consecutive
+  # absent probes prove the label is stably gone through the observed
+  # re-registration delay.
+  local _quiet_target=2
   while (( _tries < _max )); do
-    if ! launchctl print "system/${_label}" >/dev/null 2>&1; then
+    local _p=0 _seen_present=false
+    while (( _p < _quiet_target )); do
+      if launchctl print "system/${_label}" >/dev/null 2>&1; then
+        _seen_present=true
+        break
+      fi
+      (( _p++ ))
+      sleep 0.5
+    done
+    if [[ "${_seen_present}" == "false" ]]; then
       return 0
     fi
     if (( _tries > 0 )); then
@@ -757,25 +774,62 @@ launchd_bootout_until_gone() {
 # unloading now guarantees the atomic-replace hits a quiescent target.
 # The retry helper handles a supervisor re-bootstrapping the plist
 # behind our back on a back-to-back reinstall.
+#
+# Match each bootout to the bootstrap path this run will actually
+# execute. Without this gate, a reconcile with --skip-launchd would
+# stop every current-gen job and exit at the SKIP_LAUNCHD short-circuit
+# below without re-bootstrapping anything; a reconcile with
+# --skip-connector would stop guardian/enumerator whose bootstrap sits
+# inside the SKIP_CONNECTOR block. Preserve a loaded job when the
+# matching restart path won't run — the operator's running services
+# stay running through a partial install.
 for _label in "${_current_launchd_labels[@]}"; do
-  if launchctl print "system/${_label}" >/dev/null 2>&1; then
-    log "unloading current launchd job for reinstall: ${_label}"
-    launchd_bootout_until_gone "${_label}" \
-      || warn "launchctl bootout system/${_label} failed after retries; bootstrap below may still surface a real failure"
+  if ! launchctl print "system/${_label}" >/dev/null 2>&1; then
+    continue
   fi
+  case "${_label}" in
+    "${LAUNCHD_LABEL}")
+      # Gateway is bootstrapped at the end of this script unless
+      # SKIP_LAUNCHD.
+      if [[ "${SKIP_LAUNCHD}" == "true" ]]; then
+        log "preserving loaded ${_label} (--skip-launchd will skip its restart)"
+        continue
+      fi
+      ;;
+    "${GUARDIAN_LAUNCHD_LABEL}"|"${ENUMERATOR_LAUNCHD_LABEL}")
+      # Guardian/enumerator bootstrap sits inside the SKIP_CONNECTOR
+      # block, which itself only runs when SKIP_LAUNCHD is off (the
+      # SKIP_LAUNCHD short-circuit exits before it).
+      if [[ "${SKIP_LAUNCHD}" == "true" || "${SKIP_CONNECTOR}" == "true" ]]; then
+        log "preserving loaded ${_label} (--skip-launchd/--skip-connector will skip its restart)"
+        continue
+      fi
+      ;;
+  esac
+  log "unloading current launchd job for reinstall: ${_label}"
+  launchd_bootout_until_gone "${_label}" \
+    || warn "launchctl bootout system/${_label} failed after retries; bootstrap below may still surface a real failure"
 done
 
-# Legacy launchd cleanup: unload pre-Cisco-path labels if any are still
-# loaded. Those plists point at binaries that no longer exist on a
-# current install; leaving them loaded produces log noise (repeated
-# spawn-and-crash) but is otherwise inert.
-for _label in "${_legacy_launchd_labels[@]}"; do
-  if launchctl print "system/${_label}" >/dev/null 2>&1; then
-    log "unloading legacy launchd job: ${_label}"
-    launchd_bootout_until_gone "${_label}" \
-      || warn "launchctl bootout system/${_label} failed after retries; legacy plist will be superseded below"
-  fi
-done
+# Legacy launchd cleanup: unload pre-Cisco-path labels only on the
+# reconcile path. Under fresh install, a loaded legacy job means the
+# host has legacy on-disk state (legacy plists at ${LEGACY_PLIST_DST}
+# and ${LEGACY_GUARDIAN_PLIST_DST}) that the pre-mutation boundary
+# below will reject with die(). Booting the legacy job out first would
+# just leave the operator with a stopped legacy service AND a rejected
+# install with no recovery. Under reconcile, current-gen plists will
+# supersede the legacy plists further down, so bootout here is safe.
+# Legacy bootout is also gated on the same SKIP flags as its current-
+# gen counterparts — we never stop a service we won't replace.
+if [[ "${_RECONCILE_REINSTALL}" == "true" && "${SKIP_LAUNCHD}" != "true" ]]; then
+  for _label in "${_legacy_launchd_labels[@]}"; do
+    if launchctl print "system/${_label}" >/dev/null 2>&1; then
+      log "unloading legacy launchd job: ${_label}"
+      launchd_bootout_until_gone "${_label}" \
+        || warn "launchctl bootout system/${_label} failed after retries; legacy plist will be superseded below"
+    fi
+  done
+fi
 
 unset _current_managed_markers _legacy_managed_paths _current_launchd_labels \
   _legacy_launchd_labels _marker _label _local_users _local_user \
@@ -895,28 +949,53 @@ create_install_directory_no_replace "${GUARDIAN_AUTH_DIR}" root wheel 0750
 POLICIES_DST="${RUNTIME_DIR}/policies"
 create_install_directory_no_replace "${POLICIES_DST}" root wheel 0750
 log "installing guardrail rule packs -> ${POLICIES_DST}/guardrail"
-# cp -R + explicit chown/chmod: we don't have install_dir_no_replace for
-# a whole tree, and RUNTIME_DIR itself is already 0750 root:wheel.
+# Stage the replacement rule-pack tree in a sibling directory and swap
+# atomically so the gateway is never left with a partially-copied
+# policy tree if cp fails mid-copy (macOS cp(1) can leave a partial
+# destination on I/O error) and so the old tree is available for
+# rollback until the new one is in place.
 #
-# Under reconcile, ${POLICIES_DST}/guardrail already exists from the prior
-# install. BSD cp on macOS, given an existing destination directory,
-# copies the SOURCE INTO the destination (creating dst/guardrail/guardrail),
-# silently producing a nested tree that the gateway won't find on startup.
-# Remove the prior tree first so cp always creates a fresh, correctly
-# shaped destination in both branches. The rule-pack tree carries no
-# operator state — it's fully re-rendered from the shipped bundle every
-# install — so wholesale replacement is safe. A pre-existing symlink at
-# this path is refused: it can only get there via privileged tampering.
+# The rule-pack tree carries no operator state — it's fully re-rendered
+# from the shipped bundle every install — so wholesale replacement is
+# safe. A pre-existing symlink at the destination path is refused: it
+# can only get there via privileged tampering.
 if [[ -L "${POLICIES_DST}/guardrail" ]]; then
   die "guardrail policies destination is a symlink; refusing to overwrite: ${POLICIES_DST}/guardrail"
 fi
-if [[ -e "${POLICIES_DST}/guardrail" ]]; then
-  rm -rf -- "${POLICIES_DST}/guardrail"
+_guardrail_stage="${POLICIES_DST}/guardrail.new"
+_guardrail_old="${POLICIES_DST}/guardrail.old"
+# Clean any stray staging directories from an aborted prior install.
+rm -rf -- "${_guardrail_stage}" "${_guardrail_old}"
+cp -R "${POLICIES_SRC}/guardrail" "${_guardrail_stage}" \
+  || { rm -rf -- "${_guardrail_stage}"; die "could not stage guardrail rule packs at ${_guardrail_stage}"; }
+chown -R root:wheel "${_guardrail_stage}"
+find "${_guardrail_stage}" -type d -exec chmod 0750 {} +
+find "${_guardrail_stage}" -type f -exec chmod 0640 {} +
+# Sanity-check the staged tree before touching the running tree. The
+# `default/` profile is required by the gateway's cold-start sidecar
+# init (see internal/config/config.go:3573). A cp that ended with an
+# I/O error would leave a tree without it.
+if [[ ! -d "${_guardrail_stage}/default" ]]; then
+  rm -rf -- "${_guardrail_stage}"
+  die "staged guardrail rule packs are missing the required default profile at ${_guardrail_stage}/default; refusing to swap"
 fi
-cp -R "${POLICIES_SRC}/guardrail" "${POLICIES_DST}/guardrail"
-chown -R root:wheel "${POLICIES_DST}/guardrail"
-find "${POLICIES_DST}/guardrail" -type d -exec chmod 0750 {} +
-find "${POLICIES_DST}/guardrail" -type f -exec chmod 0640 {} +
+# Move any existing tree aside first, then move the staged tree into
+# place. Both moves are atomic rename(2) calls within the same parent
+# directory. If the second move fails, restore the old tree so the
+# gateway keeps its working rule packs.
+if [[ -e "${POLICIES_DST}/guardrail" ]]; then
+  /bin/mv -f -- "${POLICIES_DST}/guardrail" "${_guardrail_old}" \
+    || { rm -rf -- "${_guardrail_stage}"; die "could not move current guardrail tree aside at ${POLICIES_DST}/guardrail"; }
+fi
+if ! /bin/mv -f -- "${_guardrail_stage}" "${POLICIES_DST}/guardrail"; then
+  if [[ -d "${_guardrail_old}" ]]; then
+    /bin/mv -f -- "${_guardrail_old}" "${POLICIES_DST}/guardrail" 2>/dev/null || true
+  fi
+  rm -rf -- "${_guardrail_stage}"
+  die "could not publish new guardrail tree at ${POLICIES_DST}/guardrail"
+fi
+rm -rf -- "${_guardrail_old}"
+unset _guardrail_stage _guardrail_old
 # Multi-user hook wiring: the hook-guardian LaunchDaemon reads its
 # per-tick manifest from ${GUARDIAN_MANIFEST_DIR}/targets.yaml. Creating
 # the directory unconditionally keeps the guardian's LoadManifest happy

@@ -734,14 +734,43 @@ t_install_reconciles_existing_state() {
   assert_contains "${body}" 'hook-guardian manifest is a symlink; refusing to overwrite' \
     "managed bundle refuses a symlink at GUARDIAN_MANIFEST_PATH in either mode"
 
-  # Guardrail rule-pack cp must NOT nest under reconcile. BSD cp with an
-  # existing destination directory silently produces dst/guardrail/guardrail
-  # so the gateway can't find its rule packs on startup. Remove the tree
-  # first, then let cp create it fresh. Symlink at that path is refused.
+  # Guardrail rule-pack publication is a staged atomic swap: cp into a
+  # sibling `.new`, sanity-check `default/`, move the current tree to
+  # `.old` and the staged tree into place, then remove `.old`. On any
+  # failure the old tree is left in place so the gateway keeps its
+  # working rule packs. BSD cp's "copy source INTO existing dst" trap
+  # is avoided because we always cp into a fresh sibling, not into the
+  # live destination. Symlink at the live destination is refused.
   assert_contains "${body}" 'guardrail policies destination is a symlink; refusing to overwrite' \
     "managed bundle refuses a symlink at the guardrail policies destination"
-  assert_contains "${body}" 'rm -rf -- "${POLICIES_DST}/guardrail"' \
-    "managed bundle wipes any pre-existing guardrail tree before cp -R (avoids BSD cp reconcile nesting)"
+  assert_contains "${body}" '_guardrail_stage="${POLICIES_DST}/guardrail.new"' \
+    "managed bundle stages the new guardrail tree in a sibling directory"
+  assert_contains "${body}" '_guardrail_old="${POLICIES_DST}/guardrail.old"' \
+    "managed bundle stages the retired guardrail tree in a sibling directory for rollback"
+  assert_contains "${body}" 'staged guardrail rule packs are missing the required default profile' \
+    "managed bundle sanity-checks the staged tree before swapping the live one"
+  assert_contains "${body}" 'could not publish new guardrail tree' \
+    "managed bundle surfaces publication failure with an actionable message"
+
+  # Skip-flag / legacy bootout guardrails: bootout must match the
+  # bootstrap path that will run in this invocation. --skip-launchd
+  # short-circuits every restart; --skip-connector short-circuits the
+  # guardian/enumerator restart. Legacy bootout only runs under
+  # reconcile so a fresh-install boundary rejection doesn't leave the
+  # legacy job stopped with no recovery.
+  assert_contains "${body}" 'preserving loaded ${_label} (--skip-launchd will skip its restart)' \
+    "managed bundle preserves loaded gateway when --skip-launchd would skip its restart"
+  assert_contains "${body}" 'preserving loaded ${_label} (--skip-launchd/--skip-connector will skip its restart)' \
+    "managed bundle preserves loaded guardian/enumerator when --skip-connector would skip their restart"
+  assert_contains "${body}" '"${_RECONCILE_REINSTALL}" == "true" && "${SKIP_LAUNCHD}" != "true"' \
+    "managed bundle gates legacy bootout on the reconcile branch AND on the matching restart being reachable"
+
+  # Quiescence-interval contract: the retry helper must observe multiple
+  # consecutive absent probes before returning success. A single absent
+  # probe would be a false positive if the supervisor re-registers a
+  # beat later.
+  assert_contains "${body}" '_quiet_target=2' \
+    "managed bundle requires multiple consecutive absent probes before treating a label as stably unloaded"
 
   local reconcile_line build_line mutation_line
   reconcile_line="$(grep -n "reconciling existing DefenseClaw installation in place" \
