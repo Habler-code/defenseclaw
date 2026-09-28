@@ -864,6 +864,14 @@ func isAddrInUse(err error) bool {
 		strings.Contains(msg, "only one usage of each socket address")
 }
 
+// retriesHeldAPIPortWithoutHookSocket reports whether this gateway keeps
+// retrying a held API port although it serves no hook socket: only the
+// standalone profile on a platform without the socket (Windows). Secure
+// Client and per-user gateways keep ending Run after the bind budget.
+func (a *APIServer) retriesHeldAPIPortWithoutHookSocket() bool {
+	return heldAPIPortRetriedWithoutHookSocket && a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise()
+}
+
 func (a *APIServer) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
@@ -1076,11 +1084,17 @@ func (a *APIServer) Run(ctx context.Context) error {
 	case lnErr == nil:
 		serveTCP(ln)
 		a.health.SetAPI(StateRunning, "", apiDetails)
-	case hookSrv != nil && isAddrInUse(lnErr) && ctx.Err() == nil:
-		// Another process holds the TCP port. Keep serving the hook socket,
-		// report the API as failed, and take the port when it is released
-		// instead of exiting into a restart loop that also drops the socket.
-		fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; the hook socket stays up while the API bind is retried: %v\n", a.addr, lnErr)
+	case (hookSrv != nil || a.retriesHeldAPIPortWithoutHookSocket()) && isAddrInUse(lnErr) && ctx.Err() == nil:
+		// Another process holds the TCP port. Keep serving the hook socket
+		// (where there is one), report the API as failed, and take the port
+		// when it is released instead of exiting into a restart loop that
+		// also drops the socket, or (Windows standalone) leaving the service
+		// running without its API.
+		if hookSrv != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; the hook socket stays up while the API bind is retried: %v\n", a.addr, lnErr)
+		} else {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; hooks fail closed while the API bind is retried until the port is released: %v\n", a.addr, lnErr)
+		}
 		retryDetails := make(map[string]interface{}, len(apiDetails)+1)
 		for key, value := range apiDetails {
 			retryDetails[key] = value
