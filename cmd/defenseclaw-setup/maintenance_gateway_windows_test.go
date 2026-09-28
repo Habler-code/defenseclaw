@@ -66,6 +66,11 @@ func TestMain(m *testing.M) {
 			os.Exit(0)
 		}
 	}
+	// Setup tests must not depend on whether this Windows host has the
+	// enterprise DefenseClawGateway service registered, as Secure Client test
+	// hosts do. Tests of the coexistence gates stub them themselves.
+	refuseSetupBesideEnterprise = func() error { return nil }
+	refuseRuntimeRestoreBesideEnterprise = func() error { return nil }
 	os.Exit(m.Run())
 }
 
@@ -76,7 +81,7 @@ func writeMaintenanceGatewayArchive(t *testing.T, path, executable string, corru
 		t.Fatal(err)
 	}
 	writer := zip.NewWriter(file)
-	for _, name := range []string{"defenseclaw.exe", "defenseclaw-hook.exe"} {
+	for _, name := range []string{"defenseclaw.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe"} {
 		entry, createErr := writer.Create(name)
 		if createErr != nil {
 			_ = writer.Close()
