@@ -445,19 +445,21 @@ func windowsEnterpriseLogDirectory() (string, error) {
 func ensureWindowsEnterpriseLogDirectory(directory string) error {
 	info, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
-		descriptor, err := windows.SecurityDescriptorFromString(windowsEnterpriseLogSDDL)
-		if err != nil {
+		// Assign, never redeclare, err here: the check below must see the
+		// Lstat of the created folder, not the first lookup that missed it.
+		var descriptor *windows.SECURITY_DESCRIPTOR
+		if descriptor, err = windows.SecurityDescriptorFromString(windowsEnterpriseLogSDDL); err != nil {
 			return err
 		}
 		attributes := &windows.SecurityAttributes{
 			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 			SecurityDescriptor: descriptor,
 		}
-		pointer, err := winpath.UTF16Ptr(directory)
-		if err != nil {
+		var pointer *uint16
+		if pointer, err = winpath.UTF16Ptr(directory); err != nil {
 			return err
 		}
-		if err := windows.CreateDirectory(pointer, attributes); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		if err = windows.CreateDirectory(pointer, attributes); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 			return fmt.Errorf("create %s: %w", directory, err)
 		}
 		info, err = os.Lstat(directory)

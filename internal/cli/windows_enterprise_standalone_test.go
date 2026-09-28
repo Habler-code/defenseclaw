@@ -543,6 +543,18 @@ func TestWindowsEnterpriseStandalonePreflightFailureIsSchemaTwo(t *testing.T) {
 	}
 }
 
+// On a host without the log folder the first run created it but still
+// reported it missing, so a first install carried lifecycle_log_failed.
+func TestWindowsEnterpriseLogDirectoryIsUsableOnFirstCreate(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "DefenseClaw")
+	if err := ensureWindowsEnterpriseLogDirectory(directory); errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the log folder this call created is reported missing: %v", err)
+	}
+	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+		t.Fatalf("the log folder was not created: %v", err)
+	}
+}
+
 func TestWindowsEnterpriseLifecycleLogRotatesFiveGenerations(t *testing.T) {
 	directory := t.TempDir()
 	originalLimit := windowsEnterpriseLogLimit
