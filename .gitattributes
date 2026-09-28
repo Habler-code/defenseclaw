@@ -16,6 +16,7 @@ internal/gateway/connector/hooks/opencode-plugin.js text eol=lf
 internal/gateway/connector/hooks/amp-plugin-secure-client.ts text eol=lf
 internal/gateway/connector/hooks/opencode-plugin-secure-client.js text eol=lf
 internal/gateway/connector/hooks/*.sh text eol=lf
+internal/enterprisepolicy/opencode_managed_plugin.js text eol=lf
 
 # The MDM kit scripts are uploaded to MDM consoles as committed and the Unix
 # ones run under /bin/sh; keep them LF on Windows checkouts too.
