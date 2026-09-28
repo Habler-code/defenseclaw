@@ -99,7 +99,8 @@ either. OpenHands before 1.12.0 does not load DefenseClaw's hooks, and a
 user can start one straight from the uv cache
 (`uvx --from openhands==1.11.0 openhands`): in DefenseClaw's testing on
 macOS 15 it ran a command the policy blocks with no DefenseClaw decision
-and no audit record, and the user's enrolled OpenHands stayed ready. Only
+and no audit record. Status and verify check only the enrolled OpenHands
+and its default hook file, so they keep reporting the user ready. Only
 application control that allows approved agent versions closes it; see
 [Residual risks](/docs/enterprise/threat-model#residual-risks).
 

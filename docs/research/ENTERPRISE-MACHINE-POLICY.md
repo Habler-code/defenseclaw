@@ -63,7 +63,7 @@ Legend: ✔ admin hook still ran / control held · ✘ bypass works ·
 | amp | managed settings `/etc/ampcode/managed-settings.json` etc. exist, but **no machine plugin location**: plugins load only from `.amp/plugins/*.ts` and `~/.config/amp/plugins/*.ts` (workspace "global plugins" are cloud, experimental) | — (no machine hook) | none | ✘ `{action:'modify'}` from user and project plugins executed; handler order is documented as undefined | Per-user plugin + guardian repair + foreign-plugin guard |
 | devin | none documented; user `~/.config/devin/config.json` · `%APPDATA%\devin\config.json`; also reads Claude-format files by default | — | none | doc: `updatedInput` | Per-user + admin hook binary + foreign-hook guard |
 | antigravity | none documented; `~/.gemini/config/hooks.json`, `~/.gemini/antigravity-cli/settings.json` | — (user owns the file; per-hook `enabled:false`) | none | doc: no input-modification field | Per-user + admin hook binary + guardian repair |
-| hermes | none (`hooks:` in `~/.hermes/config.yaml`) | — | none | — ; hook exit status/timeouts only warn (no fail-closed) | Per-user + admin hook binary; residual |
+| hermes | none (`hooks:` in `~/.hermes/config.yaml`) | — | none | — ; blocks only on a block answer or (from 0.21) exit code 2; other failures and timeouts let the call run unless an entry sets `fail_closed` (0.21), which DefenseClaw's entries do not (threat model R5) | Per-user + admin hook binary; residual |
 | openhands | none; `~/.openhands/hooks.json`, project `.openhands/hooks.json` | — | none | verify per release | Linux/macOS per-user |
 | omnigent | none; `~/.omnigent/config.yaml` policy modules | — | none | — | Linux/macOS per-user |
 | kiro | none (`managed-settings.json` carries permission rules only); workspace `.kiro/hooks/*.json`, user `~/.kiro/hooks/` ("All scopes merged" for IDE 1.0.182+ and `kiro-cli --v3`) | — | none | blocks only | Linux/macOS per-user (global `~/.kiro/hooks` + CLI 2.x agent); Windows `enterprise acp` mediation |
@@ -278,8 +278,8 @@ Source: https://antigravity.google/docs/hooks (retrieved 2026-09-26).
 
 | Connector | User / project hook locations | Machine policy | Notes |
 | --- | --- | --- | --- |
-| hermes | `hooks:` in `~/.hermes/config.yaml` (default profile only) | none | Hermes does not enforce hook exit status, timeouts or non-zero exits — there is no fail-closed surface (DefenseClaw `hermes.mdx`, `hook_contract.go`) |
-| openhands | `~/.openhands/hooks.json`; project `.openhands/hooks.json` layers with it | none | Windows requires WSL (unsupported natively) |
+| hermes | `hooks:` in `~/.hermes/config.yaml` (default profile only) | none | Hermes blocks a `pre_tool_call` only on a valid block answer and, from 0.21, on exit code 2; other exits and timeouts let the call run unless the entry sets `fail_closed` (0.21), which DefenseClaw's entries do not (DefenseClaw `hermes.mdx`, `hook_contract.go`, threat model R5) |
+| openhands | `~/.openhands/hooks.json`; a project `.openhands/hooks.json` replaces it (OpenHands uses the first file it finds, the project's first; threat model R30) | none | Windows requires WSL (unsupported natively) |
 | omnigent | `~/.omnigent/config.yaml` (`policies`, `policy_modules`) | none | Windows degraded |
 | kiro | workspace `.kiro/hooks/*.json`, user `~/.kiro/hooks/` | none | Linux/macOS: the guardian writes each user's global `~/.kiro/hooks/defenseclaw.json` and the CLI 2.x agent. Windows: DefenseClaw mediates via ACP (`enterprise acp enroll`); the guardian cannot read the kiro-cli version without running it |
 
@@ -296,7 +296,7 @@ Source: https://antigravity.google/docs/hooks (retrieved 2026-09-26).
 | devin | **No** | No | **Yes** — including the Claude-format files Devin reads by default | `updatedInput` from any loaded source |
 | antigravity | **No** | No | Low (no input rewrite); guardian repair covers `enabled:false` tampering | User owns the config file; bounded repair window |
 | hermes | **No** | No | Low | No fail-closed surface upstream |
-| openhands | **No** | No | Verify per release | Project hooks layer with user hooks |
+| openhands | **No** | No | Verify per release | A project hooks file replaces the user file (threat model R30) |
 | omnigent | **No** | No | — | Policy modules are Python code in the user profile |
 | kiro | **No** (per-user global hooks on Linux/macOS; ACP mediation on Windows) | No | Recommended (project `.kiro/hooks` run on the same trigger); not implemented yet | User owns `~/.kiro/hooks`; `KIRO_HOME` and cloud configuration sync bypass it; CLI 2.x vetoes tool calls only |
 

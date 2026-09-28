@@ -264,8 +264,11 @@ context at `pre_llm_call`, and continue its bounded verification loop at
 `pre_verify`. DefenseClaw registers all 23 Hermes v0.19 shell-hook-valid events,
 but transform, API, gateway, approval, Kanban, and ordinary lifecycle events
 remain attributed audit unless the official shell response parser documents a
-compatible effect. Hermes does not enforce exit status, timeout, nonzero,
-malformed, auth, or network failures and has no DefenseClaw ask surface.
+compatible effect. Hermes blocks a `pre_tool_call` only on a valid block
+answer and, from Hermes 0.21, on exit code 2. Other exit codes, a timeout,
+malformed output and auth or network failures let the call run in the
+releases DefenseClaw supports (DefenseClaw's entries do not set Hermes'
+`fail_closed`), and Hermes has no DefenseClaw ask surface.
 Confirm verdicts are audit/alert-only, with no synthesized hook output.
 Registration is not claimed live until Hermes reload evidence exists; Doctor
 reports the staged state as unhealthy/pending reload.

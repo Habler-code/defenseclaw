@@ -231,8 +231,8 @@ a user who sets out to avoid it:
   DefenseClaw's plugin (`amp plugins list` shows only Amp's own), so its tool
   calls are not inspected or logged, the guardian never repairs that
   session, and status and verify keep reporting the user's Amp ready. In
-  DefenseClaw's testing on RHEL 9, Ubuntu 24.04 and macOS 15, a command the
-  policy blocks ran this way. `DEFENSECLAW_*` environment overrides did not
+  DefenseClaw's testing a command the policy blocks ran this way on RHEL 9
+  (`XDG_CONFIG_HOME` and `HOME`) and macOS 15 (`XDG_CONFIG_HOME`). `DEFENSECLAW_*` environment overrides did not
   turn the plugin off.
 - **Plugin order.** Amp does not define the order in which plugins run (see
   the trust boundary above).
