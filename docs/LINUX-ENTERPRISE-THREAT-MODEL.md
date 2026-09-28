@@ -213,20 +213,20 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-18 | W-15 | A failed upgrade leaves mixed state | Transaction snapshot, rollback and crash recovery on the next run | `internal/enterpriseunix/lifecycle_test.go` failure injection |
 | L-19 | W-46 | Concurrent MDM runs collide | Lifecycle lock; exit `75` while busy | Lifecycle tests |
 | L-20 | W-48 | A user reads the AI Defense key | `LoadCredential=` with a root-only file (systemd 247 or later), else `root:defenseclaw 0640`; the reader rejects any other owner, mode or link count | `internal/managed/credentials_test.go`, `internal/enterpriseunix/lifecycle_test.go` |
-| L-21 | W-52 | A per-user install competes with the managed deployment | `scripts/install.sh`, `scripts/defenseclaw-upgrade.sh`, `defenseclaw upgrade` and the per-user gateway refuse while `/etc/defenseclaw/managed-runtime.json` exists; `--adopt-existing` backs up and takes over an older unmanaged layout | `cli/tests/test_managed_host_refusal.py`, `internal/cli/managed_host_guard_test.go` |
+| L-21 | W-52 | A per-user install competes with the managed deployment | `scripts/install.sh`, `scripts/defenseclaw-upgrade.sh`, `defenseclaw upgrade` and the per-user gateway refuse while `/etc/defenseclaw/managed-runtime.json` exists; `--adopt-existing` backs up and takes over an older unmanaged layout | `cli/tests/test_upgrade_shim.py`, `internal/cli/managed_host_guard_test.go` |
 | L-22 | W-13 | A removed user or connector stays authorized | The ledger is rebuilt from the current manifest; removed or disabled rows are revoked | Enumerator and guardian tests |
-| L-23 | — | SELinux, fapolicyd or AppArmor silently blocks a service | Relabel after install; lifecycle warnings; certification on RHEL 9 with SELinux enforcing (partial on this code: not yet complete) and on Ubuntu (not yet run) | Host certification record |
+| L-23 | — | SELinux, fapolicyd or AppArmor silently blocks a service | Relabel after install; lifecycle warnings | Host certification record |
 | L-24 | W-21 | The gateway hangs without exiting | `WatchdogSec=60s` with `Type=notify`; systemd restarts it | SIGSTOP drill |
-| L-25 | W-27 | An old, copied or self-built agent client (for example Codex built from source, or an older Codex or Claude Code under `~/.local`) ignores `/etc/codex/requirements.toml` or the managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and fapolicyd (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15). Claude Code releases that do not read `/etc/claude-code/managed-settings.d` (1.0.128 and 2.0.77 on RHEL 9, 2.0.77 on Ubuntu 24.04) ignore both DefenseClaw drop-ins, including the version floor, run with no DefenseClaw hook and no audit row, and are not reported by `status` or `verify` ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). GitHub Copilot CLI 1.0.15, below its 1.0.18 floor, installed with `npm install --prefix` and run with `--no-auto-update`, does not load `/etc/github-copilot/policy.d` on RHEL 9 either. Per-user connectors below their contract minimum are the same class: OpenHands 1.11.0 (the minimum is 1.12.0), started with `uvx --from openhands==1.11.0 openhands`, starts on RHEL 9 without loading `~/.openhands/hooks.json`, and nothing refuses it or reports it, because it runs from the uv cache, where discovery does not look | Application-control profile on a host; RHEL 9 and Ubuntu 24.04 certification, 2026-09-27 |
+| L-25 | W-27 | An old, copied or self-built agent client (for example Codex built from source, or an older Codex or Claude Code under `~/.local`) ignores `/etc/codex/requirements.toml` or the managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and fapolicyd (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15). Claude Code releases that do not read `/etc/claude-code/managed-settings.d` (for example 1.0.128 and 2.0.77) ignore both DefenseClaw drop-ins, including the version floor, run with no DefenseClaw hook and no audit row, and are not reported by `status` or `verify` ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). GitHub Copilot CLI 1.0.15, below its 1.0.18 floor, installed with `npm install --prefix` and run with `--no-auto-update`, does not load `/etc/github-copilot/policy.d` either. Per-user connectors below their contract minimum are the same class: OpenHands 1.11.0 (the minimum is 1.12.0), started with `uvx --from openhands==1.11.0 openhands`, starts without loading `~/.openhands/hooks.json`, and nothing refuses it or reports it, because it runs from the uv cache, where discovery does not look | Application-control profile on a host; an old client started from a user's home |
 | L-26 | — | A standard user creates a private user and mount namespace and starts an agent with its own view of the machine policy, runtime descriptor or hook socket directory | `enterprise linux verify` warns (`unprivileged_user_namespaces`) unless the kernel refuses unprivileged user namespaces; the host sysctl closes it (residual 11, enterprise R20) | `internal/enterpriseunix/userns_test.go` |
 | L-27 | W-57 | A user has an agent only as a desktop app or editor extension and is never enrolled | Not in this release: machine-policy hook calls are inspected under the default contract or refused (`unenrolled_users`), and per-user connectors get no hooks ([R25](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#912](https://github.com/cisco-ai-defense/defenseclaw/issues/912)) | Tracked in #912 |
 | L-28 | W-58 | A Copilot agent chat in VS Code's Local harness runs without DefenseClaw policy or audit | Not in this release ([R26](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913)) | Tracked in #913 |
 | L-29 | W-59 | The standalone profile is installed inside a WSL 2 distribution, where the Windows user is root | Not a supported deployment: the user controls the distribution ([R27](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#914](https://github.com/cisco-ai-defense/defenseclaw/issues/914)) | Tracked in #914 |
 | L-30 | W-60 | Devin Desktop runs without DefenseClaw hooks for a user without the `devin` CLI | Not in this release ([R28](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915)) | Tracked in #915 |
 | L-31 | W-61 | The Kiro IDE is not discovered and has no version floor; its reading of the global `~/.kiro/hooks` file is not live-verified | Not in this release ([R29](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916)); `kiro-cli` is covered per user (R22) | Tracked in #916 |
-| L-32 | — | A user kills, stops or starves their own `defenseclaw-hook` (or `openhands-hook.sh`, `hermes-hook.sh`) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex, OpenHands, Devin and Hermes then run the call with no DefenseClaw decision before it runs (Hermes' later `post_tool_call` hook can still record it); Copilot, OpenCode, Amp and Antigravity stay closed (residual 12, enterprise R5 and R18). Application control or EDR process protection closes it | RHEL 9 and Ubuntu 24.04 certification, 2026-09-27 |
-| L-33 | — | A project's `.openhands/hooks.json` replaces the user-level registration, so none of DefenseClaw's OpenHands hooks run in that project | Not closable by DefenseClaw: OpenHands uses the first `hooks.json` it finds, the project's before the user's, so any project file (a cloned repository can carry one) removes every DefenseClaw hook; the guardian does not restore or remove project files, the foreign-hook guard does not cover OpenHands, and policy verify does not look for it ([R30](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | Ubuntu 24.04 and RHEL 9 certification, 2026-09-27 |
-| L-34 | — | A user starts a per-user agent with another config root or a mode that skips user configuration (Amp or Devin with `XDG_CONFIG_HOME` or `HOME`, `devin --config <file>`, Antigravity or OpenHands with `HOME`, Hermes with `--safe-mode` or `HERMES_HOME`), so DefenseClaw's registration is never loaded | Not closable by DefenseClaw: the guardian repairs only the default location and cannot see a process's environment or command line, so the session is not inspected, logged or repaired, and status and verify keep the user's target ready (residual 7, enterprise R1). Application control over how users launch these agents closes it | RHEL 9 and Ubuntu 24.04 certification, 2026-09-27 |
+| L-32 | — | A user kills, stops or starves their own `defenseclaw-hook` (or `openhands-hook.sh`, `hermes-hook.sh`) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex, OpenHands, Devin and Hermes then run the call with no DefenseClaw decision before it runs (Hermes' later `post_tool_call` hook can still record it); Copilot, OpenCode, Amp and Antigravity stay closed (residual 12, enterprise R5 and R18). Application control or EDR process protection closes it | Kill and stop drill on the user's hook processes |
+| L-33 | — | A project's `.openhands/hooks.json` replaces the user-level registration, so none of DefenseClaw's OpenHands hooks run in that project | Not closable by DefenseClaw: OpenHands uses the first `hooks.json` it finds, the project's before the user's, so any project file (a cloned repository can carry one) removes every DefenseClaw hook; the guardian does not restore or remove project files, the foreign-hook guard does not cover OpenHands, and policy verify does not look for it ([R30](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | A project `.openhands/hooks.json` drill |
+| L-34 | — | A user starts a per-user agent with another config root or a mode that skips user configuration (Amp or Devin with `XDG_CONFIG_HOME` or `HOME`, `devin --config <file>`, Antigravity or OpenHands with `HOME`, Hermes with `--safe-mode` or `HERMES_HOME`), so DefenseClaw's registration is never loaded | Not closable by DefenseClaw: the guardian repairs only the default location and cannot see a process's environment or command line, so the session is not inspected, logged or repaired, and status and verify keep the user's target ready (residual 7, enterprise R1). Application control over how users launch these agents closes it | Alternate config root and launch flag drill per connector |
 
 ## Invariants
 
@@ -268,22 +268,20 @@ access. Status shows presence, modification time and a digest prefix only.
    policy.
 7. Amp loads plugins only from the per-user config directory, which follows
    `XDG_CONFIG_HOME`. A user who starts Amp with `XDG_CONFIG_HOME` pointing
-   at another directory runs it without the DefenseClaw plugin (verified on
-   RHEL 9 on 2026-09-26). The guardian cannot see a per-process environment,
+   at another directory runs it without the DefenseClaw plugin. The guardian cannot see a per-process environment,
    no DefenseClaw hook runs that could detect it, and Amp has no machine
    plugin path (R3). The same holds for every per-user connector started
-   with another config root or a mode that skips user configuration (R1).
-   Certified on RHEL 9 and Ubuntu 24.04 on 2026-09-27: Amp with `HOME`,
-   Devin with `XDG_CONFIG_HOME` or `devin --config <file>` naming a copy
-   without hooks, Antigravity with `HOME`, Hermes with `--safe-mode` or
-   `HERMES_HOME`, and OpenHands with `HOME` each ran a marker command with
-   no DefenseClaw audit row, and the guardian never repairs such a session.
+   with another config root or a mode that skips user configuration (R1):
+   Amp with `HOME`, Devin with `XDG_CONFIG_HOME` or `devin --config <file>`
+   naming a copy without hooks, Antigravity with `HOME`, Hermes with
+   `--safe-mode` or `HERMES_HOME`, and OpenHands with `HOME` run tool calls
+   with no DefenseClaw audit row, and the guardian never repairs such a
+   session.
    `status` and `verify` keep reporting the user's target ready, because
    the registration in the default location is intact (L-34). Hermes
-   `--ignore-user-config` on its own kept DefenseClaw's hooks on RHEL 9 (a
-   Hermes 0.21.5 source build), and `DEFENSECLAW_*` overrides did not
-   remove them. The machine-policy connectors were not
-   affected. Closing it needs application control over how users launch
+   `--ignore-user-config` on its own keeps DefenseClaw's hooks, and
+   `DEFENSECLAW_*` overrides do not remove them. The machine-policy
+   connectors are not affected. Closing it needs application control over how users launch
    these agents (for example allowing the agent binary to run only from an
    administrator-owned launcher that resets these variables and refuses
    these flags), or a vendor machine setting that pins the config directory.
@@ -334,13 +332,12 @@ access. Status shows presence, modification time and a digest prefix only.
 12. `defenseclaw-hook` and the per-user hook scripts run as the user, who
     can terminate, suspend or starve them; agents that block only on an
     explicit deny then run the call, with no DefenseClaw decision or audit
-    row before it runs (R18, L-32). Certified on RHEL 9 and Ubuntu 24.04
-    (2026-09-27): with the user's own hook processes killed or stopped,
-    Claude Code and Codex ran the tool call (a killed hook is a non-2 exit; a
-    stopped one times out after 30 s), and so did OpenHands (`Exit Code: -9`),
-    Devin and Hermes for a killed hook. For Hermes no `pre_tool_call` row
-    reached the gateway, while its later `post_tool_call` and model hooks
-    did, so the audit shows the call only after it ran (R5). Copilot,
-    OpenCode, Amp and Antigravity stayed closed. Closing it needs
+    row before it runs (R18, L-32). With the user's own hook processes
+    killed or stopped, Claude Code and Codex run the tool call (a killed hook
+    is a non-2 exit; a stopped one times out after 30 s), and so do OpenHands
+    (`Exit Code: -9`), Devin and Hermes for a killed hook. For Hermes no
+    `pre_tool_call` row reaches the gateway, while its later `post_tool_call`
+    and model hooks do, so the audit shows the call only after it ran (R5).
+    Copilot, OpenCode, Amp and Antigravity stay closed. Closing it needs
     the vendor to treat a failed or timed-out hook as a deny, or
     application control or EDR that stops users from signalling the hook.

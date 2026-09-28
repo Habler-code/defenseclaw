@@ -141,31 +141,30 @@ not-found answers.
 | M-14 | W-52 | A per-user install competes with the managed deployment | `scripts/install.sh`, `defenseclaw upgrade` and the per-user gateway refuse while the descriptor exists | Refusal tests |
 | M-15 | W-15 | A failed upgrade leaves mixed state | Transaction snapshot and rollback | Lifecycle tests |
 | M-16 | — | The standalone and Secure Client profiles are installed together | The standalone lifecycle refuses when a Secure Client deployment is present | `secureClientPresent` tests |
-| M-17 | W-27 | An old, copied or self-built agent client ignores `/etc/codex/requirements.toml` or the Claude Code managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and Santa (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15). Claude Code 2.0.0, installed by a standard user under their home, does not read `/Library/Application Support/ClaudeCode/managed-settings.d`, so it ignores both DefenseClaw drop-ins, including the version floor, runs with no DefenseClaw hook, and is not reported by `status` or `verify` ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). Per-user connectors below their contract minimum are the same class: OpenHands 1.11.0 (the minimum is 1.12.0), started by a standard user with `uvx --from openhands==1.11.0 openhands`, does not load `~/.openhands/hooks.json` and ran a marker command with no DefenseClaw decision or audit row; nothing refuses it, discovery does not look in the uv cache it runs from, and `status` and `verify`, which check only the enrolled OpenHands and its default hook file, keep reporting the user's target ready | Application-control profile on a host; macOS 15 certification, 2026-09-27 |
+| M-17 | W-27 | An old, copied or self-built agent client ignores `/etc/codex/requirements.toml` or the Claude Code managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and Santa (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15). Claude Code 2.0.0, installed by a standard user under their home, does not read `/Library/Application Support/ClaudeCode/managed-settings.d`, so it ignores both DefenseClaw drop-ins, including the version floor, runs with no DefenseClaw hook, and is not reported by `status` or `verify` ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). Per-user connectors below their contract minimum are the same class: OpenHands 1.11.0 (the minimum is 1.12.0), started by a standard user with `uvx --from openhands==1.11.0 openhands`, does not load `~/.openhands/hooks.json`, so its tool calls run with no DefenseClaw decision or audit row; nothing refuses it, discovery does not look in the uv cache it runs from, and `status` and `verify`, which check only the enrolled OpenHands and its default hook file, keep reporting the user's target ready | Application-control profile on a host; an old client started from a user's home |
 | M-18 | W-57 | A user has an agent only as a desktop app or editor extension and is never enrolled | Not in this release: machine-policy hook calls are inspected under the default contract or refused (`unenrolled_users`), and per-user connectors get no hooks ([R25](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#912](https://github.com/cisco-ai-defense/defenseclaw/issues/912)) | Tracked in #912 |
 | M-19 | W-58 | A Copilot agent chat in VS Code's Local harness runs without DefenseClaw policy or audit | Not in this release ([R26](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913)) | Tracked in #913 |
 | M-20 | W-60 | Devin Desktop runs without DefenseClaw hooks for a user without the `devin` CLI | Not in this release ([R28](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915)) | Tracked in #915 |
 | M-21 | W-61 | The Kiro IDE is not discovered and has no version floor; its reading of the global `~/.kiro/hooks` file is not live-verified | Not in this release ([R29](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916)); `kiro-cli` is covered per user (R22) | Tracked in #916 |
-| M-22 | — | A user kills, stops or starves their own `defenseclaw-hook` (or a per-user hook script) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex, OpenHands (killed, or stalled until its 60 s timeout, leaving only its own confirmation prompt, which the user answers) and Hermes (killed; a stalled `pre_tool_call` hook timed out after 30 s and blocked) then run the call with no DefenseClaw decision or audit row; Copilot stays closed unless every one of its hooks is stopped, and OpenCode and Amp stay closed (residual 8, enterprise R5 and R18). Application control or EDR process protection closes it | macOS 15 certification, 2026-09-27 |
-| M-23 | — | A project's `.openhands/hooks.json` replaces the user-level registration, so none of DefenseClaw's OpenHands hooks run in that project | Not closable by DefenseClaw: OpenHands uses the first `hooks.json` it finds, the project's before the user's, so any project file (a cloned repository can carry one) removes every DefenseClaw hook; the guardian does not restore or remove project files, the foreign-hook guard does not cover OpenHands, and policy verify does not look for it ([R30](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | Ubuntu 24.04, RHEL 9 and macOS 15 certification, 2026-09-27 |
-| M-24 | — | A standard user kickstarts the on-demand `apply` or `verify` LaunchDaemon | Accepted: the jobs run fixed, idempotent root work from root-owned inputs; the lifecycle lock serializes them with administrator runs (residual 9) | macOS 15 certification, 2026-09-27 |
-| M-25 | — | A standard user hard-links root-owned DefenseClaw files into their home | Accepted: a link keeps the file's owner and mode, and the files DefenseClaw refuses with more than one link are in directories standard users cannot search (residual 10) | macOS 15 certification, 2026-09-27 |
-| M-26 | — | A user starts a per-user agent with another config root or a mode that skips user configuration (Amp with `XDG_CONFIG_HOME`, Hermes with `--safe-mode` or `HERMES_HOME`), so DefenseClaw's registration is never loaded | Not closable by DefenseClaw: the guardian repairs only the default location and cannot see a process's environment or command line, so the session is not inspected, logged or repaired, and status and verify keep the user's target ready (residual 1, enterprise R1). Application control over how users launch these agents closes it | macOS 15 certification, 2026-09-27 |
+| M-22 | — | A user kills, stops or starves their own `defenseclaw-hook` (or a per-user hook script) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex, OpenHands (killed, or stalled until its 60 s timeout, leaving only its own confirmation prompt, which the user answers) and Hermes (killed) then run the call with no DefenseClaw decision or audit row; Copilot stays closed unless every one of its hooks is stopped, and OpenCode and Amp stay closed (residual 8, enterprise R5 and R18). Application control or EDR process protection closes it | Kill and stop drill on the user's hook processes |
+| M-23 | — | A project's `.openhands/hooks.json` replaces the user-level registration, so none of DefenseClaw's OpenHands hooks run in that project | Not closable by DefenseClaw: OpenHands uses the first `hooks.json` it finds, the project's before the user's, so any project file (a cloned repository can carry one) removes every DefenseClaw hook; the guardian does not restore or remove project files, the foreign-hook guard does not cover OpenHands, and policy verify does not look for it ([R30](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | A project `.openhands/hooks.json` drill |
+| M-24 | — | A standard user kickstarts the on-demand `apply` or `verify` LaunchDaemon | Accepted: the jobs run fixed, idempotent root work from root-owned inputs; the lifecycle lock serializes them with administrator runs (residual 9) | `launchctl kickstart` as a standard user |
+| M-25 | — | A standard user hard-links root-owned DefenseClaw files into their home | Accepted: a link keeps the file's owner and mode, and the files DefenseClaw refuses with more than one link are in directories standard users cannot search (residual 10) | Hard-link attempts as a standard user; `verify` and `repair` |
+| M-26 | — | A user starts a per-user agent with another config root or a mode that skips user configuration (Amp with `XDG_CONFIG_HOME`, Hermes with `--safe-mode` or `HERMES_HOME`), so DefenseClaw's registration is never loaded | Not closable by DefenseClaw: the guardian repairs only the default location and cannot see a process's environment or command line, so the session is not inspected, logged or repaired, and status and verify keep the user's target ready (residual 1, enterprise R1). Application control over how users launch these agents closes it | Alternate config root and launch flag drill per connector |
 
 ## Residual risks
 
 1. Per-user registrations are user-owned and repaired within one reconcile
    interval, as on the other platforms, and a per-user agent started with
    another config root or a mode that skips user configuration never loads
-   them ([R1](ENTERPRISE-THREAT-MODEL.md#residual-risks), M-26). Certified
-   on macOS 15 (2026-09-27): Amp with `XDG_CONFIG_HOME` naming a directory
-   without DefenseClaw's plugin (`amp plugins list` showed only Amp's own),
-   Hermes with `--safe-mode`, and Hermes with `HERMES_HOME` naming a copy of
-   `config.yaml` without the `hooks` block each ran a marker command with no
-   DefenseClaw decision or audit row. The guardian cannot see a
+   them ([R1](ENTERPRISE-THREAT-MODEL.md#residual-risks), M-26): Amp with
+   `XDG_CONFIG_HOME` naming a directory without DefenseClaw's plugin, Hermes
+   with `--safe-mode`, and Hermes with `HERMES_HOME` naming a copy of
+   `config.yaml` without the `hooks` block run tool calls with no DefenseClaw
+   decision or audit row. The guardian cannot see a
    per-process environment or command line, so it never repairs such a
    session, and `status` and `verify` keep reporting the user's target
-   ready. `DEFENSECLAW_*` overrides did not remove the hooks. Amp has no
+   ready. `DEFENSECLAW_*` overrides do not remove the hooks. Amp has no
    machine plugin path (R3) and Hermes has no DefenseClaw machine policy;
    closing it needs application control over how users launch these
    agents, for example allowing the agent binary to run only from an
@@ -196,7 +195,7 @@ not-found answers.
    ([R7](ENTERPRISE-THREAT-MODEL.md#residual-risks)).
 7. An old, copied or self-built agent client can ignore machine policy
    (M-17); only application control closes it. This includes Claude Code
-   releases that do not read `managed-settings.d` (2.0.0 on macOS 15), which
+   releases that do not read `managed-settings.d` (for example 2.0.0), which
    ignore DefenseClaw's hooks and version floor alike ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)),
    and per-user connectors below their contract minimum: OpenHands 1.11.0,
    started with `uvx --from openhands==1.11.0 openhands`, loads no
@@ -204,25 +203,21 @@ not-found answers.
 8. `defenseclaw-hook` and the per-user hook scripts run as the user, who can
    terminate, suspend or starve them; agents that block only on an explicit
    deny then run the call, with no DefenseClaw audit row for it
-   ([R18](ENTERPRISE-THREAT-MODEL.md#residual-risks), M-22). Certified on
-   macOS 15 (2026-09-27): with the user's own hook processes killed or
-   stopped, Claude Code and Codex ran the tool call (a killed hook is a
-   non-2 exit; a stopped one times out after 30 s), OpenHands did for a
-   killed hook (`Exit Code: -9`) and for one that stalled until its 60 s
-   timeout, once the user answered Yes at OpenHands' own confirmation
-   prompt, and Hermes did for a killed `pre_tool_call` hook (a stalled one
-   timed out after 30 s and blocked, which is not a documented Hermes
-   contract, R5); Copilot
-   stayed closed unless every one of its hooks was stopped, and OpenCode
-   and Amp stayed closed. Closing it needs the vendor
+   ([R18](ENTERPRISE-THREAT-MODEL.md#residual-risks), M-22). With the
+   user's own hook processes killed or stopped, Claude Code and Codex run
+   the tool call (a killed hook is a non-2 exit; a stopped one times out
+   after 30 s), OpenHands does for a killed hook (`Exit Code: -9`) and for
+   one that stalls until its 60 s timeout, once the user answers Yes at
+   OpenHands' own confirmation prompt, and Hermes does for a killed
+   `pre_tool_call` hook (R5); Copilot stays closed unless every one of its
+   hooks is stopped, and OpenCode and Amp stay closed. Closing it needs the vendor
    to treat a failed or timed-out hook as a deny, or application control or
    EDR that stops users from signalling the hook.
 9. A standard user can start the root on-demand LaunchDaemons
    `com.cisco.defenseclaw.apply` (runs `enterprise macos ensure`) and
    `com.cisco.defenseclaw.verify` with
    `launchctl kickstart -k system/<label>`; launchd accepts it (exit 0),
-   while the same request for a running daemon is refused (verified on
-   macOS 15 on 2026-09-27). Both jobs do fixed, idempotent work from
+   while the same request for a running daemon is refused. Both jobs do fixed, idempotent work from
    root-owned inputs, so the effect is extra root lifecycle runs (an
    `ensure` that reports `noop`), growth of `lifecycle.log`, and lock
    contention: an administrator's own run that starts meanwhile waits for
@@ -233,8 +228,7 @@ not-found answers.
     hard-link any root-owned DefenseClaw file that sits in a directory they
     can search (the binaries, `etc/config.yaml`, `etc/managed-runtime.json`,
     `etc/machine-policy.json`, the LaunchDaemon plists, the logs and the
-    vendor machine-policy files) into their own home; 27 such links were
-    created on macOS 15 on 2026-09-27. The link does not change the file's
+    vendor machine-policy files) into their own home. The link does not change the file's
     owner or mode, so the user can read or write no more than before, and
     `verify` and `repair` still pass. The user keeps the old inodes after an
     upgrade or log rotation replaces the files, so a file the user could

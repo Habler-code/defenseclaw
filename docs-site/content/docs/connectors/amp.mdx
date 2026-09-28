@@ -230,15 +230,13 @@ a user who sets out to avoid it:
   with `XDG_CONFIG_HOME` or `HOME` pointing at another folder does not load
   DefenseClaw's plugin (`amp plugins list` shows only Amp's own), so its tool
   calls are not inspected or logged, the guardian never repairs that
-  session, and status and verify keep reporting the user's Amp ready. In
-  DefenseClaw's testing a command the policy blocks ran this way on RHEL 9
-  (`XDG_CONFIG_HOME` and `HOME`) and macOS 15 (`XDG_CONFIG_HOME`). `DEFENSECLAW_*` environment overrides did not
-  turn the plugin off.
+  session, and status and verify keep reporting the user's Amp ready.
+  `DEFENSECLAW_*` environment overrides do not turn the plugin off.
 - **Plugin order.** Amp does not define the order in which plugins run (see
   the trust boundary above).
 
-A plugin that loaded stays closed when its DefenseClaw check fails: in
-testing, a killed or stopped check blocked the call.
+A plugin that loaded stays closed when its DefenseClaw check fails: a
+killed or stopped check blocks the call.
 
 What reduces it:
 

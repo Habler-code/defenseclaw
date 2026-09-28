@@ -75,9 +75,8 @@ travels through a temporary file inside a `0700` temporary directory.
 ## Why the Secure Client kit is not parameterized here
 
 The Secure Client signing pipeline's build kit (`packaging/scripts/*.sh`,
-`packaging/scripts/lib/*`) is byte-pinned by the Secure Client source
-tripwire (`scripts/secure_client_golden.py`), because it ships production
-Secure Client builds. Its fixed `Cisco Systems, Inc.` signer assertion
+`packaging/scripts/lib/*`) is pinned by the Secure Client release gate,
+because it ships production Secure Client builds. Its fixed `Cisco Systems, Inc.` signer assertion
 therefore stays as it is.
 
 Configurable signer pinning lives in the standalone path instead:

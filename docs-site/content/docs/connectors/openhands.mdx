@@ -165,19 +165,17 @@ avoid it:
   and status and verify do not report it.
 - **Older OpenHands releases.** OpenHands before 1.12.0 does not load
   `~/.openhands/hooks.json`. A user can start one without installing it, for
-  example with `uvx --from openhands==1.11.0 openhands`: in DefenseClaw's
-  testing on macOS 15 it ran a command the policy blocks with no audit
-  record. Nothing refuses it, and because `uvx` runs it from its cache, it
+  example with `uvx --from openhands==1.11.0 openhands`, and its tool calls
+  then run with no audit record. Nothing refuses it, and because `uvx` runs it from its cache, it
   is not reported.
 - **Another home.** OpenHands reads the hook file under `HOME`, so a session
-  started with `HOME` pointing elsewhere loads no DefenseClaw hooks (seen in
-  testing on RHEL 9 and Ubuntu 24.04). The guardian never repairs that
+  started with `HOME` pointing elsewhere loads no DefenseClaw hooks. The guardian never repairs that
   session, and status and verify keep reporting the user's OpenHands ready.
-  `OPENHANDS_PERSISTENCE_DIR` and `DEFENSECLAW_*` environment overrides did
+  `OPENHANDS_PERSISTENCE_DIR` and `DEFENSECLAW_*` environment overrides do
   not remove the hooks.
 - **A killed or stalled hook lets the call run.** `openhands-hook.sh` runs
-  as the user. OpenHands treats a killed hook (`Exit Code: -9`) and, on
-  macOS 15, a hook that stalls until its 60-second timeout as non-blocking,
+  as the user. OpenHands treats a killed hook (`Exit Code: -9`) and can
+  treat a hook that stalls until its 60-second timeout as non-blocking,
   so the call runs with no DefenseClaw decision; OpenHands' own
   confirmation prompt, which the user answers, is the only check left.
 

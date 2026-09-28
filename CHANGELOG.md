@@ -64,262 +64,123 @@ stopped`. Nothing is changed; use the install command above.
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
 
-## [Unreleased] — Enterprise hardening: changes that reach per-user installs
+## [Unreleased] — Enterprise hardening
 
-These changes landed with the standalone enterprise profile but are not
-gated on it, so they apply to per-user installs too.
+Entries that name the enterprise standalone profile apply only there; the
+rest also reach per-user installs.
 
 ### Fixed
 
-- **OpenHands tool calls are inspected, per-user installs included.** The
-  OpenHands SDK sends its hook events with PascalCase `event_type` values
-  (`PreToolUse`), which DefenseClaw did not map to its tool-call route, and
-  the terminal action's fields left the command unproven. A terminal
-  `PreToolUse` call was therefore allowed without inspection, even in
-  action mode. OpenHands payloads now have their own decoder, so terminal
-  commands are inspected and can be blocked.
-- **Antigravity `run_command` calls match command rules.** Antigravity sends
-  scheduling and UI arguments beside the command (`WaitMsBeforeAsync`,
-  `SafeToAutoRun`, `Blocking`, `toolAction`, `toolSummary`). They left the
-  command unproven, so command rules did not match. DefenseClaw now drops
-  these arguments, when each has its expected type, before it analyzes the
-  command.
-
+- **OpenHands tool calls are inspected.** OpenHands sends PascalCase
+  `event_type` values (`PreToolUse`) that DefenseClaw did not route, so
+  terminal calls ran uninspected even in action mode. OpenHands payloads now
+  have their own decoder, so terminal commands can be blocked.
+- **Antigravity `run_command` calls match command rules.** The scheduling
+  and UI arguments Antigravity sends beside the command
+  (`WaitMsBeforeAsync`, `toolAction` and others) left it unproven.
+  DefenseClaw now drops them when each has its expected type.
 - **An upgrade whose only connector was removed stops before the swap.**
-  When every configured connector is one the new release does not ship (for
-  example Gemini CLI alone), `defenseclaw migrate --check` now fails before
-  the installer replaces anything, names the connector, and prints commands
-  the installed release accepts: `defenseclaw setup remove <name> --yes
-  --force` from 0.7.0 on (earlier releases have no `setup remove`, so the
-  message says to set up a supported connector or edit `config.yaml`), or
-  set up another connector first. Earlier, the upgrade swapped, the new
-  gateway could not start, the installer rolled back, and the suggested
-  `setup remove` was refused on the restored release. The in-place migrate
-  warning now names the connector instead of `<name>`.
-
-- **A command rule still blocks when the command writes to a `~/` or
-  `$HOME/` path.** A redirect target the shell expands at run time
-  (`> ~/out.txt`, `> "$HOME/out.txt"`, `> out-*.txt`) made the whole
-  command's parse partial, so a CEL command rule fell back to its regex and
-  a CRITICAL match was recorded as detection-only (allowed in action mode),
-  while the same command writing to an absolute path was blocked. When such
-  a target is the only unknown part of a command and can only name a file
-  (it starts with `~` or `$HOME/`, or only a filename pattern expands), the
-  rule engine now analyzes the same command with a static stand-in target,
-  including any wrapped commands (`sudo`, `env`, `sh -c`), and evaluates
-  CEL rules on that analysis without the stand-in's redirect and path. A
-  match there is proof for a block, provided the rule cannot depend on the
-  dropped redirect and path (it does not negate, compare or `all()` over
-  `redirects`, `paths`, `artifacts` or `archive_lineages`, and does not read
-  `parse`, `argv_complete` or a lineage's `authoritative`) and has no
-  built-in code prerequisite. A non-match still leaves the regex fallback
-  to decide, as before. Nearly all built-in rules have a code prerequisite,
-  so this covers custom and marker rules; the built-in rules still record a
-  match on such a command as detection-only (tracked in #925). Commands
-  chained with `&&` or `||`, commands with an expanding argument or program
-  name, and other parameter targets such as `> $OUT` are unchanged. This is
-  rule engine behavior, so it applies to every profile that uses the local
-  engine, per-user installs included.
-- **Agents say that DefenseClaw policy made a block.** A block or
-  confirmation by a policy rule reached the agent as `matched:
-  <RULE-ID>:<redacted len=N sha=...>`, which users and models read as a
-  broken hook. It now reads `DefenseClaw policy blocked this action (rule
-  <RULE-ID>). Do not retry it in another form.` or `DefenseClaw policy needs
-  your confirmation for this action (rule <RULE-ID>).` (in the standalone
-  enterprise profile: "...under your organization's policy", with a pointer
-  to the administrator). The retry sentence is there because an agent that
-  was told only the rule name sometimes rewrote the blocked command to get
-  the same result. A title is
-  kept for DefenseClaw's built-in rules and for rules of the loaded rule
-  pack; the audit record keeps the full reason. A block that another
-  verdict (AI Defense, the LLM judge) also decided keeps that verdict's
-  reason instead of naming only the local rule. The Secure Client wording
-  is unchanged.
-- **OpenCode shows DefenseClaw blocks.** A blocked tool call failed with
-  only the bare reason, and in some sessions showed no text at all, so the
-  model told the user the command had succeeded. The plugin now fails the
-  call with an error that says DefenseClaw blocked it ("DefenseClaw blocked
-  this tool call under policy, so it did not run: <reason>", or the reason
-  as is when it already comes from DefenseClaw, such as "DefenseClaw policy
-  blocked this action (rule ...)"), and shows the same text as an error
-  notice in the OpenCode TUI. A confirm verdict, which the plugin cannot ask
-  about, still runs the call but now shows a warning notice. A plugin an
-  earlier release wrote fails its presence check and is replaced.
+  When no configured connector ships in the new release, `defenseclaw
+  migrate --check` fails before anything is replaced, names the connector
+  and prints commands the installed release accepts.
+- **A command rule still blocks a write to a `~/` or `$HOME/` path.** A
+  redirect target the shell expands (`> ~/out.txt`) made the parse partial,
+  so a CRITICAL CEL match was only detected. CEL rules that cannot depend on
+  that redirect now see the command with a static target (built-ins: #925).
+- **Agents say that DefenseClaw policy made a block.** Rule verdicts reached
+  the agent as `matched: <RULE-ID>:<redacted ...>`. They now say
+  `DefenseClaw policy blocked this action (rule <RULE-ID>)` and not to retry
+  it in another form; the audit keeps the full reason.
+- **OpenCode shows DefenseClaw blocks.** A blocked call failed with the bare
+  reason or no text, so the model reported success. The plugin now fails it
+  with an error that names DefenseClaw and shows an error notice; a confirm
+  verdict runs with a warning notice.
 - **OpenCode and Amp say to restart after a failed start-up check.** When
-  the plugin's load-time check for unapproved plugins fails, its blocks now
-  say the check failed when the agent started and to restart the agent once
-  DefenseClaw is available (the result is kept for the process, as before).
-- **`defenseclaw doctor` passes a global Kiro install.** Its `Connector
-  scope [kiro]` check failed every install without `claw.workspace_dir`,
-  saying the hooks never run, although Kiro IDE 1.0.182 and later and
-  `kiro-cli --v3` read the global `~/.kiro/hooks/defenseclaw.json`. It now
-  passes when that file holds DefenseClaw's hooks, notes that older Kiro IDE
-  builds still need `claw.workspace_dir`, and fails only when neither the
-  global nor a workspace registration is present.
-- **Devin on macOS after the config folder moved.** Earlier builds wrote
-  Devin's hooks under `~/Library/Application Support/devin`; the Devin CLI
-  reads `~/.config/devin/config.json`, where DefenseClaw now writes. Setup
-  over the old backup receipt failed with "managed backup target mismatch"
-  until someone ran teardown. Setup now closes the old location first (an
-  unchanged file is restored, an edited one keeps everything but
-  DefenseClaw's entries) and records the receipt for the new one. The same
-  move now also happens when the target switches between the global
-  config and a workspace `hooks.v1.json`.
+  the plugin's load-time check for unapproved plugins fails, its blocks say
+  so and ask the user to restart the agent once DefenseClaw is available.
+- **`defenseclaw doctor` passes a global Kiro install.** `Connector scope
+  [kiro]` failed every install without `claw.workspace_dir`. It now passes
+  when the global `~/.kiro/hooks/defenseclaw.json`, which recent Kiro builds
+  read, holds DefenseClaw's hooks.
+- **Devin on macOS after the config folder moved.** Setup writes
+  `~/.config/devin/config.json`, which the Devin CLI reads, and closes the
+  old `~/Library/Application Support/devin` target first instead of failing
+  with "managed backup target mismatch".
 - **Kiro teardown finds the agent it hooked.** Teardown and VerifyClean also
-  clean the default agent named in the settings backup, so hooks an earlier
-  setup added to the user's own default agent are removed even after the
-  user changed `chat.defaultAgent`. An agent name containing `/`, `\`, `.`
-  or `..` is no longer resolved to a file.
-- **The `windsurf` to `devin` rename reaches every setting.** It covered
-  `guardrail.connector`, `claw.mode` and the four `*.connectors` maps only, so
-  a `connector_hooks` override, `guardrail.judge.hook_connectors`,
-  `application_protection.include_connectors` / `exclude_connectors`, the
-  `connector` of `asset_policy` rules (a denied rule or a registry entry
-  written for the retired ID) and observability route
-  `selector.connectors` kept the retired ID and silently stopped applying.
-  The loaders, the v8 observability compiler and the `defenseclaw migrate`
-  step now rename those too; an explicit `devin` entry wins, a list names
-  `devin` once, and the notice lists every setting moved.
+  clean the default agent named in the settings backup, even after the user
+  changed `chat.defaultAgent`. An agent name with `/`, `\`, `.` or `..` is
+  no longer resolved to a file.
+- **The `windsurf` to `devin` rename reaches every setting.**
+  `connector_hooks`, the judge and `application_protection` lists,
+  `asset_policy` rules and observability selectors kept the retired ID; the
+  loaders and `migrate` now rename them.
 - **`defenseclaw migrate` survives a plugin manifest that is not UTF-8.** A
-  Latin-1 `plugin.yaml` under `plugin_dir` raised `UnicodeDecodeError`
-  through `migrate` (blocking every upgrade on the host) and `setup remove`.
-  Such a manifest now declares only its directory name, as in the gateway.
-- **`defenseclaw migrate` keeps plugin connectors.** A plugin connector
-  registers under the name its code reports, which need not match its
-  directory or manifest name, so `migrate` could drop a working plugin
-  connector from `config.yaml`. While `plugin_dir` holds a plugin the
-  gateway could load (its manifest sets `entry` and `sha256` and the entry
-  file is present; Go plugins never load on Windows), `migrate` drops no
-  connector name, and the upgrade preflight asks the staged gateway
-  (`connector verify`) whether it knows a name before it keeps it.
-- **The gateway reads the custom-providers overlay from its data directory.**
-  It read `~/.defenseclaw/custom-providers.json` even when `DEFENSECLAW_HOME`
-  named another data directory, so a relocated install's overlay was
-  ignored, and a gateway command run against another account's data
-  directory printed `custom-providers overlay open error`. It now reads
-  `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`, then
-  `$DEFENSECLAW_HOME/custom-providers.json`, then `~/.defenseclaw`. A
-  missing overlay is skipped quietly, and so is one under the
-  `~/.defenseclaw` fallback this account may not read; an unreadable
-  overlay in the data directory the gateway was pointed at is still
-  logged.
+  Latin-1 `plugin.yaml` raised `UnicodeDecodeError` through `migrate` and
+  `setup remove`; such a manifest now declares only its directory name, as
+  in the gateway.
+- **`defenseclaw migrate` keeps plugin connectors.** While `plugin_dir`
+  holds a plugin the gateway could load, `migrate` drops no connector name,
+  and the upgrade preflight asks the staged gateway whether it knows a name
+  before it keeps it.
+- **The gateway reads the custom-providers overlay from its data
+  directory.** It now reads `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`, then
+  `$DEFENSECLAW_HOME/custom-providers.json`, then `~/.defenseclaw`, and
+  skips a missing overlay quietly.
 - **`defenseclaw-gateway status` no longer shows a disabled connector as
-  enforced.** A connector with `enabled: false` was listed under Connector
-  Mode with its policy and enforcement lines; it now reads `Status:
-  disabled, not enforced`.
+  enforced.** A connector with `enabled: false` now reads `Status: disabled,
+  not enforced` under Connector Mode.
 - **No sonic warning on stderr.** Binaries built with Go 1.27 printed
-  `WARNING: sonic/ast only supports ...` on every run, which also became the
-  hook-error text agents showed when a hook failed. The sonic dependency now
-  supports Go 1.27.
-- **`defenseclaw uninstall` works on a host with a managed deployment.** On
-  such a host `defenseclaw-gateway stop` refuses while this account's own
-  gateway is not running (it cannot run there), and the uninstall stopped
-  at its gateway-stop phase. A per-user install left over from before the
-  managed deployment is now removed; `stop` also still stops that
-  account's leftover watchdog before it refuses.
+  `WARNING: sonic/ast only supports ...` on every run, which agents also
+  showed as the hook-error text. The sonic dependency now supports Go 1.27.
+- **`defenseclaw uninstall` works on a host with a managed deployment.** It
+  stopped at its gateway-stop phase, because `stop` refuses there. A
+  per-user install left over from before the managed deployment is now
+  removed.
 - **Amp's `async_shell_command` is inspected like its bash tool.** Commands
   an Amp release ran through `async_shell_command` got no command facts, so
   a rule that needs them was recorded but did not block.
 - **Audit rows name the account for per-user connector hooks.** Rejected
   connector-hook and inspect-tool rows now carry `user.id` and
-  `defenseclaw.user.name` when the caller is known, like hook decision
-  rows.
+  `defenseclaw.user.name` when the caller is known, like hook decision rows.
+- **Kiro on native Windows blocks again.** The hook binary rejected
+  `--hook-surface` and exited 1, which Kiro lets through. It now accepts the
+  flag, and the Kiro commands use a PowerShell bridge that returns exit 2;
+  `defenseclaw setup kiro` replaces the old entries.
+- **Enterprise (standalone) Kiro follows kiro-cli self-updates.** The Linux
+  and macOS guardian refused every repair after a kiro-cli update. It now
+  follows updates at or above 2.24.1, the certified minimum, and in action
+  mode refuses to enroll a new user below it.
 
 ### Added
 
 - **`defenseclaw-gateway audit export --since`, `--until` and `--newest`.**
   `--since` and `--until` take an RFC3339 time or a duration ago (`30m`,
-  `2h`). With `--limit N`, `--newest` keeps the N most recent rows instead of
-  the N oldest; output stays oldest first. Without the new flags the output
-  is unchanged.
+  `2h`). With `--limit N`, `--newest` keeps the N most recent rows; output
+  stays oldest first.
+- **`defenseclaw-sensor-helper --version`.** The helper (shipped only in the
+  enterprise archive and packages) reports its version and commit.
+- **Claude Code version floor (enterprise standalone).** DefenseClaw sets
+  `requiredMinimumVersion` to 2.1.154 in its own `managed-settings.d`
+  drop-in. An administrator's value wins; `enterprise policy show|verify`
+  report the floor, and `connectors.claudecode.version_floor` controls it.
 
 ### Changed
 
-- **Plugin teardown without a backup receipt.** Removing the OpenCode or
-  Amp connector (or uninstalling) now deletes DefenseClaw's plugin file
-  when its backup receipt under `~/.defenseclaw/connector_backups` is
-  missing, instead of leaving it in place. The file is deleted only while
-  its first line is DefenseClaw's `// defenseclaw-managed-plugin` marker,
-  which includes a copy you edited but whose marker line you kept.
+- **Plugin teardown without a backup receipt.** Removing the OpenCode or Amp
+  connector (or uninstalling) deletes DefenseClaw's plugin file when its
+  backup receipt is missing, as long as the file still starts with the
+  `// defenseclaw-managed-plugin` marker.
 - **An empty Copilot hooks file is deleted.** Teardown removes
   `<hooks>/defenseclaw.json` when nothing but its schema version is left,
   instead of rewriting it; handlers you added to it are kept.
 - **Teardown no longer creates missing files.** Removing the Cursor,
   Copilot, OpenHands, Antigravity, Devin or Hermes connector for a user who
-  has no config file there leaves it absent; earlier releases wrote an
-  empty document. The Cursor change also applies to the Secure Client
-  profile.
-
-## [Unreleased] — Enterprise hardening: standalone enterprise packages
-
-### Added
-
-- **`defenseclaw-sensor-helper --version`.** The helper (shipped only in the
-  enterprise archive and packages) reports its version and commit; the
-  release builds and the macOS standalone pkg stamp them.
-
-## [Unreleased] — Kiro CLI hooks and the Claude Code version floor
-
-### Fixed
-
-- **Kiro on native Windows blocks again, per-user installs included (owner
-  decision D6).** Setup registered `& '<defenseclaw-hook.exe>' hook
-  --connector kiro --hook-surface v3` for Kiro IDE and `kiro-cli --v3`, but
-  the hook binary did not know `--hook-surface` and exited 1, which Kiro
-  treats as a failed hook: it showed a warning and let every prompt and tool
-  call through. The CLI 2.x agent hook, which carries no marker, instead
-  exited 2 on every event, because the binary had no Kiro contract, so it
-  blocked every tool call. And the call-operator command itself lost exit 2:
-  `cmd.exe` rejects it, and PowerShell does not wait for the GUI-subsystem
-  release launcher. The binary now accepts the hidden `--hook-surface` flag
-  (per-connector values; Kiro: `v3`), answers exactly like `kiro-hook.sh`,
-  and forwards the surface in the new `X-DefenseClaw-Hook-Dialect` header
-  (the gateway still reads `X-DefenseClaw-Kiro-Surface` from
-  `kiro-hook.sh`). Both Kiro commands are now the encoded system PowerShell
-  bridge (`Start-Process -NoNewWindow -Wait -PassThru`), which returns exit 2
-  through `cmd.exe` or a direct launch; a launcher that uses `powershell
-  -Command` still reports it as 1, and Kiro does not document its Windows
-  hook shell. `defenseclaw setup kiro` replaces the older entries. A Kiro
-  hook that fails closed (managed, or fail mode `closed`) exits 2 on a
-  DefenseClaw-side failure, including a usage error; a fail-open hook exits 1
-  as before.
-- **Enterprise (standalone) Kiro follows kiro-cli self-updates.** Kiro's hook
-  contract is not version-gated, so the Linux and macOS guardian refused
-  every repair after a kiro-cli update ("hook contract drift detected"). It
-  now follows updates at or above kiro-cli 2.24.1, the certified minimum, and
-  keeps a row at its certified version when the CLI is downgraded below the
-  minimum. In action mode it refuses to enroll a new user below 2.24.1; a
-  user an earlier release enrolled below it keeps being repaired at that
-  version until kiro-cli reaches 2.24.1.
-
-### Changed
-
+  has no config file there leaves it absent. The Cursor change also applies
+  to the Secure Client profile.
 - **Enterprise Kiro route.** `enterprise policy show|verify` reports Kiro as
-  `per_user` on Linux and macOS, where the guardian enrolls it, instead of
-  `acp`. A managed Kiro install writes only each user's global
-  `~/.kiro/hooks/defenseclaw.json` and the CLI 2.x `defenseclaw` agent, and
-  makes that agent the `chat.defaultAgent`; it never writes a copy in the
-  machine-wide workspace directory and never edits the user's own agents.
-  Windows keeps the `acp` route: the Windows guardian does not enroll Kiro.
-
-### Added
-
-- **Claude Code version floor (enterprise standalone profile).** DefenseClaw
-  sets Claude Code's `requiredMinimumVersion` to the lowest version with a
-  verified hook contract (2.1.154) in its own drop-in,
-  `managed-settings.d/00-defenseclaw-version-floor.json`, so older builds
-  refuse to start; `90-defenseclaw.json` is unchanged. An administrator's own
-  version wins and DefenseClaw withdraws its drop-in; a value that is not a
-  version does not count. A file at the drop-in's name is DefenseClaw's only
-  while its ownership record names it with a matching hash, so an
-  administrator's own copy (for example the `version-floor` export) is never
-  rewritten or removed. `enterprise policy show|verify` report who sets the
-  floor and fail when no floor reaches the builds it targets, for example
-  while HKLM `Settings` or macOS managed preferences are in force without the
-  key. `export --format version-floor` renders the drop-in, and
-  `enterprise.machine_policy.connectors.claudecode.version_floor: enforce |
-  report | off` (default `enforce`) controls it; the drop-in follows
-  `connectors.claudecode.ownership` on every OS, Windows included.
+  `per_user` on Linux and macOS, where the guardian enrolls it. A managed
+  install writes each user's global Kiro hooks and the CLI 2.x `defenseclaw`
+  agent only. Windows keeps `acp`.
 
 ## [Unreleased] — Hook collector unification
 

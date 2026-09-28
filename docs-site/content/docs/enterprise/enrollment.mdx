@@ -85,11 +85,11 @@ root-owned `agent_prefixes` path instead.
 For machine-policy agents, a missed install is usually still inspected,
 because the vendor policy applies to every copy on the computer. Older
 Claude Code releases are the exception on Linux and macOS: a release that
-does not read `managed-settings.d` (1.0.128, 2.0.0 and 2.0.77 in
-DefenseClaw's testing), installed under a home with `npm install --prefix`,
+does not read `managed-settings.d` (for example 1.0.128, 2.0.0 and 2.0.77),
+installed under a home with `npm install --prefix`,
 ignores DefenseClaw's hooks and version floor, runs without DefenseClaw, and
-is not reported. So does a Copilot CLI below its 1.0.18 floor (1.0.15 on
-RHEL 9, run with `--no-auto-update`), which does not load
+is not reported. So does a Copilot CLI below its 1.0.18 floor (for example
+1.0.15, run with `--no-auto-update`), which does not load
 `/etc/github-copilot/policy.d`. See
 [Vendor limits](/docs/enterprise/machine-policy#vendor-limits); tracked in
 [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
@@ -97,9 +97,8 @@ RHEL 9, run with `--no-auto-update`), which does not load
 A per-user agent that a user runs without installing it is not found
 either. OpenHands before 1.12.0 does not load DefenseClaw's hooks, and a
 user can start one straight from the uv cache
-(`uvx --from openhands==1.11.0 openhands`): in DefenseClaw's testing on
-macOS 15 it ran a command the policy blocks with no DefenseClaw decision
-and no audit record. Status and verify check only the enrolled OpenHands
+(`uvx --from openhands==1.11.0 openhands`), whose tool calls then run with
+no DefenseClaw decision and no audit record. Status and verify check only the enrolled OpenHands
 and its default hook file, so they keep reporting the user ready. Only
 application control that allows approved agent versions closes it; see
 [Residual risks](/docs/enterprise/threat-model#residual-risks).

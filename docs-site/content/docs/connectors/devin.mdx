@@ -34,11 +34,10 @@ wrote for the old app. See
 
 The supported hook contract is pinned to Devin CLI `3000.4.25` on Windows,
 macOS, and Linux, from source review. On Linux it is also pinned to
-`3000.11.3`, which was live-verified on RHEL 9 on 2026-09-26: the
-`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and
-`SessionEnd` events reached the gateway under these names, and exit-code-2
-blocks on `UserPromptSubmit` and `PreToolUse` were honored
-(`PermissionRequest` and `PostCompaction` were not exercised).
+`3000.11.3`, which delivers the `SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` events under these names
+and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse`
+(`PermissionRequest` and `PostCompaction` are not verified).
 
 ## Platform support
 

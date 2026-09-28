@@ -464,23 +464,23 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 These come from the agents themselves:
 
 - **Claude Code.** `claude --bare` and `CLAUDE_CODE_SIMPLE=1` skip managed
-  `SessionStart` and `UserPromptSubmit` hooks. In DefenseClaw's testing,
-  `PreToolUse` and later tool hooks still ran, so tool calls stayed
-  inspected; prompt inspection is best effort.
+  `SessionStart` and `UserPromptSubmit` hooks. `PreToolUse` and later tool
+  hooks still run, so tool calls stay inspected; prompt inspection is best
+  effort.
 - **Older Claude Code releases (Linux and macOS).** Releases that do not
   read `managed-settings.d` ignore both of DefenseClaw's drop-ins, the
   hooks in `90-defenseclaw.json` and the
   [version floor](#claude-code-version-floor), so the floor cannot stop
-  them. In DefenseClaw's testing, 1.0.128, 2.0.0 and 2.0.77, installed by a
-  standard user under their home (`npm install --prefix`), ran tool calls
-  with no DefenseClaw hook and no audit record, and `status` and `verify`
-  did not report them. These releases read only `managed-settings.json`,
+  them. For example 1.0.128, 2.0.0 and 2.0.77, installed by a standard user
+  under their home (`npm install --prefix`), run tool calls with no
+  DefenseClaw hook and no audit record, and `status` and `verify` do not
+  report them. These releases read only `managed-settings.json`,
   which DefenseClaw leaves to you. Use application control to allow only
   Claude Code at or above 2.1.154. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
 - **Older Copilot CLI releases.** A Copilot CLI below its 1.0.18 floor can
-  skip machine policy: in DefenseClaw's testing on RHEL 9, 1.0.15 installed
-  under a home (`npm install --prefix`) and run with `--no-auto-update` did
-  not load `/etc/github-copilot/policy.d`, and a tool call ran with no audit
+  skip machine policy: 1.0.15, installed under a home (`npm install
+  --prefix`) and run with `--no-auto-update`, does not load
+  `/etc/github-copilot/policy.d`, and its tool calls run with no audit
   record. Use application control to allow only Copilot CLI at or above the
   floor.
 - **Copilot.** A command hook that times out fails open, including policy

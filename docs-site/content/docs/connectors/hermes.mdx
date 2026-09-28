@@ -290,17 +290,15 @@ it:
   user's `config.yaml`, and `HERMES_HOME` pointing at a copy of it without
   the `hooks` block does the same. No DefenseClaw hook runs, nothing is
   logged, the guardian never repairs that session, and status and verify
-  keep reporting the user's Hermes ready. In DefenseClaw's testing on RHEL 9
-  and macOS 15, a command the policy blocks ran both ways.
-  `--ignore-user-config` on its own kept the hooks on RHEL 9.
+  keep reporting the user's Hermes ready. `--ignore-user-config` on its own
+  keeps the hooks.
 - **A killed hook lets the call run.** `hermes-hook.sh` runs as the user.
   Hermes blocks a tool call only on a block answer (and, from Hermes 0.21,
   exit code 2), so when the user kills their own hook process the call runs
   with no DefenseClaw decision; Hermes' later `post_tool_call` hook can
   still record it after it ran. In the Hermes releases DefenseClaw supports,
-  a hook timeout also lets the call run. The build tested on macOS 15
-  blocked the call when a stalled hook timed out, but Hermes does not
-  document that.
+  a hook timeout also lets the call run. Some builds block the call when a
+  stalled hook times out, but Hermes does not document that.
 
 What reduces it:
 
