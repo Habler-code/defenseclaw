@@ -306,8 +306,8 @@ def test_standalone_uninstall_accepts_and_removes_only_its_ipc_directory() -> No
     removal = uninstall.index("Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout", helper)
     retire = uninstall.index("Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout", removal)
     assert helper < removal < retire
-    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-ipc-uninstall-smoke.ps1")
-    assert "Secure Client allow-list" in smoke
+    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-install-tree-smoke.ps1")
+    assert "Secure Client allow-list (ipc)" in smoke
     assert "symbolic link named like the socket (removal)" in smoke
 
 
@@ -338,8 +338,8 @@ def test_standalone_uninstall_accepts_and_removes_only_the_managed_opencode_plug
     removed = uninstall.index("Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout", helper)
     retire = uninstall.index("Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout", removed)
     assert helper < removed < retire
-    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-opencode-plugin-uninstall-smoke.ps1")
-    assert "Secure Client allow-list" in smoke
+    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-install-tree-smoke.ps1")
+    assert "Secure Client allow-list (share)" in smoke
     assert "symbolic link named like the plugin (removal)" in smoke
     assert "refused removal still deleted content" in smoke
 
@@ -396,8 +396,7 @@ STANDALONE_SMOKES = (
     "enterprise-profile-lifecycle-lock-smoke.ps1",
     "enterprise-profile-deployment-record-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
-    "enterprise-standalone-ipc-uninstall-smoke.ps1",
-    "enterprise-standalone-opencode-plugin-uninstall-smoke.ps1",
+    "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
