@@ -256,18 +256,21 @@ func TestEnterpriseHookWorkerDiscoverRunsAsTheUser(t *testing.T) {
 }
 
 func TestEnterpriseHookWorkerRejectsMalformedOrRunawayWorkers(t *testing.T) {
+	// Only the runaway worker gets the short timeout: an instrumented test
+	// binary can take longer than a second to start on a busy runner.
 	for _, tc := range []struct {
-		mode string
-		want string
+		mode    string
+		want    string
+		timeout time.Duration
 	}{
-		{"garbage", "invalid JSON"},
-		{"oversize", "oversized response"},
-		{"sleep", "timed out"},
+		{"garbage", "invalid JSON", 30 * time.Second},
+		{"oversize", "oversized response", 30 * time.Second},
+		{"sleep", "timed out", time.Second},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			useEnterpriseHookWorkerHelper(t, tc.mode)
 			origTimeout := enterpriseHookWorkerTimeout
-			enterpriseHookWorkerTimeout = time.Second
+			enterpriseHookWorkerTimeout = tc.timeout
 			t.Cleanup(func() { enterpriseHookWorkerTimeout = origTimeout })
 			account := selfWorkerAccount(t)
 			started := time.Now()
