@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -3527,7 +3528,9 @@ func TestCursorHooksHighCardinalityForeignRegistrationsStayWithinLifecycleBudget
 	}
 	elapsed := time.Since(started)
 	t.Logf("%d Cursor 21x23 patch plus two exact ownership-scan cycles completed in %s (average %s)", iterations, elapsed, elapsed/iterations)
-	if elapsed > 15*time.Second {
+	// Under the race detector on a shared runner wall-clock time says nothing
+	// about the budget; the uninstrumented macOS lifecycle job enforces it.
+	if elapsed > 15*time.Second && !raceInstrumentedBuild() {
 		t.Fatalf("Cursor patch plus repeated ownership verification took %s, want <=15s within the fixed 2m lifecycle budget", elapsed)
 	}
 
@@ -3649,4 +3652,16 @@ func TestHermesAgentPathsDeclareNativeStateOnlyOnWindows(t *testing.T) {
 	if declared != (runtime.GOOS == "windows") {
 		t.Fatalf("native state declared=%v on %s: %v", declared, runtime.GOOS, paths.PatchedFiles)
 	}
+}
+
+// raceInstrumentedBuild reports whether this test binary was built with -race.
+func raceInstrumentedBuild() bool {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "-race" {
+				return setting.Value == "true"
+			}
+		}
+	}
+	return false
 }
