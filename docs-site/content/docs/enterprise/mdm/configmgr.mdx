@@ -252,9 +252,9 @@ See [Logs](/docs/enterprise/mdm#logs).
 | Code | Meaning | Configuration Manager |
 | --- | --- | --- |
 | `0` | Success, or nothing to do | Success (no reboot) |
-| `1603` | The action failed and rolled back, Setup refused its arguments, or the config does not validate | Failure; read `errors[].code` in `enterprise-lifecycle.log` and see [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes) |
+| `1603` | The action failed and rolled back, the config does not validate, Setup is not elevated, or a non-administrator can change the config file | Failure; read `errors[].code` in `enterprise-lifecycle.log` and see [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes) |
 | `1618` | Another lifecycle run holds the lock | Fast Retry |
-| `1639` | Invalid arguments, such as a first install without a config | Failure; fix the content |
+| `1639` | Invalid arguments, such as a first install without a config, an unknown Setup property, or a relative or environment-expanded `CONFIG=` path | Failure; fix the content |
 | `3010` | Reserved; Setup does not return it today | Soft Reboot |
 
 For the full table, see [Exit codes](/docs/enterprise/mdm#exit-codes).

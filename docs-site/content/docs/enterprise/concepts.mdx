@@ -340,9 +340,11 @@ restarts them after a failure. Standard users get query-only access to them.
 **Linux.** NSS is the system's user and group lookup (what `getent` uses). It
 covers local accounts and directory accounts. SSSD is a common way to connect
 Linux to LDAP or Active Directory through NSS. The enumerator lists users
-through NSS. Accounts whose user ID is above `UID_MAX` in `/etc/login.defs`
-(60000 when it is not set) are skipped unless they are listed in
-`include_users`. Directory accounts often have user IDs that high.
+through NSS. `UID_MAX` in `/etc/login.defs` (60000 when it is not set) caps
+only local accounts in `/etc/passwd`: a local account above it is skipped
+unless it is listed in `include_users`. Directory accounts often have user
+IDs that high, and they have no upper bound unless you set
+`enterprise.enrollment.uid_max`.
 
 ### SO_PEERCRED and LOCAL_PEERCRED
 

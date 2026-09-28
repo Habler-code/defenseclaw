@@ -15,9 +15,10 @@ configures DefenseClaw.
    settings block, set:
    - `DC_SOURCE_URL` and `DC_SOURCE_SHA256` (from the cosign-verified
      `checksums.txt`);
-   - optionally `DC_PRODUCT_VERSION`. The lifecycle refuses a payload archive
-     of another version before applying it; a deb, rpm or pkg of another
-     version is installed first and then fails with `mdm_version_mismatch`;
+   - optionally `DC_PRODUCT_VERSION`. The wrapper refuses a deb, rpm or pkg
+     of another version with `mdm_version_mismatch` before the package
+     manager runs, so nothing is installed; the lifecycle refuses a payload
+     archive of another version before applying it;
    - for GPG trust, when the release ships signatures, also
      `DC_TRUST_MODE=signed`, `DC_GPG_KEYRING` (a root-owned keyring you
      deploy separately; convert `defenseclaw-enterprise-release-key.asc`

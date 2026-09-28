@@ -90,6 +90,24 @@ elevated shell.
 | `scripts/test-enterprise-windows-install.ps1` | Runs the hash-pinned unsigned `DefenseClawSetup-Enterprise-Standalone-x64.exe` through `/ensure`, a no-op `/ensure`, `verify`, `status`, `detect.ps1`, the installed CLI's own `ensure` and `/uninstall`. Checks the four services, the HKLM marker, the Add/Remove Programs entry, and that the Codex requirements and the Claude Code managed-settings fragment name the DefenseClaw hook after `/ensure` and are gone after `/uninstall` |
 | `scripts/check_enterprise_lifecycle_result.py` | Checks one saved lifecycle result against what the step must produce. Every lane uses it. A step fails on any error and on any warning it does not allow (`--allow-warning`); `--complete` also requires `coverage_complete` and `security_complete` |
 
+Build the packages the lanes install:
+
+- **Linux deb, rpm and payload tarball:** `make packaging-linux-enterprise`
+  runs a GoReleaser snapshot of the release config into `dist/`. It needs
+  GoReleaser v2; `ci.yml` and `release.yaml` pin v2.15.4, so install the
+  same version (`go install github.com/goreleaser/goreleaser/v2@v2.15.4`).
+  `GORELEASER_CURRENT_TAG` sets the version: `v9.9.9` builds
+  `9.9.9-SNAPSHOT-<commit>`. To test an upgrade, build the second package
+  with a higher tag.
+- **macOS pkg:** `make packaging-macos-enterprise VERSION=<version>` runs
+  `scripts/build-macos-enterprise-pkg.sh` on a Mac with Go and the Xcode
+  command line tools, and writes
+  `dist/defenseclaw-enterprise-<version>-darwin-arm64.pkg`. The Makefile's
+  default `VERSION` is an old release number, so always pass `VERSION`:
+  the package refuses to install over a newer deployment, so a build for an
+  upgrade test needs a version above the installed one. See
+  [packaging/macos/PACKAGING.md](../packaging/macos/PACKAGING.md).
+
 ```bash
 # Unsigned deb and rpm from the release config, then the rpm lane on RHEL 9.
 GORELEASER_CURRENT_TAG=v9.9.9 make packaging-linux-enterprise
@@ -97,6 +115,11 @@ v=$(python3 -c 'import json; print(json.load(open("dist/metadata.json"))["versio
 scripts/test-enterprise-linux-container.sh \
   --image registry.access.redhat.com/ubi9/ubi-init \
   --package "dist/defenseclaw-enterprise-$v-linux-amd64.rpm" --version "$v"
+
+# Unsigned macOS pkg (on a Mac), then the pkg lane on a disposable Mac.
+make packaging-macos-enterprise VERSION=9.9.9
+sudo bash scripts/test-enterprise-unix-install.sh \
+  --package dist/defenseclaw-enterprise-9.9.9-darwin-arm64.pkg --version 9.9.9
 ```
 
 On every pull request, `ci.yml` runs the deb lane on the Ubuntu 24.04

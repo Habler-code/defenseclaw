@@ -218,7 +218,7 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
-| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` therefore returns the earliest N matching rows, not the newest N. Omit `--limit` and pipe to `tail` for the most recent rows. `--include-activity` also dumps `activity_events`. |
+| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` returns the earliest N matching rows, and with `--newest` the most recent N (still written oldest-first). `--since` (inclusive) and `--until` (exclusive) take an RFC3339 time or a duration ago such as `30m` or `2h`. `--connector` keeps one connector's rows. `--include-activity` also dumps `activity_events`, within the same window. |
 | `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail the optional v8 JSONL destination when configured at that path. Mandatory local history is SQLite; JSONL is not an implicit mirror. |
 
@@ -360,7 +360,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--allow-downgrade` | install, upgrade, repair, ensure | Allow a payload older than the installed release (a deliberate rollback). Without it the lifecycle refuses with `downgrade_refused` |
 | `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
 | `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
-| `--lock-wait <duration>` | install, upgrade, repair, ensure | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
+| `--lock-wait <duration>` | install, upgrade, repair, reconcile, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
 | `--purge` | uninstall | Also remove config, credentials, state, and logs |
 | `--remove-service-account` | uninstall | With `--purge`, also delete the gateway service account |
 | `--json` | all | Print the lifecycle result as JSON |
@@ -433,7 +433,7 @@ Setup. See [Install with an MDM](/docs/enterprise/mdm).
 
 Property names are case-insensitive, and dashes in them are ignored. Paths
 must be absolute: Setup refuses relative paths and paths that contain `%`.
-The unsigned (hash-pinned) Setup writes its payload trust file itself from its embedded manifest; a signed Setup uses Authenticode trust, optionally pinned with `ALLOWEDSIGNERS=`. Setup's own argument errors, such as an unknown property, `/install` without `CONFIG=` and `MANIFEST=`, or a `TIMEOUTSECONDS` out of range, exit `1603`.
+The unsigned (hash-pinned) Setup writes its payload trust file itself from its embedded manifest; a signed Setup uses Authenticode trust, optionally pinned with `ALLOWEDSIGNERS=`. Setup's own argument errors, such as an unknown property, a missing, relative or environment-expanded `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`, or a `TIMEOUTSECONDS` out of range, exit `1639`. A token that is not elevated, or a `CONFIG=` or `MANIFEST=` file a non-administrator can change, exits `1603`. The Secure Client Setup returns only `0` and `1603`.
 
 ### Machine policy (`enterprise policy`)
 
@@ -444,8 +444,8 @@ never write machine policy; the lifecycle does. See
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw-gateway enterprise policy show` | Show each connector's route, lock, and coverage. `--connector X` limits it to one connector, `--user NAME` also checks that user's agent config, and `--project DIR` (with `--user`) also scans a project directory for foreign hooks |
-| `defenseclaw-gateway enterprise policy export --connector X` | Print DefenseClaw's entries for your own policy tool. `--format`: `codex` takes `toml` or `plist`; `claudecode` takes `json`, `claude-hklm-json`, `reg`, `plist`, or `intune-settings-catalog`; `cursor`, `copilot`, and `opencode` take `json`. The default is the connector's native file |
-| `defenseclaw-gateway enterprise policy verify` | Verify coverage. Exits `1` when it is incomplete. Takes the same `--connector` and `--user` flags. `--live` also runs the real client as the user; it needs `--user`, one `--connector` (`codex` or `claudecode`), and `--agent-binary` with an absolute path. `--gateway-log` and `--timeout` (default `90s`) tune the live check |
+| `defenseclaw-gateway enterprise policy export --connector X` | Print DefenseClaw's entries for your own policy tool. `--format`: `codex` takes `toml` or `plist`; `claudecode` takes `json`, `claude-hklm-json`, `reg`, `plist`, `intune-settings-catalog`, or `version-floor` (the [version floor](/docs/enterprise/machine-policy#claude-code-version-floor) drop-in); `cursor`, `copilot`, and `opencode` take `json`. The default is the connector's native file |
+| `defenseclaw-gateway enterprise policy verify` | Verify coverage. Exits `1` when it is incomplete. Takes the same `--connector` and `--user` flags. `--live` also runs the real client as the user; it needs `--user`, one `--connector` (`codex` or `claudecode`), and `--agent-binary` with an absolute path. `--audit-db` (the gateway audit database searched for the Claude Code check's tool call; default: the configured `audit_db`) and `--timeout` (default `90s`) tune the live check |
 
 All three take `--json`. On this release, set `DEFENSECLAW_CONFIG` to the
 managed config path when you run them. Otherwise they read the calling user's

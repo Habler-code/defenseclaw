@@ -217,9 +217,9 @@ nothing is installed. Pass `-Purge` to also remove managed state.
 | Code | Meaning | In Workspace ONE |
 | --- | --- | --- |
 | `0` | Success, or nothing to do | Success (**Installer Success Exit Code**) |
-| `1603` | The action failed and rolled back, Setup refused its arguments, or the config does not validate | Failure; retried up to **Retry Count**. Read `errors[].code` in the lifecycle log. |
+| `1603` | The action failed and rolled back, the config does not validate, Setup is not elevated, or a non-administrator can change the config file | Failure; retried up to **Retry Count**. Read `errors[].code` in the lifecycle log. |
 | `1618` | Another lifecycle run holds the lock | Failure for this attempt; the retry usually succeeds |
-| `1639` | Invalid arguments, such as a first install without a config | Failure; fix the content, because a retry gives the same result |
+| `1639` | Invalid arguments, such as a first install without a config, an unknown Setup property, or a relative or environment-expanded `CONFIG=` path | Failure; fix the content, because a retry gives the same result |
 | `3010` | Reserved; Setup does not return it today | Reboot (**Installer Reboot Exit Code**) |
 
 See [Exit codes](/docs/enterprise/mdm#exit-codes) and

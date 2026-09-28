@@ -48,13 +48,30 @@ Only agents you select in the config are protected; see
   machine policy. The guardian writes only each enrolled user's protected
   DefenseClaw runtime, never the user's Copilot or OpenCode config.
 
-The machine policy and per-user registrations run the administrator-owned
-hook binary. On Linux and macOS the command is
+The machine-policy registrations run the administrator-owned hook binary.
+On Linux and macOS the command is
 `'<bin>/defenseclaw-hook' hook --connector <name> --enterprise-managed`,
 where `<bin>` is `/opt/defenseclaw/bin` (Linux) or
 `/opt/cisco/defenseclaw/bin` (macOS). On Windows the binary is
 `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, and Cursor
 runs it through a protected PowerShell adapter next to its `hooks.json`.
+
+The per-user registrations differ by OS:
+
+- **Windows.** Every per-user registration runs the same hook binary, or an
+  in-agent plugin that calls the gateway (Amp).
+- **Linux and macOS, Devin.** Devin's registration in each user's
+  `~/.config/devin/config.json` runs the same administrator-owned command,
+  so each Devin hook runs the foreign-hook guard and fails closed. A
+  registration an earlier release wrote (`~/.defenseclaw/hooks/devin-hook.sh`)
+  is replaced at the guardian's next repair.
+- **Linux and macOS, other per-user agents.** Antigravity, Hermes,
+  OpenHands and Kiro run a DefenseClaw hook script that the guardian writes
+  into the user's `~/.defenseclaw/hooks` (for example `hermes-hook.sh`), and
+  OmniGent a DefenseClaw policy bridge there. The script sends the event to
+  the gateway over the hook socket itself, and the guardian verifies and
+  repairs it. Amp and the per-user OpenCode plugin call the gateway from
+  inside the agent and run `defenseclaw-hook` for the foreign-hook check.
 
 ## Machine policy files
 
@@ -141,9 +158,13 @@ it. OpenCode itself can still start without it: see
   bring back content you deleted.
 - **Root-owned files that users can read** (`0644`). Copilot ignores a
   policy file that is not root-owned or that group or others can write.
-- **Removal of policy it no longer publishes.** When you disable a
-  connector or set its `ownership` to `"off"`, the next `ensure` removes
-  DefenseClaw's entries for it.
+- **Removal of policy it no longer publishes.** When you remove a
+  connector's name from both `guardrail.connectors` and
+  `enterprise.machine_policy.connectors`, or set its `ownership` to
+  `"off"`, the next `ensure` removes DefenseClaw's entries for it.
+  `enabled: false` is not enough: it stops only per-user enrollment, and
+  the machine policy stays (see
+  [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)).
 
 If a Codex `requirements.toml` defines `features` or `hooks` as dotted keys
 or inline tables, DefenseClaw cannot merge without rewriting your content.
@@ -284,9 +305,18 @@ policy; see
 - **Your value wins.** When `managed-settings.json`, another drop-in,
   `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` or the macOS managed
   preferences set `requiredMinimumVersion` to a version, DefenseClaw leaves
-  that file alone and removes its own drop-in at the next reconcile, even
-  when the value is below 2.1.154. `policy show` names the source and says
-  when the value is below 2.1.154.
+  that file alone and withdraws its own drop-in, even when the value is
+  below 2.1.154. `policy show` names the source and says when the value is
+  below 2.1.154. On Windows the guardian withdraws the drop-in on its next
+  cycle. On Linux and macOS the withdrawal happens at the next lifecycle
+  run that applies changes (`ensure`, `reconcile` or `repair`), not in the
+  background. Until then, a value you add to `managed-settings.json` or to a
+  drop-in that sorts before `00-defenseclaw-version-floor.json` is
+  overridden, because DefenseClaw's drop-in merges after it: `policy show`
+  and `policy verify` report the drop-in's value as the one in force and
+  yours as overridden, and under `ownership: merge` `verify` reports drift,
+  so the next `ensure` (for example your MDM's periodic run) withdraws the
+  drop-in.
 - **A file at the drop-in's name is yours unless DefenseClaw wrote it.**
   DefenseClaw treats `00-defenseclaw-version-floor.json` as its own only
   while its ownership record names the file and the file's hash matches the
@@ -305,9 +335,15 @@ policy; see
   drop-in (a later drop-in, a higher-precedence source), no floor applies
   and `policy verify` fails until you fix or remove the value.
 - **When it applies.** The drop-in is written only in the standalone
-  profile, while `claudecode` is enabled with `ownership: merge`. Linux and
-  macOS write it at install and every reconcile; on Windows the guardian
-  writes it every cycle, under the same lock the lifecycle uses for
+  profile, while `claudecode` is named under `guardrail.connectors` (even
+  with `enabled: false`) or under `enterprise.machine_policy.connectors`,
+  with `ownership: merge`. To stop it, remove the name from both maps or set
+  `ownership: "off"`. Windows follows the same name-based rule for the
+  floor, not the enrolled-row rule it uses for `90-defenseclaw.json`: a
+  Windows config that names `claudecode` writes the floor even when no
+  Claude Code user is enrolled, so older builds refuse to start there too.
+  Linux and macOS write it at install and every reconcile; on Windows the
+  guardian writes it every cycle, under the same lock the lifecycle uses for
   `90-defenseclaw.json`. Uninstall removes it.
 - **It follows `connectors.claudecode.ownership` on every OS.** `merge`
   writes and repairs it. `verify_only` neither writes nor removes it: deploy
@@ -330,7 +366,9 @@ policy; see
   then `policy show` marks the floor `not applied` and `policy verify` fails
   (a warning with `higher_precedence_sources: warn`).
 - **Limits.** The check runs when a session starts; running sessions go
-  on. Builds that predate the setting ignore it.
+  on. Builds that predate the setting ignore it, and builds that do not
+  read `managed-settings.d` ignore the drop-in altogether; see
+  [Vendor limits](#vendor-limits).
 
 ## Higher-precedence sources
 
@@ -425,6 +463,16 @@ These come from the agents themselves:
   `SessionStart` and `UserPromptSubmit` hooks. In DefenseClaw's testing,
   `PreToolUse` and later tool hooks still ran, so tool calls stayed
   inspected; prompt inspection is best effort.
+- **Older Claude Code releases (Linux and macOS).** Releases that do not
+  read `managed-settings.d` ignore both of DefenseClaw's drop-ins, the
+  hooks in `90-defenseclaw.json` and the
+  [version floor](#claude-code-version-floor), so the floor cannot stop
+  them. In DefenseClaw's testing, 1.0.128, 2.0.0 and 2.0.77, installed by a
+  standard user under their home (`npm install --prefix`), ran tool calls
+  with no DefenseClaw hook and no audit record, and `status` and `verify`
+  did not report them. These releases read only `managed-settings.json`,
+  which DefenseClaw leaves to you. Use application control to allow only
+  Claude Code at or above 2.1.154. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
 - **Copilot.** A command hook that times out fails open, including policy
   hooks. On Windows, Copilot also loads policy hooks from
   `HKLM\Software\Policies\GitHub\Copilot`; those run beside DefenseClaw's

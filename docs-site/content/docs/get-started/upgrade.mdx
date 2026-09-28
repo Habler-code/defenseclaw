@@ -175,8 +175,13 @@ What `defenseclaw upgrade` and the gateway do for you:
   first remaining connector. The upgrade output names the connector it
   removed. (The same step removes any other connector name this release does
   not ship, unless a plugin under `plugin_dir` provides it.)
-- If Gemini CLI was your only connector, the upgrade leaves `config.yaml`
-  unchanged and warns. The gateway does not start until you do step 1.
+- If Gemini CLI was your only connector (or every connector you configured
+  is one this release does not ship), the upgrade stops before it changes
+  anything. Its preflight, `defenseclaw migrate --check`, fails, names the
+  connector and prints commands your installed release accepts, and the
+  installer reports that your configuration cannot be migrated and that
+  nothing was changed. Your current release keeps running. Do step 1 on it,
+  then run the upgrade again.
 - On its next start, the gateway drops `geminicli` from its lock and
   active-connector state and deletes `~/.defenseclaw/hooks/geminicli-hook.sh`
   (and `geminicli-hook.ps1`) and `~/.defenseclaw/hooks/.otlp-geminicli.token`.
@@ -191,15 +196,18 @@ Do this once, before you set up Antigravity:
 
 1. Only if Gemini CLI was your only connector, or you replaced the package
    without running `defenseclaw upgrade`: remove it from DefenseClaw's config.
+   When the upgrade stopped, run this on the release you still have: it
+   refuses to remove the last connector without `--force`.
 
    ```bash
-   defenseclaw setup remove geminicli --yes
+   defenseclaw setup remove geminicli --yes --force
    ```
 
-   This works even when Gemini CLI was your only connector; DefenseClaw then
-   enforces nothing until step 7. Or delete `geminicli` from
-   `guardrail.connectors` and `guardrail.connector` in
-   `~/.defenseclaw/config.yaml`.
+   DefenseClaw then enforces nothing until step 7. You can instead set up
+   another connector first (`defenseclaw setup <connector>`) and then remove
+   Gemini CLI, or delete `geminicli` from `guardrail.connectors` and
+   `guardrail.connector` in `~/.defenseclaw/config.yaml`. Then run the
+   upgrade again.
 2. Open `~/.gemini/settings.json` (or `$GEMINI_CLI_HOME/.gemini/settings.json`;
    on Windows `%USERPROFILE%\.gemini\settings.json`). Under `hooks`, look at
    each of these events: `SessionStart`, `SessionEnd`, `BeforeAgent`,

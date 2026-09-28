@@ -64,6 +64,128 @@ stopped`. Nothing is changed; use the install command above.
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
 
+## [Unreleased] — Enterprise hardening: changes that reach per-user installs
+
+These changes landed with the standalone enterprise profile but are not
+gated on it, so they apply to per-user installs too.
+
+### Fixed
+
+- **OpenHands tool calls are inspected, per-user installs included.** The
+  OpenHands SDK sends its hook events with PascalCase `event_type` values
+  (`PreToolUse`), which DefenseClaw did not map to its tool-call route, and
+  the terminal action's fields left the command unproven. A terminal
+  `PreToolUse` call was therefore allowed without inspection, even in
+  action mode. OpenHands payloads now have their own decoder, so terminal
+  commands are inspected and can be blocked.
+- **Antigravity `run_command` calls match command rules.** Antigravity sends
+  scheduling and UI arguments beside the command (`WaitMsBeforeAsync`,
+  `SafeToAutoRun`, `Blocking`, `toolAction`, `toolSummary`). They left the
+  command unproven, so command rules did not match. DefenseClaw now drops
+  these arguments, when each has its expected type, before it analyzes the
+  command.
+
+- **An upgrade whose only connector was removed stops before the swap.**
+  When every configured connector is one the new release does not ship (for
+  example Gemini CLI alone), `defenseclaw migrate --check` now fails before
+  the installer replaces anything, names the connector, and prints commands
+  the installed release accepts (`defenseclaw setup remove <name> --yes
+  --force`, or set up another connector first). Earlier, the upgrade swapped,
+  the new gateway could not start, the installer rolled back, and the
+  suggested `setup remove` was refused on the restored release. The
+  in-place migrate warning now names the connector instead of `<name>`.
+
+- **Agents say that DefenseClaw policy made a block.** A block or
+  confirmation by a policy rule reached the agent as `matched:
+  <RULE-ID>:<redacted len=N sha=...>`, which users and models read as a
+  broken hook. It now reads `DefenseClaw policy blocked this action (rule
+  <RULE-ID>).` or `DefenseClaw policy needs your confirmation for this action
+  (rule <RULE-ID>).` (in the standalone enterprise profile: "...under your
+  organization's policy", with a pointer to the administrator). A title is
+  kept only for DefenseClaw's built-in rules; the audit record keeps the
+  full reason. The Secure Client wording is unchanged.
+- **OpenCode shows DefenseClaw blocks.** A blocked tool call failed with
+  only the bare reason, and in some sessions showed no text at all, so the
+  model told the user the command had succeeded. The plugin now fails the
+  call with "DefenseClaw blocked this tool call under policy, so it did not
+  run: <reason>". A confirm verdict, which the plugin cannot ask about,
+  still runs the call but now shows a warning notice in the OpenCode TUI. A
+  plugin an earlier release wrote fails its presence check and is
+  replaced.
+- **`defenseclaw doctor` passes a global Kiro install.** Its `Connector
+  scope [kiro]` check failed every install without `claw.workspace_dir`,
+  saying the hooks never run, although Kiro IDE 1.0.182 and later and
+  `kiro-cli --v3` read the global `~/.kiro/hooks/defenseclaw.json`. It now
+  passes when that file holds DefenseClaw's hooks, notes that older Kiro IDE
+  builds still need `claw.workspace_dir`, and fails only when neither the
+  global nor a workspace registration is present.
+- **Devin on macOS after the config folder moved.** Earlier builds wrote
+  Devin's hooks under `~/Library/Application Support/devin`; the Devin CLI
+  reads `~/.config/devin/config.json`, where DefenseClaw now writes. Setup
+  over the old backup receipt failed with "managed backup target mismatch"
+  until someone ran teardown. Setup now closes the old location first (an
+  unchanged file is restored, an edited one keeps everything but
+  DefenseClaw's entries) and records the receipt for the new one.
+- **The `windsurf` to `devin` rename reaches every setting.** It covered
+  `guardrail.connector`, `claw.mode` and the four `*.connectors` maps only, so
+  a `connector_hooks` override, `guardrail.judge.hook_connectors`, and
+  `application_protection.include_connectors` / `exclude_connectors` entries
+  kept the retired ID and silently stopped applying. The loaders and the
+  `defenseclaw migrate` step now rename those too; an explicit `devin` entry
+  wins, a list names `devin` once, and the notice lists every setting moved.
+- **`defenseclaw migrate` survives a plugin manifest that is not UTF-8.** A
+  Latin-1 `plugin.yaml` under `plugin_dir` raised `UnicodeDecodeError`
+  through `migrate` (blocking every upgrade on the host) and `setup remove`.
+  Such a manifest now declares only its directory name, as in the gateway.
+- **`defenseclaw migrate` keeps plugin connectors.** A plugin connector
+  registers under the name its code reports, which need not match its
+  directory or manifest name, so `migrate` could drop a working plugin
+  connector from `config.yaml`. While `plugin_dir` holds a manifest the
+  gateway would load, `migrate` drops no connector name.
+- **The gateway reads the custom-providers overlay from its data directory.**
+  It read `~/.defenseclaw/custom-providers.json` even when `DEFENSECLAW_HOME`
+  named another data directory, so a relocated install's overlay was
+  ignored, and a gateway command run against another account's data
+  directory printed `custom-providers overlay open error`. It now reads
+  `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`, then
+  `$DEFENSECLAW_HOME/custom-providers.json`, then `~/.defenseclaw`, and a
+  missing or unreadable overlay is skipped quietly.
+- **`defenseclaw-gateway status` no longer shows a disabled connector as
+  enforced.** A connector with `enabled: false` was listed under Connector
+  Mode with its policy and enforcement lines; it now reads `Status:
+  disabled, not enforced`.
+- **No sonic warning on stderr.** Binaries built with Go 1.27 printed
+  `WARNING: sonic/ast only supports ...` on every run, which also became the
+  hook-error text agents showed when a hook failed. The sonic dependency now
+  supports Go 1.27.
+
+### Added
+
+- **`defenseclaw-gateway audit export --since`, `--until` and `--newest`.**
+  `--since` and `--until` take an RFC3339 time or a duration ago (`30m`,
+  `2h`). With `--limit N`, `--newest` keeps the N most recent rows instead of
+  the N oldest; output stays oldest first. Without the new flags the output
+  is unchanged.
+- **`defenseclaw-sensor-helper --version`.** The helper now reports its
+  version and commit, and release builds stamp them.
+
+### Changed
+
+- **Plugin teardown without a backup receipt.** Removing the OpenCode or
+  Amp connector (or uninstalling) now deletes DefenseClaw's plugin file
+  when its backup receipt under `~/.defenseclaw/connector_backups` is
+  missing, instead of leaving it in place. The file is deleted only while
+  its first line is DefenseClaw's `// defenseclaw-managed-plugin` marker,
+  which includes a copy you edited but whose marker line you kept.
+- **An empty Copilot hooks file is deleted.** Teardown removes
+  `<hooks>/defenseclaw.json` when nothing but its schema version is left,
+  instead of rewriting it; handlers you added to it are kept.
+- **Teardown no longer creates missing files.** Removing the Cursor,
+  Copilot, OpenHands, Antigravity, Devin or Hermes connector for a user who
+  has no config file there leaves it absent; earlier releases wrote an
+  empty document. The Cursor change also applies to the Secure Client
+  profile.
+
 ## [Unreleased] — Kiro CLI hooks and the Claude Code version floor
 
 ### Fixed
@@ -156,17 +278,20 @@ deleted.
   are protected; conversations in Devin Desktop's legacy Cascade agent are not.
 - **Gemini CLI removed.** Use the Antigravity connector instead.
   `defenseclaw upgrade` removes `geminicli` from `config.yaml` when another
-  connector is configured (and warns, leaving the file unchanged, when it was
-  the only one). On its next start the gateway drops `geminicli` from its lock
+  connector is configured. When it was the only one, the upgrade's preflight
+  (`defenseclaw migrate --check`) stops before anything changes and names
+  the command to run on the installed release. On its next start the gateway drops `geminicli` from its lock
   and active-connector state and deletes DefenseClaw's
   `hooks/geminicli-hook.sh`/`.ps1` and `hooks/.otlp-geminicli.token`; Gemini CLI
   then treats the missing hook as a non-blocking error. DefenseClaw never edits
   `~/.gemini`; clean it up once by hand, then set up Antigravity:
   1. Only if Gemini CLI was the only connector, or the package was replaced
      without `defenseclaw upgrade`: run `defenseclaw setup remove geminicli
-     --yes` (no `--force` needed even when it is the last connector), or delete
-     `geminicli` from `guardrail.connectors` / `guardrail.connector` in
-     `~/.defenseclaw/config.yaml`.
+     --yes --force` (the 0.8.x release still installed after a stopped
+     upgrade refuses to remove the last connector without `--force`), set up
+     another connector first, or delete `geminicli` from
+     `guardrail.connectors` / `guardrail.connector` in
+     `~/.defenseclaw/config.yaml`; then run the upgrade again.
   2. In `~/.gemini/settings.json` (or `$GEMINI_CLI_HOME/.gemini/settings.json`;
      on Windows `%USERPROFILE%\.gemini\settings.json`), under `hooks`, for each
      of `SessionStart`, `SessionEnd`, `BeforeAgent`, `AfterAgent`,

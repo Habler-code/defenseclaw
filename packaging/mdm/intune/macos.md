@@ -17,9 +17,10 @@ Use the shell-script route, which detects through the lifecycle itself.
    settings block, set:
    - `DC_SOURCE_URL`;
    - `DC_SOURCE_SHA256`, from the cosign-verified `checksums.txt`;
-   - optionally `DC_PRODUCT_VERSION`. The lifecycle refuses a payload archive
-     of another version before applying it; a deb, rpm or pkg of another
-     version is installed first and then fails with `mdm_version_mismatch`;
+   - optionally `DC_PRODUCT_VERSION`. The wrapper refuses a deb, rpm or pkg
+     of another version with `mdm_version_mismatch` before the package
+     manager runs, so nothing is installed; the lifecycle refuses a payload
+     archive of another version before applying it;
    - for Developer ID trust, also `DC_TRUST_MODE=signed` and
      `DC_ALLOWED_TEAM_IDS="<team id>"`.
 

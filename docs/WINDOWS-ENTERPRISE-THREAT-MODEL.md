@@ -72,7 +72,9 @@ and macOS managed-enterprise deployments, expressed in Windows-native terms:
     port cannot return a forged allow verdict to it. The Amp plugin and the
     per-user OpenCode plugin call the gateway themselves (W-55) and send
     neither the credential nor the payload until the listener proves it can
-    derive the user's credential (W-25).
+    derive the user's credential (W-25); that proof is a separate request
+    and does not cover a listener that replaces the gateway before the
+    hook request (residual 5).
 11. Enrollment is automatic for an eligible interactive profile and connector
     when the enumerator discovers a supported CLI/version. Existing manifest
     rows retain their protected `enabled`, `deferred`, and version state. A SID
@@ -439,9 +441,13 @@ authority.
    HMAC over the nonce keyed by their credential, which only the gateway can
    derive. Any other answer is handled like an unreachable gateway (managed
    plugins fail closed), and neither the credential nor the payload is sent.
-   The proof and the request are consecutive loopback requests, so a holder
-   would have to take the port in the instant between them, which requires
-   the gateway to stop exactly then.
+   The proof and the request are separate loopback requests, and nothing
+   binds the request to the connection that passed the proof. A holder that
+   takes the port between them receives that request's credential and
+   payload, and the plugin accepts its verdict. That needs the gateway to
+   release the port in that interval (an administrator or upgrade restart)
+   and the request to open a new connection instead of reusing the pooled
+   one (residual 5).
 4. Constant-time token comparison authorizes only that connector's hook or
    notification route. In the standalone profile the gateway accepts only a
    credential bound to a SID the authorization ledger protects, attributes
@@ -481,7 +487,7 @@ authority.
 | W-22 | User-controlled loader environment, shared temp/cache/home content, PowerShell function, module, or preloaded helper type hijacks elevated lifecycle code | Fixed System32 PowerShell, strict environment/working directory, one unique protected directory for every writable temp/cache/home variable, pre-import module trust, module-qualified built-ins, randomized retained native-helper type | Poisoned loader/environment/module/function/type smokes, PowerShell ModuleAnalysisCache containment, and protected one-shot-directory ACL/use probes in Windows PowerShell 5.1 and PowerShell 7 |
 | W-23 | Authorization remains green with an extra removed/disabled target | Healthy status and verify require exact target-set equality, strict schema/counts, no duplicates, same reconcile identity, and freshness | Extra/stale/removed target tests for status, verify, and gateway readiness |
 | W-24 | A caller uses `-AllowUnsigned` with production names/roots, a near-miss certification scope, an action outside the lifecycle, or implicit core-only semantics to import or deploy untrusted code | Before module import, accept unsigned artifacts only for the seven lifecycle actions (`Install`, `Upgrade`, `Repair`, `Reconcile`, `Status`, `Verify`, `Uninstall`) and only with exact case-sensitive same-id certification service names, exact same-id Program Files/ProgramData certification roots, and a required same-id certification CODEX_HOME basename. Select core-only behavior through a separate explicit flag that is valid only for `Install`/`Upgrade`/`Repair`, requires the same scope, rejects production attestations and Codex targets, and is bound into transaction recovery; retain all fixed-NTFS, no-reparse, owner, and DACL source checks. The standalone profile's hash-pinned trust (W-45) is a separate production mode, not an extension of this switch | Bootstrap, module, public-CLI, recovery, and live-harness matrix tests: full unsigned uses home/no-core, Claude-only uses home/core, signed production and read-only use neither; negative production, mismatched-id, case-near-miss, nested-root, CODEX_HOME-near-miss, and flag-combination assertions |
-| W-25 | A standard-user fake listener wins the exact API port and returns a valid allow response while the gateway is stopped or restarting | For `defenseclaw-hook.exe`, bind hook trust to both the user's credential and the connected server PID; the PID must equal the exact current SCM gateway PID, not merely any process listening on loopback. The standalone Amp plugin and the per-user OpenCode plugin, which cannot read the PID, require the listener proof before sending the credential or payload. The Codex and Claude Code OTLP exporters verify nothing (residual 5) | Stop/crash the gateway, bind the exact port as a non-admin, return valid allow JSON, and race service restart; the hook must deny/fail closed and the fake listener must observe zero authenticated requests; `internal/gateway/connector/plugin_listener_proof_test.go` for the plugins |
+| W-25 | A standard-user fake listener wins the exact API port and returns a valid allow response while the gateway is stopped or restarting | For `defenseclaw-hook.exe`, bind hook trust to both the user's credential and the connected server PID; the PID must equal the exact current SCM gateway PID, not merely any process listening on loopback. The standalone Amp plugin and the per-user OpenCode plugin, which cannot read the PID, require the listener proof before sending the credential or payload; the proof is not bound to the request that follows (residual 5). The Codex and Claude Code OTLP exporters verify nothing (residual 5) | Stop/crash the gateway, bind the exact port as a non-admin, return valid allow JSON, and race service restart; the hook must deny/fail closed and the fake listener must observe zero authenticated requests; `internal/gateway/connector/plugin_listener_proof_test.go` for the plugins |
 | W-26 | Codex managed-hook configuration is removed, redirected, or bypassed | Protect the machine requirements and enrollment state with administrator-owned ACLs, verify the exact ten-event policy, and require end-to-end managed-hook contact or a blocked operation in certification | Invoke the approved Codex client against a bounded local provider and require SessionStart/UserPromptSubmit audit evidence or a causal block |
 | W-27 | An old officially signed or custom unsigned agent avoids a newer managed-hook contract | When an enterprise opts into application control, allow only approved signed clients at or above the minimum versions. The hook-contract floors are the source of truth: `cli/defenseclaw/inventory/hook_contracts.json` (mirrored in `internal/gateway/connector/hook_contract.go`) currently starts Codex at 0.124.0, Claude Code at 2.1.154, Cursor at 2.4.0 and Copilot at 1.0.18. The Secure Client installer's own minimums in `internal/enterprisehooks/install_windows.go` (Codex 0.131.0, Claude Code 2.1.152, Cursor 1.7.0) differ from the contract table; the standalone profile takes its floors from the contract table. Certification records the floors of the tested build rather than this document | In the optional application-control profile, approved clients start and explicitly supplied old signed Codex/Claude and custom unsigned lookalikes fail process creation with an application-control denial |
 | W-28 | An unregistered interactive SID invokes the installed managed hook or reuses another target's state | Exact SID membership in protected connector enrollment state is checked before token use; absence is fail-closed and diagnostic | Run the installed managed hook under a temporary non-admin SID absent from the manifest; require non-zero, causal enrollment text, and byte/security-exact user trees |
@@ -707,11 +713,17 @@ authority.
    block managed-hook readiness, but leaves the user-owned hook race described
    above as a residual risk. If an enterprise claims these controls, it must
    certify them independently.
-5. Local port squatting cannot forge an allow verdict because the connected
-   peer PID must be the exact SCM gateway PID (the Amp plugin and the
-   per-user OpenCode plugin require the listener proof instead), but it can
-   still deny availability. The Codex and Claude Code OTLP exporters verify
-   neither: while a user holds the port, that user receives their telemetry,
+5. Local port squatting cannot forge an allow verdict for
+   `defenseclaw-hook.exe`, because the connected peer PID must be the exact
+   SCM gateway PID, but it can still deny availability. The Amp plugin and
+   the per-user OpenCode plugin require the listener proof instead; it is a
+   separate request, so a user who takes the port between the proof and the
+   hook request (the gateway must release it then, in an administrator or
+   upgrade restart, and the request must open a new connection) receives
+   that request's per-user credential and tool payload, and the plugin
+   accepts that user's verdict. A request-bound proof would close it. The
+   Codex and Claude Code OTLP exporters verify neither: while a user holds
+   the port, that user receives their telemetry,
    which can include prompt text, and the sending user's per-SID telemetry
    credential, and can replay the credential once the gateway is back to
    post telemetry attributed to that user for that connector until the user
@@ -837,8 +849,11 @@ authority.
     example by signing the user out) closes it.
 22. `defenseclaw-hook.exe` runs as the user, who can end or suspend it or
     starve it until the agent's hook timeout. Agents that block only on an
-    explicit deny then run the call
-    ([R18](ENTERPRISE-THREAT-MODEL.md#residual-risks)).
+    explicit deny then run the call, with no DefenseClaw audit row for it
+    ([R18](ENTERPRISE-THREAT-MODEL.md#residual-risks)). Claude Code and
+    Codex treat a hook that exits without code 2 or times out as
+    non-blocking; certification on Linux and macOS showed both running the
+    call after the user killed or stopped their own hook.
 
 ## Certification gate
 

@@ -41,6 +41,13 @@ The systemd version decides how the gateway reads secrets:
 | 247 or later | `/etc/defenseclaw/secrets` is `root:root 0700`, and each file is `0600`. The gateway receives them through `LoadCredential=`. |
 | 239 to 246 | `/etc/defenseclaw/secrets` is `root:defenseclaw 0750`, and each file is `0640`, readable by the gateway's group |
 
+It also decides how much of the units' sandboxing applies. systemd ignores
+directives it does not know, so hosts older than systemd 250 run the units
+without some of them; RHEL 8 (systemd 239) runs without `ProtectHostname`,
+`ProtectKernelLogs`, `ProtectClock`, `ProtectProc` and `ProcSubset`. The
+[Linux threat model](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/LINUX-ENTERPRISE-THREAT-MODEL.md#review-scope)
+lists each directive and the version it needs.
+
 ## Layout
 
 | Item | Path | Owner and mode |
@@ -55,9 +62,9 @@ The systemd version decides how the gateway reads secrets:
 | Machine-policy summary | `/etc/defenseclaw/machine-policy.json` | Readable by users |
 | Lifecycle state | `/var/lib/defenseclaw-enterprise`: lock, snapshots, deployment record, `last-package-result.json`, `last-activation-failure.log`, the last applied config and a rejected one | `root`, `0700` |
 | Transaction snapshots on other filesystems | `/opt/defenseclaw/.lifecycle-snapshots`, `/etc/defenseclaw/.lifecycle-snapshots`: only during a lifecycle transaction (or while a rollback waits for a retry) when `/var` is on its own filesystem. They hold the snapshot's hard links to the files there. | `root`, `0700` |
-| Gateway data | `/var/lib/defenseclaw` | `defenseclaw`, `0750` |
+| Gateway data | `/var/lib/defenseclaw` | `defenseclaw`, `0700` (the device identity key needs a private directory) |
 | Authorization ledger | `/var/lib/defenseclaw-hook-guardian` | `root:defenseclaw`, `0750` |
-| Logs | `/var/log/defenseclaw` | `defenseclaw`, `0750` |
+| Logs | `/var/log/defenseclaw`: empty unless a `jsonl` destination writes there; the services log to the journal ([Logs and events](/docs/enterprise/operations#logs-and-events)) | `defenseclaw`, `0750` |
 | Hook socket | `/run/defenseclaw-hook/hook.sock` | Directory `defenseclaw`, `0755`. Socket `0666`: every user may connect, and the gateway authorizes each caller by uid. |
 
 The gateway runs as the `defenseclaw` system account. The lifecycle creates
@@ -309,8 +316,10 @@ service and readiness check, and exits `1` when anything fails. Look for:
 | `enrollment.targets` | The number of per-user targets in the manifest. Connectors published through machine policy (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets unless `enterprise.enrollment.unenrolled_users` is `deny`, so `0` is normal when you enable only those. For per-user connectors, `0` means nobody is enrolled yet. |
 | `errors` | Empty |
 
-Neither `coverage_complete` nor `security_complete` checks that anyone is
-enrolled, so check `enrollment` too. For per-user connectors, a newly added
+When the config enables no agent under `guardrail.connectors` while there
+are users to enroll, `status` and `verify` warn `no_connectors_enabled` and
+`security_complete` is `false`. Otherwise neither field checks that the
+users you expect are enrolled, so check `enrollment` too. For per-user connectors, a newly added
 user shows up after the next enumerator cycle (up to five minutes), then the
 guardian reconciles.
 
@@ -323,6 +332,49 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json
 
 See [Status and verify](/docs/enterprise/operations#status-and-verify) and
 [Health fields](/docs/enterprise/operations#health-fields) for monitoring.
+
+### User namespaces
+
+On most distributions as shipped, Ubuntu 24.04 and RHEL 9 included,
+`verify` reports `ok: true` with one warning, `unprivileged_user_namespaces`.
+Where standard users can create a private user and mount namespace, an
+agent started inside one can be given its own view of
+`/etc/codex/requirements.toml` and the other machine-policy files, the
+runtime descriptor and `/run/defenseclaw-hook`, outside your enforcement.
+DefenseClaw cannot turn this off from user space
+([Residual risks](/docs/enterprise/threat-model#residual-risks)). The
+warning names the host setting that closes it:
+
+| Host | Setting |
+| --- | --- |
+| Ubuntu 24.04 and other AppArmor hosts where `kernel.apparmor_restrict_unprivileged_userns` is `1` | `kernel.apparmor_restrict_unprivileged_unconfined=1`, so an unconfined process cannot switch to an AppArmor profile that allows user namespaces (for example with `aa-exec`) |
+| Any host | `user.max_user_namespaces=0`, which turns user namespaces off for everyone but root |
+
+```bash
+# Ubuntu 24.04: keep the setting across reboots, then load it.
+echo 'kernel.apparmor_restrict_unprivileged_unconfined = 1' |
+  sudo tee /etc/sysctl.d/60-defenseclaw-userns.conf
+sudo sysctl --system
+```
+
+Weigh the trade-off first. The command sandboxes of Codex and Claude Code
+use bubblewrap, which needs user namespaces:
+
+- With `user.max_user_namespaces=0` those sandboxes cannot start, and
+  neither can other software that uses user namespaces, such as rootless
+  containers.
+- Under the AppArmor restriction a sandbox runs only where an AppArmor
+  profile allows user namespaces. On stock Ubuntu 24.04, where
+  `kernel.apparmor_restrict_unprivileged_userns=1` is already the default,
+  Codex's bundled bubblewrap already fails
+  (`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`), so its
+  shell calls fail until the user chooses `--sandbox danger-full-access` or
+  approves running outside the sandbox. Setting
+  `kernel.apparmor_restrict_unprivileged_unconfined=1` as well does not
+  change that.
+
+DefenseClaw's hooks inspect each tool call whether or not the agent's own
+sandbox runs.
 
 ## Per-user installs
 

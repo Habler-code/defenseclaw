@@ -42,9 +42,14 @@ Which Kiro builds read the global hook file. Kiro documents a global scope,
 All scopes merged"), for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`.
 Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so for them
 the enforcing file is the workspace copy. For those builds, set
-`claw.workspace_dir` to the project root before running setup, and confirm
-with `defenseclaw doctor`. Its `Connector scope [kiro]` check still fails when
-no project-local hook file exists.
+`claw.workspace_dir` to the project root before running setup. `defenseclaw
+doctor`'s `Connector scope [kiro]` check passes when the global
+`~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks, and its detail
+says that Kiro IDE builds before 1.0.182 also need `claw.workspace_dir`,
+because doctor cannot tell which Kiro build you run. It fails
+(`kiro_hooks_not_workspace_scoped`) only when neither the global
+registration nor a workspace copy is present; run `defenseclaw setup kiro`
+to fix that.
 </Callout>
 
 ## Native Windows

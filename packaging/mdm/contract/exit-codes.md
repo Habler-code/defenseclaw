@@ -25,13 +25,22 @@ Intune's default Win32 return codes are `0` Success, `1707` Success, `3010`
 Soft reboot, `1641` Hard reboot and `1618` Retry. `1603` and `1639` report
 as Failed, which is correct. You don't need to add any codes.
 
-Setup's own refusals, before the lifecycle starts, also exit `1603`: an
-unelevated token, a relative, environment-expanded or untrusted `CONFIG=`
-path, or an unknown property. With `JSON=1`, Setup then prints a short
-document with `schema_version: 1` and an `error` field; the wrappers turn it
-into a schema-version-2 document with the code `mdm_lifecycle_no_result`.
-Setup stops reading arguments at the first unknown one, so put `JSON=1`
-before the other properties.
+The standalone Setup can also refuse before the lifecycle starts:
+
+- A malformed command line exits `1639`: an unknown property, a `CONFIG=`
+  or `MANIFEST=` path that is missing, relative, padded,
+  environment-expanded (contains `%`) or not on a local drive, `/install`
+  without `CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of range.
+- An unelevated token, and a `CONFIG=` or `MANIFEST=` file that exists but
+  is a link, is not a regular file, or can be changed by a non-administrator,
+  exit `1603`.
+
+With `JSON=1`, Setup then prints a short document with `schema_version: 1`
+and an `error` field; the wrappers keep Setup's exit code and turn the
+document into a schema-version-2 document with the code
+`mdm_lifecycle_no_result`. Setup stops reading arguments at the first
+unknown one, so put `JSON=1` before the other properties. The Secure Client
+Setup returns only `0` and `1603`, its argument errors included.
 
 ## Linux and macOS (sysexits-style)
 

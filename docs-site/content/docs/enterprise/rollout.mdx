@@ -90,22 +90,31 @@ checks again every five minutes. The settings live under
 | Setting | Linux and macOS | Windows |
 | --- | --- | --- |
 | Candidates | Every account the user database lists (NSS on Linux, Directory Services on macOS), signed-in users, the owners of folders under the home roots, and `include_users` | Every user profile on the computer: local, domain, and Microsoft Entra ID accounts |
-| Built-in filter | A user ID in the interactive range (Linux: `UID_MIN` to `UID_MAX` from `/etc/login.defs`, 1000 to 60000 when unset; macOS: 501 and up), a login shell, and a home under `/home` or `/var/home` (Linux) or `/Users` (macOS) or a `home_roots` entry. Never root or `nobody` | Interactive user profiles only |
-| `include_users` | Adds these users even outside the user-ID range or with a no-login shell. Everyone else who passes the filter is still enrolled | When set, only these users are enrolled |
+| Built-in filter | A user ID in the interactive range, a login shell, and a home under `/home` or `/var/home` (Linux) or `/Users` (macOS) or a `home_roots` entry. Never root or `nobody`. The range starts at `UID_MIN` from `/etc/login.defs` (1000 when unset) on Linux and at 501 on macOS. On Linux, `UID_MAX` (60000 when unset) caps only local accounts in `/etc/passwd`; directory accounts have no upper bound unless you set `uid_max` | Interactive user profiles only |
+| `include_users` | Adds these users even outside the user-ID range or with a no-login shell. Everyone else who passes the filter is still enrolled | Accepted, but it adds and removes no one: every profile on the computer is already a candidate |
 | `exclude_users` | Never enrolled | Never enrolled |
-| `include_groups`, `exclude_groups` | Filter by group | Not used |
-| `exempt_users` | Not enrolled, but their calls are still inspected and logged | Treated like `exclude_users` |
+| `include_groups`, `exclude_groups` | Filter by group | Filter by local, Active Directory and Microsoft Entra ID group. A user whose membership is not known yet, or who is left undecided by an `include_groups` entry that does not resolve, is pending: no new rows, nothing revoked |
+| `exempt_users` | Not enrolled, but their calls are still inspected and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept |
 | A user who is not enrolled and runs a machine-policy agent | Inspected by default (`unenrolled_users: inspect`). Refused with `unenrolled_users: deny` | Refused |
 
-Two cases to plan for:
+Three cases to plan for:
 
 - **Linux directory accounts.** SSSD and Active Directory often map users to
-  user IDs above 60000. The enumerator skips them unless you list them in
-  `include_users`. Check a user's ID on a pilot host with `getent passwd <user>`
-  or `id -u <user>`.
+  user IDs above 60000. The `UID_MAX` cap does not apply to them, so they are
+  enrolled like local users. Set `uid_max` only if you want to cap directory
+  and local accounts alike. Check a user's ID on a pilot host with
+  `getent passwd <user>` or `id -u <user>`.
+- **One config for several OSes.** Windows applies `include_groups` and
+  `exclude_groups` too. A Linux group name such as `wheel` in `include_groups`
+  does not resolve on Windows, so a new Windows user that no other entry
+  admits stays pending: they get no rows, and their machine-policy calls are
+  refused. Name groups that exist on every OS the config reaches (or by SID
+  on Windows), or use separate configs.
 - **Windows exclusions.** On Windows, excluding a user does not leave them
   unprotected: their calls through a machine-policy agent are refused.
-  Exclude only accounts that do not run the protected agents.
+  Exclude only accounts that do not run the protected agents. To keep an
+  account working without per-user registrations, list it in `exempt_users`
+  instead: it keeps its machine-policy rows and is inspected and logged.
 
 [Enrollment](/docs/enterprise/enrollment) has every setting.
 

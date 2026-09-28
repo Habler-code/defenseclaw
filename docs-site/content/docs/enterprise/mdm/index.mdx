@@ -126,7 +126,8 @@ Rules that apply to every method:
   anything else with `mdm_untrusted_input`; Setup run directly refuses it with
   its own error and exit `1603`.
 - **Absolute local paths only.** Setup also refuses relative paths, paths with
-  environment variables such as `%TEMP%`, and network paths.
+  environment variables such as `%TEMP%`, and network paths (the standalone
+  Setup exits `1639`).
 - **At most 1 MiB** (1,048,576 bytes). The wrappers refuse a larger config
   with `mdm_input_too_large`.
 - **No credentials in the config.** The standalone profile rejects an inline
@@ -230,7 +231,7 @@ C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\Stag
 | `--allowed-team-id ID` (macOS), `--gpg-keyring FILE` with `--signature FILE` or `--signature-url URL` (Linux) | `-AllowedSigners THUMBPRINT[,...]` | Signer pins for signed trust. |
 | `--config-file`, `--config-stdin` | `-ConfigPath`, `-ConfigFromStdin` | The config. |
 | `--secret-name` with `--secret-file` or `--secret-stdin` | `-SecretName` with `-SecretPath` or `-SecretFromStdin` | The optional key. |
-| `--product-version X.Y.Z` | `-ProductVersion X.Y.Z` | Linux and macOS: the lifecycle refuses a payload archive of another version before applying it. For a deb, rpm or pkg the wrapper checks after the package manager has installed it, then fails with `mdm_version_mismatch`; the other version stays installed. Windows: without `-SetupPath`, it sets the version the installed CLI's `ensure` records and compares with the installed one; it does not filter an artifact, so leave it unset. With `-SetupPath`, Setup uses its embedded version. |
+| `--product-version X.Y.Z` | `-ProductVersion X.Y.Z` | Linux and macOS: a deb, rpm or pkg of another version is refused with `mdm_version_mismatch` before the package manager runs, so nothing is installed; the lifecycle refuses a payload archive of another version before applying it. Windows: applies only without `-SetupPath`: it sets the version the installed CLI's `ensure` records and compares with the installed one, and does not filter an artifact. With `-SetupPath` the wrapper refuses it (`mdm_invalid_arguments`, `1639`); a staged Setup carries its own version and is pinned to one release with `-Sha256`. |
 | `--https-proxy URL` | — | Proxy for the download only. The services' own proxy is set in the config ([Network proxy](/docs/enterprise/configuration#network-proxy)). |
 | `--log FILE` | — | Wrapper log path. |
 
@@ -332,8 +333,13 @@ The Windows codes are Windows Installer codes, so MDMs classify them with
 their default tables. Intune's default Win32 return codes (`0`, `1707`, `3010`,
 `1641`, `1618`) already treat `1603` and `1639` as failures and retry `1618`.
 
-Setup's own refusals, before the lifecycle starts, exit `1603`: not elevated,
-a relative or untrusted `CONFIG=` path, or an unknown property.
+The standalone Setup can also refuse before the lifecycle starts. A
+malformed command line exits `1639`: an unknown property, a `CONFIG=` or
+`MANIFEST=` path that is missing, relative or environment-expanded,
+`/install` without `CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of
+range. A token that is not elevated, and a `CONFIG=` or `MANIFEST=` file that
+a non-administrator can change, exit `1603`. The Secure Client Setup returns
+only `0` and `1603`.
 With `JSON=1`, Setup then prints a short document with `schema_version: 1` and
 an `error` field. Setup stops reading its arguments at the first unknown one,
 so put `JSON=1` before the other properties. The wrappers turn it into a schema-version-2 document with

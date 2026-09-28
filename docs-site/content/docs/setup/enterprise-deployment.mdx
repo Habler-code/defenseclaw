@@ -1608,7 +1608,9 @@ file changes. `ensure` validates the new config, restarts the services in
 order, waits for the gateway to report healthy, and rolls back if any step
 fails. Run `ensure` yourself to see the result straight away; it is a no-op if
 the path unit has already applied the change. If another lifecycle run holds
-the lock, it waits up to two minutes and then exits `75`. Then run `reconcile`
+the lock, a hand-run `ensure` waits 5 seconds by default (pass `--lock-wait`,
+at most `15m`, to wait longer) and then exits `75`; the apply unit and the
+package's install and removal scripts wait up to 10 minutes. Then run `reconcile`
 to repair hooks now
 instead of at the guardian's next one-minute pass. The guardian service is
 always running, so `systemctl start` on it does nothing.

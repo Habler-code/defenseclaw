@@ -27,6 +27,29 @@ is given in the second column so reviewers can compare the two platforms.
   - `internal/managed/credentials_unix.go`, `internal/managed/runtime_descriptor.go`
 - Supported hosts: systemd 239 or later as PID 1. Containers and WSL without
   systemd are refused (`systemd is not the running init system`).
+- Unit hardening by systemd version. systemd ignores a unit directive it does
+  not know (it logs `Unknown lvalue` when it loads the unit), so on an older
+  supported systemd the units below run without these directives. RHEL 8
+  (systemd 239) ignores every one of them; systemd 250 or later applies them
+  all.
+
+  | Directive | Needs systemd | Units that set it |
+  | --- | --- | --- |
+  | `ProtectHostname=true` | 242 | gateway, hook guardian, guardian reconcile, hook enumerator, sensor helper |
+  | `ProtectKernelLogs=true` | 244 | the same five units |
+  | `ProtectClock=true` | 245 | the same five units |
+  | `ProtectProc=invisible` | 247 | gateway, hook guardian, guardian reconcile |
+  | `ProcSubset=pid` | 247 | gateway |
+  | `TriggerLimitIntervalSec=`, `TriggerLimitBurst=` in `[Path]` | 250 | `defenseclaw-enterprise-apply.path` (its trigger rate limit) |
+
+  How the AI Defense key reaches the gateway also depends on the version:
+  `LoadCredential=` needs systemd 247 ([Secrets](#secrets), L-20). A
+  `systemd-analyze verify` run over these units in the `ubi8-init` image the
+  rpm-el8 CI lane uses (systemd 239-82.el8_10) reported only the directives
+  above; the rest (`ProtectSystem=strict`, `ProtectHome`, `PrivateDevices`,
+  `PrivateTmp`, `RestrictNamespaces`, `RestrictSUIDSGID`,
+  `MemoryDenyWriteExecute`, the syscall filters and the capability sets)
+  load there.
 
 ## Security objectives
 
@@ -72,7 +95,7 @@ is given in the second column so reviewers can compare the two platforms.
 | Z1 | `defenseclaw-hook-enumerator.service` | root; `CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, the last two also ambient; `ProtectHome=read-only` | Writes only `/etc/defenseclaw/hook-guardian` |
 | Z1 | Per-user `enterprise hooks apply-target` worker | the target user's uid and primary gid | New session, parent-death signal, non-dumpable, rlimits, timeout, minimal environment |
 | Z1 | `defenseclaw-sensor-helper.service` | root with acquisition capabilities (`CAP_SYS_ADMIN`, `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_DAC_READ_SEARCH`, `CAP_SYS_PTRACE`, `CAP_CHOWN`, `CAP_FOWNER`) | Own `RuntimeDirectory=defenseclaw-sensor`; fixed fieldless request protocol; homes from the manifest |
-| Z2 | `defenseclaw-gateway.service` (`Type=notify`, watchdog) | `defenseclaw:defenseclaw`, `CapabilityBoundingSet=` (empty) | `ProtectSystem=strict`, `ProtectHome=true`, `PrivateDevices`, `PrivateTmp`, `ProtectProc=invisible`, `@system-service` syscall filter, `MemoryDenyWriteExecute`, `RestrictNamespaces`; read-only `/etc/defenseclaw`, `/opt/defenseclaw` and the ledger |
+| Z2 | `defenseclaw-gateway.service` (`Type=notify`, watchdog) | `defenseclaw:defenseclaw`, `CapabilityBoundingSet=` (empty) | `ProtectSystem=strict`, `ProtectHome=true`, `PrivateDevices`, `PrivateTmp`, `ProtectProc=invisible` (systemd 247 or later; see [Review scope](#review-scope)), `@system-service` syscall filter, `MemoryDenyWriteExecute`, `RestrictNamespaces`; read-only `/etc/defenseclaw`, `/opt/defenseclaw` and the ledger |
 | Z2 endpoints | `defenseclaw-gateway-api.socket` (`127.0.0.1:18970`) and `defenseclaw-gateway-hook.socket` (`/run/defenseclaw-hook/hook.sock`) | bound by PID 1 | Held across gateway restarts. `/run/defenseclaw-hook` is created `0755 defenseclaw:defenseclaw` by systemd-tmpfiles at boot (`packaging/systemd/defenseclaw.conf`) and by the lifecycle; only root and the service account can create entries in it. The socket is `0666 defenseclaw:defenseclaw` (`SocketUser`, `SocketGroup`, `SocketMode`) so every local user can connect; the gateway authorizes each caller by kernel uid (L-08) |
 | Z3 | `/opt/defenseclaw` (binaries), `/etc/defenseclaw` (config, `policies/`, `secrets/`, `hook-guardian/targets.yaml`, `managed-runtime.json`, `machine-policy.json`), `/var/lib/defenseclaw-hook-guardian` (ledger), `/var/lib/defenseclaw-enterprise` (lifecycle), `/etc/{codex,claude-code,cursor,github-copilot,opencode}` | root | Administrator-only write; secrets root-only with systemd 247 or later, otherwise `root:defenseclaw 0640` |
 | Z4 | The AI agent and `/opt/defenseclaw/bin/defenseclaw-hook` running as the user; the user's vendor config | the user | Peer verification, guardian repair, foreign-hook guard |
@@ -148,8 +171,10 @@ access. Status shows presence, modification time and a digest prefix only.
    root-owned binary, so LDAP, SSSD, AD, NIS and systemd-userdb accounts are
    visible to the `CGO_ENABLED=0` build), logged-in sessions, home owners and
    `enrollment.include_users`, then applies uid, shell, group, home-root and
-   exclusion filters. The uid range is `UID_MIN`–`UID_MAX` from
-   `/etc/login.defs` (1000–60000 when unset); accounts with a nologin shell
+   exclusion filters. The uid range starts at `UID_MIN` from
+   `/etc/login.defs` (1000 when unset); `UID_MAX` (60000 when unset) bounds
+   only local accounts in `/etc/passwd`, and directory accounts have no upper
+   bound unless `enrollment.uid_max` is set (residual 10); accounts with a nologin shell
    (`/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false`
    and the like) are skipped; `enrollment.include_users` bypasses both
    checks, `include_groups` does not; uid 0 and `nobody` are never targets.
@@ -191,13 +216,15 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-22 | W-13 | A removed user or connector stays authorized | The ledger is rebuilt from the current manifest; removed or disabled rows are revoked | Enumerator and guardian tests |
 | L-23 | — | SELinux, fapolicyd or AppArmor silently blocks a service | Relabel after install; lifecycle warnings; certification on RHEL 9 with SELinux enforcing (partial on this code: not yet complete) and on Ubuntu (not yet run) | Host certification record |
 | L-24 | W-21 | The gateway hangs without exiting | `WatchdogSec=60s` with `Type=notify`; systemd restarts it | SIGSTOP drill |
-| L-25 | W-27 | An old, copied or self-built agent client (for example Codex built from source, or an older Codex or Claude Code under `~/.local`) ignores `/etc/codex/requirements.toml` or the managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and fapolicyd (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15) | Application-control profile on a host |
+| L-25 | W-27 | An old, copied or self-built agent client (for example Codex built from source, or an older Codex or Claude Code under `~/.local`) ignores `/etc/codex/requirements.toml` or the managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and fapolicyd (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15). Claude Code releases that do not read `/etc/claude-code/managed-settings.d` (1.0.128 and 2.0.77 on RHEL 9, 2.0.77 on Ubuntu 24.04) ignore both DefenseClaw drop-ins, including the version floor, run with no DefenseClaw hook and no audit row, and are not reported by `status` or `verify` ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)) | Application-control profile on a host; RHEL 9 and Ubuntu 24.04 certification, 2026-09-27 |
 | L-26 | — | A standard user creates a private user and mount namespace and starts an agent with its own view of the machine policy, runtime descriptor or hook socket directory | `enterprise linux verify` warns (`unprivileged_user_namespaces`) unless the kernel refuses unprivileged user namespaces; the host sysctl closes it (residual 11, enterprise R20) | `internal/enterpriseunix/userns_test.go` |
 | L-27 | W-57 | A user has an agent only as a desktop app or editor extension and is never enrolled | Not in this release: machine-policy hook calls are inspected under the default contract or refused (`unenrolled_users`), and per-user connectors get no hooks ([R25](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#912](https://github.com/cisco-ai-defense/defenseclaw/issues/912)) | Tracked in #912 |
 | L-28 | W-58 | A Copilot agent chat in VS Code's Local harness runs without DefenseClaw policy or audit | Not in this release ([R26](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913)) | Tracked in #913 |
 | L-29 | W-59 | The standalone profile is installed inside a WSL 2 distribution, where the Windows user is root | Not a supported deployment: the user controls the distribution ([R27](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#914](https://github.com/cisco-ai-defense/defenseclaw/issues/914)) | Tracked in #914 |
 | L-30 | W-60 | Devin Desktop runs without DefenseClaw hooks for a user without the `devin` CLI | Not in this release ([R28](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915)) | Tracked in #915 |
 | L-31 | W-61 | The Kiro IDE is not discovered and has no version floor; its reading of the global `~/.kiro/hooks` file is not live-verified | Not in this release ([R29](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916)); `kiro-cli` is covered per user (R22) | Tracked in #916 |
+| L-32 | — | A user kills, stops or starves their own `defenseclaw-hook` (or `openhands-hook.sh`, `devin-hook.sh`, `hermes-hook.sh`) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex, OpenHands, Devin and Hermes then run the call with no audit row; Copilot, OpenCode, Amp and Antigravity stay closed (residual 12, enterprise R18). Application control or EDR process protection closes it | RHEL 9 and Ubuntu 24.04 certification, 2026-09-27 |
+| L-33 | — | A project's `.openhands/hooks.json` replaces the user-level registration, so none of DefenseClaw's OpenHands hooks run in that project | Not closable by DefenseClaw: OpenHands reads the project file instead of the user file, the foreign-hook guard does not cover OpenHands, and policy verify does not look for it ([R30](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | Ubuntu 24.04 certification, 2026-09-27 |
 
 ## Invariants
 
@@ -243,9 +270,15 @@ access. Status shows presence, modification time and a digest prefix only.
    RHEL 9 on 2026-09-26). The guardian cannot see a per-process environment,
    no DefenseClaw hook runs that could detect it, and Amp has no machine
    plugin path (R3). The same holds for every per-user connector started
-   with another config root (R1). Closing it needs application control over
-   how users launch these agents, or a vendor machine setting that pins the
-   config directory.
+   with another config root or a mode that skips user configuration (R1).
+   Certified on RHEL 9 and Ubuntu 24.04 on 2026-09-27: Amp with `HOME`,
+   Devin with `XDG_CONFIG_HOME` or `devin --config <file>` naming a copy
+   without hooks, Antigravity with `HOME`, Hermes with `--safe-mode` or
+   `HERMES_HOME`, and OpenHands with `HOME` each ran a marker command with
+   no DefenseClaw audit row, and the guardian never repairs such a session.
+   The machine-policy connectors were not affected. Closing it needs
+   application control over how users launch these agents, or a vendor
+   machine setting that pins the config directory.
 8. Agent versions without a verified DefenseClaw hook contract get no
    DefenseClaw hooks (the guardian refuses hooks it cannot parse). Status
    and verify report them as `hook_contract_unverified` with
@@ -284,6 +317,19 @@ access. Status shows presence, modification time and a digest prefix only.
     `kernel.apparmor_restrict_unprivileged_userns=1` and
     `kernel.apparmor_restrict_unprivileged_unconfined=1` (the Ubuntu 24.04
     default leaves the second at `0`). DefenseClaw cannot close this from
-    user space; the host sysctl can (R20).
-12. `defenseclaw-hook` runs as the user, who can terminate, suspend or starve
-    it; agents that block only on an explicit deny then run the call (R18).
+    user space; the host sysctl can (R20). Both settings also restrict the
+    agents' bubblewrap command sandboxes: `user.max_user_namespaces=0` stops
+    Codex's and Claude Code's sandboxes, and on stock Ubuntu 24.04 the
+    AppArmor userns restriction already stops Codex's bundled bubblewrap
+    (`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`), so
+    its shell calls fail until the user runs without its sandbox.
+12. `defenseclaw-hook` and the per-user hook scripts run as the user, who
+    can terminate, suspend or starve them; agents that block only on an
+    explicit deny then run the call, with no DefenseClaw audit row for it
+    (R18, L-32). Certified on RHEL 9 and Ubuntu 24.04 (2026-09-27): with the
+    user's own hook processes killed or stopped, Claude Code and Codex ran
+    the tool call (a killed hook is a non-2 exit; a stopped one times out
+    after 30 s), and so did OpenHands, Devin and Hermes for a killed hook;
+    Copilot, OpenCode, Amp and Antigravity stayed closed. Closing it needs
+    the vendor to treat a failed or timed-out hook as a deny, or
+    application control or EDR that stops users from signalling the hook.

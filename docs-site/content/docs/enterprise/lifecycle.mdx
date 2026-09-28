@@ -31,8 +31,10 @@ rollback does not remove it, even after a first install.
 Only one lifecycle run works at a time. On Linux and macOS a run that finds
 another one in progress waits 5 seconds and exits `75` (busy); pass
 `--lock-wait <duration>` (at most `15m`) to wait longer. The apply trigger
-waits up to 10 minutes, so a change made during another run is applied after
-it. On Windows a busy run exits `1618`. MDM agents retry both.
+and the deb, rpm and pkg install and removal scripts wait up to 10 minutes,
+so a change made during another run is applied after it, and a package
+removal that still finds the lock busy fails without deleting anything. On
+Windows a busy run exits `1618`. MDM agents retry both.
 
 The examples use these paths:
 
@@ -190,8 +192,14 @@ compliance checks see it. Push a corrected config to clear it; pushing the
 previous config again clears it too.
 
 The apply trigger watches the config file and the top level of the secrets
-and policies directories. After you edit a rule pack in a subdirectory, run
-`ensure` (or restart the gateway) so the gateway loads it.
+and policies directories, but `ensure` applies a change only when the config
+or a secret changed: it does not track the files under `policies`. The
+gateway reads rule packs and policies when it starts, so after you edit a
+rule pack or policy in place,
+[restart the managed gateway](#restart-the-managed-gateway). A config change
+that points `guardrail.rule_pack_dir` at another folder is applied by
+`ensure` like any other config change; see
+[Custom rule packs](/docs/enterprise/configuration#custom-rule-packs).
 
 A change to `enterprise.network` (the outbound proxy) takes effect only when
 the gateway restarts. On Linux and macOS a lifecycle run that applies a
@@ -261,6 +269,25 @@ reconcile:
 ```powershell
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows reconcile --profile standalone --json
 ```
+
+## Restart the managed gateway
+
+`defenseclaw-gateway start`, `stop` and `restart` control the per-user
+gateway, and on a managed host they refuse, also when you run them as root;
+run as root, the refusal names the commands below. Restart the managed
+gateway through the service manager instead. On Linux
+systemd keeps the hook and API sockets open while the gateway restarts, so a
+hook that connects meanwhile waits; on macOS a hook that runs during the
+restart fails closed.
+
+| OS | Restart the gateway | Re-apply the deployment and restart every service |
+| --- | --- | --- |
+| Linux | `sudo systemctl restart defenseclaw-gateway.service` | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair --json` |
+| macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
+| Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
+
+Restart the gateway after you edit a rule pack or policy file in place.
+Config changes, secrets and upgrades restart it on their own.
 
 ## Uninstall
 

@@ -203,8 +203,11 @@ are on each [connector page](/docs/connectors#platform-support).
 ## A minimal config
 
 The administrator config is one YAML file. The example below protects Codex
-and Claude Code in observe mode, so policy verdicts do not block yet. It is the config the Linux and macOS
-lifecycle writes when you supply none, plus the `guardrail.connectors` block.
+and Claude Code in observe mode, so policy verdicts do not block yet. The
+Linux and macOS tabs install as written with `ensure --config`. They leave
+`guardrail.rule_pack_dir` out, so the gateway uses a rule pack you put in
+`<policy_dir>/guardrail/default`, and otherwise the default pack that ships
+with DefenseClaw.
 
 <Tabs items={['Linux', 'macOS', 'Windows']}>
   <Tab value="Linux">
@@ -272,7 +275,7 @@ guardrail:
   </Tab>
 </Tabs>
 
-Three things to know before you deploy it:
+Four things to know before you deploy it:
 
 - **Nothing is protected until you list agents.** Each key under
   `guardrail.connectors` turns on one agent. On Linux and macOS, the config the
@@ -294,6 +297,14 @@ Three things to know before you deploy it:
 - **The data directory is fixed.** On Linux and macOS the lifecycle rejects
   any other `data_dir`. On Windows, a `data_dir` other than the runtime
   directory is rejected too.
+- **Tell enrollment about unusual layouts (Linux and macOS).** Users are
+  enrolled from homes under `/home` and `/var/home` (Linux) or `/Users`
+  (macOS), and agent CLIs are found in the usual install locations. If
+  homes live elsewhere, such as `/srv/home`, list the parent folders under
+  `enterprise.enrollment.home_roots`; if agents are installed under an
+  administrator prefix, such as an npm `--prefix` of `/opt/tools`, list it
+  under `enterprise.enrollment.agent_prefixes`. See
+  [Enrollment](/docs/enterprise/enrollment#home-roots-and-install-prefixes).
 
 Where the file goes on each OS, every `enterprise.*` setting, and the proxy
 settings are on [Configuration](/docs/enterprise/configuration).

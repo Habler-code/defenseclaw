@@ -50,7 +50,7 @@ All paths are under `/opt/cisco/defenseclaw` unless shown in full.
 | Runtime descriptor | `etc/managed-runtime.json`, the non-secret settings that hooks read | `root`, `0644` |
 | Machine-policy summary | `etc/machine-policy.json` | Readable by users |
 | Lifecycle state | `lifecycle`, including `last-package-result.json`, `last-activation-failure.log`, the last applied config and a rejected one | `root`, `0700` |
-| Gateway data | `runtime` | `_defenseclaw`, `0750` |
+| Gateway data | `runtime` | `_defenseclaw`, `0700` (the device identity key needs a private directory) |
 | Authorization ledger | `hook-guardian-state` | `root:_defenseclaw`, `0750` |
 | Hook socket | `run/hook.sock` | Directory `_defenseclaw`, `0755` |
 | Logs | `/Library/Logs/Cisco/DefenseClaw`, with the gateway's logs in `gateway/` | `root`, `0755`; `gateway/` is `_defenseclaw`, `0750` |
@@ -276,7 +276,10 @@ service and readiness check, and exits `1` when anything fails. Look for:
 | `enrollment.targets` | The number of per-user targets in the manifest. Connectors published through machine policy (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets unless `enterprise.enrollment.unenrolled_users` is `deny`, so `0` is normal when you enable only those. For per-user connectors, `0` means nobody is enrolled yet. |
 | `errors` | Empty |
 
-Neither field checks that anyone is enrolled, so check `enrollment` too. The
+When the config enables no agent under `guardrail.connectors` while there
+are users to enroll, `status` and `verify` warn `no_connectors_enabled` and
+`security_complete` is `false`. Otherwise neither field checks that the
+users you expect are enrolled, so check `enrollment` too. The
 enumerator enrolls accounts with a uid of 501 or higher by default. See
 [Enrollment](/docs/enterprise/enrollment). To reconcile at once instead of
 waiting for the next minute, run

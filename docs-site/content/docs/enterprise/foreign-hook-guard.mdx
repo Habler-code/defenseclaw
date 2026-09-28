@@ -309,6 +309,11 @@ with `enterprise_machine_policy_summary_untrusted`.
 - Antigravity, Hermes, OpenHands and OmniGent have neither a vendor lock nor
   the guard. Hooks a user or project adds for them run next to
   DefenseClaw's. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
+- For OpenHands a project hook file is worse than an extra hook: OpenHands
+  loads a project's `.openhands/hooks.json` instead of the user's
+  `~/.openhands/hooks.json`, so in that project none of DefenseClaw's hooks
+  run. The guard cannot see it, and `policy verify --user` does not report
+  it.
 - Plugins are code. The guard stops unapproved plugins, but an approved
   plugin can do anything the user can.
 - Deploying the hooks your developers need through machine policy avoids

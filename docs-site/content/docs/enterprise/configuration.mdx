@@ -58,10 +58,10 @@ refuses conflicting values:
 | `config_version` | `8` | `8` | `8` |
 | `deployment_mode` | `managed_enterprise` | `managed_enterprise` | `managed_enterprise` |
 | `enterprise.profile` | `standalone` | `standalone` | `standalone` |
-| `data_dir` | Exactly `/var/lib/defenseclaw` | Exactly `/opt/cisco/defenseclaw/runtime` | Leave unset. The services set it. |
+| `data_dir` | Exactly `/var/lib/defenseclaw`, or unset (the lifecycle then uses that path) | Exactly `/opt/cisco/defenseclaw/runtime`, or unset | Leave unset. The services set it. |
 | `gateway.api_bind` | `127.0.0.1`, or unset | `127.0.0.1`, or unset | `127.0.0.1`, or unset |
 | `gateway.api_port` | `18970`, or unset | `18970`, or unset | `18970`, or unset |
-| `guardrail.rule_pack_dir` | `""` (recommended) | `""` (recommended) | `""` (recommended) |
+| `guardrail.rule_pack_dir` | Unset, `""`, or a [custom pack](#custom-rule-packs) | Unset, `""`, or a [custom pack](#custom-rule-packs) | `""` (recommended) |
 
 - **`enterprise.profile`.** Always set it. When it is unset, Windows and
   macOS resolve to the Secure Client profile, and the `enterprise policy`
@@ -72,13 +72,21 @@ refuses conflicting values:
   OS refuses any bind address other than `127.0.0.1`; Linux and macOS also
   refuse any other port.
 - **`guardrail.rule_pack_dir`.** Set it to `""` to select the rule packs
-  built into the gateway. A non-empty value names a rule-pack directory; if
-  that directory exists, only administrators may be able to write it. If it
-  does not exist, the gateway uses the built-in packs. When you leave the key
-  out, the gateway uses `<policy_dir>/guardrail/default` if `policy_dir` is
-  set (as in the Linux and macOS samples, an administrator-owned folder), and
-  otherwise `<data_dir>/policies/guardrail/default`, inside the gateway's own
-  data directory. Setting `""` avoids depending on either.
+  built into the gateway. A non-empty value names a rule-pack directory,
+  which only administrators may be able to write.
+  - Linux and macOS: when you leave the key out, the gateway uses
+    `<policy_dir>/guardrail/default` if you created that folder, and
+    otherwise the default pack DefenseClaw ships
+    (`/opt/defenseclaw/share/policies/guardrail/default` on Linux,
+    `/opt/cisco/defenseclaw/share/policies/guardrail/default` on macOS), so
+    a config that leaves the key out installs on a fresh host. The
+    lifecycle refuses a value that names a folder that does not exist, or
+    one inside `data_dir`. See [Custom rule packs](#custom-rule-packs).
+  - Windows: if the named directory does not exist, the gateway uses the
+    built-in packs. When you leave the key out, the gateway uses
+    `<policy_dir>/guardrail/default` if `policy_dir` is set, and otherwise
+    `<data_dir>/policies/guardrail/default`, inside the gateway's own data
+    directory. Setting `""` avoids depending on either.
 
 The whole `enterprise` block is refused unless `deployment_mode` is
 `managed_enterprise`. In the Secure Client profile the block may contain
@@ -170,7 +178,7 @@ default shown. "Linux and macOS" means the key has no effect on Windows.
 | `machine_policy.default.allowed_hooks` | List of SHA-256 digests, 64 hex characters, with or without `sha256:` | Empty | All | Hooks the foreign-hook guard approves. |
 | `machine_policy.connectors.<name>.*` | The same five keys | Inherit | As above | Overrides for one connector. Each key falls back to `default`, then to the built-in value. `allowed_hooks` lists are merged. |
 | `machine_policy.connectors.claudecode.version_floor` | `enforce`, `report`, `off` | `enforce` | All | Whether DefenseClaw sets Claude Code's `requiredMinimumVersion` to its lowest verified hook contract while no other source sets it. Only `connectors.claudecode` takes this key; it does not inherit from `default`. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor). |
-| `trust.mode` | `authenticode`, `hash_pinned` | None | Windows | `authenticode` refuses any hash-pinned (unsigned) payload. `hash_pinned` or unset admits both. See [Payload trust](#payload-trust). |
+| `trust.mode` | `authenticode`, `hash_pinned` | None | Windows | `authenticode` refuses any hash-pinned (unsigned) payload. `hash_pinned`, `""` or unset admits both. See [Payload trust](#payload-trust). |
 | `trust.allowed_signers` | List of SHA-256 certificate thumbprints | Empty | Windows | Accept only payloads signed by these certificates, like `--allowed-signer`. |
 | `coexistence.per_user_install` | `migrate`, `block`, `ignore` | None | Reserved | Reserved: accepted and validated, no effect in this release. |
 | `coexistence.disable_self_update` | `true`, `false` | `true` | Windows | Sets the Windows `DisableSelfUpdate` policy value. See below. |
@@ -239,6 +247,51 @@ preserve` in your Windows config to turn the guard on for Claude Code, as the
 Windows sample below does. Keep Linux and macOS on `enforce`, where it sets
 Claude Code's own lock, so use separate configs per OS. See
 [Machine policy](/docs/enterprise/machine-policy#windows-differences).
+
+## Custom rule packs
+
+The gateway ships three rule packs, `default`, `strict` and `permissive`,
+under `/opt/defenseclaw/share/policies/guardrail` on Linux and
+`/opt/cisco/defenseclaw/share/policies/guardrail` on macOS. To use your own
+rules on Linux and macOS:
+
+1. **Create the pack in the administrator policy folder**, as root:
+   `/etc/defenseclaw/policies/guardrail/<name>` on Linux,
+   `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` on macOS. Start
+   from a copy of a shipped pack. Keep every file and folder owned by root,
+   not writable by group or others, and readable by the gateway (for example
+   `0644` files in `0755` folders). The lifecycle refuses a pack inside
+   `data_dir`, which the gateway can write.
+2. **Name the folder for the block threshold you want.** The pack folder's
+   name selects the thresholds: `strict` blocks findings of MEDIUM severity
+   and above, `permissive` only CRITICAL ones, and any other name, `default`
+   included, CRITICAL ones.
+3. **Validate the pack** with the gateway's own loader:
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/strict
+   ```
+
+   On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`.
+   `--json` prints a versioned result. Enterprise packages ship no
+   `defenseclaw` CLI, so `defenseclaw guardrail validate-pack` and
+   `defenseclaw setup guardrail` from the
+   [per-user workflow](/docs/policies/rulepack-validation) are not available.
+4. **Point the config at it** with `guardrail.rule_pack_dir` (or
+   `guardrail.connectors.<name>.rule_pack_dir` for one agent) and apply the
+   config with `ensure --config` or through your MDM. The lifecycle refuses
+   a `rule_pack_dir` that does not exist and restarts the services with the
+   new pack. If the gateway cannot load it, `ensure` fails and the previous
+   config stays in force.
+
+To change a pack that is in use, the safest route is the same as for a new
+one: create the edited copy in a new folder that keeps the threshold name
+(for example `/etc/defenseclaw/policies/guardrail-v2/strict`), validate it,
+and switch `rule_pack_dir` to it, so `ensure` applies it with rollback. If
+you edit the files in place instead, validate them and
+[restart the managed gateway](/docs/enterprise/lifecycle#restart-the-managed-gateway):
+`ensure` does not track the files under `policies`, and the gateway reads
+the pack only when it starts.
 
 ## Network proxy
 

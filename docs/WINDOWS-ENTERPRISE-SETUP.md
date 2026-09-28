@@ -193,8 +193,13 @@ folder for you.
 
 `/ensure` installs, upgrades or repairs as needed and does nothing when the
 device is compliant. The first `/ensure` without `CONFIG=` exits `1639`.
-Setup's own argument and path checks exit `1603`; `1618` and `1639` come from
-the lifecycle it runs.
+Setup's own checks run before the lifecycle: a malformed command line (an
+unknown property, a missing, relative, padded or environment-expanded
+`CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`,
+or `TIMEOUTSECONDS` out of range) exits `1639`; an unelevated token and a
+`CONFIG=` or `MANIFEST=` file that is a link or can be changed by a
+non-administrator exit `1603`. The lifecycle it runs adds `1603`, `1618` and
+`1639`. The Secure Client Setup returns only `0` and `1603`.
 
 ### Payload trust
 

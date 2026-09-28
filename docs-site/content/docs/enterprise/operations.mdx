@@ -66,6 +66,40 @@ again after that run finishes.
 | macOS | `com.cisco.defenseclaw.verify`: daily at 03:17 local time |
 | Windows | None built in. Run `verify` from your MDM, for example with `detect.ps1 -RequireHealthy` (see [Detection](/docs/enterprise/mdm#detection)) |
 
+## Review activity from the CLI (Linux and macOS)
+
+The lifecycle's `status` and `verify` report the deployment. To see the
+gateway, who is enrolled and what the gateway decided, run these as root.
+No extra environment variables are needed: on a standalone host, run as
+root (or as the gateway's service account), `status`, `audit` and
+`enterprise hooks` read the managed config, data directory, target manifest
+and guardian state instead of `~/.defenseclaw`, and `audit` opens the
+gateway's audit database read-only.
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway status
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status
+sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --connector claudecode --output /root/claudecode-audit.jsonl
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway status
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks status
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --connector claudecode --output /var/root/claudecode-audit.jsonl
+```
+
+| Command | What it shows |
+| --- | --- |
+| `status` | The gateway's health, its subsystems, and its connectors and their modes |
+| `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment` |
+| `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output |
+| `audit findings` | The distinct scan findings that are current |
+
+For the machine-policy view per user, see
+[Machine policy status](#machine-policy-status). A standard user who runs
+`enterprise hooks` gets the managed-host message, which names the
+administrator command.
+
 ## Health fields
 
 With `--json`, every lifecycle action prints one result document. Its schema
@@ -200,6 +234,42 @@ If a user you expect is missing, see
 [A user is not enrolled](/docs/enterprise/troubleshooting#symptoms) and
 [Enrollment](/docs/enterprise/enrollment).
 
+### When a user breaks their own setup (Linux and macOS)
+
+A user can break the files DefenseClaw needs in their own account, for
+example by making `~/.defenseclaw` unreadable, replacing an agent's config
+folder with a file or a symbolic link, or leaving an agent config the agent
+cannot parse. That account is then not protected for the affected agents,
+so the device is reported unhealthy by design: `status` warns with
+`guardian_target_failed` and sets `security_complete: false`, `verify`
+fails, and the MDM detection script `detect.sh --require-healthy` reports
+the device as not compliant. Every other account stays protected and the
+services stay ready. Once the account is fixed, the next reconcile (within
+a minute) clears the failure.
+
+The guardian repairs, as that user and within a minute, what DefenseClaw
+owns in the account:
+
+- DefenseClaw's registration or plugin, removed or edited in the agent's
+  default config;
+- the modes of `~/.defenseclaw` and its hooks folder, restored to
+  owner-only (`0700`);
+- a deleted or edited hook script, and a hook runtime whose fail mode no
+  longer matches the config;
+- a missing `~/.kiro` or `~/.kiro/hooks` folder, which Kiro does not create;
+- group or other write on the home folder of an enrolled user.
+
+It does not change anything else in the account, so these stay failed for
+that account until the user or an administrator fixes them: a link or a
+non-directory where an agent's config folder should be, an agent config the
+agent cannot parse, a special file such as a named pipe at a config path,
+and files another account owns.
+
+To find the account, read `warnings[]` in `status --json` or `verify --json`:
+each `guardian_target_failed` entry names the user, the connector and the
+reason. As root, `defenseclaw-gateway enterprise hooks status --json` lists
+every user and connector with its state.
+
 ## Logs and events
 
 ### Windows
@@ -240,7 +310,7 @@ fill the event log.
 | Service output | The journal: `journalctl -u defenseclaw-gateway.service`, and likewise for `defenseclaw-hook-guardian.service`, `defenseclaw-hook-enumerator.service`, and `defenseclaw-sensor-helper.service` |
 | Config changes applied | `journalctl -u defenseclaw-enterprise-apply.service` |
 | Daily verify | `journalctl -u defenseclaw-enterprise-verify.service` |
-| Gateway log directory | `/var/log/defenseclaw` |
+| `/var/log/defenseclaw` | Empty by default: the services write their output to the journal. The gateway may write only there and in `/var/lib/defenseclaw`, so it is the place for a `jsonl` file destination (see [Audit records and SIEM forwarding](#audit-records-and-siem-forwarding)) |
 | Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json`, and `last-package-result.log` beside it |
 | MDM wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` |
 

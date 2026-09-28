@@ -55,7 +55,10 @@ in the config, including which agents to protect, is in
    `signing/README.md` for signature-based trust instead.
 2. **Write the administrator config.** It needs `config_version: 8`,
    `deployment_mode: managed_enterprise` and `enterprise.profile:
-   standalone`, and it chooses the agents to protect. On Linux and macOS a
+   standalone`, and it chooses the agents to protect. Start from the
+   per-OS minimal config in
+   <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/#a-minimal-config>,
+   which installs as written on Linux and macOS. On Linux and macOS a
    host installed without a config gets a default that protects no agents;
    on Windows the first install refuses to run without one (`1639`). Never put
    credentials in it: the standalone profile rejects an inline
