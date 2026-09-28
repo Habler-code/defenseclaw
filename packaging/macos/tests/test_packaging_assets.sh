@@ -717,6 +717,32 @@ t_install_reconciles_existing_state() {
   assert_contains "${body}" "keeps re-registering after quiesce" \
     "managed bundle surfaces the supervisor-loop failure mode with an actionable message"
 
+  # Reconcile-aware publication for the two atomic-published files
+  # (config.yaml and hook-guardian/targets.yaml). Both live at fixed
+  # paths that already exist after a prior install, so their pre-checks
+  # and their ln-based publications must both branch on
+  # _RECONCILE_REINSTALL. Regression guard against the actual site of
+  # the crash that landed the user in a broken state on 2026-09-28.
+  assert_contains "${body}" 'managed config appeared after fresh-host preflight and was preserved' \
+    "managed bundle keeps the fresh-install refusal text for config.yaml"
+  assert_contains "${body}" 'could not atomically replace managed config' \
+    "managed bundle atomically replaces config.yaml on the reconcile branch"
+  assert_contains "${body}" 'could not atomically replace hook-guardian manifest' \
+    "managed bundle atomically replaces targets.yaml on the reconcile branch"
+  assert_contains "${body}" 'managed config is a symlink; refusing to overwrite' \
+    "managed bundle refuses a symlink at CONFIG_PATH in either mode"
+  assert_contains "${body}" 'hook-guardian manifest is a symlink; refusing to overwrite' \
+    "managed bundle refuses a symlink at GUARDIAN_MANIFEST_PATH in either mode"
+
+  # Guardrail rule-pack cp must NOT nest under reconcile. BSD cp with an
+  # existing destination directory silently produces dst/guardrail/guardrail
+  # so the gateway can't find its rule packs on startup. Remove the tree
+  # first, then let cp create it fresh. Symlink at that path is refused.
+  assert_contains "${body}" 'guardrail policies destination is a symlink; refusing to overwrite' \
+    "managed bundle refuses a symlink at the guardrail policies destination"
+  assert_contains "${body}" 'rm -rf -- "${POLICIES_DST}/guardrail"' \
+    "managed bundle wipes any pre-existing guardrail tree before cp -R (avoids BSD cp reconcile nesting)"
+
   local reconcile_line build_line mutation_line
   reconcile_line="$(grep -n "reconciling existing DefenseClaw installation in place" \
     "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"

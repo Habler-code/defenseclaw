@@ -897,6 +897,22 @@ create_install_directory_no_replace "${POLICIES_DST}" root wheel 0750
 log "installing guardrail rule packs -> ${POLICIES_DST}/guardrail"
 # cp -R + explicit chown/chmod: we don't have install_dir_no_replace for
 # a whole tree, and RUNTIME_DIR itself is already 0750 root:wheel.
+#
+# Under reconcile, ${POLICIES_DST}/guardrail already exists from the prior
+# install. BSD cp on macOS, given an existing destination directory,
+# copies the SOURCE INTO the destination (creating dst/guardrail/guardrail),
+# silently producing a nested tree that the gateway won't find on startup.
+# Remove the prior tree first so cp always creates a fresh, correctly
+# shaped destination in both branches. The rule-pack tree carries no
+# operator state — it's fully re-rendered from the shipped bundle every
+# install — so wholesale replacement is safe. A pre-existing symlink at
+# this path is refused: it can only get there via privileged tampering.
+if [[ -L "${POLICIES_DST}/guardrail" ]]; then
+  die "guardrail policies destination is a symlink; refusing to overwrite: ${POLICIES_DST}/guardrail"
+fi
+if [[ -e "${POLICIES_DST}/guardrail" ]]; then
+  rm -rf -- "${POLICIES_DST}/guardrail"
+fi
 cp -R "${POLICIES_SRC}/guardrail" "${POLICIES_DST}/guardrail"
 chown -R root:wheel "${POLICIES_DST}/guardrail"
 find "${POLICIES_DST}/guardrail" -type d -exec chmod 0750 {} +
@@ -957,8 +973,17 @@ if [[ "${DC_INSTALLER_SKIP_INSTALL_LOG:-}" != "1" ]]; then
 fi
 
 CONFIG_PATH="${CONFIG_DIR}/config.yaml"
-[[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
-  || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
+# Under reconcile, config.yaml legitimately exists from the prior install
+# and will be atomically replaced by the rendered version below. Only a
+# fresh install treats a pre-existing config as evidence of a concurrent
+# writer. A symlink is refused in either mode — a symlink at this path
+# under a root-owned tree can only get there via privileged tampering.
+if [[ -L "${CONFIG_PATH}" ]]; then
+  die "managed config is a symlink; refusing to overwrite: ${CONFIG_PATH}"
+fi
+if [[ -e "${CONFIG_PATH}" && "${_RECONCILE_REINSTALL}" != "true" ]]; then
+  die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
+fi
 
 # Enumerate eligible local user homes so the sidecar's per-user AI-discovery
 # detectors (skills / rules / plugins / MCP under ~/.claude, ~/.codex, …) can
@@ -987,9 +1012,18 @@ render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "$
   "${CONNECTORS[@]}" > "${CONFIG_TMP}"
 chown root:wheel "${CONFIG_TMP}"
 chmod 0640 "${CONFIG_TMP}"
-ln "${CONFIG_TMP}" "${CONFIG_PATH}" \
-  || die "managed config appeared concurrently and was preserved: ${CONFIG_PATH}"
-rm -f -- "${CONFIG_TMP}"
+# Reconcile branch: atomically replace the existing config with the
+# newly rendered one. Fresh-install branch: use ln so a concurrent
+# installer racing to publish the same path fails us loud rather than
+# clobbering an unrelated writer.
+if [[ -e "${CONFIG_PATH}" && "${_RECONCILE_REINSTALL}" == "true" ]]; then
+  /bin/mv -f -- "${CONFIG_TMP}" "${CONFIG_PATH}" \
+    || die "could not atomically replace managed config: ${CONFIG_PATH}"
+else
+  ln "${CONFIG_TMP}" "${CONFIG_PATH}" \
+    || die "managed config appeared concurrently and was preserved: ${CONFIG_PATH}"
+  rm -f -- "${CONFIG_TMP}"
+fi
 forget_install_temporary "${CONFIG_TMP}"
 
 log "chowning runtime dirs to root:wheel (daemon runs as root)"
@@ -1195,9 +1229,20 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"
-  ln "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
-    || die "manifest appeared concurrently and was preserved: ${GUARDIAN_MANIFEST_PATH}"
-  rm -f -- "${MANIFEST_TMP}"
+  # Reconcile: atomically replace the existing targets.yaml (the guardian
+  # reads it via fsnotify and reconciles on the next tick). Fresh-install:
+  # use ln to preserve the concurrent-installer guard.
+  if [[ -L "${GUARDIAN_MANIFEST_PATH}" ]]; then
+    die "hook-guardian manifest is a symlink; refusing to overwrite: ${GUARDIAN_MANIFEST_PATH}"
+  fi
+  if [[ -e "${GUARDIAN_MANIFEST_PATH}" && "${_RECONCILE_REINSTALL}" == "true" ]]; then
+    /bin/mv -f -- "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
+      || die "could not atomically replace hook-guardian manifest: ${GUARDIAN_MANIFEST_PATH}"
+  else
+    ln "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
+      || die "manifest appeared concurrently and was preserved: ${GUARDIAN_MANIFEST_PATH}"
+    rm -f -- "${MANIFEST_TMP}"
+  fi
   forget_install_temporary "${MANIFEST_TMP}"
 
   log "loading hook-enumerator LaunchDaemon"
