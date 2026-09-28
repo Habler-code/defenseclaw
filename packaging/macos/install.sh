@@ -965,7 +965,17 @@ fi
 _guardrail_stage="${POLICIES_DST}/guardrail.new"
 _guardrail_old="${POLICIES_DST}/guardrail.old"
 # Clean any stray staging directories from an aborted prior install.
-rm -rf -- "${_guardrail_stage}" "${_guardrail_old}"
+# `.new` is always safe to wipe — it is the destination we're about to
+# populate. `.old` is only safe to wipe when the live destination
+# exists: if a prior invocation's swap AND rollback both failed, the
+# previous rule packs survive only at `.old`, so unconditionally
+# removing it here would delete the last working copy before the fresh
+# `cp -R` succeeds. Preserve `.old` in that case and let the atomic
+# swap below reconcile it.
+rm -rf -- "${_guardrail_stage}"
+if [[ -e "${POLICIES_DST}/guardrail" ]]; then
+  rm -rf -- "${_guardrail_old}"
+fi
 cp -R "${POLICIES_SRC}/guardrail" "${_guardrail_stage}" \
   || { rm -rf -- "${_guardrail_stage}"; die "could not stage guardrail rule packs at ${_guardrail_stage}"; }
 chown -R root:wheel "${_guardrail_stage}"
@@ -988,8 +998,18 @@ if [[ -e "${POLICIES_DST}/guardrail" ]]; then
     || { rm -rf -- "${_guardrail_stage}"; die "could not move current guardrail tree aside at ${POLICIES_DST}/guardrail"; }
 fi
 if ! /bin/mv -f -- "${_guardrail_stage}" "${POLICIES_DST}/guardrail"; then
+  # Best-effort rollback so the gateway keeps its working rule packs.
+  # If the rollback ALSO fails, do NOT swallow it — the previous tree
+  # survives only at ${_guardrail_old} and the operator needs the
+  # explicit path so they can either restore it by hand OR know that
+  # the next install must not delete it. The next install's top-of-
+  # block guard above preserves ${_guardrail_old} whenever the live
+  # destination is missing, exactly for this recovery path.
   if [[ -d "${_guardrail_old}" ]]; then
-    /bin/mv -f -- "${_guardrail_old}" "${POLICIES_DST}/guardrail" 2>/dev/null || true
+    if ! /bin/mv -f -- "${_guardrail_old}" "${POLICIES_DST}/guardrail"; then
+      rm -rf -- "${_guardrail_stage}"
+      die "could not publish new guardrail tree at ${POLICIES_DST}/guardrail and could not restore previous tree; previous rule packs are preserved at ${_guardrail_old}"
+    fi
   fi
   rm -rf -- "${_guardrail_stage}"
   die "could not publish new guardrail tree at ${POLICIES_DST}/guardrail"
