@@ -156,6 +156,17 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			expectAction:   "block",
 		},
 		{
+			// Amp runs background commands through async_shell_command; it
+			// was not parsed into command facts, so a rule that needs typed
+			// proof was only recorded (CRITICAL, allow).
+			name:           "amp-async-shell",
+			connector:      "amp",
+			event:          "tool.call",
+			toolName:       "async_shell_command",
+			topLevelOutput: "",
+			expectAction:   "block",
+		},
+		{
 			connector: "omnigent",
 			event:     "PreToolUse",
 			toolName:  "bash",

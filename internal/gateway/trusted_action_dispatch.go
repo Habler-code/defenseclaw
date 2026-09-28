@@ -4210,6 +4210,8 @@ func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
 func trustedBashExecutionTool(tool string) bool {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "bash", "zsh", "ksh", "shell", "shell_command", "terminal",
+		// Amp runs background commands through async_shell_command.
+		"async_shell_command",
 		"run_command", "run_shell", "run_shell_command", "runshellcommand",
 		"run_terminal_cmd", "execute", "execute_command", "exec",
 		"exec_command", "command", "subprocess", "system.run":
