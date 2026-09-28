@@ -833,10 +833,9 @@ func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 // kernel reclaim the port so the restarted gateway can bind it. Non-address-in-use
 // errors and context cancellation return immediately.
 func listenWithRetry(ctx context.Context, addr string, budget time.Duration) (net.Listener, error) {
-	var lc net.ListenConfig
 	deadline := time.Now().Add(budget)
 	for attempt := 1; ; attempt++ {
-		ln, err := lc.Listen(ctx, "tcp", addr)
+		ln, err := apiListenTCP(ctx, addr)
 		if err == nil {
 			return ln, nil
 		}
@@ -870,6 +869,24 @@ func isAddrInUse(err error) bool {
 // Client and per-user gateways keep ending Run after the bind budget.
 func (a *APIServer) retriesHeldAPIPortWithoutHookSocket() bool {
 	return heldAPIPortRetriedWithoutHookSocket && a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise()
+}
+
+// apiPortHeld reports whether the first bind failed because another process
+// holds the API port, so Run keeps retrying the bind instead of returning.
+// Beside "address in use", a Windows standalone gateway also retries the
+// "forbidden by its access permissions" failure (WSAEACCES) that Windows
+// returns when another account holds the port on the wildcard address
+// (0.0.0.0 or [::]): the gateway service account cannot bind 127.0.0.1
+// under another account's wildcard listener, so that is a held port too
+// (WIN-F32).
+func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
+	if hasHookSocket {
+		return isAddrInUse(err)
+	}
+	if !a.retriesHeldAPIPortWithoutHookSocket() {
+		return false
+	}
+	return isAddrInUse(err) || isAPIPortHeldByAnotherAccount(err)
 }
 
 func (a *APIServer) Run(ctx context.Context) error {
@@ -1084,15 +1101,18 @@ func (a *APIServer) Run(ctx context.Context) error {
 	case lnErr == nil:
 		serveTCP(ln)
 		a.health.SetAPI(StateRunning, "", apiDetails)
-	case (hookSrv != nil || a.retriesHeldAPIPortWithoutHookSocket()) && isAddrInUse(lnErr) && ctx.Err() == nil:
+	case a.apiPortHeld(hookSrv != nil, lnErr) && ctx.Err() == nil:
 		// Another process holds the TCP port. Keep serving the hook socket
 		// (where there is one), report the API as failed, and take the port
 		// when it is released instead of exiting into a restart loop that
 		// also drops the socket, or (Windows standalone) leaving the service
 		// running without its API.
-		if hookSrv != nil {
+		switch {
+		case hookSrv != nil:
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; the hook socket stays up while the API bind is retried: %v\n", a.addr, lnErr)
-		} else {
+		case isAPIPortHeldByAnotherAccount(lnErr):
+			fmt.Fprintf(os.Stderr, "[sidecar-api] another account holds the port of %s on its wildcard address; hooks fail closed while the API bind is retried until the port is released: %v\n", a.addr, lnErr)
+		default:
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; hooks fail closed while the API bind is retried until the port is released: %v\n", a.addr, lnErr)
 		}
 		retryDetails := make(map[string]interface{}, len(apiDetails)+1)
