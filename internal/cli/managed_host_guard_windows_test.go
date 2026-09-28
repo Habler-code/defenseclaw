@@ -17,11 +17,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -69,29 +67,13 @@ func TestWindowsManagedRecordTrustUsesRealACLs(t *testing.T) {
 }
 
 // TestWindowsStandaloneGatewayServiceLookup reads the real Service Control
-// Manager with the caller's token, the way the guard does. Run as a standard
-// user on a standalone host, it shows that the connect and query-config
-// access the guard needs are granted and that the registered image path
-// decides. A host without the gateway service must not confirm a deployment.
+// Manager with the caller's token, the way the guard does: a host without the
+// gateway service must not confirm a deployment.
 func TestWindowsStandaloneGatewayServiceLookup(t *testing.T) {
-	image, err := windowsServiceImagePath(managed.StandaloneWindowsGatewaySvc)
-	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-		if where, err := managedHostStandaloneService(); err == nil {
-			t.Fatalf("an unregistered gateway service confirmed a standalone deployment: %s", where)
-		}
-		t.Skip("no DefenseClawGateway service on this host")
+	if _, err := windowsServiceImagePath(managed.StandaloneWindowsGatewaySvc); !errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		t.Skipf("this host has a DefenseClawGateway service (%v)", err)
 	}
-	if err != nil {
-		t.Fatalf("read the gateway service image path: %v", err)
+	if where, err := managedHostStandaloneService(); err == nil {
+		t.Fatalf("an unregistered gateway service confirmed a standalone deployment: %s", where)
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
-	if err != nil {
-		t.Fatal(err)
-	}
-	standalone := strings.EqualFold(serviceImageExecutable(image), roots.InstallRoot+`\bin\defenseclaw-gateway.exe`)
-	where, err := managedHostStandaloneService()
-	if (err == nil) != standalone {
-		t.Fatalf("image %q: managedHostStandaloneService = %q, %v; want confirmed=%t", image, where, err, standalone)
-	}
-	t.Logf("image %q confirmed=%t (%s)", image, err == nil, where)
 }

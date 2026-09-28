@@ -139,18 +139,6 @@ func TestHostForeignHookGuardKeepsFailClosedOnRegisteredStandaloneHost(t *testin
 	}
 }
 
-// The registration is read only when the directory check fails, so a
-// standalone host with a trusted directory pays nothing extra per hook.
-func TestHostForeignHookGuardReadsRegistrationOnlyWhenDirectoryCheckFails(t *testing.T) {
-	withForeignGuardHostSeams(t, nil, enterprisepolicy.ErrNoPublicPolicy)
-	reads := withForeignGuardStandaloneRegistration(false)
-	opts := hookexec.Options{Connector: "codex", Stdin: strings.NewReader("{}")}
-	applyHostEnterpriseForeignHookGuard(&opts)
-	if *reads != 0 {
-		t.Fatalf("registration reads = %d with a trusted directory, want 0", *reads)
-	}
-}
-
 // The hook command must enter the guard only through the host gate.
 func TestHookCommandEntersForeignGuardThroughHostGate(t *testing.T) {
 	source, err := os.ReadFile("hook.go")

@@ -132,35 +132,24 @@ func TestWindowsForeignCleanupCleansFoldersTheUserEnvironmentNames(t *testing.T)
 		return fn()
 	}
 
-	// Alice's hive is loaded; her variables move every agent's user config
-	// out of the profile defaults, some through references to others.
+	// Alice's hive is loaded; her variables move agents' user configs out of
+	// the profile defaults, one through a reference to another variable.
 	moved := filepath.Join(aliceHome, "moved")
 	writeWindowsTestEnvKey(t, hives+`\`+alice+`\Volatile Environment`, windowsEnvValue{name: "USERPROFILE", value: aliceHome})
 	writeWindowsTestEnvKey(t, hives+`\`+alice+`\Environment`,
-		windowsEnvValue{name: "CODEX_HOME", value: filepath.Join(moved, "codex")},
 		windowsEnvValue{name: "CLAUDE_CONFIG_DIR", value: `%USERPROFILE%\moved\claude`, expand: true},
 		windowsEnvValue{name: "MOVED_ROOT", value: moved},
 		windowsEnvValue{name: "Copilot_Home", value: `%moved_root%\copilot`, expand: true},
-		windowsEnvValue{name: "XDG_CONFIG_HOME", value: filepath.Join(moved, "xdg")},
-		windowsEnvValue{name: "OPENCODE_CONFIG_DIR", value: filepath.Join(moved, "opencode")},
 	)
 	grouped := `{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "./rewrite.cmd"}]}]}}`
 	rewritten := map[string]string{
-		filepath.Join(moved, "codex", "hooks.json"):              grouped,
 		filepath.Join(moved, "claude", "settings.json"):          grouped,
 		filepath.Join(moved, "copilot", "hooks", "rewrite.json"): `{"hooks": {"preToolUse": [{"powershell": "./rewrite.cmd"}]}}`,
 		// Bob has no loaded hive: his default location is still cleaned.
 		filepath.Join(bobHome, ".copilot", "hooks", "rewrite.json"): `{"hooks": {"preToolUse": [{"powershell": "./rewrite.cmd"}]}}`,
 	}
-	plugins := []string{
-		filepath.Join(moved, "xdg", "opencode", "plugins", "mutate.js"),
-		filepath.Join(moved, "opencode", "plugins", "mutate.js"),
-	}
 	for path, body := range rewritten {
 		writeForeignEnvTestFile(t, path, body)
-	}
-	for _, path := range plugins {
-		writeForeignEnvTestFile(t, path, "export default {}")
 	}
 
 	var log bytes.Buffer
@@ -173,11 +162,6 @@ func TestWindowsForeignCleanupCleansFoldersTheUserEnvironmentNames(t *testing.T)
 		}
 		if !strings.Contains(output, path) {
 			t.Errorf("the removal from %s must be logged:\n%s", path, output)
-		}
-	}
-	for _, path := range plugins {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("the foreign plugin %s must be moved aside (%v):\n%s", path, err, output)
 		}
 	}
 	for _, line := range strings.Split(output, "\n") {

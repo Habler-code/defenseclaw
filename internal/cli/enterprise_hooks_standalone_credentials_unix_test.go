@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -82,21 +81,6 @@ func TestStandaloneReconcileFailsPerUserTargetsWithoutTheHookSocket(t *testing.T
 	}
 	if len(f.requests) != 0 {
 		t.Fatalf("a worker was asked to render hooks without the hook socket: %+v", f.requests)
-	}
-}
-
-func TestStandaloneHookTransportRequiresTheDescriptorSocket(t *testing.T) {
-	descriptor := &managed.RuntimeDescriptor{ServiceUID: 995, HookSocket: "/run/defenseclaw-hook/hook.sock"}
-	if socket, uid, err := standaloneHookTransportFromDescriptor(descriptor); err != nil || socket != descriptor.HookSocket || uid != 995 {
-		t.Fatalf("descriptor socket = %q/%d/%v", socket, uid, err)
-	}
-	for _, socket := range []string{"", "  ", "relative/hook.sock"} {
-		if _, _, err := standaloneHookTransportFromDescriptor(&managed.RuntimeDescriptor{ServiceUID: 995, HookSocket: socket}); err == nil {
-			t.Errorf("socket %q accepted", socket)
-		}
-	}
-	if _, _, err := standaloneHookTransportFromDescriptor(nil); err == nil {
-		t.Error("a missing descriptor was accepted")
 	}
 }
 

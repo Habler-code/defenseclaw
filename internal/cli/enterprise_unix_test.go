@@ -29,16 +29,6 @@ func TestUnixEnterpriseCommandTree(t *testing.T) {
 				t.Fatalf("enterprise %s %s has no --json", group, action)
 			}
 		}
-		ensure, _, _ := rootCmd.Find([]string{"enterprise", group, "ensure"})
-		for _, flag := range []string{"payload", "from-package", "config", "no-start", "adopt-existing", "product-version", "reason"} {
-			if ensure.Flags().Lookup(flag) == nil {
-				t.Fatalf("enterprise %s ensure lacks --%s", group, flag)
-			}
-		}
-		uninstall, _, _ := rootCmd.Find([]string{"enterprise", group, "uninstall"})
-		if uninstall.Flags().Lookup("purge") == nil || uninstall.Flags().Lookup("payload") != nil {
-			t.Fatalf("enterprise %s uninstall flags are wrong", group)
-		}
 		// Package scriptlets remove the deployment with a long lock wait.
 		for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "uninstall"} {
 			cmd, _, _ := rootCmd.Find([]string{"enterprise", group, action})

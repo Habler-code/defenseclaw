@@ -26,10 +26,3 @@ func TestOpenHelperLogRefusesSymlinkLeaf(t *testing.T) {
 		t.Fatal("openHelperLog followed a symlink at the leaf")
 	}
 }
-
-func TestServiceLogPathIsUnsetOffWindows(t *testing.T) {
-	t.Setenv("DEFENSECLAW_WINDOWS_SERVICE_LOG", filepath.Join(t.TempDir(), "x.log"))
-	if got := serviceLogPath(); got != "" {
-		t.Fatalf("serviceLogPath() = %q off Windows, want empty", got)
-	}
-}

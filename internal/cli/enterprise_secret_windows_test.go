@@ -30,13 +30,20 @@ import (
 
 func windowsSecretTestHarness(t *testing.T) string {
 	t.Helper()
-	root := strings.TrimSpace(os.Getenv("DC_M5B_WINDOWS_SECRET_ROOT"))
-	if root == "" || !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("needs an elevated token and DC_M5B_WINDOWS_SECRET_ROOT: an administrator-only directory on NTFS")
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the secret store is administrator-only; run elevated")
+	}
+	// An administrator-only directory at the root of the system drive stands
+	// in for the deployment tree the gateway's credential reader trusts.
+	root, err := os.MkdirTemp(os.Getenv("SystemDrive")+`\`, "dc-secret-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := applyWindowsSDDL(root, "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"); err != nil {
+		t.Fatal(err)
 	}
 	dir := filepath.Join(root, "secrets")
-	_ = os.RemoveAll(dir)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	previousLayout, previousAccount := windowsSecretLayout, windowsSecretGatewayAccount
 	previousInstalled, previousElevated, previousRestart := windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway
 	t.Cleanup(func() {
