@@ -1056,7 +1056,7 @@ func (c *Config) ClaudeCodeAllowUnmanagedHooks() bool {
 	if c == nil {
 		return false
 	}
-	return c.ConnectorHookConfig("claudecode").AllowUnmanagedHooks
+	return c.ClaudeCode.AllowUnmanagedHooks || c.ConnectorHooks["claudecode"].AllowUnmanagedHooks
 }
 
 // EffectiveFailMode returns the per-connector POLICY-LAYER fail

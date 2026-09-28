@@ -170,7 +170,6 @@ type SetupOpts struct {
 	// cannot run beside DefenseClaw's managed hooks. It has no effect on
 	// per-user hook registrations.
 	ClaudeCodeAllowUnmanagedHooks bool
-
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
