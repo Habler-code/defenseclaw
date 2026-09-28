@@ -159,6 +159,9 @@ func InstallOpenCodeManagedPlugin(opts Options) (bool, error) {
 	if err == nil && installed && bytes.Equal(current, openCodeManagedPlugin) && opts.openCodeArtifactLoadable() {
 		return false, nil
 	}
+	if err := releaseOpenCodePluginName(opts, platformPath(opts, opts.openCodeArtifactFile())); err != nil {
+		return false, fmt.Errorf("enterprise policy: install the managed OpenCode plugin: %w", err)
+	}
 	if _, err := writePolicyFileWith(opts, opts.openCodeArtifactFile(), func(path string) error {
 		return atomicWriteOpenCodePlugin(opts, path, openCodeManagedPlugin)
 	}); err != nil {
@@ -174,6 +177,9 @@ func RemoveOpenCodeManagedPlugin(opts Options) error {
 		return nil
 	}
 	file := opts.openCodeArtifactFile()
+	if err := releaseOpenCodePluginName(opts, platformPath(opts, file)); err != nil {
+		return fmt.Errorf("enterprise policy: remove the managed OpenCode plugin: %w", err)
+	}
 	if err := removePolicyFile(opts, file); err != nil {
 		return fmt.Errorf("enterprise policy: remove the managed OpenCode plugin: %w", err)
 	}

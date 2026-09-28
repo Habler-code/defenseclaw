@@ -108,6 +108,9 @@ func atomicWriteOpenCodePlugin(opts Options, path string, data []byte) error {
 
 func openCodePluginLoadable(Options, string) (bool, error) { return true, nil }
 
+// Standard accounts hold no write right on the plugin here.
+func releaseOpenCodePluginName(Options, string) error { return nil }
+
 // The Amp machine folder is held on Windows only; /etc/ampcode and
 // /Library/Application Support/ampcode are already administrator-only.
 func reserveWindowsAmpMachineDir(Options) (State, error) { return State{}, nil }

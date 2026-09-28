@@ -129,6 +129,76 @@ func atomicWriteOpenCodePlugin(_ Options, path string, data []byte) error {
 	return atomicWriteSDDL(path, data, openCodePluginFileSDDL)
 }
 
+// releaseOpenCodePluginName undoes, before the plugin is rewritten or
+// removed, what a standard account can do with the FILE_WRITE_ATTRIBUTES
+// right it holds on the installed copy: a read-only attribute (no rename
+// replaces the file) and a reparse point set on it (no reader can open it,
+// and it is no longer a regular file to replace). It works through a handle
+// that does not follow reparse points, changes nothing unless the plugin's
+// folder passes the trust rules, and leaves a directory for the writer to
+// refuse.
+func releaseOpenCodePluginName(_ Options, path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && info.IsDir()) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_ATTRIBUTES|windows.SYNCHRONIZE,
+		share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	var basic struct {
+		CreationTime, LastAccessTime, LastWriteTime, ChangeTime int64
+		FileAttributes                                          uint32
+		_                                                       uint32
+	}
+	if err := windows.GetFileInformationByHandleEx(handle, windows.FileBasicInfo, (*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
+		return err
+	}
+	attributes := basic.FileAttributes
+	if attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 ||
+		attributes&(windows.FILE_ATTRIBUTE_READONLY|windows.FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
+		return nil
+	}
+	if err := validateTrustedDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if attributes&windows.FILE_ATTRIBUTE_READONLY != 0 {
+		basic.CreationTime, basic.LastAccessTime, basic.LastWriteTime, basic.ChangeTime = 0, 0, 0, 0
+		basic.FileAttributes = attributes &^ (windows.FILE_ATTRIBUTE_READONLY | windows.FILE_ATTRIBUTE_REPARSE_POINT)
+		if basic.FileAttributes == 0 {
+			basic.FileAttributes = windows.FILE_ATTRIBUTE_NORMAL
+		}
+		if err := windows.SetFileInformationByHandle(handle, windows.FileBasicInfo, (*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
+			return fmt.Errorf("clear the read-only attribute of %s: %w", path, err)
+		}
+	}
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return nil
+	}
+	// Delete the reparse object itself; the writer then creates the plugin.
+	target, err := windows.CreateFile(name, windows.DELETE|windows.SYNCHRONIZE, share, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return fmt.Errorf("remove the reparse point at %s: %w", path, err)
+	}
+	defer windows.CloseHandle(target)
+	deleteFile := byte(1)
+	if err := windows.SetFileInformationByHandle(target, windows.FileDispositionInfo, &deleteFile, 1); err != nil {
+		return fmt.Errorf("remove the reparse point at %s: %w", path, err)
+	}
+	return nil
+}
+
 // openCodePluginLoadable inspects the installed plugin's own descriptor. It
 // is trusted when it is a regular file, not a reparse point, owned by
 // Administrators or LocalSystem, and every other principal holds at most
