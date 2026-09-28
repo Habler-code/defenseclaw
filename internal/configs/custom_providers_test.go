@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -304,8 +305,8 @@ func TestLoadProvidersIsQuietForAMissingOrUnreadableOverlay(t *testing.T) {
 		t.Fatalf("a missing overlay printed %q", out)
 	}
 
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode-0000 file")
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs a file this account cannot read: root reads a mode-0000 file, and Windows mode bits do not deny reads")
 	}
 	// Under the ~/.defenseclaw fallback an unreadable overlay is not this
 	// process's (a service account's or another account's home): quiet.
