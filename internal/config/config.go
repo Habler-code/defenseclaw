@@ -2694,7 +2694,7 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	if !has("guardrail", "rule_pack_dir") {
 		candidate.Guardrail.RulePackDir = filepath.Join(dataDir, "policies", "guardrail", "default")
 		if candidate.StandaloneEnterprise() {
-			standaloneRulePackDefault(candidate, dataDir)
+			standaloneRulePackDefault(candidate, dataDir, runtime.GOOS)
 		}
 	}
 	if !has("gateway", "device_key_file") {

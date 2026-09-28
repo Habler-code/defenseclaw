@@ -289,7 +289,7 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 	cfg.declaredEnterpriseProfile = declared
 	cfg.Enterprise.Profile = profile
 	if cfg.StandaloneEnterprise() {
-		standaloneRulePackDefault(cfg, cfg.DataDir)
+		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 	}
 	return validateEnterpriseConfig(cfg)
 }
@@ -325,14 +325,23 @@ func (c *Config) DeclaredEnterpriseProfile() string {
 // standaloneRulePackDefault keeps the default rule pack inside policy_dir.
 // The loader's generic default lives under data_dir, which the standalone
 // gateway service can write, so in the standalone profile that path always
-// maps to the pack a per-user install would seed in policy_dir.
-func standaloneRulePackDefault(cfg *Config, dataDir string) {
+// maps to the pack a per-user install would seed in policy_dir. On Windows
+// nothing stages a pack under data_dir (the Setup ships none), so there the
+// implicit default selects the gateway's embedded rule packs instead of a
+// directory that never exists (WIN-F23); an administrator's own
+// guardrail.rule_pack_dir or policy_dir is kept.
+func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {
 	implicit := filepath.Join(dataDir, "policies", "guardrail", "default")
-	if cfg.Guardrail.RulePackDir != implicit || strings.TrimSpace(cfg.PolicyDir) == "" ||
-		filepath.Clean(cfg.PolicyDir) == filepath.Join(dataDir, "policies") {
+	if cfg.Guardrail.RulePackDir != implicit {
 		return
 	}
-	cfg.Guardrail.RulePackDir = filepath.Join(cfg.PolicyDir, "guardrail", "default")
+	if strings.TrimSpace(cfg.PolicyDir) != "" && filepath.Clean(cfg.PolicyDir) != filepath.Join(dataDir, "policies") {
+		cfg.Guardrail.RulePackDir = filepath.Join(cfg.PolicyDir, "guardrail", "default")
+		return
+	}
+	if goos == "windows" {
+		cfg.Guardrail.RulePackDir = ""
+	}
 }
 
 func enterpriseBlockEmpty(e EnterpriseConfig) bool {
