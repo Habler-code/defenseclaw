@@ -52,8 +52,8 @@ RemoveIPC=true
 LockPersonality=true
 # No MemoryDenyWriteExecute: the per-user workers this unit starts run agent
 # CLIs for version discovery and hook setup, and JIT runtimes such as Node
-# (V8) die under it (SIGTRAP). The DefenseClaw processes themselves are Go
-# and never map writable-executable memory.
+# (V8) die under it (SIGTRAP). DefenseClaw's own binary also needs
+# executable memory on x86_64 (see defenseclaw-gateway.service).
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap

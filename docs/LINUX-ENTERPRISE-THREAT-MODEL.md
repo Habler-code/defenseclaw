@@ -48,7 +48,7 @@ is given in the second column so reviewers can compare the two platforms.
   rpm-el8 CI lane uses (systemd 239-82.el8_10) reported only the directives
   above; the rest (`ProtectSystem=strict`, `ProtectHome`, `PrivateDevices`,
   `PrivateTmp`, `RestrictNamespaces`, `RestrictSUIDSGID`,
-  `MemoryDenyWriteExecute`, the syscall filters and the capability sets)
+  the syscall filters and the capability sets)
   load there.
 
 ## Security objectives
@@ -96,7 +96,7 @@ is given in the second column so reviewers can compare the two platforms.
 | Z1 | `defenseclaw-hook-enumerator.service` | root; `CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, the last two also ambient; `ProtectHome=read-only` | Writes only `/etc/defenseclaw/hook-guardian` |
 | Z1 | Per-user `enterprise hooks apply-target` worker | the target user's uid and primary gid | New session, parent-death signal, non-dumpable, rlimits, timeout, minimal environment |
 | Z1 | `defenseclaw-sensor-helper.service` | root with acquisition capabilities (`CAP_SYS_ADMIN`, `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_DAC_READ_SEARCH`, `CAP_SYS_PTRACE`, `CAP_CHOWN`, `CAP_FOWNER`) | Own `RuntimeDirectory=defenseclaw-sensor`; fixed fieldless request protocol; homes from the manifest |
-| Z2 | `defenseclaw-gateway.service` (`Type=notify`, watchdog) | `defenseclaw:defenseclaw`, `CapabilityBoundingSet=` (empty) | `ProtectSystem=strict`, `ProtectHome=true`, `PrivateDevices`, `PrivateTmp`, `ProtectProc=invisible` (systemd 247 or later; see [Review scope](#review-scope)), `@system-service` syscall filter, `MemoryDenyWriteExecute`, `RestrictNamespaces`; read-only `/etc/defenseclaw`, `/opt/defenseclaw` and the ledger |
+| Z2 | `defenseclaw-gateway.service` (`Type=notify`, watchdog) | `defenseclaw:defenseclaw`, `CapabilityBoundingSet=` (empty) | `ProtectSystem=strict`, `ProtectHome=true`, `PrivateDevices`, `PrivateTmp`, `ProtectProc=invisible` (systemd 247 or later; see [Review scope](#review-scope)), `@system-service` syscall filter, `RestrictNamespaces` (no `MemoryDenyWriteExecute`: the sonic JSON library maps executable memory on x86_64); read-only `/etc/defenseclaw`, `/opt/defenseclaw` and the ledger |
 | Z2 endpoints | `defenseclaw-gateway-api.socket` (`127.0.0.1:18970`) and `defenseclaw-gateway-hook.socket` (`/run/defenseclaw-hook/hook.sock`) | bound by PID 1 | Held across gateway restarts. `/run/defenseclaw-hook` is created `0755 defenseclaw:defenseclaw` by systemd-tmpfiles at boot (`packaging/systemd/defenseclaw.conf`) and by the lifecycle; only root and the service account can create entries in it. The socket is `0666 defenseclaw:defenseclaw` (`SocketUser`, `SocketGroup`, `SocketMode`) so every local user can connect; the gateway authorizes each caller by kernel uid (L-08) |
 | Z3 | `/opt/defenseclaw` (binaries), `/etc/defenseclaw` (config, `policies/`, `secrets/`, `hook-guardian/targets.yaml`, `managed-runtime.json`, `machine-policy.json`), `/var/lib/defenseclaw-hook-guardian` (ledger), `/var/lib/defenseclaw-enterprise` (lifecycle), `/etc/{codex,claude-code,cursor,github-copilot,opencode}` | root | Administrator-only write; secrets root-only with systemd 247 or later, otherwise `root:defenseclaw 0640` |
 | Z4 | The AI agent and `/opt/defenseclaw/bin/defenseclaw-hook` running as the user; the user's vendor config | the user | Peer verification, guardian repair, foreign-hook guard |

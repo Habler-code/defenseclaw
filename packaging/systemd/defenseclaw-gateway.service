@@ -73,7 +73,11 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# No MemoryDenyWriteExecute: the gateway links bytedance/sonic (through the
+# bifrost LLM client). On x86_64 sonic loads its SIMD code and JIT-compiles
+# JSON codecs into executable memory, starting in package init; under the
+# directive mprotect(PROT_EXEC) fails with EPERM and the process panics before
+# it answers on its sockets (seen on RHEL 9 x86_64).
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap

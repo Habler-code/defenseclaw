@@ -987,13 +987,16 @@ func mustLayout(t *testing.T, goos string) managed.StandaloneLayout {
 	return layout
 }
 
-// Units whose per-user workers run agent CLIs cannot deny writable-executable
-// memory: Node (V8) aborted every cursor-agent --version under it on RHEL,
-// so Cursor was never enrolled. The gateway and sensor helper keep it.
+// No unit may deny writable-executable memory. The per-user workers run agent
+// CLIs, and Node (V8) aborted every cursor-agent --version under it on RHEL,
+// so Cursor was never enrolled. The gateway and the sensor helper link
+// bytedance/sonic, which on x86_64 makes memory executable in package init:
+// with the directive both panicked at start on RHEL 9 x86_64 (mprotect:
+// operation not permitted), leaving the host unprotected.
 func TestAgentRunningUnitsAllowJITRuntimes(t *testing.T) {
 	for unit, want := range map[string]bool{
 		unitEnumerator: false, unitGuardian: false, unitGuardianOneshot: false,
-		unitGateway: true, unitSensorHelper: true,
+		unitGateway: false, unitSensorHelper: false,
 	} {
 		data, err := systemdunits.ReadFile(unit)
 		if err != nil {
