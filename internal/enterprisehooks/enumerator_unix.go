@@ -277,8 +277,18 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	missing := map[string]struct{}{}
 	listed := map[string]struct{}{}
 	previousUsers := map[string]struct{}{}
+	previousUIDs := map[string]map[int]bool{}
 	for _, prev := range previous {
 		previousUsers[strings.TrimSpace(prev.User)] = struct{}{}
+		addEnrolledUID(previousUIDs, prev)
+	}
+	// cachedLocal reports an enrolled local account that the local database
+	// no longer lists but a lookup still resolves with the enrolled uid (a
+	// lookup cache). A resolved account with another uid is a different
+	// account under the same name, for example one moved to a directory:
+	// it is a candidate like any other and gets a row for its new uid.
+	cachedLocal := func(userName string, account unixidentity.Account) bool {
+		return sources.goneLocally(userName) && sameEnrolledUID(previousUIDs, userName, account.UID)
 	}
 	logGoneLocally := func(userName string) {
 		logfSafely(opts.Logger, userName, "no longer in the local account database; a cached lookup still resolves it, so it counts as not found")
@@ -287,7 +297,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	for _, candidate := range candidates {
 		name := candidate.account.Name
 		listed[name] = struct{}{}
-		if _, enrolled := previousUsers[name]; enrolled && sources.goneLocally(name) {
+		if _, enrolled := previousUsers[name]; enrolled && cachedLocal(name, candidate.account) {
 			missing[name] = struct{}{}
 			logGoneLocally(name)
 			continue
@@ -303,7 +313,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		listed[userName] = struct{}{}
 		account, err := opts.Resolver.LookupUser(userName)
 		switch {
-		case err == nil && sources.goneLocally(userName):
+		case err == nil && cachedLocal(userName, account):
 			missing[userName] = struct{}{}
 			logGoneLocally(userName)
 		case err == nil:
@@ -659,6 +669,25 @@ func (s unixAccountSources) goneLocally(user string) bool {
 	return !listed
 }
 
+// addEnrolledUID records the uid a manifest row was enrolled with.
+func addEnrolledUID(uids map[string]map[int]bool, target ManifestTarget) {
+	if target.UID == nil {
+		return
+	}
+	user := strings.TrimSpace(target.User)
+	if uids[user] == nil {
+		uids[user] = map[int]bool{}
+	}
+	uids[user][*target.UID] = true
+}
+
+// sameEnrolledUID reports whether uid is the uid user's rows were enrolled
+// with. Rows without a recorded uid cannot tell, and count as the same.
+func sameEnrolledUID(uids map[string]map[int]bool, user string, uid int) bool {
+	enrolled := uids[user]
+	return len(enrolled) == 0 || enrolled[uid]
+}
+
 // definitiveMiss reports whether a "no such user" answer for user proves
 // the account is gone. directoryAnswered is set when a directory account
 // resolved in the same pass.
@@ -727,7 +756,9 @@ func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Man
 	sources := newUnixAccountSources(opts.LocalAccounts, opts.DirectoryConfigured, opts.State.Sources, opts.Logger)
 	var users []string
 	seen := map[string]struct{}{}
+	enrolledUIDs := map[string]map[int]bool{}
 	for _, target := range manifest.Targets {
+		addEnrolledUID(enrolledUIDs, target)
 		user := strings.TrimSpace(target.User)
 		if _, dup := seen[user]; dup || user == "" {
 			continue
@@ -744,7 +775,7 @@ func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Man
 		}
 		account, err := opts.Resolver.LookupUser(user)
 		switch {
-		case err == nil && sources.goneLocally(user):
+		case err == nil && sources.goneLocally(user) && sameEnrolledUID(enrolledUIDs, user, account.UID):
 			missing[user] = struct{}{}
 		case err == nil:
 			if sources.sourceOf(account) == unixSourceDirectory && !systemdLocalUID(account.UID) {
@@ -763,6 +794,14 @@ func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Man
 	gone := map[string]struct{}{}
 	for _, user := range users {
 		if _, ok := missing[user]; !ok {
+			continue
+		}
+		// Repair removes rows in one pass, with none of the enumerator's
+		// three-cycle margin, so it acts only on a local account database it
+		// could read: a short dscl or opendirectoryd failure would otherwise
+		// look like every local account being deleted at once.
+		if !sources.localKnown {
+			report.Kept = append(report.Kept, fmt.Sprintf("%s: account not found, but the local account database could not be read, so its targets stay", user))
 			continue
 		}
 		if sources.definitiveMiss(user, directoryAnswered) {

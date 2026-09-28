@@ -355,7 +355,11 @@ avoid lookups.
 - **Changed user (Linux and macOS).** A user name that now resolves to a
   different uid or home path, or a home recreated with a different inode, is
   a new identity and is enrolled from scratch. A reused uid does not inherit
-  a deleted user's rows.
+  a deleted user's rows. This includes an account that leaves the local
+  account database and returns under the same name with a new uid, for
+  example one moved to a directory: its rows are replaced in that cycle. If
+  it keeps its uid, it counts as deleted locally and is enrolled again as a
+  directory account in the cycle after its rows are removed.
 - **Excluded user.** Removed on the next cycle.
 - **Deleted user (Linux and macOS).** Only a definitive "no such user"
   answer counts. For an account last seen in the local account database
@@ -378,7 +382,12 @@ avoid lookups.
   `enterprise linux repair` or `enterprise macos repair` as root. Repair
   removes the targets of accounts that no longer exist and lists them in its
   result (`deleted_account_targets_removed`). An account that a directory
-  outage could explain keeps its targets (`deleted_account_targets_kept`).
+  outage could explain keeps its targets (`deleted_account_targets_kept`),
+  and when the local account database cannot be read during the repair, no
+  targets are removed. An account that an earlier release recorded as a
+  directory account is removed only on a host with no directory configured;
+  on a host bound to a directory, add it to `enrollment.exclude_users` to
+  remove its rows on the next cycle.
 
   On macOS, check that the account record is gone:
   `dscl . -read /Users/<name>` must report `eDSRecordNotFound`. When

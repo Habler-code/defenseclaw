@@ -1135,3 +1135,88 @@ func TestRevokeGoneUnixTargetsRemovesOnlyDefinitivelyDeletedAccounts(t *testing.
 		t.Fatalf("missing manifest: %+v %+v %v", manifest, report, err)
 	}
 }
+
+// A local account that leaves the local database but resolves with another
+// uid is a different account under the same name, for example one moved to
+// a directory. The cached-lookup rule above counted it as deleted: the old
+// uid's row stayed for three cycles and failed verify, then the account was
+// re-enrolled a cycle later. It now gets a row for its new uid at once, as
+// before that rule.
+func TestEnumerateUnixReissuesTheRowOfAnAccountThatReturnsWithAnotherUID(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	manifestPath := filepath.Join(root, "targets.yaml")
+	newUID := 1234401103
+	writeTestManifest(t, manifestPath,
+		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(1500), GID: intPointer(1500), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+	)
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"alice": unixSourceFiles}}
+	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: newUID, GID: newUID, Home: filepath.Join(homes, "alice"), Shell: "/bin/bash"},
+	}}
+	opts := UnixEnumerateOptions{
+		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000,
+		CheckHome: availableHome, State: state,
+		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+			return map[string]string{"opencode": "1.0.0"}, nil, nil
+		},
+		LocalAccounts:       func() (map[string]int, error) { return map[string]int{"root": 0}, nil },
+		DirectoryConfigured: func() bool { return true },
+	}
+	manifest, report, err := EnumerateUnix(context.Background(), enumeratorConfig("opencode"), connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].UID == nil || *manifest.Targets[0].UID != newUID {
+		t.Fatalf("the account that returned with uid %d must get a row for that uid in the first cycle: %+v (misses=%v, report=%+v)", newUID, manifest.Targets, state.Misses, report)
+	}
+	if state.Misses[unixRowKey("alice", "opencode")] != 0 {
+		t.Fatalf("a resolving account must not count a miss: %v", state.Misses)
+	}
+	if state.Sources["alice"] != unixSourceDirectory {
+		t.Fatalf("the returned account is a directory account: %v", state.Sources)
+	}
+}
+
+// Repair removes rows in one pass. It must not act on a local account
+// database it could not read (a dscl timeout would otherwise look like every
+// local account being deleted), and a name that resolves with another uid
+// is a live account, not a deleted one.
+func TestRevokeGoneUnixTargetsKeepsRowsItCannotProveDeleted(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, "targets.yaml")
+	row := func(user string, uid int) ManifestTarget {
+		return ManifestTarget{User: user, UserHome: "/Users/" + user, UID: intPointer(uid), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42}
+	}
+	writeTestManifest(t, manifestPath, row("u1", 1501), row("u2", 1502), row("u3", 1503))
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"u1": unixSourceFiles, "u2": unixSourceFiles, "u3": unixSourceFiles}}
+	opts := UnixRevokeGoneOptions{
+		ExistingManifestPath: manifestPath, Resolver: &fakeResolver{accounts: map[string]unixidentity.Account{}}, State: state,
+		LocalAccounts:       func() (map[string]int, error) { return nil, errors.New("dscl timed out") },
+		DirectoryConfigured: func() bool { return false },
+	}
+	manifest, report, err := RevokeGoneUnixTargets(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 3 || len(report.Revoked) != 0 {
+		t.Fatalf("an unreadable local account database must remove nothing: rows=%d revoked=%v", len(manifest.Targets), report.Revoked)
+	}
+	if kept := strings.Join(report.Kept, "\n"); strings.Count(kept, "the local account database could not be read") != 3 {
+		t.Fatalf("each kept account must say why: %q", kept)
+	}
+
+	// u1 now resolves with another uid (moved to a directory); u2 is gone.
+	opts.LocalAccounts = func() (map[string]int, error) { return map[string]int{"u3": 1503}, nil }
+	opts.Resolver = &fakeResolver{accounts: map[string]unixidentity.Account{
+		"u1": {Name: "u1", UID: 1234401103, GID: 20, Home: "/Users/u1"},
+		"u3": {Name: "u3", UID: 1503, GID: 20, Home: "/Users/u3"},
+	}}
+	manifest, report, err = RevokeGoneUnixTargets(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if users := manifestUsers(manifest); !users["u1"] || users["u2"] || !users["u3"] {
+		t.Fatalf("only the deleted account may be revoked: %v (report %+v)", users, report)
+	}
+}
