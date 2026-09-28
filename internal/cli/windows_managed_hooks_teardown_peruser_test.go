@@ -27,24 +27,6 @@ func perUserTeardownManifest(connectorName string) enterprisehooks.Manifest {
 	}}}
 }
 
-func TestWindowsManagedHooksTeardownTargetsAcceptPerUserOnlyInStandalone(t *testing.T) {
-	t.Setenv(managed.EnterpriseProfileEnv, "")
-	if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("copilot")); err == nil ||
-		!strings.Contains(err.Error(), "does not support connector") {
-		t.Fatalf("Secure Client teardown accepted copilot: %v", err)
-	}
-	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
-	for _, name := range []string{"copilot", "devin", "amp"} {
-		targets, claude, codex, cursor, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest(name))
-		if err != nil || len(targets) != 1 || len(claude)+len(codex)+len(cursor) != 0 {
-			t.Fatalf("%s: targets=%v err=%v", name, targets, err)
-		}
-	}
-	if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("openhands")); err == nil {
-		t.Fatal("standalone teardown accepted openhands")
-	}
-}
-
 func TestWindowsManagedHooksTeardownPluginConnectorsHaveNoSelector(t *testing.T) {
 	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 	for name, want := range map[string]bool{"copilot": true, "devin": true, "amp": false, "opencode": true, "codex": true} {
@@ -71,20 +53,6 @@ func TestWindowsManagedHooksTeardownPluginConnectorsHaveNoSelector(t *testing.T)
 	identity.ActivationState = windowsManagedHooksNeverActivated
 	if got := windowsManagedHooksStandalonePerUserExpected(identity)["devin"]; len(got) != 0 {
 		t.Fatalf("never-activated deployment expects enrollment %+v", got)
-	}
-}
-
-func TestWindowsStandalonePerUserEnrollmentKeepFollowsManifest(t *testing.T) {
-	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
-		{Connector: "devin", SID: "S-1-5-21-1-2-3-1017"},
-		{Connector: "hermes", SID: "S-1-5-21-1-2-3-1018", Enabled: boolPointerForTest(false)},
-	}}
-	keep := windowsStandalonePerUserEnrollmentKeep(manifest)
-	if !keep("devin", "s-1-5-21-1-2-3-1017") {
-		t.Fatal("enabled row not kept")
-	}
-	if keep("hermes", "S-1-5-21-1-2-3-1018") || keep("devin", "S-1-5-21-1-2-3-1018") || keep("copilot", "S-1-5-21-1-2-3-1017") {
-		t.Fatal("unauthorized SID kept")
 	}
 }
 
@@ -142,6 +110,40 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 		!strings.Contains(result.Failed[0], "LocalSystem") {
 		t.Fatalf("non-LocalSystem uninstall: attempted=%v result=%+v", attempted, result)
 	}
+
+	// Only the standalone profile's teardown accepts the per-user connectors.
+	t.Run("teardown targets", func(t *testing.T) {
+		t.Setenv(managed.EnterpriseProfileEnv, "")
+		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("copilot")); err == nil ||
+			!strings.Contains(err.Error(), "does not support connector") {
+			t.Fatalf("Secure Client teardown accepted copilot: %v", err)
+		}
+		t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+		for _, name := range []string{"copilot", "devin", "amp"} {
+			targets, claude, codex, cursor, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest(name))
+			if err != nil || len(targets) != 1 || len(claude)+len(codex)+len(cursor) != 0 {
+				t.Fatalf("%s: targets=%v err=%v", name, targets, err)
+			}
+		}
+		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("openhands")); err == nil {
+			t.Fatal("standalone teardown accepted openhands")
+		}
+	})
+
+	// The kept per-user enrollment follows the manifest's enabled rows.
+	t.Run("enrollment keep", func(t *testing.T) {
+		manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+			{Connector: "devin", SID: "S-1-5-21-1-2-3-1017"},
+			{Connector: "hermes", SID: "S-1-5-21-1-2-3-1018", Enabled: boolPointerForTest(false)},
+		}}
+		keep := windowsStandalonePerUserEnrollmentKeep(manifest)
+		if !keep("devin", "s-1-5-21-1-2-3-1017") {
+			t.Fatal("enabled row not kept")
+		}
+		if keep("hermes", "S-1-5-21-1-2-3-1018") || keep("devin", "S-1-5-21-1-2-3-1018") || keep("copilot", "S-1-5-21-1-2-3-1017") {
+			t.Fatal("unauthorized SID kept")
+		}
+	})
 }
 
 // Finalize removes users' registrations and reports the outcome only for

@@ -107,23 +107,53 @@ func TestKiroHookCommandRunsAndForwardsItsSurface(t *testing.T) {
 	}
 }
 
-// A flag error before --connector and --fail-mode are parsed still exits
-// with Kiro's blocking status: both come from the raw arguments.
-func TestKiroHookFlagErrorBeforeConnectorBlocks(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	t.Setenv("DEFENSECLAW_FAIL_MODE", "")
-	args := []string{"--not-a-hook-flag", "--connector", "kiro", "--fail-mode", "closed"}
-	previous := hookRawArgs
-	hookRawArgs = func() []string { return append([]string{"hook"}, args...) }
-	t.Cleanup(func() { hookRawArgs = previous })
-
-	cmd := newHookCmd()
-	cmd.SetArgs(args)
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SilenceErrors = true
-	err := cmd.Execute()
-	if got := commandExitCode(err); err == nil || got != 2 {
-		t.Fatalf("exit = %d (err=%v), want 2", got, err)
+// A Kiro hook that fails before it can run (a flag it does not know, a value
+// it does not list, a stray argument) must exit 2 so Kiro blocks instead of
+// going ahead, when its policy is to fail closed: an administrator-managed
+// hook, or fail mode closed from --fail-mode, the hook sidecar or
+// DEFENSECLAW_FAIL_MODE. A fail-open Kiro hook and every other connector
+// keep cobra's status 1; the fail-open policy itself is unchanged.
+func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		sidecar string
+		want    int
+	}{
+		{name: "kiro fail closed, unknown flag", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 2},
+		{name: "kiro managed, connector spelled with =", args: []string{"--connector=kiro", "--not-a-hook-flag", "--enterprise-managed"}, want: 2},
+		{name: "kiro closed in the hook sidecar", args: []string{"--connector", "kiro", "--hook-surface", "v9"}, sidecar: `{"version":2,"fail_modes":{"kiro":"closed"}}`, want: 2},
+		{name: "kiro fail open keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, want: 1},
+		{name: "codex unknown flag", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", home)
+			t.Setenv("DEFENSECLAW_FAIL_MODE", "")
+			if tc.sidecar != "" {
+				if err := os.MkdirAll(filepath.Join(home, "hooks"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(home, "hooks", ".hookcfg"), []byte(tc.sidecar), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous := hookRawArgs
+			hookRawArgs = func() []string { return tc.args }
+			t.Cleanup(func() { hookRawArgs = previous })
+			cmd := newHookCmd()
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("hook %v succeeded, want a usage failure", tc.args)
+			}
+			if got := commandExitCode(err); got != tc.want {
+				t.Fatalf("hook %v exit = %d, want %d (err=%v)", tc.args, got, tc.want, err)
+			}
+		})
 	}
 }

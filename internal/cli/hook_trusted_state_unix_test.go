@@ -153,56 +153,52 @@ func TestStandaloneHookRuntimeNoopOnlyAfterUninstall(t *testing.T) {
 	}
 }
 
-func TestStandaloneHookRuntimeUntrustedDescriptorFailsClosed(t *testing.T) {
-	withStandaloneHookRuntime(t, "linux",
-		func(string) (*managed.RuntimeDescriptor, error) {
-			return nil, errors.New("owner uid 1000 is not trusted")
-		},
-		noMarkers, "/nonexistent-secure-client")
-	if enterpriseManagedHookRuntimeNoop("codex") {
-		t.Fatal("an untrusted descriptor must never be a no-op")
+// A standalone runtime that fails its checks (an untrusted descriptor, or one
+// that names no hook socket, since the standalone hook has no loopback TCP
+// fallback and never reads a token) fails closed. Its options select no
+// transport but stay marked as the standalone profile's, whose stop events
+// are not blocked, and only for the connector the runtime was prepared for.
+func TestStandaloneHookRuntimeFailsClosed(t *testing.T) {
+	untrusted := func(string) (*managed.RuntimeDescriptor, error) {
+		return nil, errors.New("owner uid 1000 is not trusted")
 	}
-	if reason := enterpriseManagedHookRuntimeFailureReason(); reason != standaloneRuntimeReasonInvalid {
-		t.Fatalf("reason = %q", reason)
+	noSocket := func(string) (*managed.RuntimeDescriptor, error) {
+		descriptor := testDescriptor()
+		descriptor.HookSocket = ""
+		return descriptor, nil
 	}
-	if _, _, _, ok := enterpriseManagedHookRuntimeConnection("codex"); ok {
-		t.Fatal("an untrusted descriptor must not yield an endpoint")
-	}
-}
-
-// A descriptor that names no hook socket must fail closed: the standalone
-// hook has no loopback TCP fallback and never reads a token.
-func TestStandaloneHookRuntimeWithoutHookSocketFailsClosed(t *testing.T) {
-	for _, goos := range []string{"linux", "darwin"} {
-		t.Run(goos, func(t *testing.T) {
-			withStandaloneHookRuntime(t, goos,
-				func(string) (*managed.RuntimeDescriptor, error) {
-					descriptor := testDescriptor()
-					descriptor.HookSocket = ""
-					return descriptor, nil
-				},
-				noMarkers, "/nonexistent-secure-client")
-			if enterpriseManagedHookRuntimeNoop("codex") {
-				t.Fatal("a descriptor without a hook socket is never a no-op")
+	for _, tc := range []struct {
+		name, goos  string
+		load        func(string) (*managed.RuntimeDescriptor, error)
+		reason      string
+		forceClosed bool
+	}{
+		{"untrusted descriptor", "linux", untrusted, standaloneRuntimeReasonInvalid, false},
+		{"no hook socket on linux", "linux", noSocket, standaloneRuntimeReasonHookSocketMissing, true},
+		{"no hook socket on darwin", "darwin", noSocket, standaloneRuntimeReasonHookSocketMissing, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withStandaloneHookRuntime(t, tc.goos, tc.load, noMarkers, "/nonexistent-secure-client")
+			if enterpriseManagedHookRuntimeNoop("claudecode") {
+				t.Fatal("a failed standalone runtime is never a no-op")
 			}
-			if reason := enterpriseManagedHookRuntimeFailureReason(); reason != standaloneRuntimeReasonHookSocketMissing {
-				t.Fatalf("reason = %q, want %q", reason, standaloneRuntimeReasonHookSocketMissing)
+			if reason := enterpriseManagedHookRuntimeFailureReason(); reason != tc.reason {
+				t.Fatalf("reason = %q, want %q", reason, tc.reason)
 			}
-			if !enterpriseManagedHookRuntimeForceClosed() {
+			if tc.forceClosed && !enterpriseManagedHookRuntimeForceClosed() {
 				t.Fatal("a descriptor without a hook socket must force the hook closed")
 			}
-			if _, _, _, ok := enterpriseManagedHookRuntimeConnection("codex"); ok {
-				t.Fatal("a descriptor without a hook socket must not yield a TCP endpoint")
+			if _, _, _, ok := enterpriseManagedHookRuntimeConnection("claudecode"); ok {
+				t.Fatal("a failed standalone runtime must not yield an endpoint")
 			}
-			opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
-			// No transport is selected; the failure is marked as the
-			// standalone profile's, whose stop events are not blocked.
-			if opts.ManagedRuntimeFailure != standaloneRuntimeReasonHookSocketMissing || !opts.ManagedStandalone || opts.ManagedUnixSocket != "" {
-				t.Fatalf("fail-closed options wrong: failure=%q standalone=%v socket=%q",
-					opts.ManagedRuntimeFailure, opts.ManagedStandalone, opts.ManagedUnixSocket)
+			opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "", true)
+			if opts.ManagedRuntimeFailure != tc.reason || !opts.ManagedStandalone || opts.ManagedUnixSocket != "" ||
+				opts.FailMode != "closed" || !opts.StrictAvailability {
+				t.Fatalf("options: failure=%q standalone=%v socket=%q fail=%q strict=%v",
+					opts.ManagedRuntimeFailure, opts.ManagedStandalone, opts.ManagedUnixSocket, opts.FailMode, opts.StrictAvailability)
 			}
-			if opts.FailMode != "closed" || !opts.StrictAvailability {
-				t.Fatalf("hook must fail closed: fail=%q strict=%v", opts.FailMode, opts.StrictAvailability)
+			if other := buildHookOptionsForRuntime("codex", "Stop", "", "", true); other.ManagedStandalone {
+				t.Fatal("the runtime prepared for claudecode must not mark a codex invocation")
 			}
 		})
 	}
@@ -224,56 +220,6 @@ func TestStandaloneHookRuntimeKeepsSecureClientMacFailClosed(t *testing.T) {
 	opts := buildHookOptionsForRuntime("claudecode", "", "", "", true)
 	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonInvalid || opts.ManagedStandalone {
 		t.Fatalf("Secure Client options: failure=%q standalone=%v", opts.ManagedRuntimeFailure, opts.ManagedStandalone)
-	}
-}
-
-// A standalone runtime that fails its checks (untrusted or missing
-// descriptor while machine policy remains) is still the standalone
-// profile's: the options select no transport but are marked standalone.
-func TestStandaloneHookRuntimeFailureIsMarkedStandalone(t *testing.T) {
-	withStandaloneHookRuntime(t, "linux",
-		func(string) (*managed.RuntimeDescriptor, error) {
-			return nil, errors.New("owner uid 1000 is not trusted")
-		},
-		noMarkers, "/nonexistent-secure-client")
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
-		t.Fatal("an untrusted descriptor must never be a no-op")
-	}
-	opts := buildHookOptionsForRuntime("claudecode", "", "", "", true)
-	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonInvalid || !opts.ManagedStandalone ||
-		opts.ManagedUnixSocket != "" || opts.FailMode != "closed" || !opts.StrictAvailability {
-		t.Fatalf("options: failure=%q standalone=%v socket=%q fail=%q strict=%v",
-			opts.ManagedRuntimeFailure, opts.ManagedStandalone, opts.ManagedUnixSocket, opts.FailMode, opts.StrictAvailability)
-	}
-	// A different connector's invocation is not marked by this runtime.
-	other := buildHookOptionsForRuntime("codex", "Stop", "", "", true)
-	if other.ManagedStandalone {
-		t.Fatal("the runtime prepared for claudecode must not mark a codex invocation")
-	}
-}
-
-func TestStandaloneMachinePolicyMarkersCoverPublishedConnectors(t *testing.T) {
-	for _, goos := range []string{"linux", "darwin"} {
-		opts, ok := defaultStandaloneMachinePolicyOptions(goos)
-		if !ok {
-			t.Fatalf("%s has no standalone layout", goos)
-		}
-		for _, connector := range []string{"codex", "claudecode", "cursor", "copilot", "opencode"} {
-			target, ok := enterprisepolicy.TargetFor(connector)
-			if !ok {
-				t.Fatalf("%s has no machine policy target", connector)
-			}
-			if paths, err := target.Paths(opts); err != nil || len(paths) == 0 {
-				t.Errorf("%s/%s has no machine-policy file: %v", goos, connector, err)
-			}
-		}
-	}
-	// Per-user-only connectors (Amp has no machine plugin path) never keep a
-	// managed hook alive after uninstall.
-	for _, connector := range []string{"antigravity", "amp"} {
-		if _, ok := enterprisepolicy.TargetFor(connector); ok {
-			t.Fatalf("per-user-only connector %s must not have a machine policy target", connector)
-		}
 	}
 }
 

@@ -20,7 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// RHEL-F37: a user's own Hermes pre_tool_call hook placed after
+// A user's own Hermes pre_tool_call hook placed after
 // DefenseClaw's could rewrite the tool call, and the rewritten command ran
 // uninspected: Hermes was not guarded. On Linux and macOS the standalone
 // hermes-hook.sh now asks `hook --connector hermes --foreign-hook-check`
@@ -140,40 +140,40 @@ func TestForeignHookCheckBlocksAUserHermesHookAfterDefenseClaws(t *testing.T) {
 	if result := check("pre_tool_call", "s-2"); result.Deny {
 		t.Fatalf("a Hermes process started after the entry is gone is allowed: %+v", result)
 	}
-}
 
-// An untrusted summary still denies Hermes, with a Hermes block object.
-func TestForeignHookCheckRendersTheHermesBlockForAnUntrustedSummary(t *testing.T) {
-	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
-	fixture.loadErr = os.ErrPermission
-	var out bytes.Buffer
-	runForeignHookCheck("hermes", strings.NewReader(`{"hook_event_name":"pre_tool_call"}`), &out)
-	var result foreignHookCheckResult
-	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if !result.Deny || result.HookOutput == nil || result.HookOutput.Action != "block" ||
-		!strings.HasSuffix(result.HookOutput.Message, "(enterprise_machine_policy_summary_untrusted)") {
-		t.Fatalf("untrusted summary: %+v %+v", result, result.HookOutput)
-	}
-	out.Reset()
-	runForeignHookCheck("opencode", strings.NewReader(`{"hook_event_name":"tool.execute.before"}`), &out)
-	if strings.Contains(out.String(), "hook_output") {
-		t.Fatalf("only Hermes gets a hook_output: %q", out.String())
-	}
-}
+	// An untrusted summary still denies Hermes, with a Hermes block object.
+	t.Run("untrusted summary", func(t *testing.T) {
+		fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
+		fixture.loadErr = os.ErrPermission
+		var out bytes.Buffer
+		runForeignHookCheck("hermes", strings.NewReader(`{"hook_event_name":"pre_tool_call"}`), &out)
+		var result foreignHookCheckResult
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if !result.Deny || result.HookOutput == nil || result.HookOutput.Action != "block" ||
+			!strings.HasSuffix(result.HookOutput.Message, "(enterprise_machine_policy_summary_untrusted)") {
+			t.Fatalf("untrusted summary: %+v %+v", result, result.HookOutput)
+		}
+		out.Reset()
+		runForeignHookCheck("opencode", strings.NewReader(`{"hook_event_name":"tool.execute.before"}`), &out)
+		if strings.Contains(out.String(), "hook_output") {
+			t.Fatalf("only Hermes gets a hook_output: %q", out.String())
+		}
+	})
 
-// `enterprise policy show` lists the Hermes guard on Linux and macOS.
-func TestEnterprisePolicyShowListsTheHermesGuard(t *testing.T) {
-	ctx := withEnterprisePolicyTree(t)
-	ctx.connectors = append(ctx.connectors, enterprisepolicy.ConnectorHermes)
-	standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return ctx, nil }
-	out, err := runPolicyCommand(t, runEnterprisePolicyShow)
-	if err != nil {
-		t.Fatalf("show: %v\n%s", err, out)
-	}
-	index := strings.Index(out, "\nhermes ")
-	if index < 0 || !strings.Contains(out[index:], "per_user") || !strings.Contains(out[index:], "guard:     foreign hooks remove (0 allowlisted)") {
-		t.Fatalf("show must list the Hermes guard:\n%s", out)
-	}
+	// `enterprise policy show` lists the Hermes guard on Linux and macOS.
+	t.Run("policy show", func(t *testing.T) {
+		ctx := withEnterprisePolicyTree(t)
+		ctx.connectors = append(ctx.connectors, enterprisepolicy.ConnectorHermes)
+		standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return ctx, nil }
+		out, err := runPolicyCommand(t, runEnterprisePolicyShow)
+		if err != nil {
+			t.Fatalf("show: %v\n%s", err, out)
+		}
+		index := strings.Index(out, "\nhermes ")
+		if index < 0 || !strings.Contains(out[index:], "per_user") || !strings.Contains(out[index:], "guard:     foreign hooks remove (0 allowlisted)") {
+			t.Fatalf("show must list the Hermes guard:\n%s", out)
+		}
+	})
 }

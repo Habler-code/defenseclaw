@@ -380,9 +380,12 @@ func TestPrintConnectorModes_SingleEntry(t *testing.T) {
 	}
 }
 
-func TestFriendlyConnectorNameAmp(t *testing.T) {
-	if got := friendlyConnectorName("amp"); got != "Amp" {
-		t.Fatalf("friendlyConnectorName(amp) = %q, want Amp", got)
+// Every connector the Python status names gets the same display name.
+func TestFriendlyConnectorNameMatchesThePythonStatus(t *testing.T) {
+	for name, want := range map[string]string{"amp": "Amp", "opencode": "OpenCode", "kiro": "Kiro", "omnigent": "OmniGent"} {
+		if got := friendlyConnectorName(name); got != want {
+			t.Errorf("friendlyConnectorName(%q) = %q, want %q", name, got, want)
+		}
 	}
 }
 
@@ -519,14 +522,5 @@ func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
 	}
 	if !strings.Contains(codex, "Hook enforcement: yes") || strings.Contains(codex, "disabled") {
 		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
-	}
-}
-
-// Every connector the Python status names gets the same display name.
-func TestFriendlyConnectorNameMatchesThePythonStatus(t *testing.T) {
-	for name, want := range map[string]string{"opencode": "OpenCode", "kiro": "Kiro", "omnigent": "OmniGent"} {
-		if got := friendlyConnectorName(name); got != want {
-			t.Errorf("friendlyConnectorName(%q) = %q, want %q", name, got, want)
-		}
 	}
 }

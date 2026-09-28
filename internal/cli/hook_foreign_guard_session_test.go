@@ -66,6 +66,11 @@ func TestForeignHookGuardKeepsDenyingASessionThatStartedWithAForeignHook(t *test
 	if err := os.Remove(foreign); err != nil {
 		t.Fatal(err)
 	}
+	// A user can remove the old user-owned session record; the gateway-held
+	// state still keeps the session blocked.
+	if err := os.RemoveAll(filepath.Join(fixture.home, ".defenseclaw", "foreign-hook-sessions")); err != nil {
+		t.Fatal(err)
+	}
 	later := fixture.runEvent(t, "claudecode", "PreToolUse", "session_id", "s-1")
 	if !later.ManagedEnterprise || !strings.HasPrefix(later.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) {
 		t.Fatalf("the session's tool calls must stay denied after the hook is deleted: %+v", later)
@@ -86,29 +91,6 @@ func TestForeignHookGuardKeepsDenyingASessionThatStartedWithAForeignHook(t *test
 	}
 	if fresh := fixture.runEvent(t, "claudecode", "PreToolUse", "session_id", "s-2"); fresh.ManagedRuntimeFailure != "" {
 		t.Fatalf("the new session's tool calls must allow: %q", fresh.ManagedRuntimeFailure)
-	}
-}
-
-func TestForeignHookGuardUserSnapshotDeletionCannotClearTheBlock(t *testing.T) {
-	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
-	fixture.guard("claudecode")
-	foreign := filepath.Join(fixture.project, ".claude", "settings.local.json")
-	fixture.write(t, foreign, claudeForeignHook)
-	start := fixture.runEvent(t, "claudecode", "SessionStart", "session_id", "s-1")
-	if start.ManagedRuntimeFailure == "" {
-		t.Fatal("foreign hook at session start must deny")
-	}
-	if err := os.Remove(foreign); err != nil {
-		t.Fatal(err)
-	}
-	// A user can remove the old user-owned record. Gateway-held state must
-	// still keep the process blocked after that file disappears.
-	if err := os.RemoveAll(filepath.Join(fixture.home, ".defenseclaw", "foreign-hook-sessions")); err != nil {
-		t.Fatal(err)
-	}
-	later := fixture.runEvent(t, "claudecode", "PreToolUse", "session_id", "s-1")
-	if !strings.Contains(later.ManagedRuntimeFailure, "restart the agent") {
-		t.Fatalf("deleting user-owned snapshots cleared the block: %q", later.ManagedRuntimeFailure)
 	}
 }
 
@@ -153,32 +135,32 @@ func TestForeignHookGuardBlocksTheSessionOnlyForAHookPresentAtStart(t *testing.T
 	if later := fixture.runEvent(t, "cursor", "preToolUse", "conversation_id", "c-1"); later.ManagedRuntimeFailure != "" {
 		t.Fatalf("once the hook is removed the session must be allowed: %q", later.ManagedRuntimeFailure)
 	}
-}
 
-// Cursor names the session conversation_id, and Copilot sessionId; both
-// hold the block the same way.
-func TestForeignHookGuardReadsEachAgentsSessionID(t *testing.T) {
-	for _, tc := range []struct{ connector, start, call, key, file, body string }{
-		{"cursor", "sessionStart", "preToolUse", "conversation_id", filepath.Join(".cursor", "hooks.json"), `{"version": 1, "hooks": {"preToolUse": [{"command": "./rewrite.sh"}]}}`},
-		{"copilot", "sessionStart", "preToolUse", "sessionId", filepath.Join(".github", "hooks", "x.json"), `{"hooks": {"preToolUse": [{"bash": "./rewrite.sh"}]}}`},
-	} {
-		fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
-		fixture.guard(tc.connector)
-		foreign := filepath.Join(fixture.project, tc.file)
-		fixture.write(t, foreign, tc.body)
-		if start := fixture.runEvent(t, tc.connector, tc.start, tc.key, "c-1"); start.ManagedRuntimeFailure == "" {
-			t.Fatalf("%s: a foreign hook at session start must deny", tc.connector)
+	// A hook present at the start blocks the session under each agent's own
+	// session ID: Cursor's conversation_id and Copilot's sessionId.
+	t.Run("each agent's session id", func(t *testing.T) {
+		for _, tc := range []struct{ connector, start, call, key, file, body string }{
+			{"cursor", "sessionStart", "preToolUse", "conversation_id", filepath.Join(".cursor", "hooks.json"), `{"version": 1, "hooks": {"preToolUse": [{"command": "./rewrite.sh"}]}}`},
+			{"copilot", "sessionStart", "preToolUse", "sessionId", filepath.Join(".github", "hooks", "x.json"), `{"hooks": {"preToolUse": [{"bash": "./rewrite.sh"}]}}`},
+		} {
+			fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+			fixture.guard(tc.connector)
+			foreign := filepath.Join(fixture.project, tc.file)
+			fixture.write(t, foreign, tc.body)
+			if start := fixture.runEvent(t, tc.connector, tc.start, tc.key, "c-1"); start.ManagedRuntimeFailure == "" {
+				t.Fatalf("%s: a foreign hook at session start must deny", tc.connector)
+			}
+			if err := os.Remove(foreign); err != nil {
+				t.Fatal(err)
+			}
+			if later := fixture.runEvent(t, tc.connector, tc.call, tc.key, "c-1"); !strings.Contains(later.ManagedRuntimeFailure, "Earlier in this agent session") {
+				t.Fatalf("%s: the session must stay denied through %s: %q", tc.connector, tc.key, later.ManagedRuntimeFailure)
+			}
+			if other := fixture.runEvent(t, tc.connector, tc.call, tc.key, "c-2"); other.ManagedRuntimeFailure != "" {
+				t.Fatalf("%s: another session is not affected: %q", tc.connector, other.ManagedRuntimeFailure)
+			}
 		}
-		if err := os.Remove(foreign); err != nil {
-			t.Fatal(err)
-		}
-		if later := fixture.runEvent(t, tc.connector, tc.call, tc.key, "c-1"); !strings.Contains(later.ManagedRuntimeFailure, "Earlier in this agent session") {
-			t.Fatalf("%s: the session must stay denied through %s: %q", tc.connector, tc.key, later.ManagedRuntimeFailure)
-		}
-		if other := fixture.runEvent(t, tc.connector, tc.call, tc.key, "c-2"); other.ManagedRuntimeFailure != "" {
-			t.Fatalf("%s: another session is not affected: %q", tc.connector, other.ManagedRuntimeFailure)
-		}
-	}
+	})
 }
 
 // A session the same agent process clears or compacts into gets a new

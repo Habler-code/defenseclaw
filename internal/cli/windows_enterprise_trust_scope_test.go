@@ -39,60 +39,6 @@ func stubWindowsEnterpriseRecordedTrust(t *testing.T, trust *string) {
 	}
 }
 
-// Without a payload manifest the installer re-admits a hash-pinned
-// deployment's payload by its recorded pins and keeps it hash-pinned, even
-// when --trust-mode is omitted or authenticode. mode authenticode therefore
-// refuses a mutation over such a deployment before any change, as it refuses
-// --trust-mode hash_pinned, whether the config is supplied or installed.
-func TestWindowsEnterpriseAuthenticodeConfigRefusesARecordedHashPinnedDeployment(t *testing.T) {
-	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
-	recorded := "hash_pinned"
-	stubWindowsEnterpriseRecordedTrust(t, &recorded)
-	dir := t.TempDir()
-	authenticode := writeWindowsEnterpriseTrustConfig(t, dir, "authenticode.yaml", "  trust:\n    mode: authenticode\n")
-	hashPinned := writeWindowsEnterpriseTrustConfig(t, dir, "hash.yaml", "  trust:\n    mode: hash_pinned\n")
-	unset := writeWindowsEnterpriseTrustConfig(t, dir, "unset.yaml", "")
-	refused := func(t *testing.T, action string, opts *windowsEnterpriseLifecycleOptions) {
-		t.Helper()
-		err := resolveWindowsEnterpriseLifecycleProfile(action, opts)
-		if err == nil || !errors.Is(err, errWindowsEnterpriseInvalidArguments) ||
-			!strings.Contains(err.Error(), "is hash_pinned") ||
-			!strings.Contains(err.Error(), `install\deployment.json`) {
-			t.Fatalf("%s: err = %v, want the recorded hash_pinned trust refused as invalid arguments", action, err)
-		}
-	}
-	accepted := func(t *testing.T, action string, opts *windowsEnterpriseLifecycleOptions) {
-		t.Helper()
-		if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
-			t.Fatalf("%s: %v", action, err)
-		}
-	}
-
-	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
-		refused(t, action, &windowsEnterpriseLifecycleOptions{configPath: authenticode})
-		refused(t, action, &windowsEnterpriseLifecycleOptions{configPath: authenticode, trustMode: "authenticode"})
-	}
-	// Read-only actions and uninstall bring no payload.
-	for _, action := range []string{"status", "verify", "uninstall"} {
-		accepted(t, action, &windowsEnterpriseLifecycleOptions{configPath: authenticode})
-	}
-	// A config that admits the hash-pinned deployment keeps working.
-	accepted(t, "ensure", &windowsEnterpriseLifecycleOptions{configPath: hashPinned})
-	accepted(t, "ensure", &windowsEnterpriseLifecycleOptions{configPath: unset})
-
-	// The installed config applies to a remediation run without --config.
-	windowsEnterpriseInstalledConfigPath = func() (string, error) { return authenticode, nil }
-	refused(t, "ensure", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
-	refused(t, "repair", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
-
-	// An Authenticode deployment, or none recorded, is not refused.
-	for _, trust := range []string{"authenticode", ""} {
-		recorded = trust
-		accepted(t, "ensure", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
-		accepted(t, "ensure", &windowsEnterpriseLifecycleOptions{configPath: authenticode})
-	}
-}
-
 // A certification-scope run (--state-root) takes the installed config and
 // the recorded trust from its own state root, like the installer's layout,
 // never from the production deployment on the same host.

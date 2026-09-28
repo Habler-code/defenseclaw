@@ -49,7 +49,7 @@ func TestHostForeignHookGuardIgnoresUserCreatedSummaryOnWindows(t *testing.T) {
 		previous, previousRegistered := hookForeignGuardSummaryPath, hookForeignGuardStandaloneRegistered
 		hookForeignGuardSummaryPath = func() (string, bool) { return summary, true }
 		// A Secure Client or unmanaged host: no standalone registration
-		// (the certification host carries a real one, so it is pinned).
+		// (pinned, since the host running the test may carry a real one).
 		hookForeignGuardStandaloneRegistered = func() bool { return false }
 		for _, managedEnterprise := range []bool{true, false} {
 			opts := hookexec.Options{Connector: "codex", ManagedEnterprise: managedEnterprise, Stdin: strings.NewReader("{}")}
@@ -70,6 +70,20 @@ func TestHostForeignHookGuardIgnoresUserCreatedSummaryOnWindows(t *testing.T) {
 			t.Fatalf("%s: a registered standalone host must fail closed: %+v", plant, opts)
 		}
 	}
+
+	// The directory check also rejects an absent directory and a file in its
+	// place.
+	root := t.TempDir()
+	if err := platformHookForeignGuardSummaryDirTrusted(filepath.Join(root, "absent")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent directory: %v", err)
+	}
+	file := filepath.Join(root, "DefenseClaw-HookRuntime")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformHookForeignGuardSummaryDirTrusted(file); err == nil {
+		t.Fatal("a file in place of the summary directory must not be trusted")
+	}
 }
 
 // The registration the gate reads is the per-user gateway guard's
@@ -82,19 +96,5 @@ func TestHostForeignHookGuardRegistrationIsTheStandaloneMarker(t *testing.T) {
 		if got := hookForeignGuardStandaloneRegistered(); got != registered {
 			t.Fatalf("registration = %v, want %v", got, registered)
 		}
-	}
-}
-
-func TestHostForeignHookGuardDirectoryCheckRejectsFileAndAbsence(t *testing.T) {
-	root := t.TempDir()
-	if err := platformHookForeignGuardSummaryDirTrusted(filepath.Join(root, "absent")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("absent directory: %v", err)
-	}
-	file := filepath.Join(root, "DefenseClaw-HookRuntime")
-	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := platformHookForeignGuardSummaryDirTrusted(file); err == nil {
-		t.Fatal("a file in place of the summary directory must not be trusted")
 	}
 }

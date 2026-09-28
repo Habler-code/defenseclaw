@@ -55,6 +55,25 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 	if _, err := os.Stat(report.BackupDir); err != nil {
 		t.Fatalf("no backup of the removed hook: %v", err)
 	}
+
+	// The worker's remove mode runs the remover for its target.
+	previous := enterpriseHookWorkerRemover
+	t.Cleanup(func() { enterpriseHookWorkerRemover = previous })
+	var removed []string
+	enterpriseHookWorkerRemover = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+		removed = append(removed, opts.ConnectorName+"@"+opts.UserHome)
+		return nil
+	}
+	response := runEnterpriseHookWorkerApply(context.Background(), enterpriseHookWorkerRequest{
+		Home: "/home/alice", UID: 1001, GID: 1001,
+		Targets: []enterpriseHookWorkerTarget{{Index: 3, Mode: enterpriseHookWorkerModeRemove, Options: enterpriseHookWorkerOptions{ConnectorName: "codex", UserHome: "/home/alice", OwnerUID: 1001, OwnerGID: 1001}}},
+	})
+	if len(response.Targets) != 1 || !response.Targets[0].OK || response.Targets[0].Index != 3 || response.Targets[0].Result != nil {
+		t.Fatalf("response %+v", response)
+	}
+	if strings.Join(removed, ",") != "codex@/home/alice" {
+		t.Fatalf("removed %v", removed)
+	}
 }
 
 func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
@@ -208,25 +227,5 @@ func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 	}
 	if strings.Join(pending, ",") != "carol/codex" || len(failed) != 1 || !strings.HasPrefix(failed[0], "legacy/codex") {
 		t.Fatalf("pending %v failed %v", pending, failed)
-	}
-}
-
-func TestWorkerRemoveModeRunsTheRemover(t *testing.T) {
-	previous := enterpriseHookWorkerRemover
-	t.Cleanup(func() { enterpriseHookWorkerRemover = previous })
-	var removed []string
-	enterpriseHookWorkerRemover = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
-		removed = append(removed, opts.ConnectorName+"@"+opts.UserHome)
-		return nil
-	}
-	response := runEnterpriseHookWorkerApply(context.Background(), enterpriseHookWorkerRequest{
-		Home: "/home/alice", UID: 1001, GID: 1001,
-		Targets: []enterpriseHookWorkerTarget{{Index: 3, Mode: enterpriseHookWorkerModeRemove, Options: enterpriseHookWorkerOptions{ConnectorName: "codex", UserHome: "/home/alice", OwnerUID: 1001, OwnerGID: 1001}}},
-	})
-	if len(response.Targets) != 1 || !response.Targets[0].OK || response.Targets[0].Index != 3 || response.Targets[0].Result != nil {
-		t.Fatalf("response %+v", response)
-	}
-	if strings.Join(removed, ",") != "codex@/home/alice" {
-		t.Fatalf("removed %v", removed)
 	}
 }

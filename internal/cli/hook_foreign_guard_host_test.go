@@ -78,6 +78,20 @@ func TestHostForeignHookGuardIgnoresSummaryInUntrustedDirectory(t *testing.T) {
 			t.Fatalf("managed=%v: the summary must not be read from an untrusted directory", managedEnterprise)
 		}
 	}
+
+	// A host without a summary directory, or without a standalone layout, is
+	// untouched too.
+	loads := withForeignGuardHostSeams(t, os.ErrNotExist, nil)
+	opts := hookexec.Options{Connector: "claudecode", Stdin: strings.NewReader("{}")}
+	applyHostEnterpriseForeignHookGuard(&opts)
+	if opts.ManagedEnterprise || opts.ManagedRuntimeFailure != "" || *loads != 0 {
+		t.Fatalf("a host without a summary directory must be untouched: %+v loads=%d", opts, *loads)
+	}
+	hookForeignGuardSummaryPath = func() (string, bool) { return "", false }
+	applyHostEnterpriseForeignHookGuard(&opts)
+	if opts.ManagedEnterprise || opts.ManagedRuntimeFailure != "" || *loads != 0 {
+		t.Fatalf("a host without a standalone layout must be untouched: %+v loads=%d", opts, *loads)
+	}
 }
 
 // On a standalone host the administrator-written directory is trusted, so an
@@ -134,20 +148,6 @@ func TestHostForeignHookGuardReadsRegistrationOnlyWhenDirectoryCheckFails(t *tes
 	applyHostEnterpriseForeignHookGuard(&opts)
 	if *reads != 0 {
 		t.Fatalf("registration reads = %d with a trusted directory, want 0", *reads)
-	}
-}
-
-func TestHostForeignHookGuardIsInertWithoutSummaryDirectory(t *testing.T) {
-	loads := withForeignGuardHostSeams(t, os.ErrNotExist, nil)
-	opts := hookexec.Options{Connector: "claudecode", Stdin: strings.NewReader("{}")}
-	applyHostEnterpriseForeignHookGuard(&opts)
-	if opts.ManagedEnterprise || opts.ManagedRuntimeFailure != "" || *loads != 0 {
-		t.Fatalf("a host without a summary directory must be untouched: %+v loads=%d", opts, *loads)
-	}
-	hookForeignGuardSummaryPath = func() (string, bool) { return "", false }
-	applyHostEnterpriseForeignHookGuard(&opts)
-	if opts.ManagedEnterprise || opts.ManagedRuntimeFailure != "" || *loads != 0 {
-		t.Fatalf("a host without a standalone layout must be untouched: %+v loads=%d", opts, *loads)
 	}
 }
 

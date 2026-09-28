@@ -161,13 +161,12 @@ func TestRunAuditExportSinceUntilSelectAWindow(t *testing.T) {
 	if strings.Join(limited, ",") != "row-7" {
 		t.Fatalf("--limit 1 --newest in the window = %v, want row-7", limited)
 	}
-}
 
-func TestParseAuditExportWindow(t *testing.T) {
+	// A relative --since counts back from now; an unknown value, a
+	// negative duration or an empty window is refused.
 	now := time.Date(2026, 9, 27, 19, 0, 0, 0, time.UTC)
 	previous := []string{auditExportSince, auditExportUntil}
 	t.Cleanup(func() { auditExportSince, auditExportUntil = previous[0], previous[1] })
-
 	auditExportSince, auditExportUntil = "30m", ""
 	window, err := parseAuditExportWindow(now)
 	if err != nil || window.since == nil || !window.since.Equal(now.Add(-30*time.Minute)) || window.until != nil {
@@ -181,38 +180,11 @@ func TestParseAuditExportWindow(t *testing.T) {
 	}
 }
 
-// The legacy projection follows the same window and --newest selection.
-func TestExportAuditEventsFallbackHonorsTheWindow(t *testing.T) {
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy-audit.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE audit_events (
-		id TEXT, timestamp TEXT, action TEXT, target TEXT, actor TEXT,
-		details TEXT, severity TEXT, run_id TEXT)`); err != nil {
-		t.Fatal(err)
-	}
-	for index, stamp := range []string{"2026-09-27T10:00:00Z", "2026-09-27T12:00:00Z", "2026-09-27T11:00:00Z"} {
-		if _, err := db.Exec(`INSERT INTO audit_events (id,timestamp,action,actor,details,severity,run_id) VALUES (?,?,?,?,?,?,?)`,
-			"legacy-"+string(rune('0'+index)), stamp, string(audit.ActionConnectorHook), "defenseclaw", "connector=codex", "INFO", "run-1"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	since := time.Date(2026, 9, 27, 10, 30, 0, 0, time.UTC)
-	var out bytes.Buffer
-	if err := exportAuditEventsFallbackWindow(db, &out, version.Provenance{}, "", auditExportWindow{since: &since, limit: 1, newest: true}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), `"id":"legacy-1"`) || strings.Count(strings.TrimSpace(out.String()), "\n") != 0 {
-		t.Fatalf("fallback window export = %s, want only legacy-1", out.String())
-	}
-}
-
-// Activity rows follow the same --since/--until window.
-func TestExportActivityLinesFollowTheWindow(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "audit.db")
-	store, err := audit.NewStore(path)
+// The activity rows and the legacy projection follow the same window, and
+// the legacy projection the same --newest selection.
+func TestAuditExportSourcesFollowTheWindow(t *testing.T) {
+	dir := t.TempDir()
+	store, err := audit.NewStore(filepath.Join(dir, "audit.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,24 +203,50 @@ func TestExportActivityLinesFollowTheWindow(t *testing.T) {
 		}
 	}
 	_ = store.Close()
-	db, err := sql.Open("sqlite", path)
+	legacy, err := sql.Open("sqlite", filepath.Join(dir, "legacy-audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Close()
+	if _, err := legacy.Exec(`CREATE TABLE audit_events (
+		id TEXT, timestamp TEXT, action TEXT, target TEXT, actor TEXT,
+		details TEXT, severity TEXT, run_id TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for index, stamp := range []string{"2026-09-27T10:00:00Z", "2026-09-27T12:00:00Z", "2026-09-27T11:00:00Z"} {
+		if _, err := legacy.Exec(`INSERT INTO audit_events (id,timestamp,action,actor,details,severity,run_id) VALUES (?,?,?,?,?,?,?)`,
+			"legacy-"+string(rune('0'+index)), stamp, string(audit.ActionConnectorHook), "defenseclaw", "connector=codex", "INFO", "run-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "audit.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
+
+	lines := func(out bytes.Buffer) int {
+		if out.Len() == 0 {
+			return 0
+		}
+		return strings.Count(strings.TrimSpace(out.String()), "\n") + 1
+	}
 	since := time.Date(2026, 9, 27, 11, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		window auditExportWindow
+		want   int
+	}{{auditExportWindow{since: &since}, 1}, {auditExportWindow{}, 2}} {
+		var out bytes.Buffer
+		if err := exportActivityLines(db, &out, version.Provenance{}, tc.window); err != nil || lines(out) != tc.want {
+			t.Fatalf("activity export in %+v = %q (%v), want %d rows", tc.window, out.String(), err, tc.want)
+		}
+	}
+	legacySince := time.Date(2026, 9, 27, 10, 30, 0, 0, time.UTC)
 	var out bytes.Buffer
-	if err := exportActivityLines(db, &out, version.Provenance{}, auditExportWindow{since: &since}); err != nil {
+	if err := exportAuditEventsFallbackWindow(legacy, &out, version.Provenance{}, "", auditExportWindow{since: &legacySince, limit: 1, newest: true}); err != nil {
 		t.Fatal(err)
 	}
-	if lines := strings.Count(strings.TrimSpace(out.String()), "\n") + 1; out.Len() == 0 || lines != 1 {
-		t.Fatalf("activity export in the window = %q, want exactly the 12:00 row", out.String())
-	}
-	out.Reset()
-	if err := exportActivityLines(db, &out, version.Provenance{}, auditExportWindow{}); err != nil {
-		t.Fatal(err)
-	}
-	if lines := strings.Count(strings.TrimSpace(out.String()), "\n") + 1; lines != 2 {
-		t.Fatalf("activity export without a window = %q, want both rows", out.String())
+	if !strings.Contains(out.String(), `"id":"legacy-1"`) || lines(out) != 1 {
+		t.Fatalf("fallback window export = %s, want only legacy-1", out.String())
 	}
 }

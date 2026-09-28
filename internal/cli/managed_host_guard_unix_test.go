@@ -69,41 +69,29 @@ func unixStandaloneLayoutForTest(t *testing.T) managed.StandaloneLayout {
 	return layout
 }
 
-// The refusal's hint must be a command that runs as typed: the package
-// puts no DefenseClaw command on PATH and sudo's secure_path does not
-// include the install directory (RHEL-F19, UBU-F16).
-func TestManagedHostRefusalNamesTheInstalledGatewayPath(t *testing.T) {
-	layout := unixStandaloneLayoutForTest(t)
-	withUnixManagedHostDescriptor(t)
-	withManagedHostCallerUID(t, 1000)
-
-	err := refusePerUserGatewayOnManagedHost()
-	if err == nil {
-		t.Fatal("a managed host allowed a per-user gateway")
-	}
-	want := "`sudo " + layout.BinDir + "/defenseclaw-gateway enterprise " + unixPlatformForTest() + " status`"
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("refusal = %q, want the absolute command %s", err, want)
-	}
-	if strings.Contains(err.Error(), "`sudo defenseclaw-gateway ") {
-		t.Fatalf("refusal still names a bare command that is not on PATH: %q", err)
-	}
-}
-
-// An administrator who runs start/stop/restart on a managed host is told
+// The refusal's hint must be a command that runs as typed: the package puts
+// no DefenseClaw command on PATH and sudo's secure_path does not include the
+// install directory. An administrator who runs start/stop/restart is told
 // how to restart, repair and check the managed gateway service instead of
-// the standard-user text (RHEL-F20, UBU-F17, MAC-F23).
-func TestManagedHostRefusalGivesAnAdministratorTheServiceCommands(t *testing.T) {
+// the standard-user text.
+func TestManagedHostRefusalNamesTheInstalledGatewayCommands(t *testing.T) {
 	layout := unixStandaloneLayoutForTest(t)
 	withUnixManagedHostDescriptor(t)
-	withManagedHostCallerUID(t, 0)
+	gateway := layout.BinDir + "/defenseclaw-gateway"
+	platform := unixPlatformForTest()
 
+	withManagedHostCallerUID(t, 1000)
 	err := refusePerUserGatewayOnManagedHost()
+	if want := "`sudo " + gateway + " enterprise " + platform + " status`"; err == nil || !strings.Contains(err.Error(), want) ||
+		strings.Contains(err.Error(), "`sudo defenseclaw-gateway ") {
+		t.Fatalf("standard-user refusal = %v, want the absolute command %s", err, want)
+	}
+
+	withManagedHostCallerUID(t, 0)
+	err = refusePerUserGatewayOnManagedHost()
 	if err == nil {
 		t.Fatal("a managed host allowed a per-user gateway for root")
 	}
-	gateway := layout.BinDir + "/defenseclaw-gateway"
-	platform := unixPlatformForTest()
 	restart := "systemctl restart defenseclaw-gateway.service"
 	if runtime.GOOS == "darwin" {
 		restart = "launchctl kickstart -k system/com.cisco.defenseclaw.gateway"
@@ -142,24 +130,10 @@ func TestManagedHostServiceNamesMatchTheLifecycle(t *testing.T) {
 
 // On a managed host `defenseclaw-gateway stop` refuses like start and
 // restart; it used to print "Watchdog is not running / Gateway sidecar is
-// not running" and exit 0 while the managed gateway ran (MAC-F21, RHEL-F18,
-// UBU-F15).
-func TestStopRefusesOnAManagedHost(t *testing.T) {
-	unixStandaloneLayoutForTest(t)
-	withUnixManagedHostDescriptor(t)
-	withManagedHostCallerUID(t, 1000)
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-
-	err := runStop(stopCmd, nil)
-	if err == nil || !strings.Contains(err.Error(), "managed by your organization") {
-		t.Fatalf("stop on a managed host = %v, want the managed-host refusal", err)
-	}
-}
-
-// A per-user watchdog left over from before the managed deployment is
-// still stopped when stop refuses: it would keep trying to restart its
-// gateway.
-func TestStopOnAManagedHostStillStopsALeftoverWatchdog(t *testing.T) {
+// not running" and exit 0 while the managed gateway ran. A per-user watchdog
+// left over from before the managed deployment is still stopped: it would
+// keep trying to restart its gateway.
+func TestStopRefusesOnAManagedHostAndStopsALeftoverWatchdog(t *testing.T) {
 	unixStandaloneLayoutForTest(t)
 	withUnixManagedHostDescriptor(t)
 	withManagedHostCallerUID(t, 1000)
@@ -214,9 +188,21 @@ func TestBareDaemonRefusesBeforeCreatingTheAuditStore(t *testing.T) {
 }
 
 // A deployment pin set by hand does not get a standard user past the
-// refusal; only the managed service account's pin counts (MAC-F21,
-// RHEL-F18). Unknown service identity keeps honoring the pin.
+// refusal; only the managed service account's pin counts, and the service
+// uid comes from the descriptor. Unknown service identity keeps honoring the
+// pin.
 func TestLifecycleGuardHonorsThePinOnlyForTheServiceAccount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "managed-runtime.json")
+	descriptor := `{"schema_version":1,"profile":"standalone","product_version":"1.0.0","service_user":"defenseclaw",` +
+		`"service_uid":987,"service_gid":987,"api_addr":"127.0.0.1:18970","machine_policy_connectors":[],` +
+		`"disable_self_update":true,"installed_at":"2026-09-27T00:00:00Z"}`
+	if err := os.WriteFile(path, []byte(descriptor), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if uid, ok := managedHostServiceUID(path); !ok || uid != 987 {
+		t.Fatalf("managedHostServiceUID = %d, %t; want 987, true", uid, ok)
+	}
+
 	unixStandaloneLayoutForTest(t)
 	withUnixManagedHostDescriptor(t)
 	restoreService := managedHostServiceUID
@@ -244,21 +230,6 @@ func TestLifecycleGuardHonorsThePinOnlyForTheServiceAccount(t *testing.T) {
 	// The per-user refusal the Secure Client golden pins is unchanged.
 	if err := refusePerUserGatewayOnManagedHost(); err != nil {
 		t.Fatalf("the pinned per-user guard changed: %v", err)
-	}
-}
-
-// The service uid comes from the descriptor, falling back to the layout's
-// service account.
-func TestManagedHostServiceUIDReadsTheDescriptor(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "managed-runtime.json")
-	descriptor := `{"schema_version":1,"profile":"standalone","product_version":"1.0.0","service_user":"defenseclaw",` +
-		`"service_uid":987,"service_gid":987,"api_addr":"127.0.0.1:18970","machine_policy_connectors":[],` +
-		`"disable_self_update":true,"installed_at":"2026-09-27T00:00:00Z"}`
-	if err := os.WriteFile(path, []byte(descriptor), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if uid, ok := managedHostServiceUID(path); !ok || uid != 987 {
-		t.Fatalf("managedHostServiceUID = %d, %t; want 987, true", uid, ok)
 	}
 }
 
@@ -340,15 +311,12 @@ func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing
 		os.Getenv("DEFENSECLAW_HOME") != "" {
 		t.Fatal("the admin defaults replaced a config the caller chose")
 	}
-}
 
-// No trusted standalone deployment: nothing changes for anyone.
-func TestManagedStandaloneAdminEnvLeavesOtherHostsAlone(t *testing.T) {
-	withManagedStandaloneDeployment(t, 991)
+	// No trusted standalone deployment: nothing changes for anyone.
+	clearManagedStandaloneAdminEnv(t)
 	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{}, nil, managed.ErrNoRuntimeDescriptor
 	}
-	withManagedHostCallerUID(t, 0)
 	if applyManagedStandaloneAdminEnv(nil) || os.Getenv(managed.ConfigPathEnv) != "" {
 		t.Fatal("a host without a standalone deployment got the managed defaults")
 	}

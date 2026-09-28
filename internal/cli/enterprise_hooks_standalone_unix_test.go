@@ -166,6 +166,24 @@ func TestEnterpriseHookWorkerRunsTargetsWithAMinimalEnvironment(t *testing.T) {
 			t.Fatalf("administrator passthrough env = %q", got.Result.HookContractID)
 		}
 	}
+
+	// The worker PATH keeps the system directories first and then the
+	// discovery directories (OmniGent setup looks itself up on PATH).
+	path := enterpriseHookWorkerPath("/home/alice", 1000)
+	parts := strings.Split(path, ":")
+	if len(parts) < 3 || parts[0] != "/usr/bin" || parts[1] != "/bin" {
+		t.Fatalf("worker PATH = %q", path)
+	}
+	if !strings.Contains(path, ":/home/alice/.local/bin") {
+		t.Fatalf("worker PATH lacks the per-user bin dir: %q", path)
+	}
+	seen := map[string]bool{}
+	for _, part := range parts {
+		if seen[part] {
+			t.Fatalf("worker PATH repeats %q: %q", part, path)
+		}
+		seen[part] = true
+	}
 }
 
 func TestEnterpriseHookWorkerRepairsDriftOnlyForProtectedTargets(t *testing.T) {
@@ -217,24 +235,24 @@ func TestEnterpriseHookWorkerDiscoverRunsAsTheUser(t *testing.T) {
 	if response.Versions["codex"] != "0.142.0" || response.Reasons["claudecode"] == "" {
 		t.Fatalf("discover response = %+v", response)
 	}
-}
 
-// For an untrusted home the parent asks for a static discovery, and the
-// worker then never takes the executing path.
-func TestEnterpriseHookWorkerStaticDiscoverExecutesNothing(t *testing.T) {
-	useEnterpriseHookWorkerHelper(t, "ok")
-	account := selfWorkerAccount(t)
-	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
-		Operation:       enterpriseHookWorkerOpDiscover,
-		Connectors:      []string{"codex"},
-		StaticDiscovery: true,
+	// For an untrusted home the parent asks for a static discovery, and the
+	// worker then never takes the executing path.
+	t.Run("static discovery", func(t *testing.T) {
+		useEnterpriseHookWorkerHelper(t, "ok")
+		account := selfWorkerAccount(t)
+		response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+			Operation:       enterpriseHookWorkerOpDiscover,
+			Connectors:      []string{"codex"},
+			StaticDiscovery: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, executed := response.Versions["codex"]; executed || !enterprisehooks.UnixAgentInstalledWithoutVersion(response.Reasons["codex"]) {
+			t.Fatalf("static discover response = %+v, want the static finding only", response)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, executed := response.Versions["codex"]; executed || !enterprisehooks.UnixAgentInstalledWithoutVersion(response.Reasons["codex"]) {
-		t.Fatalf("static discover response = %+v, want the static finding only", response)
-	}
 }
 
 func TestEnterpriseHookWorkerRejectsMalformedOrRunawayWorkers(t *testing.T) {
@@ -740,6 +758,97 @@ func TestStandaloneReconcileBindingsDetectUIDReuseAndKeepRepairRights(t *testing
 	if bindings.Bindings[codexKey].UID != uid || bindings.Bindings[codexKey].HomeInode == 0 {
 		t.Fatalf("a successful install must rebind to the current account: %+v", bindings.Bindings[codexKey])
 	}
+
+	// alice was deleted and bob created with her reused uid: the failed row
+	// carried alice's previous ledger entry, which still names that uid, so
+	// bob's hook calls matched it. A reassigned identity now revokes the
+	// carried protection; an account that is merely not found (what a
+	// directory outage also looks like) keeps it.
+	t.Run("reassigned uid", func(t *testing.T) {
+		resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
+			"bob":  {Name: "bob", UID: 5001, GID: 5001, Home: "/home/bob", Shell: "/bin/bash"},
+			"dave": {Name: "dave", UID: 7002, GID: 7002, Home: "/home/dave", Shell: "/bin/bash"},
+		}}
+		f := newStandaloneFixture(t, resolver)
+		row := func(name string, uid int) enterprisehooks.ManifestTarget {
+			home := filepath.Join(f.homes, name)
+			return enterprisehooks.ManifestTarget{User: name, UserHome: home, UID: &uid, GID: &uid, Connector: "opencode"}
+		}
+		f.writeManifest(t, row("alice", 5001), row("carol", 6001), row("dave", 7001), row("erin", 8001))
+		var protected []enterpriseHookReconcileRow
+		bindings := map[string]enterpriseHookUnixBinding{}
+		for name, uid := range map[string]int{"alice": 5001, "carol": 6001, "dave": 7001, "erin": 0} {
+			home := filepath.Join(f.homes, name)
+			prior := protectedRow(name, home, "opencode")
+			prior.UID = uid
+			protected = append(protected, prior)
+			if uid > 0 {
+				bindings[enterpriseHookProtectedTargetKey(prior)] = enterpriseHookUnixBinding{UID: uid, Home: home}
+			}
+		}
+		// erin's manifest row names uid 8001, but her binding recorded uid 5001.
+		erinKey := enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "erin", Connector: "opencode"})
+		bindings[erinKey] = enterpriseHookUnixBinding{UID: 5001, Home: filepath.Join(f.homes, "erin")}
+		f.writeLedger(t, protected...)
+		f.writeBindings(t, bindings)
+
+		run, err := runEnterpriseHookReconcileOnce(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireLedgerOrStateTrust(t, run.StateErr)
+		if run.Failures != 4 || len(f.requests) != 0 {
+			t.Fatalf("every row fails before dispatch: %+v", run.Rows)
+		}
+		kept := map[string]bool{}
+		for _, target := range f.ledger(t).ProtectedTargets {
+			kept[target.User] = true
+		}
+		if kept["alice"] || kept["dave"] || kept["erin"] {
+			t.Fatalf("a reassigned uid must not inherit the old authorization: %v", kept)
+		}
+		if !kept["carol"] {
+			t.Fatalf("an account that is only not found keeps its protection: %v", kept)
+		}
+		saved := loadEnterpriseHookUnixBindings().Bindings
+		if _, ok := saved[enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "alice", Connector: "opencode"})]; ok {
+			t.Fatalf("a reassigned identity's repair binding must be dropped: %v", saved)
+		}
+		if _, ok := saved[enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "carol", Connector: "opencode"})]; !ok {
+			t.Fatalf("carol's binding must be kept: %v", saved)
+		}
+	})
+
+	// frank was protected under an old uid (his binding and the prior ledger
+	// row carry it) and now resolves to a new one. If this pass fails, the old
+	// uid, which may already belong to someone else, must not stay authorized.
+	t.Run("name moved to a new uid", func(t *testing.T) {
+		uid, gid := os.Getuid(), os.Getgid()
+		resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+		f := newStandaloneFixture(t, resolver)
+		real := f.home(t, "frank-real", 0o700)
+		frank := filepath.Join(f.homes, "frank")
+		if err := os.Symlink(real, frank); err != nil { // untrusted: this pass fails
+			t.Fatal(err)
+		}
+		resolver.accounts["frank"] = unixidentity.Account{Name: "frank", UID: uid, GID: gid, Home: frank, Shell: "/bin/bash"}
+		f.writeManifest(t, enterprisehooks.ManifestTarget{User: "frank", UserHome: frank, UID: &uid, GID: &gid, Connector: "opencode"})
+		prior := protectedRow("frank", frank, "opencode")
+		prior.UID = uid + 1
+		f.writeLedger(t, prior)
+		f.writeBindings(t, map[string]enterpriseHookUnixBinding{enterpriseHookProtectedTargetKey(prior): {UID: uid + 1, Home: frank}})
+		run, err := runEnterpriseHookReconcileOnce(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireLedgerOrStateTrust(t, run.StateErr)
+		if run.Failures != 1 {
+			t.Fatalf("rows = %+v", run.Rows)
+		}
+		if got := f.ledger(t).ProtectedTargets; len(got) != 0 {
+			t.Fatalf("the old uid must not stay authorized: %+v", got)
+		}
+	})
 }
 
 func TestStandaloneReconcileHonorsManifestIdentityDuringDirectoryOutage(t *testing.T) {
@@ -1049,27 +1158,6 @@ func TestStandaloneReconcileMachinePolicyRowsOnlyRecordEnrollment(t *testing.T) 
 	}
 }
 
-// OmniGent setup looks itself up on PATH; with only /usr/bin:/bin the
-// worker could not find an agent discovery had just found in ~/.local/bin.
-// System directories stay first.
-func TestEnterpriseHookWorkerPathIncludesDiscoveryDirsAfterSystemDirs(t *testing.T) {
-	path := enterpriseHookWorkerPath("/home/alice", 1000)
-	parts := strings.Split(path, ":")
-	if len(parts) < 3 || parts[0] != "/usr/bin" || parts[1] != "/bin" {
-		t.Fatalf("worker PATH = %q", path)
-	}
-	if !strings.Contains(path, ":/home/alice/.local/bin") {
-		t.Fatalf("worker PATH lacks the per-user bin dir: %q", path)
-	}
-	seen := map[string]bool{}
-	for _, part := range parts {
-		if seen[part] {
-			t.Fatalf("worker PATH repeats %q: %q", part, path)
-		}
-		seen[part] = true
-	}
-}
-
 // A home that could be inspected when its target was protected and now
 // refuses the guardian (for example a filesystem the user mounted over it)
 // is a failure; staying pending stopped every repair for that user.
@@ -1104,34 +1192,6 @@ func TestStandaloneReconcileFailsAProtectedHomeThatNowRefusesInspection(t *testi
 	}
 	if row := run.Rows[1]; !row.Pending || row.Error != "" {
 		t.Fatalf("a never-protected home that refuses inspection stays pending: %+v", row)
-	}
-}
-
-// A user who loosened their own home (chmod g+w ~) made every reconcile
-// fail the row before dispatch, so nothing ever repaired their hooks. The
-// user's own worker now removes group/other write and repairs.
-func TestStandaloneReconcileTightensALoosenedEnrolledHome(t *testing.T) {
-	uid, gid := os.Getuid(), os.Getgid()
-	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
-	f := newStandaloneFixture(t, resolver)
-	dave := f.home(t, "dave", 0o770)
-	resolver.accounts["dave"] = unixidentity.Account{Name: "dave", UID: uid, GID: gid, Home: dave, Shell: "/bin/bash"}
-	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "dave", Connector: "opencode"})
-	var log bytes.Buffer
-	enterpriseHookWorkerLog = &log
-	run, err := runEnterpriseHookReconcileOnce(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	requireLedgerOrStateTrust(t, run.StateErr)
-	if len(run.Rows) != 1 || !run.Rows[0].OK || run.Failures != 0 {
-		t.Fatalf("a loosened enrolled home must be repaired: %+v failures=%d", run.Rows, run.Failures)
-	}
-	if len(f.requests) != 1 || !f.requests[0].TightenHome {
-		t.Fatalf("the worker must be asked to remove group/other write first: %+v", f.requests)
-	}
-	if !strings.Contains(log.String(), "group/other writable") {
-		t.Fatalf("the loosened mode must still be reported: %q", log.String())
 	}
 }
 
@@ -1176,66 +1236,34 @@ func TestEnterpriseHookWorkerTightensTheUsersOwnHome(t *testing.T) {
 	if got := response.Targets; len(got) != 1 || got[0].OK || !strings.Contains(got[0].Error, "remove group/other write") {
 		t.Fatalf("a symlinked home must not be tightened or repaired: %+v", got)
 	}
-}
 
-// alice was deleted and bob created with her reused uid: the failed row
-// carried alice's previous ledger entry, which still names that uid, so
-// bob's hook calls matched it. A reassigned identity now revokes the
-// carried protection; an account that is merely not found (what a
-// directory outage also looks like) keeps it.
-func TestStandaloneReconcileRevokesProtectionOfAReassignedUID(t *testing.T) {
-	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
-		"bob":  {Name: "bob", UID: 5001, GID: 5001, Home: "/home/bob", Shell: "/bin/bash"},
-		"dave": {Name: "dave", UID: 7002, GID: 7002, Home: "/home/dave", Shell: "/bin/bash"},
-	}}
-	f := newStandaloneFixture(t, resolver)
-	row := func(name string, uid int) enterprisehooks.ManifestTarget {
-		home := filepath.Join(f.homes, name)
-		return enterprisehooks.ManifestTarget{User: name, UserHome: home, UID: &uid, GID: &uid, Connector: "opencode"}
-	}
-	f.writeManifest(t, row("alice", 5001), row("carol", 6001), row("dave", 7001), row("erin", 8001))
-	var protected []enterpriseHookReconcileRow
-	bindings := map[string]enterpriseHookUnixBinding{}
-	for name, uid := range map[string]int{"alice": 5001, "carol": 6001, "dave": 7001, "erin": 0} {
-		home := filepath.Join(f.homes, name)
-		prior := protectedRow(name, home, "opencode")
-		prior.UID = uid
-		protected = append(protected, prior)
-		if uid > 0 {
-			bindings[enterpriseHookProtectedTargetKey(prior)] = enterpriseHookUnixBinding{UID: uid, Home: home}
+	// A user who loosened their own home (chmod g+w ~) made every reconcile
+	// fail the row before dispatch, so nothing ever repaired their hooks. The
+	// user's own worker now removes group/other write and repairs.
+	t.Run("the reconcile asks for it", func(t *testing.T) {
+		uid, gid := os.Getuid(), os.Getgid()
+		resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+		f := newStandaloneFixture(t, resolver)
+		dave := f.home(t, "dave", 0o770)
+		resolver.accounts["dave"] = unixidentity.Account{Name: "dave", UID: uid, GID: gid, Home: dave, Shell: "/bin/bash"}
+		f.writeManifest(t, enterprisehooks.ManifestTarget{User: "dave", Connector: "opencode"})
+		var log bytes.Buffer
+		enterpriseHookWorkerLog = &log
+		run, err := runEnterpriseHookReconcileOnce(context.Background())
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	// erin's manifest row names uid 8001, but her binding recorded uid 5001.
-	erinKey := enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "erin", Connector: "opencode"})
-	bindings[erinKey] = enterpriseHookUnixBinding{UID: 5001, Home: filepath.Join(f.homes, "erin")}
-	f.writeLedger(t, protected...)
-	f.writeBindings(t, bindings)
-
-	run, err := runEnterpriseHookReconcileOnce(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	requireLedgerOrStateTrust(t, run.StateErr)
-	if run.Failures != 4 || len(f.requests) != 0 {
-		t.Fatalf("every row fails before dispatch: %+v", run.Rows)
-	}
-	kept := map[string]bool{}
-	for _, target := range f.ledger(t).ProtectedTargets {
-		kept[target.User] = true
-	}
-	if kept["alice"] || kept["dave"] || kept["erin"] {
-		t.Fatalf("a reassigned uid must not inherit the old authorization: %v", kept)
-	}
-	if !kept["carol"] {
-		t.Fatalf("an account that is only not found keeps its protection: %v", kept)
-	}
-	saved := loadEnterpriseHookUnixBindings().Bindings
-	if _, ok := saved[enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "alice", Connector: "opencode"})]; ok {
-		t.Fatalf("a reassigned identity's repair binding must be dropped: %v", saved)
-	}
-	if _, ok := saved[enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "carol", Connector: "opencode"})]; !ok {
-		t.Fatalf("carol's binding must be kept: %v", saved)
-	}
+		requireLedgerOrStateTrust(t, run.StateErr)
+		if len(run.Rows) != 1 || !run.Rows[0].OK || run.Failures != 0 {
+			t.Fatalf("a loosened enrolled home must be repaired: %+v failures=%d", run.Rows, run.Failures)
+		}
+		if len(f.requests) != 1 || !f.requests[0].TightenHome {
+			t.Fatalf("the worker must be asked to remove group/other write first: %+v", f.requests)
+		}
+		if !strings.Contains(log.String(), "group/other writable") {
+			t.Fatalf("the loosened mode must still be reported: %q", log.String())
+		}
+	})
 }
 
 type supplementaryGroupResolver struct {
@@ -1274,36 +1302,5 @@ func TestEnterpriseHookWorkerCredentialKeepsSupplementaryGroups(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(supplementaryGroupResolver{err: errors.New("sssd: backend offline")})
 	if got := enterpriseHookWorkerGroupIDs(account); got != nil {
 		t.Fatalf("an unavailable directory falls back to the primary group only: %v", got)
-	}
-}
-
-// frank was protected under an old uid (his binding and the prior ledger
-// row carry it) and now resolves to a new one. If this pass fails, the old
-// uid, which may already belong to someone else, must not stay authorized.
-func TestStandaloneReconcileDropsProtectionWhenTheNameMovedToANewUID(t *testing.T) {
-	uid, gid := os.Getuid(), os.Getgid()
-	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
-	f := newStandaloneFixture(t, resolver)
-	real := f.home(t, "frank-real", 0o700)
-	frank := filepath.Join(f.homes, "frank")
-	if err := os.Symlink(real, frank); err != nil { // untrusted: this pass fails
-		t.Fatal(err)
-	}
-	resolver.accounts["frank"] = unixidentity.Account{Name: "frank", UID: uid, GID: gid, Home: frank, Shell: "/bin/bash"}
-	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "frank", UserHome: frank, UID: &uid, GID: &gid, Connector: "opencode"})
-	prior := protectedRow("frank", frank, "opencode")
-	prior.UID = uid + 1
-	f.writeLedger(t, prior)
-	f.writeBindings(t, map[string]enterpriseHookUnixBinding{enterpriseHookProtectedTargetKey(prior): {UID: uid + 1, Home: frank}})
-	run, err := runEnterpriseHookReconcileOnce(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	requireLedgerOrStateTrust(t, run.StateErr)
-	if run.Failures != 1 {
-		t.Fatalf("rows = %+v", run.Rows)
-	}
-	if got := f.ledger(t).ProtectedTargets; len(got) != 0 {
-		t.Fatalf("the old uid must not stay authorized: %+v", got)
 	}
 }

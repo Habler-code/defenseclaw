@@ -12,9 +12,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
-// The per-user worker must carry the managed hook socket through its JSON
-// request so the plugins it renders use the peer-authorized socket.
-func TestEnterpriseHookWorkerOptionsCarryManagedHookSocket(t *testing.T) {
+// The per-user worker carries the managed hook socket in its request, and an
+// upgrade that configures the socket must move targets that an earlier
+// release protected over TCP: the verify-or-repair pass reinstalls
+// them once with the socket transport and then leaves them alone.
+func TestWorkerVerifyOrRepairMovesPreUpgradeHooksToTheHookSocket(t *testing.T) {
+	// The worker request carries the socket through its JSON round trip.
 	in := enterprisehooks.InstallOptions{
 		ConnectorName:     "opencode",
 		ManagedHookSocket: "/run/defenseclaw-hook/hook.sock",
@@ -24,12 +27,7 @@ func TestEnterpriseHookWorkerOptionsCarryManagedHookSocket(t *testing.T) {
 	if out.ManagedHookSocket != in.ManagedHookSocket || out.ManagedServiceUID != in.ManagedServiceUID {
 		t.Fatalf("worker round trip = %q/%d, want %q/%d", out.ManagedHookSocket, out.ManagedServiceUID, in.ManagedHookSocket, in.ManagedServiceUID)
 	}
-}
 
-// An upgrade that configures the hook socket must move targets that an
-// earlier release protected over TCP: the verify-or-repair pass reinstalls
-// them once with the socket transport and then leaves them alone.
-func TestWorkerVerifyOrRepairMovesPreUpgradeHooksToTheHookSocket(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("enterprise hook installer refuses uid 0 targets")
 	}

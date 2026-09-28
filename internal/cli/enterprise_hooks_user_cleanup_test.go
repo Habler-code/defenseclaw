@@ -98,11 +98,12 @@ func TestPlanEnterpriseHookUserCleanupsRecordsOnlyRevokedPerUserRows(t *testing.
 	}
 }
 
+// A signed-out revoked user's cleanup is recorded and kept until it can run.
 // A user enrolled again while signed out stays deferred, so the guardian does
 // not protect the row until the reinstall succeeds. The recorded cleanup must
 // survive that window without being attempted, so a second revocation
 // before the reinstall still removes the registration.
-func TestReconcileEnterpriseHookUserCleanupsKeepsTheRecordUntilTheUserIsProtectedAgain(t *testing.T) {
+func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 	dataDir := useUserCleanupStateDir(t)
 	home := filepath.Join(t.TempDir(), "alice")
 	protectedRow := userCleanupRow("devin", userCleanupSIDA, home)
@@ -162,6 +163,69 @@ func TestReconcileEnterpriseHookUserCleanupsKeepsTheRecordUntilTheUserIsProtecte
 	if pending := reconcile(readmitted, protectedRow); len(pending) != 0 || len(attempts) != 0 {
 		t.Fatalf("protected again: pending=%+v attempts=%v", pending, attempts)
 	}
+
+	// The guardian records a signed-out revoked user's cleanup before its state
+	// publication drops the row, keeps it until the user signs in, and removes
+	// the record once the cleanup succeeds.
+	t.Run("recorded until sign-in", func(t *testing.T) {
+		dataDir := useUserCleanupStateDir(t)
+		home := filepath.Join(t.TempDir(), "alice")
+		writeUserCleanupAuthorization(t, dataDir,
+			userCleanupRow("devin", userCleanupSIDA, home),
+			userCleanupRow("opencode", userCleanupSIDB, home+"b"),
+		)
+		manifest := userCleanupManifest([2]string{"opencode", userCleanupSIDB})
+		signedIn := false
+		calls := 0
+		attempt := func(_ context.Context, entry enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
+			calls++
+			if entry.Connector != "devin" || entry.SID != userCleanupSIDA || entry.UserHome != home {
+				t.Fatalf("unexpected cleanup %+v", entry)
+			}
+			if signedIn {
+				return enterpriseHookUserCleanupDone, nil
+			}
+			return enterpriseHookUserCleanupPending, nil
+		}
+		var log bytes.Buffer
+		now := time.Now()
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now); err != nil {
+			t.Fatalf("first reconcile: %v", err)
+		}
+		pending, err := loadEnterpriseHookUserCleanups(dataDir)
+		if err != nil || len(pending) != 1 || pending[0].Connector != "devin" || pending[0].SID != userCleanupSIDA {
+			t.Fatalf("recorded cleanups = %+v, %v", pending, err)
+		}
+		if !strings.Contains(log.String(), "recorded for cleanup at next sign-in") {
+			t.Fatalf("log = %q", log.String())
+		}
+
+		// The state publication that follows drops the revoked row; the record
+		// alone carries the cleanup from here, and a waiting ledger is not
+		// rewritten.
+		writeUserCleanupAuthorization(t, dataDir, userCleanupRow("opencode", userCleanupSIDB, home+"b"))
+		path := enterpriseHookUserCleanupPath(dataDir)
+		before, _ := os.ReadFile(path)
+		log.Reset()
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now.Add(time.Minute)); err != nil {
+			t.Fatalf("second reconcile: %v", err)
+		}
+		after, _ := os.ReadFile(path)
+		if !bytes.Equal(before, after) || log.Len() != 0 {
+			t.Fatalf("waiting ledger rewritten or logged again: log=%q", log.String())
+		}
+
+		signedIn = true
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now.Add(2*time.Minute)); err != nil {
+			t.Fatalf("sign-in reconcile: %v", err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("completed cleanup ledger remains: %v", err)
+		}
+		if calls != 3 || !strings.Contains(log.String(), "removed DefenseClaw registration devin/"+userCleanupSIDA) {
+			t.Fatalf("calls=%d log=%q", calls, log.String())
+		}
+	})
 }
 
 func TestRunEnterpriseHookUserCleanupsKeepsSignedOutAndFailedUsers(t *testing.T) {
@@ -242,69 +306,6 @@ func writeUserCleanupAuthorization(t *testing.T, dataDir string, rows ...enterpr
 	}
 	if err := os.WriteFile(filepath.Join(dir, hookGuardianAuthorizationFile), body, 0o640); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// The guardian records a signed-out revoked user's cleanup before its state
-// publication drops the row, keeps it until the user signs in, and removes
-// the record once the cleanup succeeds.
-func TestReconcileEnterpriseHookUserCleanupsRecordsSignedOutUsersUntilSignIn(t *testing.T) {
-	dataDir := useUserCleanupStateDir(t)
-	home := filepath.Join(t.TempDir(), "alice")
-	writeUserCleanupAuthorization(t, dataDir,
-		userCleanupRow("devin", userCleanupSIDA, home),
-		userCleanupRow("opencode", userCleanupSIDB, home+"b"),
-	)
-	manifest := userCleanupManifest([2]string{"opencode", userCleanupSIDB})
-	signedIn := false
-	calls := 0
-	attempt := func(_ context.Context, entry enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
-		calls++
-		if entry.Connector != "devin" || entry.SID != userCleanupSIDA || entry.UserHome != home {
-			t.Fatalf("unexpected cleanup %+v", entry)
-		}
-		if signedIn {
-			return enterpriseHookUserCleanupDone, nil
-		}
-		return enterpriseHookUserCleanupPending, nil
-	}
-	var log bytes.Buffer
-	now := time.Now()
-	if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now); err != nil {
-		t.Fatalf("first reconcile: %v", err)
-	}
-	pending, err := loadEnterpriseHookUserCleanups(dataDir)
-	if err != nil || len(pending) != 1 || pending[0].Connector != "devin" || pending[0].SID != userCleanupSIDA {
-		t.Fatalf("recorded cleanups = %+v, %v", pending, err)
-	}
-	if !strings.Contains(log.String(), "recorded for cleanup at next sign-in") {
-		t.Fatalf("log = %q", log.String())
-	}
-
-	// The state publication that follows drops the revoked row; the record
-	// alone carries the cleanup from here, and a waiting ledger is not
-	// rewritten.
-	writeUserCleanupAuthorization(t, dataDir, userCleanupRow("opencode", userCleanupSIDB, home+"b"))
-	path := enterpriseHookUserCleanupPath(dataDir)
-	before, _ := os.ReadFile(path)
-	log.Reset()
-	if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now.Add(time.Minute)); err != nil {
-		t.Fatalf("second reconcile: %v", err)
-	}
-	after, _ := os.ReadFile(path)
-	if !bytes.Equal(before, after) || log.Len() != 0 {
-		t.Fatalf("waiting ledger rewritten or logged again: log=%q", log.String())
-	}
-
-	signedIn = true
-	if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now.Add(2*time.Minute)); err != nil {
-		t.Fatalf("sign-in reconcile: %v", err)
-	}
-	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("completed cleanup ledger remains: %v", err)
-	}
-	if calls != 3 || !strings.Contains(log.String(), "removed DefenseClaw registration devin/"+userCleanupSIDA) {
-		t.Fatalf("calls=%d log=%q", calls, log.String())
 	}
 }
 
