@@ -12,16 +12,6 @@ import (
 	"testing"
 )
 
-func TestNewHelperLoggerWithoutServiceLogUsesFallback(t *testing.T) {
-	var fallback bytes.Buffer
-	logger, closeLog := newHelperLogger("", &fallback)
-	defer closeLog()
-	logger.Info("sensor helper listening")
-	if !strings.Contains(fallback.String(), "sensor helper listening") {
-		t.Fatalf("fallback did not receive the log line: %q", fallback.String())
-	}
-}
-
 // A log that cannot be opened must not stop the helper: the gateway service
 // depends on it, so refusing to start would take managed hooks down too.
 func TestNewHelperLoggerKeepsRunningWhenServiceLogIsUnusable(t *testing.T) {
@@ -33,6 +23,14 @@ func TestNewHelperLoggerKeepsRunningWhenServiceLogIsUnusable(t *testing.T) {
 	if !strings.Contains(output, "sensor helper log is unavailable") ||
 		!strings.Contains(output, "sensor helper exited") {
 		t.Fatalf("fallback did not report the unusable log and later lines: %q", output)
+	}
+	// Without a service log the fallback gets the lines directly.
+	fallback.Reset()
+	logger, closeFallback := newHelperLogger("", &fallback)
+	defer closeFallback()
+	logger.Info("sensor helper listening")
+	if !strings.Contains(fallback.String(), "sensor helper listening") {
+		t.Fatalf("fallback did not receive the log line: %q", fallback.String())
 	}
 }
 

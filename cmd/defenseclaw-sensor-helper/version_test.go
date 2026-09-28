@@ -75,9 +75,6 @@ func TestVersionFlagPrintsTheBuildAndExits(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("--version wrote to stderr: %q", stderr)
 	}
-}
-
-func TestVersionStringNamesTheStampedBuild(t *testing.T) {
 	defer func(v, c string) { version, commit = v, c }(version, commit)
 	version, commit = "9.9.11", "438bd2fb"
 	if got, want := versionString(), "defenseclaw-sensor-helper version 9.9.11 (commit=438bd2fb)"; got != want {
@@ -85,18 +82,21 @@ func TestVersionStringNamesTheStampedBuild(t *testing.T) {
 	}
 }
 
-// Every release build of the helper stamps the version and commit that
-// --version and the "sensor helper starting" log line report.
-func TestReleaseBuildsStampTheHelperVersionAndCommit(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", ".goreleaser.yaml"))
-	if err != nil {
-		t.Fatal(err)
+// Every build of the helper stamps the version and commit that --version and
+// the "sensor helper starting" log line report: each goreleaser build, and
+// the macOS standalone pkg, which builds its own binaries.
+func TestHelperBuildsStampTheVersionAndCommit(t *testing.T) {
+	read := func(parts ...string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(append([]string{"..", ".."}, parts...)...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A Windows checkout has CRLF line endings.
+		return strings.ReplaceAll(string(data), "\r\n", "\n")
 	}
-	// A Windows checkout has CRLF line endings.
-	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	builds := regexp.MustCompile(`(?m)^  - id: `).Split(text, -1)
 	found := 0
-	for _, build := range builds {
+	for _, build := range regexp.MustCompile(`(?m)^  - id: `).Split(read(".goreleaser.yaml"), -1) {
 		if !strings.Contains(build, "main: ./cmd/defenseclaw-sensor-helper\n") {
 			continue
 		}
@@ -110,26 +110,10 @@ func TestReleaseBuildsStampTheHelperVersionAndCommit(t *testing.T) {
 	if found == 0 {
 		t.Fatal(".goreleaser.yaml has no defenseclaw-sensor-helper build")
 	}
-}
-
-// The macOS standalone pkg builds its own binaries: the helper gets the same
-// version and commit stamp as the gateway and hook.
-func TestMacOSEnterprisePkgStampsTheHelperVersionAndCommit(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "build-macos-enterprise-pkg.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	flags := regexp.MustCompile(`(?m)^\s*version_flags="([^"]*)"`).FindStringSubmatch(text)
-	if flags == nil {
-		t.Fatal("build-macos-enterprise-pkg.sh sets no version_flags")
-	}
-	for _, stamp := range []string{"-X main.version=", "-X main.commit="} {
-		if !strings.Contains(flags[1], stamp) {
-			t.Errorf("version_flags %q lacks %s", flags[1], stamp)
-		}
-	}
-	if !strings.Contains(text, `build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"`) {
-		t.Error("the pkg builds defenseclaw-sensor-helper without version_flags")
+	pkg := read("scripts", "build-macos-enterprise-pkg.sh")
+	flags := regexp.MustCompile(`(?m)^\s*version_flags="([^"]*)"`).FindStringSubmatch(pkg)
+	if flags == nil || !strings.Contains(flags[1], "-X main.version=") || !strings.Contains(flags[1], "-X main.commit=") ||
+		!strings.Contains(pkg, `build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"`) {
+		t.Errorf("build-macos-enterprise-pkg.sh does not stamp the helper: version_flags=%q", flags)
 	}
 }

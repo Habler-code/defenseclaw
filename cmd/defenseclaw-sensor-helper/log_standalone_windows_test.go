@@ -54,14 +54,10 @@ func TestStandaloneSensorHelperServiceLogPath(t *testing.T) {
 	if got := standaloneSensorHelperServiceLogPath(); got != want || *created != "" {
 		t.Fatalf("reuse: path=%q created=%q", got, *created)
 	}
-}
 
-func TestStandaloneSensorHelperServiceLogPathLeavesOtherHelpersAlone(t *testing.T) {
-	logDir := t.TempDir()
-	stubStandaloneLog(t, true, logDir)
-
+	// Other helpers keep their log: the Secure Client helper, an explicit
+	// service log, a console run and an untrusted log root derive none.
 	t.Setenv(managed.EnterpriseProfileEnv, "")
-	t.Setenv(windowsServiceLogEnv, "")
 	if got := standaloneSensorHelperServiceLogPath(); got != "" {
 		t.Fatalf("Secure Client helper got a derived log %q", got)
 	}
