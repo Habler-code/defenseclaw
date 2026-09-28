@@ -256,6 +256,49 @@ func adminOwnedFile(info os.FileInfo) bool {
 	return ok && stat.Uid == 0 && info.Mode().Perm()&0o022 == 0
 }
 
+// systemBoundFile reports an administrator-owned file (adminOwnedFile) the
+// guard may bind by kind only. Where the kernel lets a user hard-link a file
+// they do not own (macOS always; Linux with fs.protected_hardlinks off), a
+// user can hard-link root-owned programs into their own folder and swap one
+// for another under the same name, so the file must also be named from a
+// folder chain root owns that no one else can write; otherwise it is bound
+// by content.
+func systemBoundFile(path string, info os.FileInfo) bool {
+	if !adminOwnedFile(info) {
+		return false
+	}
+	if !userHardLinksAllowed() {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	for dir := filepath.Dir(resolved); ; dir = filepath.Dir(dir) {
+		folder, err := os.Lstat(dir)
+		if err != nil || !folder.IsDir() {
+			return false
+		}
+		stat, ok := folder.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != 0 || folder.Mode().Perm()&0o022 != 0 {
+			return false
+		}
+		if dir == filepath.Dir(dir) {
+			return true
+		}
+	}
+}
+
+// userHardLinksAllowed reports whether a user may hard-link a file another
+// account owns. A seam for tests.
+var userHardLinksAllowed = func() bool {
+	if runtimeGOOS() == "darwin" {
+		return true
+	}
+	data, err := os.ReadFile("/proc/sys/fs/protected_hardlinks")
+	return err == nil && strings.TrimSpace(string(data)) == "0"
+}
+
 // publishedFileProblem describes how a policy file DefenseClaw published
 // differs from the mode and owner atomicWrite gives it: 0644 (every user's
 // agent must read machine policy), and root-owned when DefenseClaw runs as

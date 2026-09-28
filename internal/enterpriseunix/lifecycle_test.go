@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -587,6 +588,29 @@ func TestGuardianPathsDropinCoversHomeRootsAndMachinePolicy(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionUninstall}))
 	if exists(h.env.P("/etc/codex")) || exists(h.env.P("/etc/opencode")) || exists(h.env.P("/etc/claude-code")) {
 		t.Fatal("uninstall kept an empty machine-policy parent it created")
+	}
+}
+
+// Copilot's machine policy lives two folders deep (/etc/github-copilot/
+// policy.d): uninstall removes both folders it created, the deeper one
+// first, instead of leaving an empty /etc/github-copilot behind.
+func TestUninstallRemovesTheCopilotPolicyFoldersItCreated(t *testing.T) {
+	h := newTestHost(t, "linux")
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	body := string(DefaultConfig(h.env.Layout)) + "  connectors:\n    copilot: {}\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
+	record, _ := h.env.loadDeployment()
+	for _, dir := range []string{"/etc/github-copilot", "/etc/github-copilot/policy.d"} {
+		if !slices.Contains(record.CreatedDirs, dir) || !exists(h.env.P(dir)) {
+			t.Fatalf("install did not create and record %s: %v", dir, record.CreatedDirs)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	if exists(h.env.P("/etc/github-copilot")) {
+		t.Fatal("uninstall kept the empty /etc/github-copilot it created")
 	}
 }
 

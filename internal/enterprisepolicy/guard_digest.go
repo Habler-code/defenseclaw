@@ -446,7 +446,9 @@ func unboundState(state string) string {
 // not invalidate approvals; a user cannot change it. A user can point a
 // symbolic link of their own at another administrator-owned file, though,
 // so when the path crosses such a link (the file itself or a folder above
-// it) the link targets are bound as well.
+// it) the link targets are bound as well. Where users may hard-link files
+// they do not own (macOS), a root-owned file named from a folder a user
+// controls is bound by content (systemBoundFile).
 func (s *guardScan) fileState(path string) string {
 	info, err := os.Stat(path)
 	switch {
@@ -458,7 +460,7 @@ func (s *guardScan) fileState(path string) string {
 		return "directory"
 	case !info.Mode().IsRegular():
 		return "special:" + info.Mode().Type().String()
-	case adminOwnedFile(info):
+	case systemBoundFile(path, info):
 		if targets := userLinkTargets(path); len(targets) > 0 {
 			return "system:links:" + strings.Join(targets, "\x00")
 		}
@@ -552,7 +554,7 @@ func (s *guardScan) treeDigest(root string) (string, error) {
 	var walk func(dir, rel string, depth int) error
 	walk = func(dir, rel string, depth int) error {
 		if depth > guardPluginTreeDepth {
-			return fmt.Errorf("%s is nested more than %d directories deep", root, guardPluginTreeDepth)
+			return guardLimit("%s is nested more than %d directories deep", root, guardPluginTreeDepth)
 		}
 		entries, _, err := s.readDir(dir)
 		if err != nil {
@@ -561,7 +563,7 @@ func (s *guardScan) treeDigest(root string) (string, error) {
 		for _, entry := range entries {
 			count++
 			if count > guardPluginTreeLimit {
-				return fmt.Errorf("%s holds more than %d entries", root, guardPluginTreeLimit)
+				return guardLimit("%s holds more than %d entries", root, guardPluginTreeLimit)
 			}
 			name := rel + "/" + entry.Name()
 			path := filepath.Join(dir, entry.Name())
@@ -579,7 +581,7 @@ func (s *guardScan) treeDigest(root string) (string, error) {
 				}
 			case info.Mode().IsRegular():
 				if info.Size() > guardReferencedFileLimit {
-					return fmt.Errorf("%s is larger than %d bytes", path, guardReferencedFileLimit)
+					return guardLimit("%s is larger than %d bytes", path, guardReferencedFileLimit)
 				}
 				sum, err := s.hashFile(path, info)
 				if err != nil {

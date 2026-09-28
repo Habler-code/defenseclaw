@@ -628,6 +628,73 @@ func TestSessionStateBlocksWhenTheSessionStartScanStopsOnABudget(t *testing.T) {
 	})
 }
 
+// A folder over its entry limit or a hook file over its size limit stops
+// the scan of that source, and the agent may still have loaded a hook past
+// the limit: like a budget stop, the session start blocks the session and
+// its agent process until the agent restarts, instead of denying only that
+// call. A file that is merely unreadable or unparsable still denies only the
+// call.
+func TestSessionStateBlocksWhenASourceStopsOnItsLimit(t *testing.T) {
+	sessionStores(t, func(t *testing.T, h *sessionHarness) {
+		hook := `{"hooks": {"preToolUse": [{"type": "command", "bash": "./rewrite-args.sh"}]}}`
+		for name, plant := range map[string]func(req GuardRequest) []string{
+			"folder entry limit": func(req GuardRequest) []string {
+				dir := filepath.Join(req.Home, ".copilot", "hooks")
+				var planted []string
+				for i := 0; i < guardDirEntryLimit; i++ {
+					path := filepath.Join(dir, fmt.Sprintf("f%03d.json", i))
+					writeFile(t, path, `{"hooks": {}}`)
+					planted = append(planted, path)
+				}
+				path := filepath.Join(dir, "zz-rewrite.json")
+				writeFile(t, path, hook)
+				return append(planted, path)
+			},
+			"file size limit": func(req GuardRequest) []string {
+				path := filepath.Join(req.Home, ".copilot", "hooks", "rewrite.json")
+				writeFile(t, path, hook+strings.Repeat(" ", guardFileLimit))
+				return []string{path}
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				req := guardRequest(t, "copilot", config.ForeignHooksRemove)
+				if err := os.MkdirAll(req.WorkingDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				planted := plant(req)
+				start := EvaluateForeignHooks(req)
+				if !start.Deny || !start.Incomplete || hasBlockableFindings(start) {
+					t.Fatalf("premise: the limit stops the scan of that source: %+v", start)
+				}
+				h.process = runtime.GOOS + "::" + name
+				session := "s-" + strings.ReplaceAll(name, " ", "-")
+				if got := h.apply(session, true, start); !got.Deny || !strings.Contains(got.Reason, "restart the agent") {
+					t.Fatalf("a session start that met a limit must block the session: %+v", got)
+				}
+				for _, path := range planted {
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				clean := EvaluateForeignHooks(req)
+				if clean.Deny {
+					t.Fatalf("premise: the cleared files scan clean: %+v", clean)
+				}
+				if later := h.apply(session, false, clean); !later.Deny || !strings.Contains(later.Reason, "restart the agent") {
+					t.Fatalf("a later call of the session must stay blocked: %+v", later)
+				}
+			})
+		}
+
+		// An unparsable file denies the call but is no limit stop.
+		req := guardRequest(t, "copilot", config.ForeignHooksRemove)
+		writeFile(t, filepath.Join(req.Home, ".copilot", "hooks", "broken.json"), `{"hooks": `)
+		if broken := EvaluateForeignHooks(req); !broken.Deny || broken.Incomplete {
+			t.Fatalf("an unparsable hook file must deny the call without marking the scan incomplete: %+v", broken)
+		}
+	})
+}
+
 func newGatewaySessionHarness(t *testing.T) *sessionHarness {
 	h := newSessionHarness(t)
 	h.now = time.Now().UTC()

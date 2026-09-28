@@ -706,6 +706,9 @@ func openGuardFileFollow(path string) (*os.File, error) {
 // by content.
 func adminOwnedFile(os.FileInfo) bool { return false }
 
+// systemBoundFile is never true on Windows (adminOwnedFile).
+func systemBoundFile(string, os.FileInfo) bool { return false }
+
 // publishedFileProblem is "" on Windows: atomicWrite gives a policy file its
 // protected DACL on every write, and mode bits do not apply.
 func publishedFileProblem(Options, string) string { return "" }

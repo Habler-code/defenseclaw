@@ -747,6 +747,38 @@ func findingFor(req GuardRequest, source hookSource, event, command string, dige
 	return finding
 }
 
+// guardLimitError is a per-file, per-folder or per-plugin-tree limit the
+// scan stopped on. Unlike a file that cannot be read or parsed, such a
+// source can hold hooks past the limit that the agent still loaded, so a
+// session start that meets one is incomplete (GuardDecision.Incomplete),
+// like a stop on the scan's overall budget.
+type guardLimitError struct{ err error }
+
+func (e *guardLimitError) Error() string { return e.err.Error() }
+
+func (e *guardLimitError) Unwrap() error { return e.err }
+
+func guardLimit(format string, args ...any) error {
+	return &guardLimitError{err: fmt.Errorf(format, args...)}
+}
+
+// isGuardLimit reports whether err is a limit stop (guardLimitError, or a
+// file over its read limit).
+func isGuardLimit(err error) bool {
+	var limit *guardLimitError
+	var read *readLimitError
+	return errors.As(err, &limit) || errors.As(err, &read)
+}
+
+// unreadable is unreadableFinding for a source of this scan; a limit stop
+// marks the scan as incomplete.
+func (s *guardScan) unreadable(source hookSource, err error) Finding {
+	if isGuardLimit(err) {
+		s.limited = true
+	}
+	return unreadableFinding(s.req, source, err)
+}
+
 // unreadableFinding reports a source the guard cannot verify. It is never
 // approvable: allowlisting "this path could not be read" would admit
 // whatever the path later holds.
@@ -789,7 +821,7 @@ func (s *guardScan) scanJSONHooks(source hookSource, data []byte) []Finding {
 	req := s.req
 	doc, _, err := decodeGuardDocument(data)
 	if err != nil {
-		return []Finding{unreadableFinding(req, source, err)}
+		return []Finding{s.unreadable(source, err)}
 	}
 	hooks := doc
 	if source.format != formatHooksObject {
@@ -827,7 +859,7 @@ func (s *guardScan) scanCodexTOML(source hookSource, data []byte) []Finding {
 	req := s.req
 	cfg := map[string]any{}
 	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return []Finding{unreadableFinding(req, source, err)}
+		return []Finding{s.unreadable(source, err)}
 	}
 	hooks, _ := cfg["hooks"].(map[string]any)
 	events := make([]string, 0, len(hooks))
@@ -884,6 +916,9 @@ type guardScan struct {
 	hashed     int64
 	references int
 	exceeded   error
+	// limited is set when a source stopped on a per-file, per-folder or
+	// per-plugin-tree limit (guardLimitError).
+	limited bool
 }
 
 func newGuardScan(req GuardRequest) *guardScan { return &guardScan{req: req} }
@@ -911,7 +946,7 @@ func (s *guardScan) readFile(path string) ([]byte, bool, error) {
 func (s *guardScan) readSource(source hookSource) ([]byte, bool, error) {
 	if source.inline != nil {
 		if len(source.inline) > guardFileLimit {
-			return nil, true, fmt.Errorf("%s exceeds %d bytes", source.path, guardFileLimit)
+			return nil, true, guardLimit("%s exceeds %d bytes", source.path, guardFileLimit)
 		}
 		return source.inline, true, s.check()
 	}
@@ -943,7 +978,7 @@ func (s *guardScan) readDir(path string) ([]fs.DirEntry, bool, error) {
 	}
 	entries, exists, err := readGuardDir(path)
 	if err == nil && len(entries) > guardDirEntryLimit {
-		err = fmt.Errorf("%s has more than %d entries", path, guardDirEntryLimit)
+		err = guardLimit("%s has more than %d entries", path, guardDirEntryLimit)
 	}
 	if err == nil {
 		err = s.check()
@@ -955,7 +990,7 @@ func (s *guardScan) scanPluginDir(source hookSource) []Finding {
 	req := s.req
 	entries, exists, err := s.readDir(source.path)
 	if err != nil {
-		return []Finding{unreadableFinding(req, source, err)}
+		return []Finding{s.unreadable(source, err)}
 	}
 	if !exists {
 		return nil
@@ -971,12 +1006,12 @@ func (s *guardScan) scanPluginDir(source hookSource) []Finding {
 		if entry.IsDir() {
 			digest, err := s.treeDigest(path)
 			if err != nil {
-				findings = append(findings, unreadableFinding(req, child, err))
+				findings = append(findings, s.unreadable(child, err))
 			} else {
 				findings = append(findings, findingFor(req, child, "", name, digest, "plugin directory"))
 			}
 		} else if data, _, err := s.readFile(path); err != nil {
-			findings = append(findings, unreadableFinding(req, child, err))
+			findings = append(findings, s.unreadable(child, err))
 		} else {
 			findings = append(findings, findingFor(req, child, "", name, sha256Hex(data), "plugin"))
 		}
@@ -991,7 +1026,7 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 	req := s.req
 	doc, _, err := decodeGuardDocument(data)
 	if err != nil {
-		return []Finding{unreadableFinding(req, source, err)}
+		return []Finding{s.unreadable(source, err)}
 	}
 	value, _ := doc.get("plugin")
 	list, _ := value.([]any)
@@ -1092,7 +1127,7 @@ func (s *guardScan) scan(stopAtBlocking bool) []Finding {
 		var found []Finding
 		switch {
 		case source.err != nil:
-			found = []Finding{unreadableFinding(req, source, source.err)}
+			found = []Finding{s.unreadable(source, source.err)}
 		case source.format == formatFlatDir:
 			found = s.scanFlatDir(source)
 		case source.format == formatPluginDir:
@@ -1111,10 +1146,9 @@ func (s *guardScan) scan(stopAtBlocking bool) []Finding {
 }
 
 func (s *guardScan) scanFlatDir(source hookSource) []Finding {
-	req := s.req
 	entries, exists, err := s.readDir(source.path)
 	if err != nil {
-		return []Finding{unreadableFinding(req, source, err)}
+		return []Finding{s.unreadable(source, err)}
 	}
 	if !exists {
 		return nil
@@ -1134,10 +1168,9 @@ func (s *guardScan) scanFlatDir(source hookSource) []Finding {
 }
 
 func (s *guardScan) scanFile(source hookSource) []Finding {
-	req := s.req
 	data, exists, err := s.readSource(source)
 	if err != nil {
-		return []Finding{unreadableFinding(req, source, err)}
+		return []Finding{s.unreadable(source, err)}
 	}
 	if !exists || len(bytes.TrimSpace(data)) == 0 {
 		return nil
@@ -1162,7 +1195,7 @@ func EvaluateForeignHooks(req GuardRequest) GuardDecision {
 	stopAtBlocking := req.StopAtFirstBlocking && req.Policy.ForeignHooks == config.ForeignHooksRemove
 	scan := newGuardScan(req)
 	decision := GuardDecision{Findings: scan.scan(stopAtBlocking)}
-	decision.Incomplete = scan.exceeded != nil
+	decision.Incomplete = scan.exceeded != nil || scan.limited
 	var blocking []Finding
 	for _, finding := range decision.Findings {
 		if !finding.Allowed {

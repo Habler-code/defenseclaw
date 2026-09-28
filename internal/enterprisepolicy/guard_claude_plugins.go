@@ -67,14 +67,14 @@ func (s *guardScan) scanClaudePlugins(source hookSource) []Finding {
 	registrySource := source.child(filepath.Join(claudeDir, "plugins", "installed_plugins.json"), formatClaudePlugins)
 	registryData, exists, err := s.readFileLimit(registrySource.path, claudePluginRegistryLimit)
 	if err != nil {
-		return []Finding{unreadableFinding(req, registrySource, err)}
+		return []Finding{s.unreadable(registrySource, err)}
 	}
 	if !exists {
 		return nil
 	}
 	installs, err := claudePluginInstallPaths(registryData)
 	if err != nil {
-		return []Finding{unreadableFinding(req, registrySource, err)}
+		return []Finding{s.unreadable(registrySource, err)}
 	}
 	var findings []Finding
 	for _, id := range enabled {
@@ -136,7 +136,7 @@ func (s *guardScan) scanClaudePluginRoot(enabling hookSource, id, root string) [
 	case errors.Is(err, os.ErrNotExist):
 		return nil
 	case err != nil:
-		return []Finding{unreadableFinding(req, rootSource, err)}
+		return []Finding{s.unreadable(rootSource, err)}
 	case info.Mode()&os.ModeSymlink != 0:
 		return []Finding{unreadableFinding(req, rootSource, fmt.Errorf("plugin %s install path is a symbolic link", id))}
 	case !info.IsDir():
@@ -150,12 +150,12 @@ func (s *guardScan) scanClaudePluginRoot(enabling hookSource, id, root string) [
 	var findings []Finding
 	manifest, exists, err := s.readFile(manifestSource.path)
 	if err != nil {
-		return []Finding{unreadableFinding(req, manifestSource, err)}
+		return []Finding{s.unreadable(manifestSource, err)}
 	}
 	if exists {
 		doc, _, err := decodeGuardDocument(manifest)
 		if err != nil {
-			return []Finding{unreadableFinding(req, manifestSource, err)}
+			return []Finding{s.unreadable(manifestSource, err)}
 		}
 		hooksValue, _ := doc.get("hooks")
 		switch v := hooksValue.(type) {
@@ -179,7 +179,7 @@ func (s *guardScan) scanClaudePluginRoot(enabling hookSource, id, root string) [
 			}
 			rendered, err := encodeOrdered(inline)
 			if err != nil {
-				return []Finding{unreadableFinding(req, manifestSource, err)}
+				return []Finding{s.unreadable(manifestSource, err)}
 			}
 			findings = append(findings, s.scanJSONHooks(manifestSource, rendered)...)
 		default:

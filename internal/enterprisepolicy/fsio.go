@@ -34,10 +34,18 @@ func readBounded(file *os.File, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s exceeds %d bytes", file.Name(), limit)
+		return nil, &readLimitError{path: file.Name(), limit: limit}
 	}
 	return data, nil
 }
+
+// readLimitError reports a file larger than the limit its reader allows.
+type readLimitError struct {
+	path  string
+	limit int64
+}
+
+func (e *readLimitError) Error() string { return fmt.Sprintf("%s exceeds %d bytes", e.path, e.limit) }
 
 // untrustedPolicyFileError reports an existing policy file that fails the
 // administrator-ownership rules.
