@@ -5282,8 +5282,10 @@ function Get-ConnectorToolName {
 }
 
 function Test-ObsoleteWindowsHookGuidance([string]$Text) {
+    # A shell script name, not a member name such as the OpenCode plugin
+    # client.tui.showToast.
+    if ([regex]::IsMatch($Text, [string]::Concat('(?i)\.', 's', 'h', '\b'))) { return $true }
     $terms = @(
-        [string]::Concat('.', 's', 'h'),
         [string]::Concat('b', 'a', 's', 'h'),
         [string]::Concat('w', 's', 'l'),
         [string]::Concat('c', 'h', 'm', 'o', 'd')
