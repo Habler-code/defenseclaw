@@ -162,6 +162,15 @@ type SetupOpts struct {
 
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
+
+	// ClaudeCodeAllowUnmanagedHooks is the administrator opt-out
+	// (claude_code.allow_unmanaged_hooks) from the managed-hooks-only lock.
+	// By default the machine-managed Claude Code policy sets
+	// allowManagedHooksOnly=true so user, project, local and plugin hooks
+	// cannot run beside DefenseClaw's managed hooks. It has no effect on
+	// per-user hook registrations.
+	ClaudeCodeAllowUnmanagedHooks bool
+
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
