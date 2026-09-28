@@ -20,6 +20,8 @@ async function renderAmpPlugin(values = {}) {
 		.replaceAll("{{.HookSocketJS}}", values.hookSocket ?? "")
 		.replaceAll("{{.ServiceUID}}", values.serviceUID ?? "0")
 		.replaceAll("{{.ForeignHookGuardJS}}", values.foreignGuard ?? "")
+		.replaceAll("{{.InstallMarkerJS}}", values.installMarker ?? "")
+		.replaceAll("{{.ListenerProofJS}}", values.listenerProof ?? "")
 	assert.ok(!rendered.includes("{{."), "rendered plugin retains a template placeholder")
 	const path = join(mkdtempSync(join(tmpdir(), "dc-amp-plugin-")), "amp-plugin.ts")
 	writeFileSync(path, rendered)
@@ -305,47 +307,32 @@ function fakeGuard(answers) {
 	return { guard, dir }
 }
 
-test("standalone installs block tool calls while the foreign-hook guard denies", { skip: process.platform === "win32" }, async () => {
-	const { guard, dir } = fakeGuard(['{"deny":true,"reason":"enterprise_foreign_hook_blocked: The project file /work/repo/.amp/plugins/x.ts adds a plugin"}'])
+test("a foreign-hook guard denial at load blocks every tool call of the process", { skip: process.platform === "win32" }, async () => {
+	// The load check denies; later checks would allow (the plugin was deleted),
+	// but the block found at load holds for the process.
+	const { guard, dir } = fakeGuard(['{"deny":true,"reason":"enterprise_foreign_hook_blocked: The project file /work/repo/.amp/plugins/x.ts adds a plugin"}', '{"deny":false}'])
 	const plugin = await renderAmpPlugin({ foreignGuard: guard })
 	const { handlers, amp, ctx } = fakeAmp("T-guard")
+	const originalBun = globalThis.Bun
 	const originalFetch = globalThis.fetch
 	let fetches = 0
+	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }) }
 	globalThis.fetch = async () => {
 		fetches++
 		return { ok: true, json: async () => ({ action: "allow" }) }
 	}
 	try {
 		plugin(amp)
-		const result = await handlers.get("tool.call")({ thread: { id: "T-guard" }, toolUseID: "TU-g", tool: "Bash", input: {} }, ctx)
-		assert.equal(result.action, "reject-and-continue")
-		assert.match(result.message, /\.amp\/plugins\/x\.ts/)
+		for (const id of ["TU-1", "TU-2"]) {
+			const result = await handlers.get("tool.call")({ thread: { id: "T-guard" }, toolUseID: id, tool: "Bash", input: {} }, ctx)
+			assert.equal(result.action, "reject-and-continue")
+			assert.match(result.message, /\.amp\/plugins\/x\.ts/)
+		}
 		assert.equal(fetches, 0, "a guard denial must not reach the gateway")
 		assert.match(readFileSync(join(dir, "args"), "utf8"), /hook --connector amp --foreign-hook-check/)
-		// The check at load (before any tool call) already denied.
 		const loadRequest = JSON.parse(readFileSync(join(dir, "request-0"), "utf8"))
 		assert.equal(loadRequest.cwd, "/work/repo")
 		assert.equal(loadRequest.hook_event_name, "session.load")
-	} finally {
-		globalThis.fetch = originalFetch
-	}
-})
-
-test("a foreign plugin found at load keeps blocking after it is deleted", { skip: process.platform === "win32" }, async () => {
-	const { guard } = fakeGuard(['{"deny":true,"reason":"blocked at load"}', '{"deny":false}'])
-	const plugin = await renderAmpPlugin({ foreignGuard: guard })
-	const { handlers, amp, ctx } = fakeAmp("T-sticky")
-	const originalBun = globalThis.Bun
-	const originalFetch = globalThis.fetch
-	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }) }
-	globalThis.fetch = async () => ({ ok: true, json: async () => ({ action: "allow" }) })
-	try {
-		plugin(amp)
-		for (const id of ["TU-1", "TU-2"]) {
-			const result = await handlers.get("tool.call")({ thread: { id: "T-sticky" }, toolUseID: id, tool: "Bash", input: {} }, ctx)
-			assert.equal(result.action, "reject-and-continue")
-			assert.equal(result.message, "blocked at load")
-		}
 	} finally {
 		globalThis.fetch = originalFetch
 		if (originalBun === undefined) delete globalThis.Bun

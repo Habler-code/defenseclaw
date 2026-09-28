@@ -62,52 +62,33 @@ class MigrateRawConfigTests(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertIn(repr(f"observability.connectors.{RETIRED}"), notices[0])
 
-    def test_connector_hooks_map_is_renamed(self):
+    def test_connector_settings_and_lists_are_renamed(self):
         raw = {"guardrail": {"connector": DEVIN}, "connector_hooks": {RETIRED: {"enabled": True, "mode": "action"}}}
         notices = legacy_connector.migrate_raw_config(raw, "/etc/dc/config.yaml")
         self.assertEqual(raw["connector_hooks"], {DEVIN: {"enabled": True, "mode": "action"}})
         self.assertEqual(len(notices), 1)
         self.assertIn("connector_hooks of /etc/dc/config.yaml", notices[0])
-
-    def test_connector_hooks_keeps_an_explicit_devin_entry(self):
-        raw = {"connector_hooks": {DEVIN: {"mode": "observe"}, RETIRED: {"mode": "action"}}}
-        notices = legacy_connector.migrate_raw_config(raw)
-        self.assertEqual(raw["connector_hooks"], {DEVIN: {"mode": "observe"}})
-        self.assertIn(repr(f"connector_hooks.{RETIRED}"), notices[0])
-
-    def test_judge_hook_connectors_list_is_renamed_once(self):
-        raw = {"guardrail": {"judge": {"enabled": True, "hook_connectors": ["codex", RETIRED, DEVIN]}}}
-        notices = legacy_connector.migrate_raw_config(raw)
-        self.assertEqual(raw["guardrail"]["judge"]["hook_connectors"], ["codex", DEVIN])
-        self.assertIn("guardrail.judge.hook_connectors", notices[0])
-
-    def test_application_protection_include_connectors_is_renamed(self):
-        raw = {"application_protection": {"include_connectors": [RETIRED, "cursor"]}}
-        notices = legacy_connector.migrate_raw_config(raw)
-        self.assertEqual(raw["application_protection"]["include_connectors"], [DEVIN, "cursor"])
-        self.assertIn("application_protection.include_connectors", notices[0])
-
-    def test_application_protection_exclude_connectors_is_renamed(self):
-        raw = {"application_protection": {"exclude_connectors": [RETIRED.capitalize(), RETIRED]}}
-        notices = legacy_connector.migrate_raw_config(raw)
-        self.assertEqual(raw["application_protection"]["exclude_connectors"], [DEVIN])
-        self.assertIn("application_protection.exclude_connectors", notices[0])
-
-    def test_notice_names_every_moved_setting_in_the_go_order(self):
+        # An explicit devin entry wins, and each list names devin once.
         raw = {
-            "claw": {"mode": RETIRED},
-            "guardrail": {"connector": RETIRED, "judge": {"hook_connectors": [RETIRED]}},
-            "connector_hooks": {RETIRED: {}},
+            "connector_hooks": {DEVIN: {"mode": "observe"}, RETIRED: {"mode": "action"}},
+            "guardrail": {"judge": {"enabled": True, "hook_connectors": ["codex", RETIRED, DEVIN]}},
+            "application_protection": {
+                "include_connectors": [RETIRED, "cursor"],
+                "exclude_connectors": [RETIRED.capitalize(), RETIRED],
+            },
         }
-        notices = legacy_connector.migrate_raw_config(raw, "config.yaml")
-        self.assertIn(
-            "in guardrail.connector, claw.mode, connector_hooks, guardrail.judge.hook_connectors of config.yaml",
-            notices[0],
-        )
+        notices = "\n".join(legacy_connector.migrate_raw_config(raw))
+        self.assertEqual(raw["connector_hooks"], {DEVIN: {"mode": "observe"}})
+        self.assertEqual(raw["guardrail"]["judge"]["hook_connectors"], ["codex", DEVIN])
+        self.assertEqual(raw["application_protection"]["include_connectors"], [DEVIN, "cursor"])
+        self.assertEqual(raw["application_protection"]["exclude_connectors"], [DEVIN])
+        for setting in (repr(f"connector_hooks.{RETIRED}"), "guardrail.judge.hook_connectors",
+                        "application_protection.include_connectors", "application_protection.exclude_connectors"):
+            self.assertIn(setting, notices)
 
-    def test_asset_policy_rule_connectors_are_renamed(self):
+    def test_asset_policy_rules_and_route_selectors_are_renamed(self):
         raw = {
-            "guardrail": {"connector": "codex"},
+            "guardrail": {"connector": RETIRED},
             "asset_policy": {
                 "mcp": {
                     "registry": [{"name": "approved-server", "connector": RETIRED}],
@@ -115,16 +96,6 @@ class MigrateRawConfigTests(unittest.TestCase):
                 },
                 "skill": {"allowed": [{"name": "marker-skill", "connector": "codex"}]},
             },
-        }
-        notices = legacy_connector.migrate_raw_config(raw, "config.yaml")
-        self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["connector"], DEVIN)
-        self.assertEqual(raw["asset_policy"]["mcp"]["denied"][0]["connector"], DEVIN)
-        self.assertNotIn("connector", raw["asset_policy"]["mcp"]["denied"][1])
-        self.assertEqual(raw["asset_policy"]["skill"]["allowed"][0]["connector"], "codex")
-        self.assertIn("in asset_policy.mcp.registry, asset_policy.mcp.denied of config.yaml", notices[0])
-
-    def test_observability_route_selectors_are_renamed(self):
-        raw = {
             "observability": {
                 "destinations": [
                     {
@@ -136,16 +107,18 @@ class MigrateRawConfigTests(unittest.TestCase):
                     }
                 ]
             },
-            "guardrail": {"connector": RETIRED},
         }
         notices = legacy_connector.migrate_raw_config(raw, "config.yaml")
+        self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["connector"], DEVIN)
+        self.assertEqual(raw["asset_policy"]["mcp"]["denied"][0]["connector"], DEVIN)
+        self.assertNotIn("connector", raw["asset_policy"]["mcp"]["denied"][1])
+        self.assertEqual(raw["asset_policy"]["skill"]["allowed"][0]["connector"], "codex")
         routes = raw["observability"]["destinations"][0]["routes"]
         self.assertEqual(routes[0]["selector"]["connectors"], ["codex"])
         self.assertEqual(routes[1]["selector"]["connectors"], ["codex", DEVIN])
-        self.assertIn(
-            "in guardrail.connector, observability.destinations[0].routes[1].selector.connectors of config.yaml",
-            notices[0],
-        )
+        for setting in ("asset_policy.mcp.registry, asset_policy.mcp.denied",
+                        "observability.destinations[0].routes[1].selector.connectors of config.yaml"):
+            self.assertIn(setting, notices[0])
 
     def test_unaffected_config_is_untouched(self):
         raw = {"claw": {"mode": "cursor"}, "guardrail": {"connector": "cursor", "connectors": {"cursor": {}}}}
@@ -269,7 +242,7 @@ class UpgradeMigrationTests(unittest.TestCase):
         self.assertEqual(doc["observability"]["connectors"], {DEVIN: {"webhooks": []}})
         self.assertEqual(doc["observability"]["destinations"][0]["select"]["connectors"], ["codex"])
 
-    def test_migration_renames_connector_hooks_and_lists_in_place(self):
+    def test_migration_renames_connector_settings_lists_and_rules_in_place(self):
         body = (
             "# operator comment kept\n"
             "guardrail:\n  connector: codex\n  judge:\n    enabled: true\n"
@@ -278,23 +251,6 @@ class UpgradeMigrationTests(unittest.TestCase):
             f"  {RETIRED}:\n    enabled: true\n    mode: action\n"
             "application_protection:\n  include_connectors:\n    - cursor\n"
             f"    - {RETIRED}\n  exclude_connectors:\n  - '{RETIRED}'\n"
-        )
-        text, changes = self._run(body)
-        self.assertEqual(len(changes), 1)
-        self.assertIn("connector_hooks", changes[0])
-        self.assertIn("# operator comment kept", text)
-        self.assertIn("# judge comment kept", text)
-        self.assertNotIn(RETIRED, text)
-        doc = yaml.safe_load(text)
-        self.assertEqual(doc["guardrail"]["judge"]["hook_connectors"], ["codex", DEVIN])
-        self.assertEqual(doc["connector_hooks"], {DEVIN: {"enabled": True, "mode": "action"}})
-        self.assertEqual(doc["application_protection"]["include_connectors"], ["cursor", DEVIN])
-        self.assertEqual(doc["application_protection"]["exclude_connectors"], [DEVIN])
-
-    def test_migration_renames_asset_rules_and_route_selectors_in_place(self):
-        body = (
-            "# operator comment kept\n"
-            "guardrail:\n  connector: codex\n"
             "asset_policy:\n  enabled: true\n  mcp:\n    denied:\n"
             f"      - name: marker-server\n        connector: {RETIRED}  # rule comment kept\n"
             f"    registry:\n      - connector: '{RETIRED}'\n        name: approved-server\n"
@@ -304,12 +260,17 @@ class UpgradeMigrationTests(unittest.TestCase):
         )
         text, changes = self._run(body)
         self.assertEqual(len(changes), 1)
-        self.assertIn("asset_policy.mcp.registry, asset_policy.mcp.denied", changes[0])
-        self.assertIn("observability.destinations[0].routes[0].selector.connectors", changes[0])
-        self.assertIn("# operator comment kept", text)
-        self.assertIn("# rule comment kept", text)
+        for setting in ("connector_hooks", "asset_policy.mcp.registry, asset_policy.mcp.denied",
+                        "observability.destinations[0].routes[0].selector.connectors"):
+            self.assertIn(setting, changes[0])
+        for comment in ("# operator comment kept", "# judge comment kept", "# rule comment kept"):
+            self.assertIn(comment, text)
         self.assertNotIn(RETIRED, text)
         doc = yaml.safe_load(text)
+        self.assertEqual(doc["guardrail"]["judge"]["hook_connectors"], ["codex", DEVIN])
+        self.assertEqual(doc["connector_hooks"], {DEVIN: {"enabled": True, "mode": "action"}})
+        self.assertEqual(doc["application_protection"]["include_connectors"], ["cursor", DEVIN])
+        self.assertEqual(doc["application_protection"]["exclude_connectors"], [DEVIN])
         self.assertEqual(doc["asset_policy"]["mcp"]["denied"][0]["connector"], DEVIN)
         self.assertEqual(doc["asset_policy"]["mcp"]["registry"][0]["connector"], DEVIN)
         self.assertEqual(doc["observability"]["destinations"][0]["routes"][0]["selector"]["connectors"], ["codex", DEVIN])

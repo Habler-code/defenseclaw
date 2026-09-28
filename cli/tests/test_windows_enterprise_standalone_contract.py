@@ -22,6 +22,7 @@ MODULE = ROOT / "packaging" / "windows" / "DefenseClawEnterprise.psm1"
 INSTALLER = ROOT / "packaging" / "windows" / "install-enterprise.ps1"
 PER_USER_INSTALLER = ROOT / "scripts" / "install.ps1"
 WINPATH_LAYOUT = ROOT / "internal" / "winpath" / "enterprise_layout.go"
+HOOK_CONTRACTS = ROOT / "internal" / "gateway" / "connector" / "hook_contract.go"
 
 SECURE_CLIENT = "Cisco Secure Client"
 
@@ -516,3 +517,47 @@ def test_bootstrap_admits_a_hash_pinned_installed_module_by_its_recorded_digest(
     module = _text(MODULE)
     entry = module[module.index("$entryMetadata = Get-DefenseClawDeploymentMetadata -Layout $layout") :]
     assert entry.index("Initialize-DefenseClawRecordedPayloadTrust `") < 600
+
+
+# The standalone Claude client floor the module records equals the lowest
+# Claude hook contract (the Go guardian enforces the same floor).
+
+
+def _version_key(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
+
+
+def _lowest_contract(connector: str) -> str:
+    text = HOOK_CONTRACTS.read_text(encoding="utf-8")
+    start = text.index(f'\t"{connector}": {{')
+    following = re.search(r'\n\t"[a-z]+": \{', text[start + 1 :])
+    block = text[start : start + 1 + following.start()] if following else text[start:]
+    versions = re.findall(r'MinAgentVersion:\s+"([0-9.]+)"', block)
+    assert versions, f"no {connector} hook contracts found"
+    return min(versions, key=_version_key)
+
+
+def _floor_function() -> str:
+    text = MODULE.read_text(encoding="utf-8-sig")
+    match = re.search(
+        r"^function Get-DefenseClawClaudeMinimumClientVersion \{\n(.*?)^\}",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, "Get-DefenseClawClaudeMinimumClientVersion is missing"
+    return match.group(1)
+
+
+def test_standalone_claude_floor_is_the_lowest_claude_hook_contract() -> None:
+    body = _floor_function()
+    standalone = re.search(
+        r"if \(Test-DefenseClawStandaloneProfile\) \{\s*return '([0-9.]+)'", body
+    )
+    assert standalone, body
+    assert standalone.group(1) == _lowest_contract("claudecode")
+
+
+def test_secure_client_claude_floor_is_unchanged() -> None:
+    body = _floor_function()
+    returns = re.findall(r"return '([0-9.]+)'", body)
+    assert returns[-1] == "2.1.152"

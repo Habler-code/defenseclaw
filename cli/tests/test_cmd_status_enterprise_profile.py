@@ -28,37 +28,30 @@ def config_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
-def test_unmanaged_install_has_no_profile(config_file: Path) -> None:
-    config_file.write_text("config_version: 8\nenterprise:\n  profile: standalone\n")
-    assert cmd_status._enterprise_profile(SimpleNamespace(deployment_mode="")) == ""
-
-
-def test_configured_profile_is_reported(config_file: Path) -> None:
-    config_file.write_text("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
-    cfg = SimpleNamespace(deployment_mode="managed_enterprise")
-    assert cmd_status._enterprise_profile(cfg) == "standalone"
-
-
-def test_service_pin_wins(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config_file.write_text("config_version: 8\ndeployment_mode: managed_enterprise\n")
-    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "Standalone")
-    cfg = SimpleNamespace(deployment_mode="managed_enterprise")
-    assert cmd_status._enterprise_profile(cfg) == "standalone"
-
-
-def test_default_follows_platform(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config_file.write_text("config_version: 8\ndeployment_mode: managed_enterprise\n")
-    cfg = SimpleNamespace(deployment_mode="managed_enterprise")
-    monkeypatch.setattr("sys.platform", "linux")
-    assert cmd_status._enterprise_profile(cfg) == "standalone"
-    monkeypatch.setattr("sys.platform", "win32")
-    assert cmd_status._enterprise_profile(cfg) == "secure_client"
-
-
-def test_malformed_config_never_raises(config_file: Path) -> None:
-    config_file.write_text(": : not yaml [\n")
-    cfg = SimpleNamespace(deployment_mode="managed_enterprise")
-    assert cmd_status._enterprise_profile(cfg) in {"standalone", "secure_client"}
+@pytest.mark.parametrize(
+    ("config", "mode", "pin", "platform", "want"),
+    [
+        # An unmanaged install has no profile, whatever its config says.
+        ("config_version: 8\nenterprise:\n  profile: standalone\n", "", "", None, {""}),
+        ("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n", "managed_enterprise", "", None, {"standalone"}),
+        # The service pin wins over the config.
+        ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "Standalone", None, {"standalone"}),
+        # Without either, the default follows the platform.
+        ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "", "linux", {"standalone"}),
+        ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "", "win32", {"secure_client"}),
+        # A malformed config never raises.
+        (": : not yaml [\n", "managed_enterprise", "", None, {"standalone", "secure_client"}),
+    ],
+)
+def test_enterprise_profile_resolution(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch, config: str, mode: str, pin: str, platform: str | None, want: set[str]
+) -> None:
+    config_file.write_text(config)
+    if pin:
+        monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", pin)
+    if platform:
+        monkeypatch.setattr("sys.platform", platform)
+    assert cmd_status._enterprise_profile(SimpleNamespace(deployment_mode=mode)) in want
 
 
 def _invoke_status(monkeypatch: pytest.MonkeyPatch, config_file: Path, *, profile_text: str, default: str, json_output: bool):
