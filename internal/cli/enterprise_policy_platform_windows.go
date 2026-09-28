@@ -68,6 +68,23 @@ func runAsEnterprisePolicyTarget(target enterprisehooks.TargetCredentials, fn fu
 	return enterprisehooks.RunAsTarget(target, fn)
 }
 
+// enterprisePolicyLiveAvailable refuses `enterprise policy verify --live` on
+// a managed Windows host up front. The live check starts the real client as
+// the target user and reads the gateway's audit database: Windows gives an
+// administrator no way to start a process as another account, and a
+// standard account cannot read the managed configuration or audit database,
+// so neither account can run it. Without this refusal an administrator was
+// told to run it from the user's own session and the user to use an
+// elevated prompt.
+func enterprisePolicyLiveAvailable() error {
+	if !auditExportManagedHost() {
+		return nil
+	}
+	return errors.New("enterprise policy verify --live is not available on a managed Windows host: Windows cannot start the client as another account, and a standard account cannot read the managed configuration. " +
+		"Run `defenseclaw enterprise policy verify` from an elevated Administrator prompt for the static check; to see the hooks run, make a tool call in the client from the user's own session, " +
+		"then read its record from the elevated prompt with `defenseclaw audit export --connector <connector> -o <file>`")
+}
+
 // enterprisePolicyLiveCredential: Windows has no setuid; the agent must be
 // started from the target user's own session.
 func enterprisePolicyLiveCredential(target enterprisehooks.TargetCredentials) func(*exec.Cmd) error {

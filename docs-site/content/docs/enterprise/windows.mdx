@@ -239,6 +239,13 @@ to `false` turns the lock off; `enterprise policy verify` and `enterprise
 windows verify` report that file. Standard accounts are told to use an
 elevated prompt.
 
+`enterprise policy verify --live` is not available on Windows: Windows cannot
+start the client as another account, and a standard account cannot read the
+managed configuration. Use the static `verify` above, and to see the hooks
+run, make a tool call in the client from the user's own session, then read
+its record from the elevated prompt with
+`defenseclaw audit export --connector <connector> -o <file>`.
+
 ## Recover a pending transaction
 
 A lifecycle that fails normally rolls back. If the rollback itself cannot
