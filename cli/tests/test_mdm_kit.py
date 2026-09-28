@@ -91,6 +91,7 @@ def test_copied_helpers_are_identical() -> None:
     assert not drifted, f"copy the shared region from packaging/mdm/windows/detect.ps1 into {drifted}"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("os_dir", ["linux", "macos"])
 @pytest.mark.parametrize("name", UNIX_SCRIPTS)
 def test_unix_scripts_parse_and_lint(os_dir: str, name: str) -> None:
@@ -354,7 +355,7 @@ function New-ProbeDirectory([string]$Path, [string]$Sddl) {
 function New-ProbeFile([string]$Path) {
     [System.IO.File]::WriteAllText($Path, "deployment_mode: managed_enterprise`n")
     $acl = Get-Acl -LiteralPath $Path
-    $acl.SetSecurityDescriptorSddlForm('D:P(A;;FA;;;SY)(A;;FA;;;BA)')
+    $acl.SetSecurityDescriptorSddlForm('O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 $adminOnly = 'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
@@ -368,7 +369,8 @@ try {
     New-ProbeDirectory (Join-Path $root 'open') 'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1301bf;;;AU)'
     New-ProbeFile (Join-Path $root 'open\config.yaml')
     $null = New-Item -ItemType Junction -Path (Join-Path $root 'link') -Target (Join-Path $root 'good')
-    $result = [ordered]@{}
+    # Whether the folders above the probe root are themselves administrator-only.
+    $result = [ordered]@{ host = [bool](Test-WrapperAdminOnlyAncestors -Path (Join-Path $root 'probe')) }
     foreach ($name in 'good', 'open', 'link') {
         $file = Join-Path $root "$name\config.yaml"
         $result[$name] = [ordered]@{
@@ -403,8 +405,11 @@ def test_generic_windows_wrapper_checks_every_folder_above_config_and_secret(tmp
     )
     assert result.returncode == 0, result.stdout + result.stderr
     verdicts = json.loads(result.stdout.strip().splitlines()[-1])
-    assert verdicts["good"] == {"item": True, "ancestors": True}, verdicts
-    assert verdicts["open"] == {"item": True, "ancestors": False}, verdicts
+    assert verdicts["good"]["item"] and verdicts["open"]["item"], verdicts
+    if not verdicts["host"]:
+        pytest.skip("a folder above the probe root is not administrator-only on this host")
+    assert verdicts["good"]["ancestors"] is True, verdicts
+    assert verdicts["open"]["ancestors"] is False, verdicts
     assert verdicts["link"]["ancestors"] is False, verdicts
 
 
@@ -430,6 +435,7 @@ def test_generic_windows_wrapper_refuses_a_product_version_pin_for_a_staged_setu
     assert "-ProductVersion applies only to the installed CLI" in document["errors"][0]["message"], document
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run the signing helpers with bash on Linux and macOS")
 def test_signing_helpers_refuse_without_credentials(tmp_path: Path) -> None:
     sign = MDM / "signing" / "authenticode-sign.sh"
     target = tmp_path / "file.exe"
