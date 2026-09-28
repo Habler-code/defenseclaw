@@ -96,10 +96,30 @@ func decodeWindowsEnterpriseRecoveryGatewayRefusal(raw json.RawMessage) *windows
 // lifecycle action (restore, retire).
 func windowsEnterpriseRecoveryStepLabel(action string) string {
 	action = strings.TrimSpace(action)
-	if action == "target-runtime-cleanup" {
+	switch action {
+	case "target-runtime-cleanup":
 		return "target-runtime rollback cleanup"
+	case windowsEnterpriseRecoveryReactivationAction:
+		return "service reactivation of the restored release"
 	}
 	return "managed-hook lifecycle " + action
+}
+
+// windowsEnterpriseRecoveryReactivationAction is the recovery record of a
+// pending transaction whose restored release could not be reactivated and
+// was left stopped for this Setup's own release to replace.
+const windowsEnterpriseRecoveryReactivationAction = "service-reactivation"
+
+// windowsEnterpriseRecoveryDeferredActivation reports whether an installer
+// report's recovery_gateway_runs say the recovery left the restored release
+// stopped (outcome "deferred").
+func windowsEnterpriseRecoveryDeferredActivation(runs json.RawMessage) bool {
+	for _, run := range decodeWindowsEnterpriseRecoveryGatewayRuns(runs) {
+		if run.Action == windowsEnterpriseRecoveryReactivationAction && run.Outcome == "deferred" {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsEnterpriseRecoveryGatewayWarnings records, for the result document
@@ -114,6 +134,14 @@ func windowsEnterpriseRecoveryGatewayWarnings(
 		staged, _ := windowsEnterpriseStandaloneErrorText(run.StagedError)
 		if strings.TrimSpace(staged) == "" {
 			staged = "no detail"
+		}
+		if run.Action == windowsEnterpriseRecoveryReactivationAction {
+			message := fmt.Sprintf(
+				"recovery left the restored release %s stopped because it could not be reactivated (%s); this Setup's verified release %s (%s, sha256 %s, trust %s) replaces it, as %s",
+				run.StagedVersion, staged, run.ProductVersion, run.Source, run.SHA256, run.Trust, run.Identity,
+			)
+			warnings = append(warnings, enterprisestatus.Message{Code: "recovery_activation_deferred", Message: message})
+			continue
 		}
 		message := fmt.Sprintf(
 			"recovery ran the %s with this Setup's verified gateway because the staged gateway failed it (%s); binary %s (copied from %s), sha256 %s, trust %s",

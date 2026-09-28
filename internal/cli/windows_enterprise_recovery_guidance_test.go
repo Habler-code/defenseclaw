@@ -248,3 +248,47 @@ func TestWindowsEnterpriseRecoveryGatewayWarningsNameTheTargetRuntimeCleanup(t *
 		t.Fatalf("retire warning = %+v", retire)
 	}
 }
+
+// WIN-F34: recovery restored a release whose guardian could not reactivate
+// it and left it stopped for this Setup's newer release; the warning says so,
+// and the report marks the deferral for ensure's follow-up upgrade.
+func TestWindowsEnterpriseRecoveryActivationDeferralBecomesAWarning(t *testing.T) {
+	raw := json.RawMessage(`[{
+		"action":"service-reactivation",
+		"binary":"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+		"source":"C:\\ProgramData\\DefenseClaw-Enterprise-Setup-0f\\defenseclaw-gateway.exe",
+		"sha256":"bb","trust":"hash_pinned","product_version":"1.0.50",
+		"identity":"NT AUTHORITY\\SYSTEM","replaced_sha256":"aa","staged_version":"1.0.48",
+		"reason":"restored_release_not_reactivated",
+		"staged_error":"LocalSystem guardian restarted but did not publish fresh required coverage within 90 seconds",
+		"outcome":"deferred","error":""}]`)
+	if !windowsEnterpriseRecoveryDeferredActivation(raw) {
+		t.Fatal("a deferred service-reactivation run was not recognized")
+	}
+	warnings := windowsEnterpriseRecoveryGatewayWarnings(decodeWindowsEnterpriseRecoveryGatewayRuns(raw), nil)
+	if len(warnings) != 1 || warnings[0].Code != "recovery_activation_deferred" {
+		t.Fatalf("warnings = %+v", warnings)
+	}
+	for _, want := range []string{
+		"restored release 1.0.48 stopped", "did not publish fresh required coverage",
+		"verified release 1.0.50", "sha256 bb", "trust hash_pinned", `as NT AUTHORITY\SYSTEM`,
+	} {
+		if !strings.Contains(warnings[0].Message, want) {
+			t.Fatalf("deferral warning %q does not contain %q", warnings[0].Message, want)
+		}
+	}
+	for _, other := range []string{
+		`[{"action":"retire","binary":"C:\\x\\bin\\defenseclaw-gateway.exe","outcome":"succeeded"}]`,
+		`[{"action":"service-reactivation","binary":"C:\\x\\bin\\defenseclaw-gateway.exe","outcome":"failed"}]`,
+		``, `null`,
+	} {
+		if windowsEnterpriseRecoveryDeferredActivation(json.RawMessage(other)) {
+			t.Fatalf("%s read as a deferred activation", other)
+		}
+	}
+	refusal := windowsEnterpriseRecoveryGatewayWarnings(nil, decodeWindowsEnterpriseRecoveryGatewayRefusal(
+		json.RawMessage(`{"action":"service-reactivation","code":"same_binary","message":"the running Setup gateway is the staged gateway that failed"}`)))
+	if len(refusal) != 1 || !strings.Contains(refusal[0].Message, "service reactivation of the restored release (same_binary)") {
+		t.Fatalf("refusal warning = %+v", refusal)
+	}
+}

@@ -232,6 +232,34 @@ def test_standalone_rollback_quiesces_the_sensor_helper_before_restoring_files()
     assert stop < ready < restart < services_restart < boot_policy
 
 
+def test_standalone_recovery_defers_activation_only_behind_the_setup_admission() -> None:
+    # WIN-F34: a restored release whose guardian cannot publish full coverage
+    # may stay stopped only in a recovery that opted in, only after the same
+    # admission as the gateway fallback, and Repair then stops with the next
+    # step instead of reapplying that release.
+    module = _text(MODULE)
+    start = _function_body(module, "Start-DefenseClawTransactionServices")
+    wait = start.index("Wait-DefenseClawFreshGuardianReconcile `")
+    guard = start.index("Test-DefenseClawRecoveryActivationDeferral `", wait)
+    rethrow = start.index("throw", guard)
+    gateway_start = start.index("Start-DefenseClawService -Name $GatewayServiceName")
+    assert wait < guard < rethrow < gateway_start
+    deferral = _function_body(module, "Test-DefenseClawRecoveryActivationDeferral")
+    opt_in = deferral.index("$script:DefenseClawRecoveryActivationDeferrable")
+    standalone = deferral.index("Test-DefenseClawStandaloneProfile", opt_in)
+    admission = deferral.index("Get-DefenseClawRecoveryGatewayAdmission -Layout $Layout", standalone)
+    deferred = deferral.index("$script:DefenseClawRecoveryActivationDeferred = $true", admission)
+    assert opt_in < standalone < admission < deferred
+    recover = _function_body(module, "Recover-DefenseClawPendingTransaction")
+    assert recover.count("$script:DefenseClawRecoveryActivationDeferrable = $false") == 1
+    assert recover.index("finally {") < recover.index("$script:DefenseClawRecoveryActivationDeferrable = $false")
+    assert module.count(
+        "-AllowDeferredActivation:($Action -in @('Upgrade', 'Repair', 'Uninstall'))"
+    ) == 2
+    repair = _function_body(module, "Assert-DefenseClawRecoveryActivatedForAction")
+    assert "$Action -eq 'Repair'" in repair and "upgrade" in repair
+
+
 def test_standalone_recovery_falls_back_only_to_a_verified_setup_gateway() -> None:
     # WIN-F17: a pending transaction's managed-hook lifecycle restore and
     # retire run through the recovery step. Secure Client calls the staged
@@ -473,6 +501,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-opencode-plugin-uninstall-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
+    "enterprise-standalone-recovery-activation-deferral-smoke.ps1",
     "enterprise-standalone-recovery-gateway-smoke.ps1",
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",

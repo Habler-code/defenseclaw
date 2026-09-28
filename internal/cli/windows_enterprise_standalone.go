@@ -1022,13 +1022,19 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
-	if plan.Action == "repair" && plan.Reason == "transaction_pending" &&
-		report.OK && report.Installed && !report.TransactionPending {
+	deferredActivation := report != nil && windowsEnterpriseRecoveryDeferredActivation(report.RecoveryGatewayRuns)
+	// A failed repair's report is the installer's failure document, which
+	// carries no installed state; the follow-up status probe below reads it.
+	if plan.Action == "repair" && plan.Reason == "transaction_pending" && !report.TransactionPending &&
+		((report.OK && report.Installed) || deferredActivation) {
 		// Repair finished an interrupted transaction on the payload already in
 		// place, typically an upgrade whose failed rollback had to be retained.
 		// That is not convergence: re-plan from a fresh status exactly as
 		// ensure does on a host without a pending transaction, so the upgrade
-		// the MDM asked for still runs in this invocation.
+		// the MDM asked for still runs in this invocation. A recovery that
+		// left the restored release stopped because it could not be
+		// reactivated (WIN-F34) fails its repair on purpose: only this
+		// Setup's newer release can bring the services back.
 		followStatus, _, statusErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 		// A follow-up probe that cannot read the host leaves the completed
 		// repair as the result, exactly like a probe that failed to launch.
@@ -1040,7 +1046,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 			}
 			if followPlan.Action == "upgrade" {
-				result.AddWarning("recovered_pending_transaction", "ensure finished a pending transaction with repair before it ran "+followPlan.Action+": "+followPlan.Reason)
+				if deferredActivation {
+					result.AddWarning("recovered_pending_transaction", "ensure recovered a pending transaction whose release could not be reactivated, then ran "+followPlan.Action+": "+followPlan.Reason)
+				} else {
+					result.AddWarning("recovered_pending_transaction", "ensure finished a pending transaction with repair before it ran "+followPlan.Action+": "+followPlan.Reason)
+				}
 				plan = followPlan
 				actionOpts = *opts
 				actionOpts.jsonOutput = true

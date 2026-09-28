@@ -160,6 +160,11 @@ $script:DefenseClawQuarantinedRoots = @()
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
 $script:DefenseClawRecoveryGatewayRefusal = $null
+# Standalone pending-transaction recovery that may leave the restored release
+# stopped when it cannot be reactivated (Test-DefenseClawRecoveryActivationDeferral),
+# and whether this run did. Set per recovery; reset per lifecycle run.
+$script:DefenseClawRecoveryActivationDeferrable = $false
+$script:DefenseClawRecoveryActivationDeferred = $false
 
 function Set-DefenseClawEnterpriseProfile {
     param(
@@ -9726,7 +9731,13 @@ function Restore-DefenseClawTransaction {
                 -TrustInProcessQuiescence `
                 -GatewayServiceName ([string]$snapshot.gateway_service) `
                 -GuardianServiceName ([string]$snapshot.guardian_service)
-            if ($restartSensorHelper) {
+            if ([bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Complete-DefenseClawDeferredRecoveryActivation `
+                    -Snapshot $snapshot `
+                    -SnapshotPath $SnapshotPath `
+                    -SensorHelper $(if ($restartSensorHelper) { $standaloneSensorHelper } else { '' })
+            }
+            elseif ($restartSensorHelper) {
                 # Boot policy follows the restored gateway.
                 $gatewayStartMode = @(
                     $snapshot.services |
@@ -9849,10 +9860,33 @@ function Start-DefenseClawTransactionServices {
         # A running SCM state is insufficient. Require a newly published
         # successful LocalSystem reconciliation while gateway is still
         # disabled, so a queued gateway restart cannot beat auto-heal.
-        [void](Wait-DefenseClawFreshGuardianReconcile `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName)
+        try {
+            [void](Wait-DefenseClawFreshGuardianReconcile `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
+        }
+        catch {
+            if (-not (Test-DefenseClawRecoveryActivationDeferral `
+                    -Layout $Layout `
+                    -Failure $_)) {
+                throw
+            }
+            # Recovery leaves the restored release stopped and disabled: the
+            # requested lifecycle activates the Setup's own release under the
+            # same coverage gate. Nothing below may start the gateway.
+            foreach ($name in @($GuardianServiceName, $brokerServiceName)) {
+                if ([bool]$states[$name].existed) {
+                    Stop-DefenseClawService -Name $name
+                }
+            }
+            foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName)) {
+                if ([bool]$states[$name].existed) {
+                    Set-DefenseClawServiceStartMode -Name $name -StartMode 4
+                }
+            }
+            return
+        }
     }
     if ([bool]$gateway.running) {
         Set-DefenseClawServiceStartMode `
@@ -10139,9 +10173,17 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                 -TrustInProcessQuiescence `
                 -GatewayServiceName ([string]$snapshot.gateway_service) `
                 -GuardianServiceName ([string]$snapshot.guardian_service)
-            Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy `
-                -Snapshot $snapshot `
-                -Name $restoredSensorHelper
+            if ([bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Complete-DefenseClawDeferredRecoveryActivation `
+                    -Snapshot $snapshot `
+                    -SnapshotPath $SnapshotPath `
+                    -SensorHelper $restoredSensorHelper
+            }
+            else {
+                Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy `
+                    -Snapshot $snapshot `
+                    -Name $restoredSensorHelper
+            }
         }
     }
     return $snapshot
@@ -12563,10 +12605,18 @@ function Recover-DefenseClawQuiescingIntent {
 }
 
 function Recover-DefenseClawPendingTransaction {
+    <#
+        -AllowDeferredActivation: the caller's lifecycle activates or removes
+        its own release next (Upgrade, Repair, Uninstall), so a standalone
+        recovery whose restored release cannot be reactivated may complete
+        with it stopped (Test-DefenseClawRecoveryActivationDeferral). The
+        result's activation_deferred says whether it did.
+    #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$AllowDeferredActivation
     )
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf)) {
         return [pscustomobject]@{
@@ -12606,9 +12656,16 @@ function Recover-DefenseClawPendingTransaction {
         }
     }
     $snapshotPath = [string]$pending.snapshot
-    $restored = Restore-DefenseClawTransactionWithManagedHooksRollback `
-        -SnapshotPath $snapshotPath `
-        -Layout $Layout
+    $script:DefenseClawRecoveryActivationDeferred = $false
+    $script:DefenseClawRecoveryActivationDeferrable = [bool]$AllowDeferredActivation
+    try {
+        $restored = Restore-DefenseClawTransactionWithManagedHooksRollback `
+            -SnapshotPath $snapshotPath `
+            -Layout $Layout
+    }
+    finally {
+        $script:DefenseClawRecoveryActivationDeferrable = $false
+    }
     $installRootCreated = (
         $null -ne $restored.PSObject.Properties['install_root_created'] -and
         [bool]$restored.install_root_created
@@ -12628,6 +12685,28 @@ function Recover-DefenseClawPendingTransaction {
         )
         install_root_created = [bool]$installRootCreated
         state_root_created = [bool]$stateRootCreated
+        activation_deferred = [bool]$script:DefenseClawRecoveryActivationDeferred
+    }
+}
+
+function Assert-DefenseClawRecoveryActivatedForAction {
+    <#
+        Repair reapplies the installed payload, which is the release recovery
+        just could not reactivate; running it would only repeat that failure.
+        Stop with the next step instead. Upgrade and Uninstall continue.
+    #>
+    param(
+        [Parameter(Mandatory)]$Recovery,
+        [Parameter(Mandatory)][string]$Action
+    )
+    $deferred = $Recovery.PSObject.Properties['activation_deferred']
+    if ($null -ne $deferred -and [bool]$deferred.Value -and $Action -eq 'Repair') {
+        throw (
+            'Repair recovered the pending transaction, but its restored release ' +
+            'could not be reactivated, so the DefenseClaw services stay stopped. ' +
+            'Next step: install this Setup''s release with upgrade (ensure does ' +
+            'this automatically).'
+        )
     }
 }
 
@@ -14517,6 +14596,8 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayCandidate = $null
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
+    $script:DefenseClawRecoveryActivationDeferrable = $false
+    $script:DefenseClawRecoveryActivationDeferred = $false
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
@@ -14662,6 +14743,94 @@ function Compare-DefenseClawRecoveryGatewayRelease {
         return -1
     }
     return [Math]::Sign([string]::CompareOrdinal($leftPrerelease, $rightPrerelease))
+}
+
+function Test-DefenseClawRecoveryActivationDeferral {
+    <#
+        Standalone pending-transaction recovery only. Recovery restores the
+        release that wrote the transaction and reactivates it, which requires
+        that release's guardian to publish fresh full coverage. When the
+        restored release is itself the one that cannot (for example a guardian
+        that cannot republish one user's lost per-user state), every recovery
+        repeats the same failure and the deployment stays down with a pending
+        transaction. When the running Setup's gateway passes
+        Get-DefenseClawRecoveryGatewayAdmission (LocalSystem, a verified
+        payload, a different release that is not older), recovery instead
+        completes with the restored release stopped and disabled, and the
+        requested lifecycle activates the Setup's own release under the same
+        coverage gate. The decision is recorded like the gateway fallbacks;
+        a refused admission keeps the coverage failure.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Failure
+    )
+    if (-not [bool]$script:DefenseClawRecoveryActivationDeferrable -or
+        -not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $admission = Get-DefenseClawRecoveryGatewayAdmission -Layout $Layout
+    if (-not [bool]$admission.admitted) {
+        $script:DefenseClawRecoveryGatewayRefusal = [ordered]@{
+            action = 'service-reactivation'
+            code = [string]$admission.code
+            message = [string]$admission.message
+        }
+        return $false
+    }
+    $source = [hashtable]$admission.source
+    $failureMessage = if ($Failure -is [Management.Automation.ErrorRecord]) {
+        [string]$Failure.Exception.Message
+    }
+    else {
+        [string]$Failure
+    }
+    $run = [ordered]@{
+        action = 'service-reactivation'
+        binary = [string]$Layout.GatewayPath
+        source = [string]$source.path
+        sha256 = [string]$admission.sha256
+        trust = [string]$admission.trust
+        signer_thumbprint = [string]$source.signer_thumbprint
+        product_version = [string]$admission.product_version
+        identity = 'NT AUTHORITY\SYSTEM'
+        replaced_sha256 = [string]$admission.replaced_sha256
+        staged_version = [string]$admission.staged_version
+        reason = 'restored_release_not_reactivated'
+        staged_error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $failureMessage `
+            -MaxLength 1024
+        outcome = 'deferred'
+        error = ''
+    }
+    $script:DefenseClawRecoveryGatewayRuns = @(
+        @($script:DefenseClawRecoveryGatewayRuns) + @($run)
+    )
+    $script:DefenseClawRecoveryActivationDeferred = $true
+    return $true
+}
+
+function Complete-DefenseClawDeferredRecoveryActivation {
+    <#
+        After Test-DefenseClawRecoveryActivationDeferral the restored release
+        stays stopped: stop and disable the sensor helper the restart had
+        started, and mark the snapshot quiesced again, so a crash before the
+        recovery completes cannot read it as an activation in progress.
+    #>
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [string]$SensorHelper
+    )
+    if (-not [string]::IsNullOrEmpty($SensorHelper)) {
+        Stop-DefenseClawService -Name $SensorHelper
+        Set-DefenseClawServiceStartMode -Name $SensorHelper -StartMode 4
+    }
+    Set-DefenseClawServiceActivationPhase `
+        -State $Snapshot `
+        -Path $SnapshotPath `
+        -Phase quiesced `
+        -ServicesQuiescedAt ([DateTime]::UtcNow.ToString('o'))
 }
 
 function Get-DefenseClawRecoveryGatewayAdmission {
@@ -21470,10 +21639,14 @@ function Invoke-DefenseClawPreLayoutRecovery {
                 $pendingRecovery = Recover-DefenseClawPendingTransaction `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
-                    -GuardianServiceName $GuardianServiceName
+                    -GuardianServiceName $GuardianServiceName `
+                    -AllowDeferredActivation:($Action -in @('Upgrade', 'Repair', 'Uninstall'))
                 if (-not [bool]$pendingRecovery.recovered) {
                     throw 'authenticated pending transaction was not recovered before layout preparation'
                 }
+                Assert-DefenseClawRecoveryActivatedForAction `
+                    -Recovery $pendingRecovery `
+                    -Action $Action
                 if ([bool]$pendingRecovery.fresh_install_rollback) {
                     if ($Action -eq 'Uninstall' -and $Purge) {
                         $result = Get-DefenseClawLifecycleStatus `
@@ -23917,7 +24090,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         $pendingRecovery = Recover-DefenseClawPendingTransaction `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -AllowDeferredActivation:($Action -in @('Upgrade', 'Repair', 'Uninstall'))
+        Assert-DefenseClawRecoveryActivatedForAction `
+            -Recovery $pendingRecovery `
+            -Action $Action
         if ([bool]$pendingRecovery.fresh_install_rollback) {
             if ($Action -eq 'Uninstall' -and $Purge) {
                 $result = Get-DefenseClawLifecycleStatus `
