@@ -329,7 +329,7 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 		// Nothing stages a pack under a Windows data_dir, so the
 		// implicit default selects the embedded packs.
 		{name: "windows standalone implicit uses the embedded packs", goos: "windows", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: ""},
-		{name: "windows standalone implicit follows an administrator policy_dir", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: "/opt/defenseclaw/share/policies/guardrail/default"},
+		{name: "windows standalone implicit follows an administrator policy_dir", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: filepath.Join("/opt/defenseclaw/share/policies", "guardrail", "default")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
