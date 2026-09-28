@@ -179,33 +179,43 @@ func LoadProviders() (*ProvidersConfig, error) {
 // it, which is where the Python CLI writes the overlay), otherwise
 // ~/.defenseclaw. Empty return value means no overlay applies.
 func CustomProvidersPath() string {
+	path, _ := customProvidersPath()
+	return path
+}
+
+// customProvidersPath is CustomProvidersPath, and whether the path is the
+// ~/.defenseclaw fallback rather than a location the process was pointed at.
+func customProvidersPath() (path string, fallback bool) {
 	if p := os.Getenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH"); p != "" {
-		return p
+		return p, false
 	}
 	if dataDir := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); dataDir != "" {
-		return filepath.Join(dataDir, "custom-providers.json")
+		return filepath.Join(dataDir, "custom-providers.json"), false
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return ""
+		return "", true
 	}
-	return filepath.Join(home, ".defenseclaw", "custom-providers.json")
+	return filepath.Join(home, ".defenseclaw", "custom-providers.json"), true
 }
 
 // mergeCustomProviders applies the operator overlay in place.
 // Exported through LoadProviders; split for testability.
 func mergeCustomProviders(cfg *ProvidersConfig) {
-	path := CustomProvidersPath()
+	path, fallback := customProvidersPath()
 	if path == "" {
 		return
 	}
 	f, err := os.Open(path) // #nosec G304 — path is a fixed per-user overlay, documented.
 	if err != nil {
-		// The overlay is optional: an absent file is the common case, and
-		// one this account may not read (another account's data dir) is
-		// not this process's overlay, so neither prints anything. Any
-		// other error is logged but non-fatal.
-		if !os.IsNotExist(err) && !os.IsPermission(err) {
+		// The overlay is optional: an absent file is the common case and
+		// prints nothing. So does one under the ~/.defenseclaw fallback this
+		// account may not read (a service account's or another account's
+		// home), which is not this process's overlay. An overlay in the data
+		// dir the process was pointed at (DEFENSECLAW_HOME or the explicit
+		// path) that it cannot read is logged, since its providers are then
+		// silently missing. Every error is non-fatal.
+		if !os.IsNotExist(err) && !(fallback && os.IsPermission(err)) {
 			fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay open error: %v\n", err)
 		}
 		return

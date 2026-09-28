@@ -307,16 +307,39 @@ func TestLoadProvidersIsQuietForAMissingOrUnreadableOverlay(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a mode-0000 file")
 	}
-	unreadable := filepath.Join(t.TempDir(), "custom-providers.json")
+	// Under the ~/.defenseclaw fallback an unreadable overlay is not this
+	// process's (a service account's or another account's home): quiet.
+	home := t.TempDir()
+	unreadable := filepath.Join(home, ".defenseclaw", "custom-providers.json")
+	if err := os.MkdirAll(filepath.Dir(unreadable), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(unreadable, []byte(`{"providers":[]}`), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", unreadable)
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+	t.Setenv("DEFENSECLAW_HOME", "")
+	t.Setenv("HOME", home)
 	if out := captureStderr(t, func() {
 		if _, err := LoadProviders(); err != nil {
 			t.Fatal(err)
 		}
 	}); out != "" {
-		t.Fatalf("an unreadable overlay printed %q", out)
+		t.Fatalf("an unreadable fallback overlay printed %q", out)
+	}
+
+	// In the data dir the process was pointed at, an overlay it cannot read
+	// means its providers are silently missing: logged.
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "custom-providers.json"), []byte(`{"providers":[]}`), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	if out := captureStderr(t, func() {
+		if _, err := LoadProviders(); err != nil {
+			t.Fatal(err)
+		}
+	}); !strings.Contains(out, "custom-providers overlay open error") {
+		t.Fatalf("an unreadable DEFENSECLAW_HOME overlay printed %q, want the open error", out)
 	}
 }

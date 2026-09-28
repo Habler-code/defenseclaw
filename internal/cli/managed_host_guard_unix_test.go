@@ -156,6 +156,28 @@ func TestStopRefusesOnAManagedHost(t *testing.T) {
 	}
 }
 
+// A per-user watchdog left over from before the managed deployment is
+// still stopped when stop refuses: it would keep trying to restart its
+// gateway.
+func TestStopOnAManagedHostStillStopsALeftoverWatchdog(t *testing.T) {
+	unixStandaloneLayoutForTest(t)
+	withUnixManagedHostDescriptor(t)
+	withManagedHostCallerUID(t, 1000)
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	stopped := 0
+	previous := stopLeftoverWatchdogOnManagedHost
+	stopLeftoverWatchdogOnManagedHost = func() { stopped++ }
+	t.Cleanup(func() { stopLeftoverWatchdogOnManagedHost = previous })
+
+	err := runStop(stopCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+		t.Fatalf("stop on a managed host = %v, want the managed-host refusal", err)
+	}
+	if stopped != 1 {
+		t.Fatalf("the leftover watchdog stop ran %d times, want once before the refusal", stopped)
+	}
+}
+
 // The bare daemon refuses before loading config or opening the audit
 // store, so a standard user's ~/.defenseclaw gets no audit.db (RHEL-F18).
 func TestBareDaemonRefusesBeforeCreatingTheAuditStore(t *testing.T) {
