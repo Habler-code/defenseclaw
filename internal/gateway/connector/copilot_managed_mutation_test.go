@@ -149,3 +149,32 @@ func TestCopilotManagedProfilePreservesEmptyNestedToolResultForModel(t *testing.
 		t.Fatalf("decoded request = %+v, want authoritative empty model-facing result", req)
 	}
 }
+
+func TestCopilotManagedProfileDoesNotFallbackWhenNestedToolResultIsAbsent(t *testing.T) {
+	profile := NewCopilotEnterpriseConnector().HookProfile(managedCopilotTestOptions())
+	req := profile.Decode(map[string]interface{}{
+		"hookEventName": "postToolUse",
+		"toolResult": map[string]interface{}{
+			"resultType": "success",
+			"metadata":   "nested decoy must not be inspected as content",
+		},
+		"result":  "top-level result decoy must not be inspected",
+		"output":  "top-level output decoy must not be inspected",
+		"content": "top-level content decoy must not be inspected",
+	})
+	if !req.ContentProvided || req.Content != "" || req.Direction != "output" {
+		t.Fatalf("decoded request = %+v, want authoritative absent model-facing result", req)
+	}
+}
+
+func TestCopilotManagedProfileUsesExactFailureErrorField(t *testing.T) {
+	profile := NewCopilotEnterpriseConnector().HookProfile(managedCopilotTestOptions())
+	req := profile.Decode(map[string]interface{}{
+		"hookEventName": "postToolUseFailure",
+		"error":         "model-facing tool failure",
+		"result":        "top-level result decoy must not be inspected",
+	})
+	if !req.ContentProvided || req.Content != "model-facing tool failure" || req.Direction != "output" {
+		t.Fatalf("decoded request = %+v, want exact failure error field", req)
+	}
+}

@@ -186,19 +186,26 @@ func copilotEnterpriseProfileDecode(payload map[string]interface{}) HookProfileR
 	case "userpromptsubmitted":
 		req.Content = hookFirstString(payload, "prompt", "userPrompt")
 		req.Direction = "input"
-	case "posttooluse", "posttoolusefailure":
+	case "posttooluse":
 		// GitHub's v2 hook schema carries model-facing tool output in the
 		// nested toolResult.textResultForLlm field. Inspect that exact string;
-		// never stringify the surrounding attacker-influenced result object.
+		// never stringify the surrounding attacker-influenced result object or
+		// fall back to a top-level decoy when the required field is absent.
+		// Mark the content authoritative even when the field is absent or empty
+		// so the generic normalizer cannot recover a different value.
+		req.ContentProvided = true
 		if toolResult, ok := payload["toolResult"].(map[string]interface{}); ok {
 			if raw, present := toolResult["textResultForLlm"]; present {
-				req.ContentProvided = true
 				req.Content, _ = raw.(string)
 			}
 		}
-		if !req.ContentProvided {
-			req.Content = hookFirstString(payload, "result", "output", "content")
-		}
+		req.Direction = "output"
+	case "posttoolusefailure":
+		// The failure schema exposes the model-facing failure as the top-level
+		// error string. Treat an absent or empty error as authoritative empty
+		// content rather than scanning unrelated result-shaped fields.
+		req.ContentProvided = true
+		req.Content = hookFirstString(payload, "error")
 		req.Direction = "output"
 	}
 	return req

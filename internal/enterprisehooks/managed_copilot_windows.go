@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -126,7 +127,7 @@ func withWindowsCopilotManagedTransaction(fn func() error) error {
 	}
 	deadline := time.Now().Add(windowsClaudeManagedLockTimeout)
 	for {
-		lock, lockErr := openWindowsClaudeManagedPolicyLockFile(paths.Lock)
+		lock, lockErr := openWindowsCopilotManagedPolicyLockFile(paths.Lock)
 		if lockErr == nil {
 			closed := false
 			defer func() {
@@ -143,12 +144,15 @@ func withWindowsCopilotManagedTransaction(fn func() error) error {
 			transactionErr := fn()
 			policy, state, _, snapshotErr := readWindowsCopilotManagedState(paths)
 			retireLock := snapshotErr == nil && !policy.existed && !state.existed
+			var retireErr error
+			if retireLock {
+				// Mark the exact still-exclusive handle delete-pending. Closing
+				// before a path-based delete would let another process create or
+				// acquire a different lock inode in the intervening window.
+				retireErr = retireWindowsCopilotManagedLock(lock)
+			}
 			closeErr := windows.CloseHandle(lock)
 			closed = closeErr == nil
-			var retireErr error
-			if closeErr == nil && retireLock {
-				retireErr = retireWindowsCopilotManagedLock(paths.Lock)
-			}
 			return errors.Join(transactionErr, snapshotErr, closeErr, retireErr)
 		}
 		if !errors.Is(lockErr, windows.ERROR_SHARING_VIOLATION) && !errors.Is(lockErr, windows.ERROR_LOCK_VIOLATION) {
@@ -201,9 +205,39 @@ func renderWindowsCopilotManagedState(state windowsCopilotManagedPolicyState) ([
 	return append(body, '\n'), nil
 }
 
-func retireWindowsCopilotManagedLock(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("enterprise hooks: retire unused Copilot transaction lock: %w", err)
+func openWindowsCopilotManagedPolicyLockFile(path string) (windows.Handle, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return 0, err
+	}
+	pathPtr, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return 0, err
+	}
+	return windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE,
+		0,
+		nil,
+		windows.OPEN_ALWAYS,
+		windows.FILE_ATTRIBUTE_HIDDEN,
+		0,
+	)
+}
+
+// retireWindowsCopilotManagedLock marks the exact exclusively held lock inode
+// delete-pending. Windows keeps the name unavailable until the caller closes
+// this handle, so no competing transaction can acquire a replacement lock in a
+// close-then-delete gap.
+func retireWindowsCopilotManagedLock(handle windows.Handle) error {
+	deleteFile := uint32(1) // FILE_DISPOSITION_INFO.DeleteFile is a Win32 BOOL.
+	if err := windows.SetFileInformationByHandle(
+		handle,
+		windows.FileDispositionInfo,
+		(*byte)(unsafe.Pointer(&deleteFile)),
+		uint32(unsafe.Sizeof(deleteFile)),
+	); err != nil {
+		return fmt.Errorf("enterprise hooks: retire unused Copilot transaction lock by handle: %w", err)
 	}
 	return nil
 }

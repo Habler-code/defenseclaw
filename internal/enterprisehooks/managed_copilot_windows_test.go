@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"golang.org/x/sys/windows"
 )
 
 func TestCanonicalWindowsCopilotManagedTargetsSortsAndRejectsAmbiguity(t *testing.T) {
@@ -138,18 +139,48 @@ func TestValidateWindowsCopilotManagedArtifactDataBindsExactIdentity(t *testing.
 	}
 }
 
-func TestRetireWindowsCopilotManagedLockIsIdempotent(t *testing.T) {
+func TestRetireWindowsCopilotManagedLockKeepsPathExclusiveUntilClose(t *testing.T) {
 	path := filepath.Join(t.TempDir(), windowsCopilotManagedLockFile)
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
+	lock, err := openWindowsCopilotManagedPolicyLockFile(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := retireWindowsCopilotManagedLock(path); err != nil {
+	closed := false
+	defer func() {
+		if !closed {
+			_ = windows.CloseHandle(lock)
+		}
+	}()
+
+	if err := retireWindowsCopilotManagedLock(lock); err != nil {
 		t.Fatal(err)
 	}
-	if err := retireWindowsCopilotManagedLock(path); err != nil {
-		t.Fatalf("idempotent Copilot lock retirement: %v", err)
+	if competing, err := openWindowsCopilotManagedPolicyLockFile(path); err == nil {
+		_ = windows.CloseHandle(competing)
+		t.Fatal("competing Copilot transaction acquired a replacement lock before the retired handle closed")
 	}
+	if err := windows.CloseHandle(lock); err != nil {
+		t.Fatal(err)
+	}
+	closed = true
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("retired Copilot lock still exists: %v", err)
+	}
+
+	// A later transaction may create a new lock only after the retiring
+	// handle has closed and the old name has disappeared.
+	replacement, err := openWindowsCopilotManagedPolicyLockFile(path)
+	if err != nil {
+		t.Fatalf("create next Copilot transaction lock: %v", err)
+	}
+	if err := retireWindowsCopilotManagedLock(replacement); err != nil {
+		_ = windows.CloseHandle(replacement)
+		t.Fatal(err)
+	}
+	if err := windows.CloseHandle(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement Copilot lock still exists after retirement: %v", err)
 	}
 }
