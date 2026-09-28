@@ -22,17 +22,20 @@ var kiroV3HookSpecs = []struct {
 	{"defenseclaw-stop", "DefenseClaw session stop", "Stop", ""},
 }
 
+// kiroV2HookSpecs are the CLI 2.x agent hooks. A 2.x matcher is a tool name
+// or "*", not a regular expression: the ".*" earlier builds wrote matched no
+// tool, so preToolUse and postToolUse never ran (kiro-cli 2.24.1).
 var kiroV2HookSpecs = []struct {
 	event       string
 	description string
 	matcher     string
 }{
-	{"userPromptSubmit", "DefenseClaw prompt inspection", ".*"},
-	{"preToolUse", "DefenseClaw tool-use inspection", ".*"},
-	{"postToolUse", "DefenseClaw tool-use audit", ".*"},
+	{"userPromptSubmit", "DefenseClaw prompt inspection", "*"},
+	{"preToolUse", "DefenseClaw tool-use inspection", "*"},
+	{"postToolUse", "DefenseClaw tool-use audit", "*"},
 	// kiro-cli 2.22's agent schema accepts `stop` only. `agentStop` is
 	// documented as an alias but fails validation, so /hooks stays empty.
-	{"stop", "DefenseClaw session stop", ".*"},
+	{"stop", "DefenseClaw session stop", "*"},
 }
 
 const kiroV2StopAlias = "agentStop"
@@ -171,6 +174,10 @@ func kiroV3FileReferencesHook(path, hookScript string) (bool, error) {
 	return false, nil
 }
 
+// kiroV2AgentReferencesHook reports whether the CLI 2.x agent holds
+// DefenseClaw's entry for every kiroV2HookSpecs event with the matcher this
+// build writes. An entry an earlier build rendered with another matcher does
+// not count, so verification fails and the guardian re-renders the agent.
 func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -183,7 +190,25 @@ func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return false, fmt.Errorf("parse kiro agent %s: %w", path, err)
 	}
-	return containsHookScript(cfg, hookScript), nil
+	if !containsHookScript(cfg, hookScript) {
+		return false, nil
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	for _, spec := range kiroV2HookSpecs {
+		list, _ := hooks[spec.event].([]interface{})
+		current := false
+		for _, item := range list {
+			entry, _ := item.(map[string]interface{})
+			if kiroV2EntryOwned(item, hookScript) && entry["matcher"] == spec.matcher {
+				current = true
+				break
+			}
+		}
+		if !current {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func kiroOwnedV3Hook(item interface{}, hookScript string) bool {

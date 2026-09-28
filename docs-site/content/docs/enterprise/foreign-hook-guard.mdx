@@ -199,16 +199,19 @@ hook is enough.
 Hermes shows the same text after `DefenseClaw blocked this tool call:`, with
 `(enterprise_foreign_hook_blocked)` at the end.
 
-Later in a session that was blocked, the message says so:
+The rest of a session that started with the hook is blocked too, from the
+first prompt on, and the message says so:
 
 ```text
 enterprise_foreign_hook_blocked: your organization blocks claudecode hooks it
 has not approved, because they can change a tool call after DefenseClaw checks
-it. Earlier in this agent session the project file
+it. When this agent session started, the project file
 /home/alice/repo/.claude/settings.local.json defined a hook (digest
-sha256:9b1e…). The agent can keep running a hook it loaded when the session
-started, even after the file changes, so DefenseClaw blocks tool calls for the
-rest of this session: after removing the hook, restart the agent.
+sha256:9b1e…). Remove it, or ask your administrator to add the digest to
+enterprise.machine_policy.connectors.claudecode.allowed_hooks. The agent can
+keep running a hook it loaded when the session started, even after the file
+changes, so DefenseClaw blocks tool calls for the rest of this session: after
+removing the hook, restart the agent.
 ```
 
 The real message carries the full 64-character digest, and every connector's
