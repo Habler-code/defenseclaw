@@ -99,6 +99,11 @@ rest also reach per-user installs.
   reason or no text, so the model reported success. The plugin now fails it
   with an error that names DefenseClaw and shows an error notice; a confirm
   verdict runs with a warning notice.
+- **A confirmation the agent cannot ask about names the rule.** On a hook
+  that cannot ask, such as OpenCode's, a confirm verdict runs as an alert
+  whose reason read `matched: <RULE-ID>:...`. It now says DefenseClaw policy
+  flagged the action for review (rule <RULE-ID>), and OpenCode's notice
+  starts with it. The Secure Client wording is unchanged.
 - **OpenCode and Amp say to restart after a failed start-up check.** When
   the plugin's load-time check for unapproved plugins fails, its blocks say
   so and ask the user to restart the agent once DefenseClaw is available.

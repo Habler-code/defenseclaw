@@ -221,6 +221,12 @@ func TestHookResponsesCarryTheDefenseClawPolicyWording(t *testing.T) {
 	if copilot.Reason != orgBlockWording {
 		t.Fatalf("generic hook reason = %q", copilot.Reason)
 	}
+	// OpenCode cannot ask: the confirmation runs as an alert, flagged for review.
+	review := agentHookResponseFor(agentHookRequest{ConnectorName: "opencode", HookEventName: "tool.execute.before", ToolName: "bash"},
+		"alert", "confirm", "HIGH", markerRuleReason, nil, "action", false, connector.HookCapability{})
+	if !strings.Contains(review.Reason, "flagged this action for review under your organization's policy (rule TEST-MARKER-BLOCK).") {
+		t.Fatalf("unaskable confirm reason = %q", review.Reason)
+	}
 
 	inspect := (&ToolInspectVerdict{Action: "block", Severity: "CRITICAL", Reason: markerRuleReason}).sanitizeForResponse(false)
 	if inspect.Reason != orgBlockWording {

@@ -76,7 +76,7 @@ _BRIDGE_TEMPLATE_DIGESTS = {
     ),
     "opencode": frozenset(
         {
-            "c323da2003f29f22987ef64bc95c3c0aa93004d5cce5ead9a0f33896cc3f7c59",  # opencode-plugin.js
+            "4c1c8bb44e4452c66afbbe7c51baf3a3e6ba46d0ec14d0d7e862b9d0dcf0c963",  # opencode-plugin.js
             "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
         }
     ),
