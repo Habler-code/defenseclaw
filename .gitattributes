@@ -13,6 +13,13 @@ extensions/defenseclaw/openclaw.plugin.json text eol=lf
 internal/configs/providers.json text eol=lf
 internal/gateway/connector/hooks/amp-plugin.ts text eol=lf
 internal/gateway/connector/hooks/opencode-plugin.js text eol=lf
+internal/gateway/connector/hooks/amp-plugin-secure-client.ts text eol=lf
+internal/gateway/connector/hooks/opencode-plugin-secure-client.js text eol=lf
+
+# The MDM kit scripts are uploaded to MDM consoles as committed and the Unix
+# ones run under /bin/sh; keep them LF on Windows checkouts too.
+packaging/mdm/**/*.sh text eol=lf
+packaging/mdm/**/*.ps1 text eol=lf
 
 # These pinned upstream snapshots are authenticated by SHA256 over their exact
 # bytes. Disable checkout-time newline conversion so Windows materializes the
