@@ -35,9 +35,10 @@ import (
 // read (connector.WriteManagedSetupAgentSelection). A later replacement of
 // the image is still refused by the connector's digest check. Connectors
 // without protected executable admission, and callers that already chose
-// an executable, are left unchanged.
+// an executable, are left unchanged. Only the standalone profile selects:
+// the Secure Client macOS guardian keeps its earlier OpenHands behavior.
 func selectManagedAgentExecutable(home, dataDir, connectorName string, setupOpts *connector.SetupOpts) error {
-	if setupOpts == nil || !connector.ProtectedSetupSelectionConnector(connectorName) ||
+	if setupOpts == nil || !standaloneProfileProcess() || !connector.ProtectedSetupSelectionConnector(connectorName) ||
 		strings.TrimSpace(setupOpts.AgentExecutable) != "" {
 		return nil
 	}

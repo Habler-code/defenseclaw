@@ -707,14 +707,15 @@ func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrol
 func unixKnownRowVersionRefused(connectorName, from, to string) string {
 	if standaloneNotGatedAgentFloor(connectorName) != "" {
 		// A not-gated connector (Kiro) is verified by its standalone floor
-		// instead of a known contract: keep a row that met the floor from
-		// following a version below it.
+		// instead of a known contract: a row never follows a version below
+		// the floor. That includes a row an earlier release enrolled below
+		// the floor: the guardian keeps repairing it at its enrolled version
+		// (validateHookContract), while it refuses a change to another
+		// version below the floor as drift, so following one would stop
+		// every repair of the user's hooks.
 		admitted, reason := standaloneNotGatedVersionAdmitted(connector.ResolveHookContract(connectorName, to))
 		if admitted {
 			return ""
-		}
-		if wasAdmitted, _ := standaloneNotGatedVersionAdmitted(connector.ResolveHookContract(connectorName, from)); !wasAdmitted {
-			return "" // nothing certified to keep
 		}
 		return reason
 	}

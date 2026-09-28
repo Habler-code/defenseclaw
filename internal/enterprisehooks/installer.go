@@ -257,8 +257,10 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if connector.HookContractLockDrifted(lock, current) {
 				return fmt.Errorf("enterprise hooks: connector %s hook contract lock drift detected", conn.Name())
 			}
-			// Unix verification reads only the agent config reference and
-			// the lock, not the hook bytes. Hooks installed before the
+			// Outside the standalone per-user worker (see
+			// verifyStandaloneHookRuntime below), Unix verification reads
+			// only the agent config reference and the lock, not the hook
+			// bytes. Hooks installed before the
 			// standalone hook socket was configured (for example by an
 			// earlier release) would otherwise pass and keep posting to the
 			// TCP port with the shared connector bearer; failing here makes
@@ -272,6 +274,12 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// target's own per-user credentials.
 			if connector.HookCredentialDrifted(lock, setupOpts) {
 				return fmt.Errorf("enterprise hooks: connector %s hooks were installed with credentials that are not bound to this user", conn.Name())
+			}
+			// The standalone per-user worker also checks the hook runtime
+			// itself: the recorded scripts and plugin bytes, and the fail
+			// and guardrail modes the hooks were rendered for.
+			if err := verifyStandaloneHookRuntime(conn, setupOpts, opts.GuardrailMode, lock, uid); err != nil {
+				return err
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),
@@ -323,6 +331,10 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
 	}
+	// The standalone per-user worker runs as the owner: undo a mode change
+	// the user made to their own DefenseClaw directories before inspecting
+	// them, instead of failing every repair until the user undoes it.
+	restoreOwnedDataDirModes(home, dataDir, uid)
 	if err := validateUserDataDir(home, dataDir, uid); err != nil {
 		return InstallResult{}, err
 	}
@@ -389,6 +401,19 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	err = connector.WithUserHomeDir(home, func() error {
 		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
 		pluginArtifacts := connector.ManagedPluginArtifacts(conn, setupOpts)
+		// A hook config file DefenseClaw owns (Kiro, Copilot) lives in a
+		// folder the agent does not create: make its missing parents as the
+		// user, and let Setup write the file itself.
+		var ownedHookConfigs []string
+		if standalonePerUserRepair(uid) {
+			if err := withOwnerCredentials(uid, gid, func() error {
+				var prepareErr error
+				ownedHookConfigs, prepareErr = prepareOwnedHookConfigParents(home, conn.Name(), paths, uid)
+				return prepareErr
+			}); err != nil {
+				return err
+			}
+		}
 		// Endpoint-product bootstrap: on a fresh target where the
 		// user hasn't launched the agent yet, the native hook config
 		// file doesn't exist and validateActivationSurfaces below
@@ -420,7 +445,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			paths,
 			uid,
 			opts.AllowMissingHookConfigRepair,
-			pluginArtifacts,
+			append(append([]string{}, pluginArtifacts...), ownedHookConfigs...),
 		); err != nil {
 			return err
 		}

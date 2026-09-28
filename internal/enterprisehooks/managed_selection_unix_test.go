@@ -121,6 +121,7 @@ func TestUnixManagedAgentExecutableSkipsInadmissibleCandidates(t *testing.T) {
 }
 
 func TestSelectManagedAgentExecutableLeavesUnprotectedConnectorsAlone(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
 	withoutMachineAgentPrefixes(t)
 	home := newTestHome(t)
 	writeUVToolOpenHands(t, home)
@@ -154,6 +155,7 @@ func TestInstallOpenHandsRecordsTheUsersExecutableOnDarwin(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("OpenHands protected executable admission is macOS-only")
 	}
+	setStandaloneProfileForTest(t, true)
 	withoutMachineAgentPrefixes(t)
 	home := newTestHome(t)
 	executable := writeUVToolOpenHands(t, home)
@@ -214,6 +216,7 @@ func TestInstallOpenHandsWithoutExecutableIsRefusedOnDarwin(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("OpenHands protected executable admission is macOS-only")
 	}
+	setStandaloneProfileForTest(t, true)
 	withoutMachineAgentPrefixes(t)
 	home := newTestHome(t)
 	_, err := Install(context.Background(), InstallOptions{
@@ -232,5 +235,26 @@ func TestInstallOpenHandsWithoutExecutableIsRefusedOnDarwin(t *testing.T) {
 	}
 	if lock := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "openhands"); lock.Connector != "" {
 		t.Fatalf("refused install wrote a hook contract lock: %+v", lock)
+	}
+}
+
+// The Secure Client macOS guardian never selected an OpenHands executable:
+// outside the standalone profile nothing is selected and no receipt or data
+// directory is written.
+func TestSelectManagedAgentExecutableIsStandaloneOnly(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("OpenHands protected executable admission is macOS-only")
+	}
+	setStandaloneProfileForTest(t, false)
+	withoutMachineAgentPrefixes(t)
+	home := newTestHome(t)
+	writeUVToolOpenHands(t, home)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	opts := connector.SetupOpts{DataDir: dataDir, AgentVersion: "1.16.0"}
+	if err := selectManagedAgentExecutable(home, dataDir, "openhands", &opts); err != nil || opts.AgentExecutable != "" {
+		t.Fatalf("Secure Client selection: executable=%q err=%v, want none", opts.AgentExecutable, err)
+	}
+	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
+		t.Fatalf("Secure Client selection created the data dir or a receipt: %v", err)
 	}
 }

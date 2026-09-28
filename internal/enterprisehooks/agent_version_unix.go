@@ -97,8 +97,10 @@ func UnixAgentProbeKnown(connector string) bool {
 // one ~/.npmrc names, yarn classic, pnpm, each installed Node of nvm, fnm,
 // asdf and mise (newest first) and Linuxbrew. Those need reads inside the
 // home, so they are searched only by a process running as the target user
-// (the worker), where these user-owned trees grant nothing the user does
-// not already have; other callers keep the original fixed list.
+// (the worker); other callers keep the original fixed list. A prefix
+// outside the home (the shared /home/linuxbrew/.linuxbrew, an ~/.npmrc
+// prefix elsewhere) belongs to whoever installed it, so discovery reads it
+// only when unixDiscoveryCandidateTrusted admits it.
 func userNodePrefixes(home string) []string {
 	prefixes := []string{
 		filepath.Join(home, ".npm-global"),
@@ -268,6 +270,9 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 		}
 		for _, prefix := range append(append([]string{}, prefixes...), machinePrefixes()...) {
 			for _, candidate := range nodeModulesPackage(prefix, pkg) {
+				if !unixDiscoveryCandidateTrusted(home, candidate) {
+					continue
+				}
 				if version, ok := readUnixPackageVersion(candidate, pkg, false); ok {
 					return version, ""
 				}
@@ -287,21 +292,30 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 	if !allowExec {
 		return "", fmt.Sprintf("no %s package metadata under this home", connector)
 	}
-	installedAt := ""
+	installedAt, installedNote := "", ""
 	for index, binary := range probe.binaries {
 		for _, candidate := range unixAgentBinaryCandidates(home, binary) {
-			if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
-				return version, ""
+			// A CLI outside the home that another account can change is
+			// never run as this user: whoever controls it would run code as
+			// every enrolled user on every enumeration cycle.
+			trusted := unixDiscoveryCandidateTrusted(home, candidate)
+			if trusted {
+				if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
+					return version, ""
+				}
 			}
 			// Only the connector's own CLI name counts as evidence of an
 			// install; a generic alias ("agent") could be anything.
 			if index == 0 && installedAt == "" && unixAgentExecutablePresent(candidate) {
 				installedAt = candidate
+				if !trusted {
+					installedNote = unixUntrustedCandidateNote
+				}
 			}
 		}
 	}
 	if installedAt != "" {
-		return "", UnixAgentUnversionedReasonPrefix + installedAt
+		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote
 	}
 	return "", fmt.Sprintf("no %s installation found for this user", connector)
 }
@@ -311,6 +325,11 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 // enumerator cannot select a hook contract for it, so it reports the agent
 // as unprotected instead of skipping it silently.
 const UnixAgentUnversionedReasonPrefix = "installed, but its version could not be read: "
+
+// unixUntrustedCandidateNote follows the path of an installed CLI that
+// discovery did not run because an account other than root and the user can
+// change it (the parent keeps the first 256 bytes of a reason).
+const unixUntrustedCandidateNote = " (not run: accounts other than root and this user can change it; use a root-owned agent_prefixes path)"
 
 // UnixAgentInstalledWithoutVersion reports whether a discovery reason names
 // an installed agent whose version could not be read.
@@ -518,6 +537,98 @@ func readUnixPackageVersion(path, wantName string, requireRoot bool) (string, bo
 		return "", false
 	}
 	return version, true
+}
+
+// unixDiscoveryUID is the account discovery reads and runs agent files for:
+// the per-user worker runs with the target user's credentials. Tests
+// replace it.
+var unixDiscoveryUID = os.Geteuid
+
+// unixDiscoveryCandidateTrusted reports whether discovery may read or run
+// path for the target user. Files inside the user's home are the user's own.
+// A candidate outside the home (the machine prefixes, agent_prefixes, the
+// shared Linuxbrew prefix, an npm prefix set outside the home), or a home
+// entry that links out of the home, is used only when unixPathTrustedFor
+// admits it for the target uid.
+func unixDiscoveryCandidateTrusted(home, path string) bool {
+	uid := unixDiscoveryUID()
+	home = filepath.Clean(home)
+	if !pathInside(home, path) {
+		return unixPathTrustedFor(path, uid)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return true // nothing there to run or read
+	}
+	if pathInside(home, resolved) {
+		return true
+	}
+	if realHome, err := filepath.EvalSymlinks(home); err == nil && pathInside(realHome, resolved) {
+		return true
+	}
+	return unixPathTrustedFor(resolved, uid)
+}
+
+// unixPathTrustedFor resolves path one element at a time, following
+// symbolic links as the kernel does, and admits it only when every
+// directory it passes through, every link it follows and the final entry
+// are owned by root or uid, and no directory or final entry is writable by
+// group or others. No other account can then change what path names
+// between the check and its use.
+func unixPathTrustedFor(path string, uid int) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	const maxLinks = 40
+	trustedOwner := func(info os.FileInfo) bool {
+		st, ok := info.Sys().(*syscall.Stat_t)
+		return ok && (st.Uid == 0 || int64(st.Uid) == int64(uid))
+	}
+	root, err := os.Lstat("/")
+	if err != nil || !trustedOwner(root) || root.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	current := "/"
+	pending := strings.Split(filepath.Clean(path), "/")
+	links := 0
+	for len(pending) > 0 {
+		name := pending[0]
+		pending = pending[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			// current is always a verified directory reached from "/", so
+			// its parent was verified on the way down.
+			current = filepath.Dir(current)
+			continue
+		}
+		next := filepath.Join(current, name)
+		info, err := os.Lstat(next)
+		if err != nil || !trustedOwner(info) {
+			return false
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			links++
+			target, err := os.Readlink(next)
+			if err != nil || target == "" || links > maxLinks {
+				return false
+			}
+			if filepath.IsAbs(target) {
+				current = "/"
+			}
+			pending = append(strings.Split(target, "/"), pending...)
+			continue
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return false
+		}
+		if len(pending) > 0 && !info.IsDir() {
+			return false
+		}
+		current = next
+	}
+	return true
 }
 
 func rootOwnedChain(path string) bool {

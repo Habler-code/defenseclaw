@@ -1762,6 +1762,7 @@ func sliceContains(values []string, want string) bool {
 func TestInstallBootstrapsMissingAntigravityHooksFile(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
 	home := newTestHome(t)
 	cfgPath := filepath.Join(home, ".gemini", "config", "hooks.json")
 	if _, err := Install(context.Background(), InstallOptions{
@@ -1795,6 +1796,7 @@ func TestInstallBootstrapsMissingOpenHandsHooksFile(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("macOS OpenHands setup also needs the user's executable; covered by TestInstallOpenHandsRecordsTheUsersExecutableOnDarwin")
 	}
+	setStandaloneProfileForTest(t, true)
 	home := newTestHome(t)
 	cfgPath := filepath.Join(home, ".openhands", "hooks.json")
 	if _, err := Install(context.Background(), InstallOptions{
@@ -1822,6 +1824,7 @@ func TestInstallBootstrapsMissingOpenHandsHooksFile(t *testing.T) {
 // Only the user-global OpenHands hooks file is bootstrapped; a pinned
 // workspace keeps the strict must-exist check.
 func TestOpenHandsHookStubOnlyForUserGlobalHooks(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
 	home := t.TempDir()
 	conn := connector.NewOpenHandsConnector()
 	stub := defaultHookConfigStubForConnector(conn, connector.SetupOpts{}, home)
@@ -1831,5 +1834,41 @@ func TestOpenHandsHookStubOnlyForUserGlobalHooks(t *testing.T) {
 	pinned := connector.SetupOpts{WorkspaceDir: filepath.Join(home, "project")}
 	if stub := defaultHookConfigStubForConnector(conn, pinned, home); stub.ContentPath != "" {
 		t.Fatalf("pinned-workspace OpenHands stub = %q, want none", stub.ContentPath)
+	}
+}
+
+// The OpenHands and Antigravity hook-config stubs are a standalone-profile
+// behavior. The Secure Client macOS guardian never created those files, so
+// outside the standalone profile a first install still stops on the
+// missing file, and nothing is written.
+func TestHookConfigStubsForOpenHandsAndAntigravityAreStandaloneOnly(t *testing.T) {
+	setStandaloneProfileForTest(t, false)
+	home := t.TempDir()
+	for _, conn := range []connector.Connector{connector.NewOpenHandsConnector(), connector.NewAntigravityConnector()} {
+		if stub := defaultHookConfigStubForConnector(conn, connector.SetupOpts{}, home); stub.ContentPath != "" {
+			t.Fatalf("%s stub outside the standalone profile = %q, want none", conn.Name(), stub.ContentPath)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	skipIfRoot(t)
+	home = newTestHome(t)
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "antigravity",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "1.2.11",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent missing") {
+		t.Fatalf("Secure Client install with no Antigravity hooks file = %v, want the missing-config refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".gemini")); !os.IsNotExist(err) {
+		t.Fatalf("Secure Client install created the Antigravity config tree: %v", err)
 	}
 }
