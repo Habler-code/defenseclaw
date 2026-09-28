@@ -298,11 +298,11 @@ residue automatically.
     numbered/text or `--json` command surfaces instead.
   </Accordion>
   <Accordion title="Uninstall leaves user data or connector residue">
-    Preserving `%USERPROFILE%\.defenseclaw` is the default. If connector cleanup
-    fails, `defenseclaw uninstall --all` stops without removing
-    `%USERPROFILE%\.defenseclaw` or the programs. Run doctor, repair the
-    connector registration, and run the uninstall again. Do not manually delete
-    backups or agent configuration while teardown is unresolved.
+    `defenseclaw uninstall` keeps `%USERPROFILE%\.defenseclaw` unless you pass
+    `--all`. If connector cleanup fails, even `--all` keeps the data and what
+    it needs to retry. Run doctor, repair the recorded connector registration,
+    and run `defenseclaw uninstall` again. Do not manually delete backups or
+    agent configuration while teardown is unresolved.
   </Accordion>
 </Accordions>
 
