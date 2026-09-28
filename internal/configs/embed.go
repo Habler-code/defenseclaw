@@ -147,7 +147,8 @@ type ProvidersConfig struct {
 }
 
 // LoadProviders parses the embedded providers.json and merges an
-// optional operator overlay at ~/.defenseclaw/custom-providers.json.
+// optional operator overlay at <data dir>/custom-providers.json (see
+// CustomProvidersPath).
 // The overlay is "additive only": it can introduce new providers or
 // extend the ollama_ports list, but a failing parse is tolerated —
 // the built-in registry is always returned even if the overlay is
@@ -171,12 +172,18 @@ func LoadProviders() (*ProvidersConfig, error) {
 	return &cfg, nil
 }
 
-// CustomProvidersPath returns the location of the operator overlay,
-// honoring DEFENSECLAW_CUSTOM_PROVIDERS_PATH for test / container
-// installs. Empty return value means no overlay applies.
+// CustomProvidersPath returns the location of the operator overlay:
+// DEFENSECLAW_CUSTOM_PROVIDERS_PATH for test / container installs, else
+// custom-providers.json in the DefenseClaw data dir: DEFENSECLAW_HOME when
+// set (a managed service's data_dir, or a per-user install relocated with
+// it, which is where the Python CLI writes the overlay), otherwise
+// ~/.defenseclaw. Empty return value means no overlay applies.
 func CustomProvidersPath() string {
 	if p := os.Getenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH"); p != "" {
 		return p
+	}
+	if dataDir := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); dataDir != "" {
+		return filepath.Join(dataDir, "custom-providers.json")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -194,9 +201,11 @@ func mergeCustomProviders(cfg *ProvidersConfig) {
 	}
 	f, err := os.Open(path) // #nosec G304 — path is a fixed per-user overlay, documented.
 	if err != nil {
-		// ENOENT is the common case — overlay absent. Any other
-		// error is logged but non-fatal.
-		if !os.IsNotExist(err) {
+		// The overlay is optional: an absent file is the common case, and
+		// one this account may not read (another account's data dir) is
+		// not this process's overlay, so neither prints anything. Any
+		// other error is logged but non-fatal.
+		if !os.IsNotExist(err) && !os.IsPermission(err) {
 			fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay open error: %v\n", err)
 		}
 		return

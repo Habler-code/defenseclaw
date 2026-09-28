@@ -231,7 +231,7 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 }
 
 func runStart(cmd *cobra.Command, _ []string) error {
-	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 		return err
 	}
 	rotationTransaction := rotationTransactionRequested(cmd)
@@ -398,6 +398,15 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		return errors.New("rotation cleanup requires transaction-grade verification")
 	}
 	d := daemon.New(config.DefaultDataPath())
+	// On a managed host stop refuses like start and restart; reporting "not
+	// running" with exit 0 read as if no gateway ran while the managed one
+	// did. Only this account's own per-user gateway, left over from before
+	// the managed deployment, may still be stopped here.
+	if refusal := refuseGatewayLifecycleOnManagedHost(); refusal != nil {
+		if running, _ := d.IsRunning(); !running {
+			return refusal
+		}
+	}
 	cfg, cfgErr := loadDaemonConfig(cmd)
 	var running bool
 	var pid int
@@ -569,7 +578,7 @@ func waitForRunningDaemonReadiness(
 }
 
 func runRestart(cmd *cobra.Command, _ []string) error {
-	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 		return err
 	}
 	d := daemon.New(config.DefaultDataPath())

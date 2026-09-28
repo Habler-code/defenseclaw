@@ -76,7 +76,7 @@ administrator publishes the manifest and this command does nothing.`,
 
 func init() {
 	flags := enterpriseHooksEnumerateCmd.Flags()
-	flags.StringVar(&enterpriseHooksEnumerateOpts.manifest, "manifest", "", "absolute path of the guardian targets.yaml to maintain (required)")
+	flags.StringVar(&enterpriseHooksEnumerateOpts.manifest, "manifest", "", "absolute path of the guardian targets.yaml to maintain (default on a standalone host: its layout's manifest)")
 	flags.StringVar(&enterpriseHooksEnumerateOpts.descriptor, "descriptor", "", "managed runtime descriptor (default: the standalone layout's)")
 	flags.DurationVar(&enterpriseHooksEnumerateOpts.interval, "interval", 0, "run every interval as a service; 0 runs one cycle")
 	flags.BoolVar(&enterpriseHooksEnumerateOpts.jsonOut, "json", false, "print each cycle's report as JSON")

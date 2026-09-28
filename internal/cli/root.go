@@ -103,6 +103,16 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
 		return nil
 	}
+	// The bare root command (it has no parent) is the per-user gateway
+	// daemon. On a managed host it must refuse before any side effect:
+	// before PID registration, before a per-user .env can set the
+	// deployment pin, and before the config load and audit store open that
+	// would create ~/.defenseclaw/audit.db.
+	if cmd != nil && !cmd.HasParent() {
+		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
+			return err
+		}
+	}
 	// Enterprise hook commands also use this initializer so they receive the
 	// same authenticated v8 runtime context as the root sidecar command.
 	// A Windows daemon may explicitly break away from the TUI's Job Object.
@@ -180,7 +190,7 @@ Run without arguments to start the sidecar daemon.`,
 		if versionJSON {
 			return writeMachineVersion(cmd.OutOrStdout())
 		}
-		if err := refusePerUserGatewayOnManagedHost(); err != nil {
+		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 			return err
 		}
 		return runSidecar(cmd, args)

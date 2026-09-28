@@ -630,7 +630,110 @@ type enterpriseHookStatusReport struct {
 	Activation                    *enterpriseHookGuardianActivation    `json:"activation,omitempty"`
 	Verification                  []enterpriseHookReconcileRow         `json:"verification,omitempty"`
 	ClaudeEffectivePolicyVerified bool                                 `json:"claude_effective_policy_verified"`
-	Errors                        []string                             `json:"errors,omitempty"`
+	// Enrollment lists, per enrolled account, each connector and its state
+	// in the last guardian reconcile.
+	Enrollment []enterpriseHookEnrollment `json:"enrollment,omitempty"`
+	Errors     []string                   `json:"errors,omitempty"`
+}
+
+// enterpriseHookEnrollment is one account's connectors in the last
+// guardian reconcile.
+type enterpriseHookEnrollment struct {
+	User       string                          `json:"user,omitempty"`
+	UserHome   string                          `json:"user_home,omitempty"`
+	SID        string                          `json:"sid,omitempty"`
+	UID        int                             `json:"uid,omitempty"`
+	Connectors []enterpriseHookEnrollmentState `json:"connectors"`
+}
+
+// enterpriseHookEnrollmentState is one connector's state for an account:
+// "enrolled", "pending" (waiting for the user's session) or "failed".
+type enterpriseHookEnrollmentState struct {
+	Connector string `json:"connector"`
+	State     string `json:"state"`
+}
+
+// enterpriseHookEnrollmentFromRows groups reconcile rows by account, in
+// account then connector order.
+func enterpriseHookEnrollmentFromRows(rows []enterpriseHookReconcileRow) []enterpriseHookEnrollment {
+	byAccount := map[string]*enterpriseHookEnrollment{}
+	var keys []string
+	for _, row := range rows {
+		key := strings.TrimSpace(row.SID)
+		if key == "" {
+			key = strings.TrimSpace(row.User)
+		}
+		if key == "" {
+			key = strings.TrimSpace(row.UserHome)
+		}
+		entry, seen := byAccount[key]
+		if !seen {
+			entry = &enterpriseHookEnrollment{User: row.User, UserHome: row.UserHome, SID: row.SID, UID: row.UID}
+			byAccount[key] = entry
+			keys = append(keys, key)
+		}
+		state := "failed"
+		switch {
+		case row.OK:
+			state = "enrolled"
+		case row.Pending:
+			state = "pending"
+		}
+		entry.Connectors = append(entry.Connectors, enterpriseHookEnrollmentState{
+			Connector: strings.TrimSpace(row.Connector), State: state,
+		})
+	}
+	sort.Strings(keys)
+	out := make([]enterpriseHookEnrollment, 0, len(keys))
+	for _, key := range keys {
+		entry := byAccount[key]
+		sort.SliceStable(entry.Connectors, func(i, j int) bool {
+			return entry.Connectors[i].Connector < entry.Connectors[j].Connector
+		})
+		out = append(out, *entry)
+	}
+	return out
+}
+
+// printEnterpriseHookEnrollment renders the per-account enrollment list.
+func printEnterpriseHookEnrollment(w io.Writer, enrollment []enterpriseHookEnrollment, updatedAt string) {
+	if len(enrollment) == 0 {
+		return
+	}
+	heading := "Enrollment"
+	if strings.TrimSpace(updatedAt) != "" {
+		heading += " (last guardian reconcile " + strings.TrimSpace(updatedAt) + ")"
+	}
+	fmt.Fprintf(w, "  %s:\n", heading)
+	for _, account := range enrollment {
+		label := strings.TrimSpace(account.User)
+		var detail []string
+		if home := strings.TrimSpace(account.UserHome); home != "" && home != label {
+			if label == "" {
+				label = home
+			} else {
+				detail = append(detail, home)
+			}
+		}
+		if sid := strings.TrimSpace(account.SID); sid != "" {
+			if label == "" {
+				label = sid
+			} else {
+				detail = append(detail, sid)
+			}
+		}
+		if account.UID > 0 {
+			detail = append(detail, fmt.Sprintf("uid %d", account.UID))
+		}
+		if len(detail) > 0 {
+			label += " (" + strings.Join(detail, ", ") + ")"
+		}
+		connectors := make([]string, 0, len(account.Connectors))
+		for _, connector := range account.Connectors {
+			connectors = append(connectors, connector.Connector+" "+connector.State)
+		}
+		fmt.Fprintf(w, "    %s: %s\n", label, strings.Join(connectors, ", "))
+	}
 }
 
 func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
@@ -669,6 +772,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	} else {
 		report.State = &state
 		report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
+		report.Enrollment = enterpriseHookEnrollmentFromRows(state.Results)
 	}
 	authorization, authorizationExists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
 	if authorizationErr != nil {
@@ -720,10 +824,14 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	if report.OK {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d verified, %d pending, %d total)\n",
 			Style("✓", "fg=green", "bold"), state.SuccessCount, state.PendingCount, state.TargetCount)
+		printEnterpriseHookEnrollment(cmd.OutOrStdout(), report.Enrollment, state.UpdatedAt)
 		return nil
 	}
 	for _, issue := range report.Errors {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s\n", Style("✗", "fg=red", "bold"), issue)
+	}
+	if report.State != nil {
+		printEnterpriseHookEnrollment(cmd.OutOrStdout(), report.Enrollment, report.State.UpdatedAt)
 	}
 	return fmt.Errorf("enterprise hooks status unhealthy")
 }
