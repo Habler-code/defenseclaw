@@ -209,6 +209,21 @@ func windowsCodexMachineHash(data []byte) string {
 }
 
 func windowsCodexManagedHookCommand(hookBinary string) string {
+	// The 0.8.6 hook reads the Codex event from stdin. Its GUI-subsystem
+	// launcher must be waited on so PowerShell returns its block exit code.
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+			" -ArgumentList @('hook','--connector','codex','--enterprise-managed') -NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// windowsCodexLegacyManagedHookCommand is the non-waiting command emitted by
+// the earlier AVC payload. Reconcile replaces it, and uninstall still owns it.
+func windowsCodexLegacyManagedHookCommand(hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -324,13 +339,18 @@ func reconcileWindowsCodexRequirements(
 				return nil, false, fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, rawGroups)
 			}
 		}
+		kept := make([]interface{}, 0, len(groups))
 		found := false
 		for _, candidate := range groups {
+			if windowsCodexMachineGroupIsLegacy(candidate, expected, opts.HookBinary) {
+				continue
+			}
+			kept = append(kept, candidate)
 			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
 				found = true
-				break
 			}
 		}
+		groups = kept
 		if !found {
 			groups = append(groups, windowsCodexExpectedMachineGroup(expected, opts.HookBinary))
 		}
@@ -394,10 +414,13 @@ func verifyWindowsCodexRequirementsBytes(
 		if !ok {
 			return fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, hooks[expected.eventType])
 		}
-		found := 0
+		found, legacy := 0, 0
 		for _, candidate := range groups {
 			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
 				found++
+			}
+			if windowsCodexMachineGroupIsLegacy(candidate, expected, opts.HookBinary) {
+				legacy++
 			}
 		}
 		if found != 1 {
@@ -406,6 +429,9 @@ func verifyWindowsCodexRequirementsBytes(
 				expected.eventType,
 				found,
 			)
+		}
+		if legacy != 0 {
+			return fmt.Errorf("hooks.%s still has %d non-waiting DefenseClaw groups from an earlier release", expected.eventType, legacy)
 		}
 	}
 	return nil
@@ -419,6 +445,43 @@ func windowsCodexMachineGroupMatches(
 		timeout   int
 	},
 	hookBinary string,
+) bool {
+	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommand(hookBinary))
+}
+
+func windowsCodexMachineGroupIsLegacy(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	hookBinary string,
+) bool {
+	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexLegacyManagedHookCommand(hookBinary))
+}
+
+func windowsCodexMachineGroupOwned(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	hookBinary string,
+) bool {
+	return windowsCodexMachineGroupMatches(raw, expected, hookBinary) ||
+		windowsCodexMachineGroupIsLegacy(raw, expected, hookBinary)
+}
+
+func windowsCodexMachineGroupHasCommand(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	command string,
 ) bool {
 	group, ok := raw.(map[string]interface{})
 	if !ok || len(group) != 1 && len(group) != 2 {
@@ -440,7 +503,6 @@ func windowsCodexMachineGroupMatches(
 	if !ok || len(handler) != 4 {
 		return false
 	}
-	command := windowsCodexManagedHookCommand(hookBinary)
 	if handler["type"] != "command" || handler["command"] != command ||
 		handler["command_windows"] != command {
 		return false
@@ -471,7 +533,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	for _, expected := range codexHookGroups {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+			if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 				return true, nil
 			}
 		}
@@ -501,13 +563,13 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
 			for _, candidate := range baselineGroups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					baselineCount++
 				}
 			}
 			currentCount := 0
 			for _, candidate := range groups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					currentCount++
 				}
 			}
@@ -518,7 +580,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			filtered := make([]interface{}, 0, len(groups)-removeCount)
 			for index := len(groups) - 1; index >= 0; index-- {
 				candidate := groups[index]
-				if removeCount > 0 && windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if removeCount > 0 && windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					removeCount--
 					continue
 				}
