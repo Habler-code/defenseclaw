@@ -391,6 +391,25 @@ func TestReconcileWindowsCodexRequirementsLegacyMarshaledDocumentIsUntouched(t *
 	requireCodexRequirementsBytes(t, "legacy uninstall semantics", gotCanonical, wantCanonical)
 }
 
+func TestReconcileWindowsCodexRequirementsReplacesNonWaitingGroups(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	admin := []byte(commentedAdminCodexRequirements)
+	want := reconcileCodexRequirementsForTest(t, admin, opts)
+	current := codexTOMLString(windowsCodexManagedHookCommand(opts.HookBinary))
+	old := codexTOMLString(windowsCodexLegacyManagedHookCommand(opts.HookBinary))
+	legacy := bytes.ReplaceAll(want, []byte(current), []byte(old))
+	if bytes.Equal(legacy, want) {
+		t.Fatal("did not construct an earlier-release managed document")
+	}
+	if err := verifyWindowsCodexRequirementsBytes(legacy, opts); err == nil {
+		t.Fatal("non-waiting managed hooks unexpectedly verified")
+	}
+	repaired := reconcileCodexRequirementsForTest(t, legacy, opts)
+	requireCodexRequirementsBytes(t, "replace older groups", repaired, want)
+	requireCodexRequirementsBytes(t, "uninstall after replacement",
+		removeCodexRequirementsForTest(t, repaired, admin, opts), admin)
+}
+
 func TestWindowsCodexRequirementsDottedRootTablesRoundTrip(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	admin := []byte("# dotted form\nfeatures.web_search_request = false\nhooks.SessionStart = []\n")
