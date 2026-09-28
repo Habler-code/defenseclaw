@@ -29,9 +29,9 @@ func useAgentVerdictProfile(t *testing.T, standalone, secureClient bool) {
 const certMarkerReason = "matched: CERT-S3-MARKER-BLOCK:Certification marker (block)"
 
 const (
-	orgBlockWording     = "DefenseClaw blocked this action under your organization's policy (rule CERT-S3-MARKER-BLOCK). Contact your administrator if you need it allowed."
+	orgBlockWording     = "DefenseClaw blocked this action under your organization's policy (rule CERT-S3-MARKER-BLOCK). Do not retry it in another form. Contact your administrator if you need it allowed."
 	orgConfirmWording   = "DefenseClaw needs your confirmation for this action under your organization's policy (rule CERT-S3-MARKER-BLOCK)."
-	userBlockWording    = "DefenseClaw policy blocked this action (rule CERT-S3-MARKER-BLOCK)."
+	userBlockWording    = "DefenseClaw policy blocked this action (rule CERT-S3-MARKER-BLOCK). Do not retry it in another form."
 	userConfirmWording  = "DefenseClaw policy needs your confirmation for this action (rule CERT-S3-MARKER-BLOCK)."
 	redactedTokenPrefix = "<redacted"
 )
@@ -131,7 +131,7 @@ func TestAgentVerdictReasonNamesALoadedRulePackTitle(t *testing.T) {
 
 	useAgentVerdictProfile(t, true, false)
 	display := agentDisplayReason(certMarkerReason, redaction.SinkPolicyDefault)
-	want := "DefenseClaw blocked this action under your organization's policy (rule CERT-S3-MARKER-BLOCK: Certification marker (block)). Contact your administrator if you need it allowed."
+	want := "DefenseClaw blocked this action under your organization's policy (rule CERT-S3-MARKER-BLOCK: Certification marker (block)). Do not retry it in another form. Contact your administrator if you need it allowed."
 	if got := agentVerdictReason("block", certMarkerReason, display, redaction.SinkPolicyDefault); got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}

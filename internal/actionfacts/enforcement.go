@@ -272,6 +272,73 @@ func markProjectionFactLimit(projected *Facts) {
 	)
 }
 
+// DynamicRedirectTargetReduction returns an independent view of partial POSIX
+// facts whose only uncertainty is a redirection target expanded at run time,
+// such as "> ~/out.txt", "> $HOME/out.txt" or "> out-*.txt". The view drops
+// those redirections and keeps everything else: every command with its
+// complete static argv, the static redirections, and every path, network and
+// data-flow fact. No path fact is invented for a dropped target.
+//
+// The view therefore describes strictly less than the action does. A caller
+// may count a semantic match on it only for an expression whose match cannot
+// be undone by more redirections (semantic.Program.RedirectReductionSafe),
+// and a non-match on it proves nothing about the action. The view is
+// unavailable when anything else is uncertain: an expanding argument or
+// program name, uncertain control flow (a chained, negated or background
+// command), a command that is not a plain POSIX process, or any other parse
+// issue.
+func (f Facts) DynamicRedirectTargetReduction() (Facts, bool) {
+	if f.Parse.Status != StatusPartial || len(f.Parse.Issues) != 1 ||
+		f.Parse.Issues[0] != IssueDynamicWord || len(f.Commands) == 0 {
+		return Facts{}, false
+	}
+	commands := cloneCommands(f.Commands)
+	dropped := false
+	for index := range commands {
+		command := &commands[index]
+		if command.Dialect != DialectPOSIX ||
+			command.Kind != CommandKindProcess ||
+			command.Effect != EffectExecute ||
+			command.ControlFlowUncertain ||
+			len(command.Argv) == 0 || command.Argv[0] == "" ||
+			command.Executable == "" || command.Program == "" ||
+			len(command.Arguments) != len(command.Argv) {
+			return Facts{}, false
+		}
+		for _, argument := range command.Arguments {
+			if argument.Expands {
+				return Facts{}, false
+			}
+		}
+		kept := make([]RedirectFact, 0, len(command.Redirects))
+		for _, redirect := range command.Redirects {
+			if !redirect.Expands {
+				kept = append(kept, redirect)
+			}
+		}
+		if len(kept) == len(command.Redirects) {
+			// Nothing to drop here, so this command's argv must already be
+			// complete on its own.
+			if !command.ArgvComplete {
+				return Facts{}, false
+			}
+			continue
+		}
+		// The parser clears ArgvComplete only because of the expanding
+		// target; the argv itself was checked static above.
+		dropped = true
+		command.Redirects = kept
+		command.ArgvComplete = true
+	}
+	if !dropped {
+		return Facts{}, false
+	}
+	reduced := f
+	reduced.Commands = commands
+	reduced.Parse = ParseResult{Status: StatusComplete, Dialect: f.Parse.Dialect}
+	return reduced, true
+}
+
 func hasStaticRedirect(redirects []RedirectFact) bool {
 	for _, redirect := range redirects {
 		if isStaticRedirect(redirect) {

@@ -97,13 +97,32 @@ gated on it, so they apply to per-user installs too.
   `setup remove` was refused on the restored release. The in-place migrate
   warning now names the connector instead of `<name>`.
 
+- **A command rule still blocks when the command writes to a `~/` or
+  `$HOME/` path.** A redirect target the shell expands at run time
+  (`> ~/out.txt`, `> "$HOME/out.txt"`, `> out-*.txt`) made the whole
+  command's parse partial, so a CEL command rule fell back to its regex and
+  a CRITICAL match was recorded as detection-only (allowed in action mode),
+  while the same command writing to an absolute path was blocked. When the
+  expanded redirect target is the only unknown part of a command, the rule
+  engine now evaluates CEL rules on the command without that redirect. A
+  match there is proof for a block, provided the rule cannot depend on the
+  dropped redirect (it does not negate, compare or `all()` over
+  `redirects`, and does not read `parse` or `argv_complete`) and has no
+  built-in code prerequisite. A non-match still leaves the regex fallback
+  to decide, as before. Commands chained with `&&` or `||`, and commands
+  with an expanding argument or program name, are unchanged. This is rule
+  engine behavior, so it applies to every profile that uses the local
+  engine, per-user installs included.
 - **Agents say that DefenseClaw policy made a block.** A block or
   confirmation by a policy rule reached the agent as `matched:
   <RULE-ID>:<redacted len=N sha=...>`, which users and models read as a
   broken hook. It now reads `DefenseClaw policy blocked this action (rule
-  <RULE-ID>).` or `DefenseClaw policy needs your confirmation for this action
-  (rule <RULE-ID>).` (in the standalone enterprise profile: "...under your
-  organization's policy", with a pointer to the administrator). A title is
+  <RULE-ID>). Do not retry it in another form.` or `DefenseClaw policy needs
+  your confirmation for this action (rule <RULE-ID>).` (in the standalone
+  enterprise profile: "...under your organization's policy", with a pointer
+  to the administrator). The retry sentence is there because an agent that
+  was told only the rule name sometimes rewrote the blocked command to get
+  the same result. A title is
   kept for DefenseClaw's built-in rules and for rules of the loaded rule
   pack; the audit record keeps the full reason. A block that another
   verdict (AI Defense, the LLM judge) also decided keeps that verdict's

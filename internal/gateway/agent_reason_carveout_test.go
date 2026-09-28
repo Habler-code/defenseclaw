@@ -77,7 +77,7 @@ func TestAgentReasonCarveOut_HookResponses(t *testing.T) {
 		t.Run(name+"/carveout_off_redacted", func(t *testing.T) {
 			redaction.SetAgentReasonRedactionDisabled(false)
 			got := shape()
-			if got != "DefenseClaw policy blocked this action (rule PII-EMAIL)." {
+			if got != "DefenseClaw policy blocked this action (rule PII-EMAIL). Do not retry it in another form." {
 				t.Fatalf("%s carve-out off must name only the rule, got %q", name, got)
 			}
 			if strings.Contains(got, "alice@example.com") {

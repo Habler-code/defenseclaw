@@ -102,14 +102,20 @@ func setStandaloneEnterpriseActive(v bool) { standaloneEnterpriseActive.Store(v)
 // agentRuleIDPattern is the shape of a rule ID an agent message may name.
 var agentRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// agentBlockNoRetry ends every policy block the agent receives. An agent that
+// got only the rule name sometimes rewrote the blocked command to get the
+// same result; the sentence tells it the block is final.
+const agentBlockNoRetry = "Do not retry it in another form."
+
 // agentVerdictReason words a block or a confirmation of a local policy rule
 // for the agent's user. The bare "matched: <rule-id>:<title>" reason, with a
 // custom rule's title replaced by a "<redacted len=N sha=...>" token, read
 // like a broken hook, and users (and the model) went looking in their own
 // agent settings. The message says DefenseClaw made the decision under the
 // organization's policy (standalone enterprise) or DefenseClaw policy
-// (per-user), and names the rules by ID; a compiled-in or rule-pack rule
-// keeps its title. The audit record keeps the full source reason.
+// (per-user), names the rules by ID (a compiled-in or rule-pack rule keeps
+// its title), and a block tells the agent not to retry the action in another
+// form. The audit record keeps the full source reason.
 //
 // Other actions and any other reason (a configured block message, a
 // foreign-hook or AI Defense verdict) keep displayReason. Secure Client
@@ -133,9 +139,10 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	standalone := standaloneEnterpriseActive.Load()
 	switch {
 	case action == "block" && standalone:
-		return "DefenseClaw blocked this action under your organization's policy (" + rules + "). Contact your administrator if you need it allowed."
+		return "DefenseClaw blocked this action under your organization's policy (" + rules + "). " +
+			agentBlockNoRetry + " Contact your administrator if you need it allowed."
 	case action == "block":
-		return "DefenseClaw policy blocked this action (" + rules + ")."
+		return "DefenseClaw policy blocked this action (" + rules + "). " + agentBlockNoRetry
 	case standalone:
 		return "DefenseClaw needs your confirmation for this action under your organization's policy (" + rules + ")."
 	default:

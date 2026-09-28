@@ -135,18 +135,31 @@ func dispatchTrustedAction(
 		return findings
 	}
 
+	// A partial action whose only uncertainty is a runtime-expanded redirect
+	// target ("> ~/out.txt", "> $HOME/out.txt") still has a static, provable
+	// argv. Semantic rules run on a view without those redirects, but only a
+	// match counts there, and only for a rule that match cannot depend on the
+	// dropped redirects (redirectReductionCandidate). A non-match or a skipped
+	// rule never suppresses its legacy fallback, which, like every recovery
+	// lane below, still sees the whole action.
+	semanticFacts := facts
+	redirectReduced := false
 	if !facts.Authoritative() {
-		var fallbackTelemetry trustedActionTelemetry
-		findings, fallbackTelemetry = dispatchTrustedFallback(
-			generation,
-			request,
-			facts,
-			options,
-		)
-		telemetry.merge(fallbackTelemetry)
-		return findings
+		reduced, ok := facts.DynamicRedirectTargetReduction()
+		if !ok {
+			var fallbackTelemetry trustedActionTelemetry
+			findings, fallbackTelemetry = dispatchTrustedFallback(
+				generation,
+				request,
+				facts,
+				options,
+			)
+			telemetry.merge(fallbackTelemetry)
+			return findings
+		}
+		semanticFacts, redirectReduced = reduced, true
 	}
-	fullProjection, projectionCode := semantic.Project(facts)
+	fullProjection, projectionCode := semantic.Project(semanticFacts)
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
 		findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -176,9 +189,12 @@ func dispatchTrustedAction(
 		if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
 			continue
 		}
-		if !candidate.owner.eligible(facts) {
-			if candidate.owner.suppressFallback != nil &&
-				candidate.owner.suppressFallback(facts) {
+		if redirectReduced && !redirectReductionCandidate(candidate) {
+			continue
+		}
+		if !candidate.owner.eligible(semanticFacts) {
+			if !redirectReduced && candidate.owner.suppressFallback != nil &&
+				candidate.owner.suppressFallback(semanticFacts) {
 				excludeSemanticOwner(excluded, candidate.owner, false)
 			}
 			continue
@@ -195,12 +211,14 @@ func dispatchTrustedAction(
 			continue
 		}
 		if !result.Matched {
-			excludeSemanticOwner(excluded, candidate.owner, false)
+			if !redirectReduced {
+				excludeSemanticOwner(excluded, candidate.owner, false)
+			}
 			continue
 		}
 
 		if !enforcementProjected {
-			enforcementFacts = facts.EnforcementProjection()
+			enforcementFacts = semanticFacts.EnforcementProjection()
 			enforcementProjection, projectionCode = semantic.Project(enforcementFacts)
 			enforcementProjected = true
 		}
@@ -248,7 +266,7 @@ func dispatchTrustedAction(
 			newActionFactsSemanticFindingProof(
 				candidate.rule.ID,
 				actionFactsSemanticProofInput{
-					FactsAuthoritative:  facts.Authoritative(),
+					FactsAuthoritative:  semanticFacts.Authoritative(),
 					EnforcementEligible: enforcementFacts.EnforcementEligible(),
 					ProjectionComplete:  projectionCode == semantic.ProjectionOK,
 					EvaluationComplete:  enforcementCode == semantic.EvalOK,
@@ -344,6 +362,18 @@ func dispatchTrustedAction(
 	)
 	findings = append(semanticFindings, legacyFindings...)
 	return finalizeTrustedActionFindings(generation, request, facts, findings)
+}
+
+// redirectReductionCandidate reports whether a match of candidate on the view
+// from actionfacts.Facts.DynamicRedirectTargetReduction may stand for the
+// whole action. The expression must be one that more redirects cannot turn
+// off (semantic.Program.RedirectReductionSafe), and the owner must have no
+// code-owned prerequisite: those are Go checks written for complete facts
+// that may read a command's redirects. Other owners keep their legacy
+// fallback, as for any other partial action.
+func redirectReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.RedirectReductionSafe()
 }
 
 func excludeSemanticOwner(

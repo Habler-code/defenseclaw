@@ -65,6 +65,15 @@ CodeGuard matches, parser-shadow evidence, partial or invalid facts, and proof
 for another rule remain detection-only unless a separate complete proof is
 pinned to that same rule; lexical metadata alone never authorizes.
 
+One partial form still gets a semantic decision: when the only unknown part of
+a POSIX command is a redirect target the shell expands at run time
+(`> ~/out.txt`, `> "$HOME/out.txt"`), CEL rules also run on the command without
+that redirect, and a match there is complete proof for a rule that has no
+code-owned prerequisite and cannot depend on the dropped redirect (no `!`,
+`==`, `!=`, `in` or `all()` over `redirects`, and no `parse` or
+`argv_complete` read). A non-match proves nothing, so the regex fallback still
+sees the whole command.
+
 Durable ordered-chain enforcement is limited to authenticated connector hooks
 with canonical connector/session correlation. The audit store persists only
 bounded masks and fingerprints, never raw commands, arguments, paths, URLs, or
