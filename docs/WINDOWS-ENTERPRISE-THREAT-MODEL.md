@@ -443,7 +443,15 @@ not an administrator authority even though it is a machine service.
    certify them independently.
 5. Local port squatting cannot forge an allow verdict because the connected
    peer PID must be the exact SCM gateway PID, but it can still deny
-   availability. Target-owned file reads and comparisons are bounded, and an
+   availability. The accidental case is closed: while the `DefenseClawGateway`
+   service exists, the per-user `install.ps1`, the per-user Setup install,
+   upgrade, and repair actions, and the per-user gateway `start`, `restart`, and
+   foreground run all refuse. A production deployment also owns
+   `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1`. It never
+   changes a value that Group Policy or another administrator already set, and
+   Uninstall removes the value only if it still carries the deployment's owner
+   marker. A deliberate listener from any other standard-user program remains
+   an availability residual. Target-owned file reads and comparisons are bounded, and an
    authorized oversized runtime leaf is quarantined for repair, but disk-full,
    handle exhaustion, continuously generated new data, and broader endpoint
    resource starvation remain availability residuals. SCM recovery, monitoring,

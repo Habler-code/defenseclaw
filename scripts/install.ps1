@@ -150,6 +150,33 @@ function Assert-NativeWindowsX64 {
     }
 }
 
+function Assert-NoEnterpriseDeployment {
+    param([string]$ServiceName = "DefenseClawGateway")
+
+    # An administrator-managed DefenseClaw enterprise deployment registers
+    # this SCM service; the per-user product never creates services. A
+    # per-user gateway beside it would take the local port that every user's
+    # enterprise managed hooks use, so the per-user install is refused.
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($null -eq $service) { return }
+    $imagePath = ""
+    try {
+        $imagePath = [string](Get-ItemProperty `
+            -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$ServiceName" `
+            -Name ImagePath -ErrorAction Stop).ImagePath
+    } catch {
+        $imagePath = ""
+    }
+    if (-not [string]::IsNullOrWhiteSpace($imagePath) -and
+        $imagePath.IndexOf("\defenseclaw-gateway.exe", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        return
+    }
+    Die ("An administrator-managed DefenseClaw enterprise deployment is installed on this computer " +
+        "(Windows service $ServiceName); the per-user DefenseClaw cannot be installed beside it. " +
+        "The enterprise service already protects every user's agents on this computer, and a " +
+        "per-user gateway would take the port its managed hooks use. Contact your administrator.")
+}
+
 function Assert-CompatibleLayoutRequest {
     if ($NoPersistPath) {
         Die "-NoPersistPath has no safe native Setup equivalent. Native Setup must own the user PATH entry so repair and uninstall remain consistent."
@@ -973,6 +1000,7 @@ function Invoke-NativeSetup {
 function Main {
     if ($Help) { Show-Help; return 0 }
     Assert-NativeWindowsX64
+    Assert-NoEnterpriseDeployment
     Assert-CompatibleLayoutRequest
 
     Write-Host ""

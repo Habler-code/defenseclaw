@@ -218,8 +218,11 @@ def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
     lifecycle_suffix = r"Cisco\Cisco Secure Client\DefenseClaw-Lifecycle"
     certification_suffix = r"Cisco\Cisco Secure Client\DefenseClaw-Cert"
 
+    # The per-user self-update machine policy key is a registry path, not a
+    # filesystem root.
+    self_update_policy_key = r"SOFTWARE\Policies\Cisco\DefenseClaw"
     for source in (installer, module, harness, smoke, documentation):
-        assert r"Cisco\DefenseClaw" not in source
+        assert r"Cisco\DefenseClaw" not in source.replace(self_update_policy_key, "")
     for source in (installer, module, harness, smoke):
         assert "Cisco Secure Client" in source
     assert production_suffix in installer
