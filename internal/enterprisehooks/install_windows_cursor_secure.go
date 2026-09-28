@@ -244,6 +244,7 @@ func installWindowsCursorManagedResult(
 		}
 		return InstallResult{}, err
 	}
+	cleanupWindowsCursorPerUserHookRegistrations(target)
 	return InstallResult{
 		Connector:                  "cursor",
 		UserHome:                   target.home,
