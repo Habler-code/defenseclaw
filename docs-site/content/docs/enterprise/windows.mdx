@@ -184,6 +184,25 @@ exits 127), and Hermes and Antigravity do not enforce a nonzero hook exit. A
 DefenseClaw Copilot user hook that stays fails open, like every Copilot
 integration failure.
 
+## Review the audit log
+
+The gateway service owns the local audit database under
+`C:\ProgramData\Cisco\DefenseClaw\runtime`. Export it from an elevated
+Administrator prompt, or as LocalSystem from an MDM script:
+
+```powershell title="Elevated Administrator prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' audit export --connector claudecode -o C:\Temp\audit-claudecode.jsonl
+```
+
+On a standalone host, `audit export` run this way reads the managed
+deployment's configuration and audit database read-only beside the running
+gateway; it needs no environment variables. Standard accounts cannot read
+the managed audit log, and the command tells them to use an elevated prompt.
+Omit `--connector` to export every row. The output file must not exist
+yet; it takes the permissions of its folder, so write it to a folder only
+administrators can read. Treat it as sensitive: it can hold prompt and tool
+content.
+
 ## Recover a pending transaction
 
 A lifecycle that fails normally rolls back. If the rollback itself cannot
@@ -245,6 +264,21 @@ fallback, a `recovery_gateway_not_used` warning gives the reason
 and the staged gateway's error stands. A failure that concerns file permissions is reported in plain terms;
 the internal detail is kept in a `lifecycle_diagnostic` warning for support.
 Do not edit DefenseClaw files or permissions by hand to recover.
+
+Recovery then restarts the restored release, and its gateway starts only
+after that release's guardian publishes full coverage. When the restored
+release is the one that cannot (for example, its guardian cannot republish a
+user's lost per-user state), every recovery would fail the same way. Under
+the same conditions as above, the standalone lifecycle instead finishes the
+recovery with the restored release stopped and disabled and records a
+`recovery_activation_deferred` warning (the restored and the Setup's
+releases, the Setup gateway's SHA-256 and trust basis, and the coverage
+failure). `/ensure` then upgrades to the running Setup's release in the same
+run; its gateway also starts only after full coverage. `/repair` stops at
+that point with the next step, because it reapplies the installed release
+that could not start. With the same release, or from an elevated
+administrator prompt, recovery keeps the coverage failure and a
+`recovery_gateway_not_used` warning gives the reason.
 
 ## Per-user installs
 

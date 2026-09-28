@@ -38,8 +38,27 @@ var auditExportCmd = &cobra.Command{
 	Short: "Export audit_events as JSONL (v7 schema)",
 	Long: `Write one JSON object per line. Each audit row is validated against
 schemas/audit-event.json before it is written. With --include-activity,
-append rows from activity_events validated against activity-event.json.`,
-	RunE: runAuditExport,
+append rows from activity_events validated against activity-event.json.
+
+The export reads the audit database read-only beside the running gateway.
+On a Windows host with a standalone managed deployment, run it from an
+elevated Administrator prompt (or as LocalSystem): it then reads the managed
+deployment's configuration and audit log.`,
+	// Export only reads audit.db. It loads the configuration without opening
+	// the audit store: the store opens read-write and, on a managed host,
+	// only as the gateway service, so an administrator could never export.
+	PersistentPreRunE: auditExportPersistentPreRunE,
+	RunE:              runAuditExport,
+}
+
+// auditExportPersistentPreRunE replaces the root initializer for export:
+// resolve a managed deployment for an administrator, then load the
+// configuration only.
+func auditExportPersistentPreRunE(_ *cobra.Command, _ []string) error {
+	if err := prepareManagedAuditExportEnvironment(); err != nil {
+		return err
+	}
+	return loadGatewayCommandConfigOnly()
 }
 
 func init() {
@@ -83,7 +102,7 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 	version.SetBinaryVersion(appVersion)
 	prov := version.Current()
 
-	db, err := sql.Open("sqlite", cfg.AuditDB)
+	db, err := audit.OpenReadOnly(cfg.AuditDB)
 	if err != nil {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}

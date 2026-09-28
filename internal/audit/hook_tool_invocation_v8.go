@@ -132,6 +132,13 @@ func decodeHookToolInvocation(projected string) hookToolInvocationRecord {
 	return record
 }
 
+// OpenReadOnly opens an existing audit database read-only and query-only,
+// with no migration, journal pragma or permission change, so an export or
+// diagnostic never becomes a second writer beside the running gateway.
+func OpenReadOnly(dbPath string) (*sql.DB, error) {
+	return openAuditReadOnly(dbPath)
+}
+
 // openAuditReadOnly opens an existing audit database read-only.
 func openAuditReadOnly(dbPath string) (*sql.DB, error) {
 	clean := filepath.Clean(strings.TrimSpace(dbPath))
