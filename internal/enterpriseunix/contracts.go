@@ -119,12 +119,14 @@ const codeGuardianReportPending = "guardian_report_pending"
 // reconciles every manifest target under the new config), so the result of
 // the change names the targets it left unprotected, for example an agent
 // version without a verified hook contract in the new guardrail mode.
-// Without manifest targets there is nothing to wait for.
+// Without manifest targets it still waits: the guardian writes that report
+// after its authorization ledger, and until the ledger exists the result
+// reads the guardian as not ready.
 func (l *lifecycle) awaitGuardianReport(ctx context.Context, since time.Time) {
 	env, r := l.env, l.result
-	manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath))
-	if err != nil || len(manifest.Targets) == 0 {
-		return
+	targets := 0
+	if manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath)); err == nil {
+		targets = len(manifest.Targets)
 	}
 	deadline := env.Now().Add(env.GuardianReportTimeout)
 	for {
@@ -132,9 +134,11 @@ func (l *lifecycle) awaitGuardianReport(ctx context.Context, since time.Time) {
 			return
 		}
 		if !env.Now().Before(deadline) {
-			r.AddWarning(codeGuardianReportPending, fmt.Sprintf(
-				"the hook guardian has not reported on its %d manifest targets since this change, so their protection is not confirmed yet; run `%s` in a minute to see it",
-				len(manifest.Targets), env.lifecycleCommand("status")))
+			if targets > 0 {
+				r.AddWarning(codeGuardianReportPending, fmt.Sprintf(
+					"the hook guardian has not reported on its %d manifest targets since this change, so their protection is not confirmed yet; run `%s` in a minute to see it",
+					targets, env.lifecycleCommand("status")))
+			}
 			return
 		}
 		select {

@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func writeGuardianState(h *testHost, at time.Time, results []map[string]any) error {
@@ -85,5 +87,42 @@ func TestEnsureSaysWhenTheGuardianHasNotReported(t *testing.T) {
 	requireOK(t, r)
 	if !hasWarning(r, "guardian_report_pending") {
 		t.Fatalf("ensure does not say the guardian has not reported: %+v", r.Warnings)
+	}
+}
+
+// With no enrollment targets yet, a package install read the guardian as not
+// ready: its unit was active, but it had not published its authorization
+// ledger. The result now waits for the guardian report written after it.
+func TestInstallWaitsForTheGuardianWithoutTargets(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	h.env.GuardianReportTimeout = 10 * time.Second
+	guardian := unitOf("darwin", "guardian")
+	published := make(chan error, 1)
+	started := false
+	h.env.Services = &hookedServices{fakeServices: h.services, onStart: func(unit string) {
+		if unit != guardian || started {
+			return
+		}
+		started = true
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
+			data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format(time.RFC3339), "ok": true})
+			if err := os.WriteFile(ledger, data, 0o640); err != nil {
+				published <- err
+				return
+			}
+			published <- writeGuardianState(h, time.Now(), nil)
+		}()
+	}}
+	t.Cleanup(func() {
+		if err := <-published; err != nil {
+			t.Error(err)
+		}
+	})
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	requireOK(t, r)
+	if !r.Readiness.Guardian || !r.CoverageComplete {
+		t.Fatalf("install result reads the starting guardian as not ready: %+v", r.Readiness)
 	}
 }
