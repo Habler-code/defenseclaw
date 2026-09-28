@@ -38,6 +38,7 @@ import (
 
 const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
 const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
+const codexMachineHookHelperMode = "TEST_CODEX_MACHINE_HOOK_MODE"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(cursorAdapterHelperMode) {
@@ -64,6 +65,16 @@ func TestMain(m *testing.M) {
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	default:
+		if os.Getenv(codexMachineHookHelperMode) == "block" {
+			payload, err := io.ReadAll(os.Stdin)
+			if err != nil || !bytes.Contains(payload, []byte(`"hook_event_name":"PreToolUse"`)) ||
+				strings.Join(os.Args[1:], "|") != "hook|--connector|codex|--enterprise-managed" {
+				fmt.Fprintf(os.Stderr, "Codex helper received wrong invocation or payload: args=%q, payload=%q, err=%v\n", os.Args[1:], payload, err)
+				os.Exit(11)
+			}
+			fmt.Print(`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}`)
+			os.Exit(2)
+		}
 		// Pre-existing connector fixtures exercise config, trust, CAS, and
 		// teardown behavior without provisioning a real Codex installation.
 		// Dedicated production-path tests explicitly restore the native policy

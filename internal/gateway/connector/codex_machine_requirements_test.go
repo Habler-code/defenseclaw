@@ -23,6 +23,57 @@ func TestWindowsCodexManagedHookCommandWaitsForExitCode(t *testing.T) {
 	}
 }
 
+func TestWindowsCodexLegacyGroupsAreReplacedAndRemainOwned(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	baseline := []byte("administrator_key = \"preserve\"\n")
+	legacy, _, err := reconcileWindowsCodexRequirements(baseline, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parseWindowsCodexRequirements(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	for _, expected := range codexHookGroups {
+		groups := hooks[expected.eventType].([]interface{})
+		for _, candidate := range groups {
+			group := candidate.(map[string]interface{})
+			for _, raw := range group["hooks"].([]interface{}) {
+				handler := raw.(map[string]interface{})
+				legacyCommand := windowsCodexLegacyManagedHookCommand(opts.HookBinary)
+				handler["command"] = legacyCommand
+				handler["command_windows"] = legacyCommand
+			}
+		}
+	}
+	legacy, err = toml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyWindowsCodexRequirementsBytes(legacy, opts); err == nil {
+		t.Fatal("non-waiting legacy groups must fail verification")
+	}
+	upgraded, changed, err := reconcileWindowsCodexRequirements(legacy, opts)
+	if err != nil || !changed {
+		t.Fatalf("upgrade legacy groups: changed=%v, err=%v", changed, err)
+	}
+	if err := verifyWindowsCodexRequirementsBytes(upgraded, opts); err != nil {
+		t.Fatalf("upgraded groups failed verification: %v", err)
+	}
+	cleaned, changed, err := removeWindowsCodexRequirementsOwnedChanges(legacy, baseline, opts)
+	if err != nil || !changed {
+		t.Fatalf("remove legacy groups: changed=%v, err=%v", changed, err)
+	}
+	cleanedCfg, err := parseWindowsCodexRequirements(cleaned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanedCfg["administrator_key"] != "preserve" {
+		t.Fatalf("administrator value lost on removal: %#v", cleanedCfg)
+	}
+}
+
 func TestWindowsCodexMachinePrerequisitesDecoupleClaudeEffectivePolicy(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	opts.EnterpriseTargetEnabled = true
