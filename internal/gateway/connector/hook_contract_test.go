@@ -3207,7 +3207,7 @@ func TestAgentUnchangedSinceLock(t *testing.T) {
 	}
 }
 
-// Devin 3000.11.3 was live-verified on Linux only; Windows and macOS keep
+// Devin 3000.11.3 is pinned on Linux only; Windows and macOS keep
 // the build their lanes were reviewed against.
 func TestDevinContractPinsArePerOS(t *testing.T) {
 	for goos, want := range map[string]string{"linux": HookCompatibilityKnown, "darwin": HookCompatibilityUnknown, "windows": HookCompatibilityUnknown} {
