@@ -199,9 +199,12 @@ type APIServer struct {
 	// codexAdditionalContextMu protects the bounded, process-local cache used
 	// only to suppress repeated in-chat Observe warnings. Canonical detection,
 	// audit, and notification emission happen before this cache is consulted.
-	codexAdditionalContextMu          sync.Mutex
-	codexAdditionalContextSeen        map[[sha256.Size]byte]time.Time
-	codexAdditionalContextOrder       []codexAdditionalContextEntry
+	codexAdditionalContextMu    sync.Mutex
+	codexAdditionalContextSeen  map[[sha256.Size]byte]time.Time
+	codexAdditionalContextOrder []codexAdditionalContextEntry
+	// compactionGuard retains bounded, content-free evidence across hook
+	// events for the forged-approval virtual patch.
+	compactionGuard                   compactionGuardStore
 	rawTelemetryMu                    sync.RWMutex
 	rawTelemetryDedupe                *rawTelemetryDeduper
 	llmPromptMu                       sync.Mutex

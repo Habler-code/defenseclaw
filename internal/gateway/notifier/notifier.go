@@ -66,11 +66,19 @@ const (
 type Category string
 
 const (
-	CategoryBlock        Category = "block"
-	CategoryWouldBlock   Category = "would_block"
-	CategoryApproval     Category = "approval"
-	CategoryServiceState Category = "service_state"
+	CategoryBlock          Category = "block"
+	CategoryWouldBlock     Category = "would_block"
+	CategoryApproval       Category = "approval"
+	CategoryServiceState   Category = "service_state"
+	CategoryCompactionRisk Category = "compaction_risk"
 )
+
+// CompactionRiskEvent is intentionally content-free: the notification must
+// never repeat a potentially malicious tool result or claim the summary was
+// verified. The session-local detector handles once-per-candidate delivery.
+type CompactionRiskEvent struct {
+	Connector string
+}
 
 // ServiceState labels a coarse DefenseClaw availability transition
 // that the operator should see as a toast. Emitted from the gateway
@@ -182,6 +190,7 @@ type Observation struct {
 	//   BlockEvent    for CategoryBlock / CategoryWouldBlock
 	//   ApprovalEvent for CategoryApproval
 	//   ServiceStateEvent for CategoryServiceState
+	//   CompactionRiskEvent for CategoryCompactionRisk
 	// Observers should type-assert on the category before reading it.
 	Event any
 }
@@ -302,6 +311,21 @@ func (d *Dispatcher) OnApprovalPending(ev ApprovalEvent) {
 	}
 	n := approvalNotification(ev)
 	d.dispatch(CategoryApproval, ev.Source, ev.Subject, ev.Reason, n, ev)
+}
+
+// OnCompactionRisk warns when Claude Code's exposed summary contains a
+// source-correlated forged-user claim after compaction. It honors the
+// notification master switch and Hook source gate.
+func (d *Dispatcher) OnCompactionRisk(ev CompactionRiskEvent) {
+	if d == nil || !d.cfg.Enabled || !d.allowSource(SourceHook) {
+		return
+	}
+	n := notify.Notification{
+		Title:    "DefenseClaw: possible memory poisoning",
+		Subtitle: ev.Connector + " · compaction",
+		Body:     "A forged user instruction may have entered the exposed compaction summary. Start a new session before sensitive work.",
+	}
+	d.dispatch(CategoryCompactionRisk, SourceHook, ev.Connector, "forged-user-in-summary", n, ev)
 }
 
 // OnServiceState fires when the gateway connection transitions

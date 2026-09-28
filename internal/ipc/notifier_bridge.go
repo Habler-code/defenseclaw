@@ -149,6 +149,9 @@ func recordFromObservation(o notifier.Observation, managedEnterprise bool) *pb.N
 	case notifier.CategoryServiceState:
 		severity = pb.NotificationSeverity_NOTIFICATION_SEVERITY_WARNING
 		presentation = pb.NotificationPresentation_NOTIFICATION_PRESENTATION_TRANSIENT
+	case notifier.CategoryCompactionRisk:
+		severity = pb.NotificationSeverity_NOTIFICATION_SEVERITY_WARNING
+		presentation = pb.NotificationPresentation_NOTIFICATION_PRESENTATION_TRANSIENT_AND_HISTORY
 	default:
 		return nil
 	}
@@ -237,6 +240,9 @@ func composeManaged(o notifier.Observation) (string, string) {
 		title, body = composeApprovalManaged(o)
 	case notifier.CategoryServiceState:
 		title, body = composeServiceStateManaged(o)
+	case notifier.CategoryCompactionRisk:
+		title = "DefenseClaw: possible memory poisoning"
+		body = "A possible forged user-role claim appeared in tool output before compaction. Start a new session before sensitive work."
 	default:
 		// Unknown category — recordFromObservation already returns
 		// nil above, so this is unreachable. Kept defensive so a

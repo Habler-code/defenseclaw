@@ -62,6 +62,18 @@ func TestRecordFromObservation_Mapping(t *testing.T) {
 			wantPres: pb.NotificationPresentation_NOTIFICATION_PRESENTATION_TRANSIENT,
 		},
 		{
+			name: "compaction_risk → WARNING TRANSIENT_AND_HISTORY",
+			obs: notifier.Observation{
+				Category:     notifier.CategoryCompactionRisk,
+				Source:       notifier.SourceHook,
+				Notification: notify.Notification{Title: "DefenseClaw: possible memory poisoning", Body: "Start a new session before sensitive work."},
+			},
+			wantSev:     pb.NotificationSeverity_NOTIFICATION_SEVERITY_WARNING,
+			wantPres:    pb.NotificationPresentation_NOTIFICATION_PRESENTATION_TRANSIENT_AND_HISTORY,
+			wantTitle:   "DefenseClaw: possible memory poisoning",
+			wantBodySub: "new session",
+		},
+		{
 			name: "empty title falls back to a safe default",
 			obs: notifier.Observation{
 				Category:     notifier.CategoryBlock,
@@ -257,6 +269,15 @@ func TestRecordFromObservation_ManagedCopy(t *testing.T) {
 			},
 			wantTitle: "DefenseClaw protection paused",
 			wantBody:  "",
+		},
+		{
+			name: "compaction risk renders fixed warning without payload",
+			obs: notifier.Observation{
+				Category: notifier.CategoryCompactionRisk,
+				Event:    notifier.CompactionRiskEvent{Connector: "claudecode"},
+			},
+			wantTitle: "DefenseClaw: possible memory poisoning",
+			wantBody:  "A possible forged user-role claim appeared in tool output before compaction. Start a new session before sensitive work.",
 		},
 	}
 

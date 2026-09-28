@@ -121,14 +121,20 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
 	mode := a.claudeCodeMode()
 	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
+		a.compactionGuard.reset("claudecode", req.SessionID)
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
+	var toolResultContent string
+	var compactionWarning bool
 	switch req.HookEventName {
 	case "SessionStart":
+		if req.Source != "resume" && req.Source != "compact" {
+			a.compactionGuard.reset("claudecode", req.SessionID)
+		}
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
 			count := a.scanClaudeCodeComponents(ctx, req)
 			if count > 0 {
@@ -184,8 +190,16 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
+		if req.HookEventName == "PreToolUse" && a.compactionGuard.matchingAction("claudecode", req.SessionID, req.ToolName, req.ToolInput) {
+			if mode == "action" {
+				compactionGuardFinding(verdict, "matching_action", "confirm")
+			} else {
+				compactionGuardFinding(verdict, "matching_action_observed", "")
+			}
+		}
 	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
-		verdict = a.inspectClaudeCodeToolResult(ctx, req, mode)
+		toolResultContent = claudeCodeToolOutput(req)
+		verdict = a.inspectClaudeCodeToolResultContent(ctx, req, mode, toolResultContent)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
@@ -200,6 +214,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "StopFailure":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
 	case "Stop", "SubagentStop", "SessionEnd":
+		if req.HookEventName == "SessionEnd" {
+			a.compactionGuard.reset("claudecode", req.SessionID)
+		}
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
 		}
@@ -210,9 +227,32 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				claudeCodeEventContent(req), "prompt",
 			))
 		}
+	case "PreCompact":
+		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
+			claudeCodeEventContent(req), "prompt",
+		))
+		pending := a.compactionGuard.preCompact("claudecode", req.SessionID)
+		if pending.action {
+			compactionGuardFinding(verdict, "pre_compact_candidate", "")
+		}
+		if pending.instruction {
+			compactionPoisonFinding(verdict, "pre_compact_candidate")
+		}
+	case "PostCompact":
+		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
+			claudeCodeEventContent(req), "prompt",
+		))
+		activation := a.compactionGuard.postCompact("claudecode", req.SessionID)
+		if activation.actionActive {
+			compactionGuardFinding(verdict, "post_compact_unverified", "")
+		}
+		if activation.completed && a.compactionGuard.inspectClaudeSummary(req.SessionID, claudeCodePayloadString(req.Payload, "compact_summary")) {
+			compactionPoisonFinding(verdict, "post_compact_warning")
+			compactionWarning = true
+		}
 	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
 		"TaskCreated", "TaskCompleted", "TeammateIdle",
-		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
+		"Elicitation", "ElicitationResult", "Notification":
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodeEventContent(req), "prompt",
 		))
@@ -252,6 +292,24 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			wouldBlock = true
 		}
 	}
+	// A blocked prompt was not delivered as user authority. A PostToolUse
+	// block does not remove the original tool output from Claude's context,
+	// so it must still be considered as a possible compaction source.
+	switch req.HookEventName {
+	case "UserPromptSubmit":
+		if action != "block" {
+			a.compactionGuard.observeUserPrompt("claudecode", req.SessionID, req.Prompt)
+		}
+	case "PostToolUse":
+		if req.ToolResponse != nil && req.ToolCalls == nil && req.Error == "" && req.ErrorDetails == "" {
+			if a.compactionGuard.observeToolResult("claudecode", req.SessionID, toolResultContent) {
+				compactionGuardFinding(verdict, "untrusted_tool_result", "")
+			}
+			if a.compactionGuard.observeInstructionResult("claudecode", req.SessionID, toolResultContent) {
+				compactionPoisonFinding(verdict, "untrusted_tool_result")
+			}
+		}
+	}
 	// Fan the rule-level findings through the unified runtime
 	// finding pipeline so SIEM sees one EventScanFinding per
 	// matched rule and the correlator gets a chance to upgrade
@@ -261,6 +319,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// row + HTTP response will surface.
 	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
+	// Only summary-correlated evidence produces the OS poisoning alert. The
+	// inline status is delivered by the first supported hook after PostCompact.
+	if compactionWarning && a.notifier != nil {
+		a.notifier.OnCompactionRisk(notifier.CompactionRiskEvent{Connector: "claudecode"})
+	}
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
@@ -269,6 +332,17 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
 		sinkPolicyFor(ctx, verdict.RedactionEnabled),
 	)
+	// PostCompact discards systemMessage; compact-source SessionStart can run
+	// before it. UserPromptSubmit is the fallback for a user-visible status on
+	// the next turn, without injecting any model context or changing decisions.
+	if (req.HookEventName == "SessionStart" && req.Source == "compact") || req.HookEventName == "UserPromptSubmit" {
+		if notice := a.compactionGuard.takeClaudeInlineNotice(req.SessionID); notice != "" {
+			if resp.ClaudeCodeOutput == nil {
+				resp.ClaudeCodeOutput = make(map[string]interface{})
+			}
+			resp.ClaudeCodeOutput["systemMessage"] = notice
+		}
+	}
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
@@ -605,7 +679,14 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 	req claudeCodeHookRequest,
 	mode string,
 ) *ToolInspectVerdict {
-	content := claudeCodeToolOutput(req)
+	return a.inspectClaudeCodeToolResultContent(ctx, req, mode, claudeCodeToolOutput(req))
+}
+
+func (a *APIServer) inspectClaudeCodeToolResultContent(
+	ctx context.Context,
+	req claudeCodeHookRequest,
+	mode, content string,
+) *ToolInspectVerdict {
 	if req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
 		req.ToolCalls != nil || strings.TrimSpace(req.Error) != "" ||
 		strings.TrimSpace(req.ErrorDetails) != "" || strings.TrimSpace(req.ToolName) == "" {

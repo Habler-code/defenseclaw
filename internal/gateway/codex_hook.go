@@ -185,14 +185,20 @@ func (a *APIServer) evaluateCodexHookForProfile(
 ) codexHookResponse {
 	mode := a.codexMode()
 	if a.scannerCfg != nil && !a.codexEnabled() {
+		a.compactionGuard.reset("codex", req.SessionID)
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
+	var toolResultContent string
+	var compactionWarning bool
 	switch req.HookEventName {
 	case "SessionStart":
+		if req.Source != "resume" && req.Source != "compact" {
+			a.compactionGuard.reset("codex", req.SessionID)
+		}
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
 			count := a.scanCodexComponents(ctx, req)
 			if count > 0 {
@@ -252,8 +258,16 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if decision, matched := a.codexSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
+		if req.HookEventName == "PreToolUse" && a.compactionGuard.matchingAction("codex", req.SessionID, req.ToolName, req.ToolInput) {
+			if mode == "action" {
+				compactionGuardFinding(verdict, "matching_action", "block")
+			} else {
+				compactionGuardFinding(verdict, "matching_action_observed", "")
+			}
+		}
 	case "PostToolUse":
-		verdict = a.inspectCodexToolResult(ctx, req, mode)
+		toolResultContent = codexToolResponseString(req.ToolResponse)
+		verdict = a.inspectCodexToolResultContent(ctx, req, mode, toolResultContent)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
@@ -264,6 +278,25 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnStop {
 			verdict = a.scanCodexChangedFiles(ctx, req)
 		}
+	case "PreCompact":
+		pending := a.compactionGuard.preCompact("codex", req.SessionID)
+		if pending.action {
+			compactionGuardFinding(verdict, "pre_compact_candidate", "")
+		}
+		if pending.instruction {
+			compactionPoisonFinding(verdict, "pre_compact_candidate")
+		}
+	case "PostCompact":
+		activation := a.compactionGuard.postCompact("codex", req.SessionID)
+		if activation.actionActive {
+			compactionGuardFinding(verdict, "post_compact_unverified", "")
+		}
+		if activation.instructionWarn {
+			compactionPoisonFinding(verdict, "post_compact_warning")
+		}
+		compactionWarning = activation.actionWarn || activation.instructionWarn
+	case "SessionEnd":
+		a.compactionGuard.reset("codex", req.SessionID)
 	}
 
 	// Inject the cloud-controlled per-inspection redaction directive
@@ -317,6 +350,22 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			assetContextEligible = true
 		}
 	}
+	// Only accepted prompts establish user authority. Likewise, a Codex
+	// PostToolUse block can keep returned bytes out of the next model turn;
+	// blocked output must not create a compaction candidate.
+	if action != "block" {
+		switch req.HookEventName {
+		case "UserPromptSubmit":
+			a.compactionGuard.observeUserPrompt("codex", req.SessionID, req.Prompt)
+		case "PostToolUse":
+			if a.compactionGuard.observeToolResult("codex", req.SessionID, toolResultContent) {
+				compactionGuardFinding(verdict, "untrusted_tool_result", "")
+			}
+			if a.compactionGuard.observeInstructionResult("codex", req.SessionID, toolResultContent) {
+				compactionPoisonFinding(verdict, "untrusted_tool_result")
+			}
+		}
+	}
 	// Emit per-rule findings FIRST so the notification + audit
 	// rows produced below can carry the resulting evaluation_id
 	// and top rule_ids — keeping the SIEM pivot key identical
@@ -337,6 +386,11 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if !eligible || !a.codexAdditionalContextFirstInWindow(req, rawAction, verdict, time.Now()) {
 			clearCodexAdditionalContext(&resp, req.HookEventName)
 		}
+	}
+	if compactionWarning && action == "allow" {
+		// PostCompact accepts a systemMessage but not summary replacement.
+		// Keep this fixed message outside the model's authority ledger.
+		resp.CodexOutput = map[string]interface{}{"systemMessage": compactionCodexWarningMessage}
 	}
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
@@ -833,7 +887,14 @@ func (a *APIServer) inspectCodexToolResult(
 	req codexHookRequest,
 	mode string,
 ) *ToolInspectVerdict {
-	content := codexToolResponseString(req.ToolResponse)
+	return a.inspectCodexToolResultContent(ctx, req, mode, codexToolResponseString(req.ToolResponse))
+}
+
+func (a *APIServer) inspectCodexToolResultContent(
+	ctx context.Context,
+	req codexHookRequest,
+	mode, content string,
+) *ToolInspectVerdict {
 	strictScope := codexToolResultContentScope(req)
 	if mode == "action" || strictScope == ruleContentScopeSource {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, strictScope))

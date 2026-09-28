@@ -76,6 +76,31 @@ func enabledConfig() config.NotificationsConfig {
 	return c
 }
 
+func TestDispatcher_CompactionRiskHonorsNotificationGates(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  config.NotificationsConfig
+		want int
+	}{
+		{"enabled", enabledConfig(), 1},
+		{"master_off", config.NotificationsConfig{Sources: config.NotificationSourceFilter{Hook: true}}, 0},
+		{"hook_source_off", config.NotificationsConfig{Enabled: true}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			d := NewWithSender(tc.cfg, rec.Send)
+			d.OnCompactionRisk(CompactionRiskEvent{Connector: "claudecode"})
+			got := rec.Drain(1, 50*time.Millisecond)
+			if len(got) != tc.want {
+				t.Fatalf("notifications=%d, want %d", len(got), tc.want)
+			}
+			if tc.want == 1 && (!strings.Contains(got[0].Title, "memory poisoning") || !strings.Contains(got[0].Body, "compaction summary") || strings.Contains(got[0].Body, "https://")) {
+				t.Fatalf("unsafe compaction notification: %+v", got[0])
+			}
+		})
+	}
+}
+
 func TestDispatcher_DisabledIsNoOp(t *testing.T) {
 	rec := &recorder{}
 	cfg := config.DefaultNotificationsConfig()
