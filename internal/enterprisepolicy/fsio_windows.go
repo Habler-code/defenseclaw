@@ -483,6 +483,19 @@ func clearPolicyFileName(opts Options, path string) (string, error) {
 // administrator owns are left for inspection to report, and keep (the
 // DefenseClaw drop-in) is handled by its writer.
 func displaceUntrustedPolicyFiles(opts Options, dir, keep string, state *State) {
+	displaceUntrusted(opts, dir, state, false, func(name string) bool {
+		return strings.HasSuffix(strings.ToLower(name), ".json") && !strings.EqualFold(name, keep)
+	})
+}
+
+// displaceUntrustedEntries moves aside every entry of a vendor folder
+// DefenseClaw holds (files of any kind and folders) that an unprivileged
+// principal owns or can change.
+func displaceUntrustedEntries(opts Options, dir string, state *State) {
+	displaceUntrusted(opts, dir, state, true, func(string) bool { return true })
+}
+
+func displaceUntrusted(opts Options, dir string, state *State, dirs bool, match func(string) bool) {
 	if opts.SkipTrustChecks {
 		return
 	}
@@ -495,12 +508,12 @@ func displaceUntrustedPolicyFiles(opts Options, dir, keep string, state *State) 
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") || strings.EqualFold(name, keep) {
+		if !match(name) {
 			continue
 		}
 		path := filepath.Join(dir, name)
 		info, err := os.Lstat(path)
-		if err != nil || plainDirectory(info) {
+		if err != nil || (plainDirectory(info) && (!dirs || validateTrustedDir(path) == nil)) {
 			continue
 		}
 		if info.Mode().IsRegular() && validateTrustedPolicyFile(opts, path) == nil {

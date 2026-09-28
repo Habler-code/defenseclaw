@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -392,6 +393,7 @@ func applyWindowsEnterpriseInstallerReport(
 			}
 		}
 		applyWindowsEnterpriseUnprotectedAgents(result)
+		applyWindowsEnterpriseAmpMachineFolder(result)
 	}
 	messages := append([]string{}, report.Errors...)
 	if len(messages) == 0 && strings.TrimSpace(report.Error) != "" {
@@ -569,6 +571,29 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	}
 	for _, agent := range agents {
 		report(agent.Code, agent.Message())
+	}
+}
+
+// windowsEnterpriseAmpMachineFolderProblems lists why %ProgramData%\ampcode
+// is not held for the administrator; replaceable in tests.
+var windowsEnterpriseAmpMachineFolderProblems = func() []string {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return []string{"resolve ProgramData for the Amp machine folder: " + err.Error()}
+	}
+	return enterprisepolicy.InspectWindowsAmpMachineFolder(enterprisepolicy.Options{GOOS: "windows", WindowsProgramData: programData})
+}
+
+// applyWindowsEnterpriseAmpMachineFolder reports an Amp machine folder a
+// standard account created or can change: every account's Amp reads it.
+func applyWindowsEnterpriseAmpMachineFolder(result *enterprisestatus.Result) {
+	for _, problem := range windowsEnterpriseAmpMachineFolderProblems() {
+		if result.Action == "verify" {
+			result.AddError("machine_folder_not_held", problem)
+		} else {
+			result.AddWarning("machine_folder_not_held", problem)
+		}
+		result.SecurityComplete = false
 	}
 }
 
