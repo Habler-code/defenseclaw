@@ -17,8 +17,6 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -103,60 +101,6 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 	}
 	if err := verifyWindowsCodexRequirementsBytes(rendered, secureClient); err == nil {
 		t.Fatal("Secure Client verification must not accept the standalone command")
-	}
-}
-
-// A standalone host upgraded from a build that published the unbound
-// command drops those groups on reconcile and removes both forms at
-// uninstall.
-func TestWindowsCodexStandaloneReplacesAndRemovesUnboundGroups(t *testing.T) {
-	baseline := []byte("administrator_key = \"preserve\"\n")
-	legacy, _, err := reconcileWindowsCodexRequirements(baseline, testWindowsCodexMachineOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts := standaloneWindowsCodexMachineOptions()
-	upgraded, changed, err := reconcileWindowsCodexRequirements(legacy, opts)
-	if err != nil || !changed {
-		t.Fatalf("reconcile upgraded requirements: changed=%v err=%v", changed, err)
-	}
-	if strings.Contains(string(upgraded), windowsCodexManagedHookCommand(opts.HookBinary)) {
-		t.Fatal("the unbound managed command survived the standalone reconcile")
-	}
-	if err := verifyWindowsCodexRequirementsBytes(upgraded, opts); err != nil {
-		t.Fatal(err)
-	}
-
-	// Removal after an interrupted upgrade (both forms present) strips both.
-	cfg, err := parseWindowsCodexRequirements(upgraded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyCfg, err := parseWindowsCodexRequirements(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hooks := cfg["hooks"].(map[string]interface{})
-	legacyHooks := legacyCfg["hooks"].(map[string]interface{})
-	event := codexHookGroups[2].eventType
-	hooks[event] = append(hooks[event].([]interface{}), legacyHooks[event].([]interface{})...)
-	mixed, err := toml.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleaned, _, err := removeWindowsCodexRequirementsOwnedChanges(mixed, baseline, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleanedCfg, err := parseWindowsCodexRequirements(cleaned)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, present := cleanedCfg["hooks"]; present {
-		t.Fatalf("DefenseClaw groups survived removal: %s", cleaned)
-	}
-	if cleanedCfg["administrator_key"] != "preserve" {
-		t.Fatalf("administrator key lost: %s", cleaned)
 	}
 }
 

@@ -16,6 +16,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -589,3 +590,45 @@ def test_windows_lane_stages_an_agent_for_every_connector_it_enables() -> None:
         )
         assert spec is not None, agent["connector"]
         assert (agent["version"], agent["package"]) == (spec.group(1), spec.group(2))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unit_check_fails_on_diagnostics_outside_the_allow_list(tmp_path: Path) -> None:
+    """The lane's unit check fails on a directive the systemd 239 allow list does not name."""
+    bin_dir, unit_dir = tmp_path / "bin", tmp_path / "units"
+    bin_dir.mkdir()
+    unit_dir.mkdir()
+    output = tmp_path / "verify-output.txt"
+    output.write_text(
+        "/usr/lib/systemd/system/defenseclaw-gateway.service:70: Unknown lvalue 'ProtectNew' in section 'Service'\n",
+        encoding="utf-8",
+    )
+    fakes = {
+        "systemctl": '#!/bin/sh\necho "systemd 239 (239-1.test)"\necho "+PAM +AUDIT"\n',
+        "systemd-analyze": f"#!/bin/sh\ncat {shlex.quote(str(output))} >&2\n",
+    }
+    for name, body in fakes.items():
+        fake = bin_dir / name
+        fake.write_text(body, encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    for unit in ("defenseclaw-gateway.service", "defenseclaw-enterprise-apply.path", "defenseclaw.conf"):
+        (unit_dir / unit).write_text("", encoding="utf-8")
+    text = UNIX_LANE.read_text(encoding="utf-8")
+    functions = "".join(
+        re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.MULTILINE | re.DOTALL).group(0)
+        for name in ("die", "directive_minimum", "unit_diagnostics")
+    )
+    harness = "\n".join(
+        [
+            "set -euo pipefail",
+            f"PATH={shlex.quote(str(bin_dir))}:$PATH",
+            f"unit_dir={shlex.quote(str(unit_dir))}",
+            functions,
+            "unit_diagnostics",
+            "echo UNITS-PASSED",
+        ]
+    )
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 1, result.stdout
+    assert "UNITS-PASSED" not in result.stdout
+    assert "unit diagnostics outside the systemd 239 allow list" in result.stderr

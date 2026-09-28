@@ -255,6 +255,11 @@ func TestWindowsPlatformVerifyAsksForARepairWhenTheEnrolledVersionMoved(t *testi
 			}
 		})
 	}
+	setStandaloneProfileForTest(t, true)
+	amp := InstallResult{Connector: "amp", AgentVersion: "0.0.1785334225 (released 2026-09-01)"}
+	if err := requireWindowsStandaloneAgentVersionUnchanged(InstallOptions{ConnectorName: "amp", AgentVersion: "0.0.1785334225"}, amp); err != nil {
+		t.Fatalf("Amp's release suffix is not a version change: %v", err)
+	}
 }
 
 // The guardian's foreign-hook cleanup covers the profiles enrollment

@@ -361,17 +361,6 @@ func reconcileWindowsCodexRequirements(
 				return nil, false, fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, rawGroups)
 			}
 		}
-		if strings.TrimSpace(opts.HookContractID) != "" {
-			// An earlier standalone build published the unbound command,
-			// which fails closed without reaching the gateway; drop it.
-			current := make([]interface{}, 0, len(groups))
-			for _, candidate := range groups {
-				if !windowsCodexMachineGroupIsUnboundStandalone(candidate, expected, opts) {
-					current = append(current, candidate)
-				}
-			}
-			groups = current
-		}
 		found := false
 		for _, candidate := range groups {
 			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
@@ -471,37 +460,6 @@ func windowsCodexMachineGroupMatches(
 	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommandFor(opts, expected.eventType))
 }
 
-// windowsCodexMachineGroupIsUnboundStandalone reports a group an earlier
-// standalone build published with the unbound command. It is DefenseClaw's
-// own content; only standalone options (HookContractID set) ask.
-func windowsCodexMachineGroupIsUnboundStandalone(
-	raw interface{},
-	expected struct {
-		eventType string
-		matcher   string
-		timeout   int
-	},
-	opts WindowsCodexMachineRequirementsOptions,
-) bool {
-	return strings.TrimSpace(opts.HookContractID) != "" &&
-		windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommand(opts.HookBinary))
-}
-
-// windowsCodexMachineGroupOwned reports any DefenseClaw managed group:
-// the current command, or on standalone the earlier unbound one.
-func windowsCodexMachineGroupOwned(
-	raw interface{},
-	expected struct {
-		eventType string
-		matcher   string
-		timeout   int
-	},
-	opts WindowsCodexMachineRequirementsOptions,
-) bool {
-	return windowsCodexMachineGroupMatches(raw, expected, opts) ||
-		windowsCodexMachineGroupIsUnboundStandalone(raw, expected, opts)
-}
-
 func windowsCodexMachineGroupHasCommand(
 	raw interface{},
 	expected struct {
@@ -591,13 +549,13 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
 			for _, candidate := range baselineGroups {
-				if windowsCodexMachineGroupOwned(candidate, expected, opts) {
+				if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 					baselineCount++
 				}
 			}
 			currentCount := 0
 			for _, candidate := range groups {
-				if windowsCodexMachineGroupOwned(candidate, expected, opts) {
+				if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 					currentCount++
 				}
 			}
@@ -608,7 +566,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			filtered := make([]interface{}, 0, len(groups)-removeCount)
 			for index := len(groups) - 1; index >= 0; index-- {
 				candidate := groups[index]
-				if removeCount > 0 && windowsCodexMachineGroupOwned(candidate, expected, opts) {
+				if removeCount > 0 && windowsCodexMachineGroupMatches(candidate, expected, opts) {
 					removeCount--
 					continue
 				}
