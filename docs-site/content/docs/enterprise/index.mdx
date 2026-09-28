@@ -108,6 +108,7 @@ The standalone config uses the same keys on every OS. Only the administrator
 can edit it.
 
 ```yaml title="config.yaml (standalone excerpt)"
+config_version: 8
 deployment_mode: managed_enterprise
 enterprise:
   profile: standalone
@@ -133,7 +134,7 @@ enterprise:
       claudecode:
         higher_precedence_sources: fail   # fail | warn
   trust:                            # Windows payload trust
-    mode: ""                        # "" or hash_pinned | authenticode; see below
+    # mode: hash_pinned             # hash_pinned | authenticode; leave unset for the default, see below
     allowed_signers: []
   coexistence:
     per_user_install: migrate       # migrate | block | ignore
@@ -145,6 +146,12 @@ guardrail:
   enabled: true
   mode: observe
 ```
+
+`config_version: 8` is required. `guardrail.rule_pack_dir` is optional:
+without it the gateway uses the product's default rule packs. A directory you
+name must exist and be writable only by administrators. DefenseClaw Setup
+checks the file with the gateway's own compiler before it changes anything
+and names the line and the reason when the gateway could not load it.
 
 `enterprise.network` is the gateway's outbound proxy. With `https_proxy` set,
 the gateway reaches AI Defense, LLM providers (the judge and the guardrail
@@ -177,7 +184,7 @@ Authenticode-signed payloads, so the Windows lifecycle refuses with exit code
   Setup.
 
 If you deploy the unsigned Setup, set `mode: hash_pinned` or leave `mode`
-unset. `allowed_signers` restricts signed payloads to the listed signer
+unset; an empty `mode: ""` is not a valid value. `allowed_signers` restricts signed payloads to the listed signer
 certificates, like `--allowed-signer`.
 
 `enterprise.coexistence.disable_self_update` controls only the Windows
