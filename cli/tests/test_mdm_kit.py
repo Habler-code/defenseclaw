@@ -510,6 +510,62 @@ def test_signing_helpers_refuse_without_credentials(tmp_path: Path) -> None:
             subprocess.run(["shellcheck", "-S", "warning", str(path)], check=True)
 
 
+# The macOS app job needs these five for every release (release.yaml).
+_MACOS_APP_SECRETS = {
+    "MACOS_DEVELOPER_ID_P12_BASE64": "cDEy",
+    "MACOS_DEVELOPER_ID_P12_PASSWORD": "password",
+    "MACOS_NOTARY_KEY_BASE64": "a2V5",
+    "MACOS_NOTARY_KEY_ID": "key-id",
+    "MACOS_NOTARY_ISSUER_ID": "issuer-id",
+}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the release job runs the pkg builder with bash on macOS")
+@pytest.mark.parametrize(
+    ("secrets", "code", "message"),
+    [
+        ({}, 0, "::notice title=Unsigned macOS enterprise package::"),
+        # The app's secrets alone do not ask for a signed pkg.
+        (_MACOS_APP_SECRETS, 0, "::notice title=Unsigned macOS enterprise package::"),
+        (
+            {"MACOS_INSTALLER_SIGNING_IDENTITY": "Developer ID Installer: Example"},
+            1,
+            "MACOS_INSTALLER_SIGNING_IDENTITY needs MACOS_DEVELOPER_ID_P12_BASE64 and MACOS_SIGNING_IDENTITY",
+        ),
+        (
+            {**_MACOS_APP_SECRETS, "MACOS_INSTALLER_SIGNING_IDENTITY": "Developer ID Installer: Example"},
+            1,
+            "MACOS_INSTALLER_SIGNING_IDENTITY needs MACOS_DEVELOPER_ID_P12_BASE64 and MACOS_SIGNING_IDENTITY",
+        ),
+        ({"MACOS_INSTALLER_P12_BASE64": "cDEy"}, 1, "MACOS_INSTALLER_P12_BASE64 is set without"),
+        ({"MACOS_NOTARY_KEY_BASE64": "a2V5"}, 1, "Set all three MACOS_NOTARY_* secrets or none of them"),
+    ],
+)
+def test_macos_enterprise_pkg_is_signed_only_with_its_installer_identity(
+    tmp_path: Path, secrets: dict[str, str], code: int, message: str
+) -> None:
+    script = tmp_path / "packaging" / "mdm" / "signing" / "build-macos-release.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(MDM / "signing" / "build-macos-release.sh", script)
+    builder = tmp_path / "scripts" / "build-macos-enterprise-pkg.sh"
+    builder.parent.mkdir()
+    builder.write_text(
+        "#!/usr/bin/env bash\nset -eu\n"
+        'while [ "$#" -gt 0 ]; do case "$1" in --version) v=$2; shift ;; --dist-dir) d=$2; shift ;; esac; shift; done\n'
+        ': > "$d/defenseclaw-enterprise-$v-darwin-arm64.pkg"\n',
+        encoding="utf-8",
+    )
+    builder.chmod(0o755)
+    out = tmp_path / "out"
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "RUNNER_TEMP": str(tmp_path), **secrets}
+    result = subprocess.run(
+        ["bash", str(script), "1.2.3", str(out)], env=env, capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == code, result.stdout + result.stderr
+    assert message in result.stdout + result.stderr
+    assert (out / "defenseclaw-enterprise-1.2.3-darwin-arm64.pkg").is_file() == (code == 0)
+
+
 def test_secure_client_build_kit_is_untouched_by_the_mdm_kit() -> None:
     # The AVC Secure Client kit is byte-pinned by the source tripwire; the
     # standalone signing channels must not edit it.
