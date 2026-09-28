@@ -421,6 +421,25 @@ has reinstalled and protects them, so a second revocation before that still
 cleans them. Uninstall does the same for signed-in users; see
 [Remove](/docs/enterprise/windows#remove).
 
+### Cleanup when a user or agent is removed on Linux and macOS
+
+When a user's row leaves the manifest (the agent is disabled or removed
+from the config, or the user is excluded or deleted), the gateway stops
+accepting that user's hooks for the agent. The guardian then removes
+DefenseClaw's own registration from the user's home, running as the user,
+with the same teardown uninstall runs: DefenseClaw's hooks, agent and hook
+credential go, the settings DefenseClaw changed are put back (for Kiro,
+the default agent setting), and the user's own hooks and settings stay.
+
+A home that is not available (not mounted, or not created yet) and a
+removal that fails are recorded in an administrator-owned list and retried.
+`status` and `verify` report each one as the warning
+`guardian_cleanup_pending` and do not fail on it. A record is dropped
+without a cleanup only when the account no longer exists, and a user who is
+enrolled again keeps the record until the guardian protects them again.
+Uninstall removes the registrations of the users still in the manifest; see
+[Remove](/docs/enterprise/linux#remove).
+
 ## Supported agent versions
 
 The enumerator records the version it finds, and the guardian installs
