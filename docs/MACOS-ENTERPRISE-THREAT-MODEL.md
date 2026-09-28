@@ -145,8 +145,8 @@ not-found answers.
 | M-19 | W-58 | A Copilot agent chat in VS Code's Local harness runs without DefenseClaw policy or audit | Not in this release ([R26](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913)) | Tracked in #913 |
 | M-20 | W-60 | Devin Desktop runs without DefenseClaw hooks for a user without the `devin` CLI | Not in this release ([R28](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915)) | Tracked in #915 |
 | M-21 | W-61 | The Kiro IDE is not discovered and has no version floor; its reading of the global `~/.kiro/hooks` file is not live-verified | Not in this release ([R29](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916)); `kiro-cli` is covered per user (R22) | Tracked in #916 |
-| M-22 | — | A user kills, stops or starves their own `defenseclaw-hook` (or a per-user hook script) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex and Hermes then run the call with no audit row; Copilot stays closed unless every one of its hooks is stopped, and OpenCode and Amp stay closed (residual 8, enterprise R18). Application control or EDR process protection closes it | macOS 15 certification, 2026-09-27 |
-| M-23 | — | A project's `.openhands/hooks.json` replaces the user-level registration, so none of DefenseClaw's OpenHands hooks run in that project | Not closable by DefenseClaw: OpenHands reads the project file instead of the user file, the foreign-hook guard does not cover OpenHands, and policy verify does not look for it ([R30](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | Certified on Ubuntu 24.04, 2026-09-27; not re-run on macOS |
+| M-22 | — | A user kills, stops or starves their own `defenseclaw-hook` (or a per-user hook script) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex, OpenHands (killed, or stalled until its 60 s timeout) and Hermes (killed; a stalled one timed out and blocked) then run the call with no audit row; Copilot stays closed unless every one of its hooks is stopped, and OpenCode and Amp stay closed (residual 8, enterprise R18). Application control or EDR process protection closes it | macOS 15 certification, 2026-09-27 |
+| M-23 | — | A project's `.openhands/hooks.json` replaces the user-level registration, so none of DefenseClaw's OpenHands hooks run in that project | Not closable by DefenseClaw: OpenHands reads the project file instead of the user file, the foreign-hook guard does not cover OpenHands, and policy verify does not look for it ([R30](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | Ubuntu 24.04, RHEL 9 and macOS 15 certification, 2026-09-27 |
 | M-24 | — | A standard user kickstarts the on-demand `apply` or `verify` LaunchDaemon | Accepted: the jobs run fixed, idempotent root work from root-owned inputs; the lifecycle lock serializes them with administrator runs (residual 9) | macOS 15 certification, 2026-09-27 |
 | M-25 | — | A standard user hard-links root-owned DefenseClaw files into their home | Accepted: a link keeps the file's owner and mode, and the files DefenseClaw refuses with more than one link are in directories standard users cannot search (residual 10) | macOS 15 certification, 2026-09-27 |
 
@@ -187,9 +187,11 @@ not-found answers.
    ([R18](ENTERPRISE-THREAT-MODEL.md#residual-risks), M-22). Certified on
    macOS 15 (2026-09-27): with the user's own hook processes killed or
    stopped, Claude Code and Codex ran the tool call (a killed hook is a
-   non-2 exit; a stopped one times out after 30 s), and Hermes did for a
-   killed hook; Copilot stayed closed unless every one of its hooks was
-   stopped, and OpenCode and Amp stayed closed. Closing it needs the vendor
+   non-2 exit; a stopped one times out after 30 s), OpenHands did for a
+   killed hook and for one that stalled until its 60 s timeout, and Hermes
+   did for a killed hook (a stalled one timed out and blocked); Copilot
+   stayed closed unless every one of its hooks was stopped, and OpenCode
+   and Amp stayed closed. Closing it needs the vendor
    to treat a failed or timed-out hook as a deny, or application control or
    EDR that stops users from signalling the hook.
 9. A standard user can start the root on-demand LaunchDaemons

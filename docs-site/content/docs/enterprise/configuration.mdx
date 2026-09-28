@@ -68,6 +68,14 @@ refuses conflicting values:
   commands refuse to run. The profile cannot change without a reinstall.
 - **`data_dir`.** On Linux and macOS the service sandbox allows writes only
   there, so the lifecycle refuses any other value.
+- **`policy_dir`.** On Linux and macOS a config that leaves it out uses the
+  root-owned folder of policies DefenseClaw ships
+  (`/opt/defenseclaw/share/policies` on Linux,
+  `/opt/cisco/defenseclaw/share/policies` on macOS), never a folder inside
+  `data_dir`, because the gateway loads its policies from there. Set it to
+  `/etc/defenseclaw/policies` (Linux) or
+  `/opt/cisco/defenseclaw/etc/policies` (macOS), as the minimal configs do,
+  to keep your own rule packs there.
 - **API listener.** The gateway API is `127.0.0.1:18970` on every OS. Every
   OS refuses any bind address other than `127.0.0.1`; Linux and macOS also
   refuse any other port.
@@ -80,8 +88,13 @@ refuses conflicting values:
     (`/opt/defenseclaw/share/policies/guardrail/default` on Linux,
     `/opt/cisco/defenseclaw/share/policies/guardrail/default` on macOS), so
     a config that leaves the key out installs on a fresh host. The
-    lifecycle refuses a value that names a folder that does not exist, or
-    one inside `data_dir`. See [Custom rule packs](#custom-rule-packs).
+    lifecycle records the pack the config resolves to: when you create
+    `<policy_dir>/guardrail/default` later, the next `ensure` applies the
+    change and restarts the gateway with that pack. Setting
+    `rule_pack_dir` to the folder you want is clearer and has the same
+    effect. The lifecycle refuses a value that names a folder that does not
+    exist, or one inside `data_dir`. See
+    [Custom rule packs](#custom-rule-packs).
   - Windows: if the named directory does not exist, the gateway uses the
     built-in packs. When you leave the key out, the gateway uses
     `<policy_dir>/guardrail/default` if `policy_dir` is set, and otherwise

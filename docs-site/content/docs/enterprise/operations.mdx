@@ -95,6 +95,15 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output |
 | `audit findings` | The distinct scan findings that are current |
 
+On a standalone host, hook decisions, rejected connector hooks, direct
+inspect-tool calls and refused hook-socket requests carry the verified
+account (`user.id`, `defenseclaw.user.name`); a refused request also names
+its route and reason. Each tool call the foreign-hook guard denies adds a
+`connector-hook` row with `event: foreign_hook_session` that names the file.
+Scan-finding and scan-verdict rows do not carry the account yet
+([#921](https://github.com/cisco-ai-defense/defenseclaw/issues/921)); join
+them to the hook decision on `evaluation_id`.
+
 For the machine-policy view per user, see
 [Machine policy status](#machine-policy-status). A standard user who runs
 `enterprise hooks` gets the managed-host message, which names the
@@ -126,7 +135,7 @@ The two summary fields are computed differently on each OS:
 | Field | Linux and macOS | Windows |
 | --- | --- | --- |
 | `coverage_complete` | The gateway answers its health check, the guardian is active with a fresh authorization ledger, and the enumerator is active | The deployment is installed, the guardian is ready, and no transaction is pending |
-| `security_complete` | `coverage_complete`, the sensor helper is active, the run had no errors when the result was built, and no agent is reported as `agent_unprotected` or `hook_contract_unverified` | The deployment is installed and healthy, the target manifest has at least one enabled Codex, Claude Code, or Cursor row, no agent is reported as `agent_unprotected` or `hook_contract_unverified`, and, when a Claude Code row is enabled, the Claude Code attestation described below is recorded |
+| `security_complete` | `coverage_complete`, the sensor helper is active, the run had no errors when the result was built, no agent is reported as `agent_unprotected` or `hook_contract_unverified`, no user target is reported as `guardian_target_failed`, and the config enables at least one agent when there are eligible users (otherwise `no_connectors_enabled`) | The deployment is installed and healthy, the target manifest has at least one enabled Codex, Claude Code, or Cursor row, no agent is reported as `agent_unprotected` or `hook_contract_unverified`, and, when a Claude Code row is enabled, the Claude Code attestation described below is recorded |
 
 - **Enrollment counts.** Linux and macOS read the counts from the guardian's
   authorization ledger. Windows counts the rows of the target manifest:
@@ -134,8 +143,10 @@ The two summary fields are computed differently on each OS:
   always `0`.
 - **Inspection.** On Windows, `inspection.ai_defense` is `ok` when AI Defense
   is enabled in the config and the gateway is ready. It does not test the key
-  or the network. On Linux and macOS the lifecycle does not yet read this
-  value from the gateway, so both fields show `unknown`. The gateway's own
+  or the network. On Linux and macOS the lifecycle reads both fields from the
+  gateway's `/health`: `local` is `active`, `disabled` or `unknown`, and
+  `ai_defense` is `disabled`, `ok`, `unavailable:<code>` or `unknown` (the
+  gateway did not answer). The gateway's own
   `/health` guardrail detail carries `ai_defense_available` when AI Defense
   is enabled, and `ai_defense_error` when it is not available. To check AI
   Defense, see [AI Defense is not used](/docs/enterprise/troubleshooting#symptoms).

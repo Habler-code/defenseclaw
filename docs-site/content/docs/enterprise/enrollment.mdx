@@ -72,13 +72,25 @@ neither enrolled nor reported. On Linux and macOS, install shared agents
 under an `agent_prefixes` path. Use application control where users must
 not run agents from arbitrary locations.
 
+Outside the user's home, discovery runs or reads an agent file only when
+every folder on its resolved path, every link it follows and the file itself
+are owned by root or by that user and no other account can write them;
+otherwise the agent is reported as installed but not run. On macOS an
+element of the `admin` group that others cannot write also counts when
+root, the user or an administrator owns it, so `/Applications` and a Homebrew
+prefix an administrator installed are searched. On Linux a group-writable
+shared prefix (for example Linuxbrew) is not; install shared agents under a
+root-owned `agent_prefixes` path instead.
+
 For machine-policy agents, a missed install is usually still inspected,
 because the vendor policy applies to every copy on the computer. Older
 Claude Code releases are the exception on Linux and macOS: a release that
 does not read `managed-settings.d` (1.0.128, 2.0.0 and 2.0.77 in
 DefenseClaw's testing), installed under a home with `npm install --prefix`,
 ignores DefenseClaw's hooks and version floor, runs without DefenseClaw, and
-is not reported. See
+is not reported. So does a Copilot CLI below its 1.0.18 floor (1.0.15 on
+RHEL 9, run with `--no-auto-update`), which does not load
+`/etc/github-copilot/policy.d`. See
 [Vendor limits](/docs/enterprise/machine-policy#vendor-limits); tracked in
 [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
 

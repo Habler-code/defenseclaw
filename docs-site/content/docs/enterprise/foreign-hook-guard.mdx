@@ -74,16 +74,21 @@ On Linux and macOS, `preserve` also removes the vendor lock; see
    resumes into, because they keep the hooks the process loaded. Remove the
    hook, then restart the agent: a new agent process starts clean, including
    one that resumes the old session. A session start whose agent process
-   DefenseClaw cannot identify also starts clean, because the agent loaded
-   its hooks from the files DefenseClaw just checked. A block ends 7 days
+   DefenseClaw cannot identify starts clean only under a new session ID,
+   because the agent loaded its hooks from the files DefenseClaw just
+   checked; one that reuses a blocked session's ID (a resume or compact)
+   keeps the block, and the denial says to start a new session. A block ends 7 days
    after it was recorded; denials in between do not extend it. A hook that
    appears after the session started denies the calls that find it but does
    not block the session: once it is removed, the next call is allowed. This
    applies with `foreign_hooks: remove`, the default. The gateway keeps the
    snapshots in its protected data directory, under `foreign-hook-sessions/`,
    keyed by the caller's verified uid or SID, so deleting files in the home
-   does not clear a block. If the gateway cannot read or write a snapshot,
-   the call is denied.
+   does not clear a block. Each account keeps at most 512 records; when that
+   is full, the gateway removes the oldest records that hold no block, and it
+   refuses a new session (denying its calls) only while live blocks alone
+   fill the store. If the gateway cannot read or write a snapshot, the call
+   is denied.
 5. **Follows redirected user config.** An agent whose environment moves its
    user configuration (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
    `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`, or a
@@ -115,7 +120,13 @@ session start, which scans everything for the session's snapshot, it stops
 at the first finding that denies. A working directory more than a fixed
 number of folders deep, where the repository root cannot be found, also
 denies. Each of these denies the call but does not block the session: once
-the file reads cleanly, the next call of the same session is allowed.
+the file reads cleanly, the next call of the same session is allowed. The
+exception is a session start whose scan stops early: on its budget of files,
+bytes or time, or on a limit of one source (a folder with more than 256
+entries, a hook file over 1 MiB, a plugin folder too deep or too large). The
+agent may still have loaded a hook past that point, so the session and its
+agent process stay blocked until the agent restarts, and the denial says to
+remove the extra files and restart.
 
 A hook script counts as DefenseClaw's own only when the registration runs
 the administrator-owned `defenseclaw-hook` exactly as DefenseClaw renders it
@@ -222,7 +233,13 @@ variable DefenseClaw cannot resolve, a file larger than 64 MiB, or a file
 that is not a readable regular file cannot be approved; move its logic into
 a script and approve that. Programs found through `PATH` (such as `bash` or
 `node`) and files a command reads on its own (a `Makefile` for `make`, the
-`package.json` scripts for `npm run`) are bound by name only.
+`package.json` scripts for `npm run`) are bound by name only. An
+administrator-owned program a command names by path is bound by kind, so an
+OS update does not invalidate approvals, except that the target of a
+symbolic link the user owns on the way to it is bound too (pointing the link
+at another program changes the digest). On macOS, where a user can hard-link
+files they do not own, a root-owned file reached from a folder the user
+controls (for example a hard link in a repository) is bound by content.
 
 | `foreign_hooks` | User-level foreign hooks | Project-level foreign hooks |
 | --- | --- | --- |

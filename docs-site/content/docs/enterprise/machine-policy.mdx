@@ -62,9 +62,11 @@ The per-user registrations differ by OS:
   in-agent plugin that calls the gateway (Amp).
 - **Linux and macOS, Devin.** Devin's registration in each user's
   `~/.config/devin/config.json` runs the same administrator-owned command,
-  so each Devin hook runs the foreign-hook guard and fails closed. A
-  registration an earlier release wrote (`~/.defenseclaw/hooks/devin-hook.sh`)
-  is replaced at the guardian's next repair.
+  so each Devin hook runs the foreign-hook guard and fails closed; its fail
+  mode is always `closed`, whatever `hook_fail_mode` says for Devin, and
+  `status` and the hook-contract lock report it that way. A registration an
+  earlier release wrote (`~/.defenseclaw/hooks/devin-hook.sh`) is replaced at
+  the guardian's next repair.
 - **Linux and macOS, other per-user agents.** Antigravity, Hermes,
   OpenHands and Kiro run a DefenseClaw hook script that the guardian writes
   into the user's `~/.defenseclaw/hooks` (for example `hermes-hook.sh`), and
@@ -473,6 +475,12 @@ These come from the agents themselves:
   did not report them. These releases read only `managed-settings.json`,
   which DefenseClaw leaves to you. Use application control to allow only
   Claude Code at or above 2.1.154. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
+- **Older Copilot CLI releases.** A Copilot CLI below its 1.0.18 floor can
+  skip machine policy: in DefenseClaw's testing on RHEL 9, 1.0.15 installed
+  under a home (`npm install --prefix`) and run with `--no-auto-update` did
+  not load `/etc/github-copilot/policy.d`, and a tool call ran with no audit
+  record. Use application control to allow only Copilot CLI at or above the
+  floor.
 - **Copilot.** A command hook that times out fails open, including policy
   hooks. On Windows, Copilot also loads policy hooks from
   `HKLM\Software\Policies\GitHub\Copilot`; those run beside DefenseClaw's

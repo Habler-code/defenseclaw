@@ -89,11 +89,13 @@ gated on it, so they apply to per-user installs too.
   When every configured connector is one the new release does not ship (for
   example Gemini CLI alone), `defenseclaw migrate --check` now fails before
   the installer replaces anything, names the connector, and prints commands
-  the installed release accepts (`defenseclaw setup remove <name> --yes
-  --force`, or set up another connector first). Earlier, the upgrade swapped,
-  the new gateway could not start, the installer rolled back, and the
-  suggested `setup remove` was refused on the restored release. The
-  in-place migrate warning now names the connector instead of `<name>`.
+  the installed release accepts: `defenseclaw setup remove <name> --yes
+  --force` from 0.7.0 on (earlier releases have no `setup remove`, so the
+  message says to set up a supported connector or edit `config.yaml`), or
+  set up another connector first. Earlier, the upgrade swapped, the new
+  gateway could not start, the installer rolled back, and the suggested
+  `setup remove` was refused on the restored release. The in-place migrate
+  warning now names the connector instead of `<name>`.
 
 - **Agents say that DefenseClaw policy made a block.** A block or
   confirmation by a policy rule reached the agent as `matched:
@@ -102,16 +104,25 @@ gated on it, so they apply to per-user installs too.
   <RULE-ID>).` or `DefenseClaw policy needs your confirmation for this action
   (rule <RULE-ID>).` (in the standalone enterprise profile: "...under your
   organization's policy", with a pointer to the administrator). A title is
-  kept only for DefenseClaw's built-in rules; the audit record keeps the
-  full reason. The Secure Client wording is unchanged.
+  kept for DefenseClaw's built-in rules and for rules of the loaded rule
+  pack; the audit record keeps the full reason. A block that another
+  verdict (AI Defense, the LLM judge) also decided keeps that verdict's
+  reason instead of naming only the local rule. The Secure Client wording
+  is unchanged.
 - **OpenCode shows DefenseClaw blocks.** A blocked tool call failed with
   only the bare reason, and in some sessions showed no text at all, so the
   model told the user the command had succeeded. The plugin now fails the
-  call with "DefenseClaw blocked this tool call under policy, so it did not
-  run: <reason>". A confirm verdict, which the plugin cannot ask about,
-  still runs the call but now shows a warning notice in the OpenCode TUI. A
-  plugin an earlier release wrote fails its presence check and is
-  replaced.
+  call with an error that says DefenseClaw blocked it ("DefenseClaw blocked
+  this tool call under policy, so it did not run: <reason>", or the reason
+  as is when it already comes from DefenseClaw, such as "DefenseClaw policy
+  blocked this action (rule ...)"), and shows the same text as an error
+  notice in the OpenCode TUI. A confirm verdict, which the plugin cannot ask
+  about, still runs the call but now shows a warning notice. A plugin an
+  earlier release wrote fails its presence check and is replaced.
+- **OpenCode and Amp say to restart after a failed start-up check.** When
+  the plugin's load-time check for unapproved plugins fails, its blocks now
+  say the check failed when the agent started and to restart the agent once
+  DefenseClaw is available (the result is kept for the process, as before).
 - **`defenseclaw doctor` passes a global Kiro install.** Its `Connector
   scope [kiro]` check failed every install without `claw.workspace_dir`,
   saying the hooks never run, although Kiro IDE 1.0.182 and later and
@@ -125,14 +136,24 @@ gated on it, so they apply to per-user installs too.
   over the old backup receipt failed with "managed backup target mismatch"
   until someone ran teardown. Setup now closes the old location first (an
   unchanged file is restored, an edited one keeps everything but
-  DefenseClaw's entries) and records the receipt for the new one.
+  DefenseClaw's entries) and records the receipt for the new one. The same
+  move now also happens when the target switches between the global
+  config and a workspace `hooks.v1.json`.
+- **Kiro teardown finds the agent it hooked.** Teardown and VerifyClean also
+  clean the default agent named in the settings backup, so hooks an earlier
+  setup added to the user's own default agent are removed even after the
+  user changed `chat.defaultAgent`. An agent name containing `/`, `\`, `.`
+  or `..` is no longer resolved to a file.
 - **The `windsurf` to `devin` rename reaches every setting.** It covered
   `guardrail.connector`, `claw.mode` and the four `*.connectors` maps only, so
-  a `connector_hooks` override, `guardrail.judge.hook_connectors`, and
-  `application_protection.include_connectors` / `exclude_connectors` entries
-  kept the retired ID and silently stopped applying. The loaders and the
-  `defenseclaw migrate` step now rename those too; an explicit `devin` entry
-  wins, a list names `devin` once, and the notice lists every setting moved.
+  a `connector_hooks` override, `guardrail.judge.hook_connectors`,
+  `application_protection.include_connectors` / `exclude_connectors`, the
+  `connector` of `asset_policy` rules (a denied rule or a registry entry
+  written for the retired ID) and observability route
+  `selector.connectors` kept the retired ID and silently stopped applying.
+  The loaders, the v8 observability compiler and the `defenseclaw migrate`
+  step now rename those too; an explicit `devin` entry wins, a list names
+  `devin` once, and the notice lists every setting moved.
 - **`defenseclaw migrate` survives a plugin manifest that is not UTF-8.** A
   Latin-1 `plugin.yaml` under `plugin_dir` raised `UnicodeDecodeError`
   through `migrate` (blocking every upgrade on the host) and `setup remove`.
@@ -140,16 +161,22 @@ gated on it, so they apply to per-user installs too.
 - **`defenseclaw migrate` keeps plugin connectors.** A plugin connector
   registers under the name its code reports, which need not match its
   directory or manifest name, so `migrate` could drop a working plugin
-  connector from `config.yaml`. While `plugin_dir` holds a manifest the
-  gateway would load, `migrate` drops no connector name.
+  connector from `config.yaml`. While `plugin_dir` holds a plugin the
+  gateway could load (its manifest sets `entry` and `sha256` and the entry
+  file is present; Go plugins never load on Windows), `migrate` drops no
+  connector name, and the upgrade preflight asks the staged gateway
+  (`connector verify`) whether it knows a name before it keeps it.
 - **The gateway reads the custom-providers overlay from its data directory.**
   It read `~/.defenseclaw/custom-providers.json` even when `DEFENSECLAW_HOME`
   named another data directory, so a relocated install's overlay was
   ignored, and a gateway command run against another account's data
   directory printed `custom-providers overlay open error`. It now reads
   `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`, then
-  `$DEFENSECLAW_HOME/custom-providers.json`, then `~/.defenseclaw`, and a
-  missing or unreadable overlay is skipped quietly.
+  `$DEFENSECLAW_HOME/custom-providers.json`, then `~/.defenseclaw`. A
+  missing overlay is skipped quietly, and so is one under the
+  `~/.defenseclaw` fallback this account may not read; an unreadable
+  overlay in the data directory the gateway was pointed at is still
+  logged.
 - **`defenseclaw-gateway status` no longer shows a disabled connector as
   enforced.** A connector with `enabled: false` was listed under Connector
   Mode with its policy and enforcement lines; it now reads `Status:
@@ -158,6 +185,19 @@ gated on it, so they apply to per-user installs too.
   `WARNING: sonic/ast only supports ...` on every run, which also became the
   hook-error text agents showed when a hook failed. The sonic dependency now
   supports Go 1.27.
+- **`defenseclaw uninstall` works on a host with a managed deployment.** On
+  such a host `defenseclaw-gateway stop` refuses while this account's own
+  gateway is not running (it cannot run there), and the uninstall stopped
+  at its gateway-stop phase. A per-user install left over from before the
+  managed deployment is now removed; `stop` also still stops that
+  account's leftover watchdog before it refuses.
+- **Amp's `async_shell_command` is inspected like its bash tool.** Commands
+  an Amp release ran through `async_shell_command` got no command facts, so
+  a rule that needs them was recorded but did not block.
+- **Audit rows name the account for per-user connector hooks.** Rejected
+  connector-hook and inspect-tool rows now carry `user.id` and
+  `defenseclaw.user.name` when the caller is known, like hook decision
+  rows.
 
 ### Added
 
@@ -166,8 +206,6 @@ gated on it, so they apply to per-user installs too.
   `2h`). With `--limit N`, `--newest` keeps the N most recent rows instead of
   the N oldest; output stays oldest first. Without the new flags the output
   is unchanged.
-- **`defenseclaw-sensor-helper --version`.** The helper now reports its
-  version and commit, and release builds stamp them.
 
 ### Changed
 
@@ -185,6 +223,14 @@ gated on it, so they apply to per-user installs too.
   has no config file there leaves it absent; earlier releases wrote an
   empty document. The Cursor change also applies to the Secure Client
   profile.
+
+## [Unreleased] — Enterprise hardening: standalone enterprise packages
+
+### Added
+
+- **`defenseclaw-sensor-helper --version`.** The helper (shipped only in the
+  enterprise archive and packages) reports its version and commit; the
+  release builds and the macOS standalone pkg stamp them.
 
 ## [Unreleased] — Kiro CLI hooks and the Claude Code version floor
 

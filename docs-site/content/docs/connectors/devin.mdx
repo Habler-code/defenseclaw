@@ -104,6 +104,13 @@ Existing foreign hook groups and JSONC content are preserved. Devin also loads
 hooks from `.claude/` settings for compatibility; DefenseClaw does not claim or
 modify those locations.
 
+In a standalone enterprise deployment on Linux and macOS, each hook runs the
+administrator-owned hook binary with
+`defenseclaw-hook hook --connector devin --enterprise-managed`, which runs
+the foreign-hook guard and always fails closed: the Devin fail mode is `closed` whatever `hook_fail_mode` says, and
+status and the hook-contract lock report it that way. See
+[Machine policy](/docs/enterprise/machine-policy).
+
 ## Lifecycle and enforcement
 
 The `devin-hooks-v1` contract registers exactly eight events:

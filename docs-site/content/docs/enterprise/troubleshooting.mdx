@@ -75,6 +75,7 @@ one can appear.
 | `lifecycle_error` | Windows | The lifecycle reported a failure without a stable code | Read `errors[].message` and `enterprise-lifecycle.log` |
 | `not_ready` | Windows | The run finished, but the deployment is not healthy | Run `verify`, then read the gateway and guardian logs |
 | `preflight_failed` | Windows | A check before the lifecycle started failed | Read the message |
+| `change_failed` | Linux, macOS | `enterprise secret set` or another protected-state change could not be written before `ensure` applied it | Read the message. Check that you ran it as root and that the secrets folder is writable by root |
 
 ### Warnings
 
@@ -96,6 +97,12 @@ Warnings do not fail an action. They appear in `warnings[]`.
 | `guardian_target_failed` | Linux, macOS | The guardian could not install or repair hooks for one user and connector; the message gives the reason. Every other user stays protected |
 | `no_connectors_enabled` | Linux, macOS | The config enables no agent under `guardrail.connectors`, but the enumerator found eligible users, so nobody is protected. `security_complete` is `false`. Add the agents to protect under `guardrail.connectors` and apply the config; see [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect) |
 | `unmanaged_leftovers` | Linux, macOS | `status` or `verify` found DefenseClaw state with no deployment. Use `uninstall --purge` to remove it |
+| `unit_failed` | Linux, macOS | A DefenseClaw service or one-shot job failed on its last run (for example `defenseclaw-enterprise-verify.service`). The message names the unit and the log command; on Linux clear it with `systemctl reset-failed <unit>` once resolved |
+| `input_changed` | Linux, macOS | `config.yaml` or a protected credential changed while this run applied the previous version. A follow-up transaction in the same run applied it, or, after a failed run, the apply trigger runs `ensure` for it once this run ends |
+| `config_reverted` | Linux, macOS | An in-place edit of `config.yaml` was not applied; the last applied config was put back for the rollback and the rejected edit is kept as `rejected-config.yaml`. When a newer `config.yaml` was written during the run, that file is put back afterwards and applied next |
+| `lifecycle_superseded` | Linux, macOS | A queued apply run of an older binary found a newer release installed while it waited, and stood down; the installed binary applies later changes |
+| `guardian_report_pending` | Linux, macOS | After a change the guardian had not reported its targets within 30 seconds. Run `status` or `verify` a moment later |
+| `package_installed`, `package_upgraded` | Linux, macOS | In the MDM wrapper's result: the wrapper installed or upgraded the package (the message gives the versions) before the `ensure` whose result follows |
 | `ensure_install`, `ensure_upgrade`, `ensure_repair` | Windows | The action that `ensure` chose, and why |
 | `registration_failed`, `lifecycle_log_failed` | Windows | The registry marker, the Add/Remove Programs entry, or the lifecycle log could not be written. The result itself stands |
 
@@ -152,6 +159,7 @@ hook call.
 | `enterprise_managed_runtime_disable_sentinel_forbidden` | all | A `.disabled` file is in the user's DefenseClaw runtime folder. Managed hooks do not treat it as "off", so they refuse the call | Remove the file |
 | `enterprise_foreign_hook_blocked` | all | A user or repository config adds a hook or plugin that your policy has not approved | Remove it, or add its digest to `enterprise.machine_policy.connectors.<name>.allowed_hooks`. See [Foreign-hook guard](/docs/enterprise/foreign-hook-guard) |
 | `enterprise_machine_policy_summary_untrusted` | all | The machine policy summary the hook reads is not administrator-owned | Run `repair` |
+| `enterprise_managed_rate_limited` | all | HTTP 429: this account sent more hook requests than its budget allows (60 a second, a burst of 120, 32 at a time; OTLP export has its own budget). Other accounts are not affected. The hook treats it as a gateway failure, so with `hook_fail_mode: open` the call is allowed | Find what floods the gateway from that account (a loop, many parallel agents). The budget refills within a second |
 
 ## Symptoms
 
@@ -165,7 +173,7 @@ hook call.
 | A user is not enrolled (Windows) | The user is in `exclude_users` or an excluded group; the user is in `exempt_users`, which keeps only the machine-policy agents; `include_groups` is set and the user is not a member, or their membership is still unknown (a directory user who has not signed in since installation stays pending); or the user is signed out or disconnected. The guardian writes hooks only during an active session | Have the user sign in, or change the lists. See [Enrollment](/docs/enterprise/enrollment#windows) |
 | A new user is protected only after a few minutes | The enumerator runs every 5 minutes | Wait one cycle. Run `reconcile` to apply existing rows at once |
 | `security_complete` is `false` on Windows | Claude Code is enabled and the Claude Code attestation is not recorded, or no Codex, Claude Code, or Cursor row is enabled in the target manifest | See [Health fields](/docs/enterprise/operations#health-fields) |
-| `security_complete` is `false` on Linux or macOS | The sensor helper is not running, the run had errors, or an agent is reported as `agent_unprotected` or `hook_contract_unverified` | Run `verify` and read the errors and warnings |
+| `security_complete` is `false` on Linux or macOS | The sensor helper is not running, the run had errors, an agent is reported as `agent_unprotected` or `hook_contract_unverified`, a user target is reported as `guardian_target_failed`, or the config enables no agent for the eligible users (`no_connectors_enabled`) | Run `verify` and read the errors and warnings |
 | `verify` and `detect.sh --require-healthy` fail because of one user (`guardian_target_failed`) | That user broke a file DefenseClaw needs in their own account, for example an agent config folder replaced by a file or a link, or a config the agent cannot parse, so the account is not protected. The guardian repairs DefenseClaw's own files there, but not these | Read the warning for the user and connector, and have the account fixed. See [When a user breaks their own setup](/docs/enterprise/operations#when-a-user-breaks-their-own-setup-linux-and-macos) |
 | `verify` fails with `verify_failed`, and `warnings[]` has `machine_policy_incomplete` | A higher-precedence policy source outranks DefenseClaw's entry, or your own policy sets a conflicting value | See [Machine policy](/docs/enterprise/machine-policy). `enterprise policy show` names the source |
 | AI Defense is not used | The credential is missing or unreadable, the name in `enterprise.inspection.ai_defense.credential` does not match the stored credential, or the proxy blocks the connection. The local engine keeps deciding alone | Check `enterprise secret status`. The gateway logs an error from the `cisco-inspect` subsystem that starts with "standalone managed_enterprise: Cisco AI Defense disabled". Check `enterprise.network.https_proxy`, and restart the gateway after changing it. When AI Defense is enabled, the gateway's `/health` guardrail detail carries `ai_defense_available`, and `ai_defense_error` with the reason when it is `false` |
