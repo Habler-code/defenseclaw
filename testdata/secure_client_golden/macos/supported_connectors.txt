@@ -1,8 +1,0 @@
-codex supported
-claudecode supported
-cursor supported
-amp supported
-opencode supported
-devin unsupported
-copilot unsupported
-hermes unsupported

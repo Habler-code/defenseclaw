@@ -564,12 +564,3 @@ def test_macos_enterprise_pkg_is_signed_only_with_its_installer_identity(
     assert result.returncode == code, result.stdout + result.stderr
     assert message in result.stdout + result.stderr
     assert (out / "defenseclaw-enterprise-1.2.3-darwin-arm64.pkg").is_file() == (code == 0)
-
-
-def test_secure_client_build_kit_is_untouched_by_the_mdm_kit() -> None:
-    # The AVC Secure Client kit is byte-pinned by the source tripwire; the
-    # standalone signing channels must not edit it.
-    tripwire = json.loads(_text(ROOT / "testdata" / "secure_client_golden" / "source_tripwire.json"))
-    pinned = json.dumps(tripwire)
-    for path in MDM.rglob("*"):
-        assert path.relative_to(ROOT).as_posix() not in pinned

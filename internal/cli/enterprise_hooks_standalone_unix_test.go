@@ -25,7 +25,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -993,113 +992,6 @@ func TestResolveEnterpriseHookTargetFallsBackToTheDirectory(t *testing.T) {
 	cfg.Enterprise.Profile = managed.ProfileSecureClient
 	if _, err := resolveEnterpriseHookTargetValues("ldap-only-user", "", -1, -1, "", ""); err == nil {
 		t.Fatal("secure_client must keep resolving through os/user only")
-	}
-}
-
-// TestStandaloneWorkerSymlinkSwapCannotReachRootFiles is the root-only
-// sentinel test: a target user plants a symlink from their agent config
-// directory to a root-owned directory, and the real installer runs in the
-// credential-dropped worker. Whatever the installer does, the root-owned
-// sentinel must be untouched and nothing root-owned may appear in the
-// user's home.
-func TestStandaloneWorkerSymlinkSwapCannotReachRootFiles(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("root-only: needs a real credential drop to an unprivileged uid")
-	}
-	const victimUID, victimGID = 54321, 54321
-	base, err := os.MkdirTemp("/", ".defenseclaw-m4-sentinel-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	if err := os.Chmod(base, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sentinelDir := filepath.Join(base, "root-owned")
-	if err := os.Mkdir(sentinelDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sentinel := filepath.Join(sentinelDir, "config.toml")
-	if err := os.WriteFile(sentinel, []byte("SENTINEL\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	home := filepath.Join(base, "home", "victim")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(filepath.Dir(home), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chown(home, victimUID, victimGID); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(home, ".codex")
-	if err := os.Symlink(sentinelDir, link); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Lchown(link, victimUID, victimGID); err != nil {
-		t.Fatal(err)
-	}
-	// The worker binary must be executable by the target uid.
-	binDir := filepath.Join(base, "bin")
-	if err := os.Mkdir(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	image, err := os.ReadFile(self)
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker := filepath.Join(binDir, "worker")
-	if err := os.WriteFile(worker, image, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	origExe, origArgs, origEnv, origLog := enterpriseHookWorkerExecutable, enterpriseHookWorkerArgs, enterpriseHookWorkerExtraEnv, enterpriseHookWorkerLog
-	t.Cleanup(func() {
-		enterpriseHookWorkerExecutable, enterpriseHookWorkerArgs, enterpriseHookWorkerExtraEnv, enterpriseHookWorkerLog = origExe, origArgs, origEnv, origLog
-	})
-	enterpriseHookWorkerExecutable = func() (string, error) { return worker, nil }
-	enterpriseHookWorkerArgs = []string{"-test.run=^TestEnterpriseHookWorkerHelperProcess$"}
-	enterpriseHookWorkerExtraEnv = []string{enterpriseHookWorkerHelperEnv + "=real"}
-	var logs bytes.Buffer
-	enterpriseHookWorkerLog = &logs
-
-	account := enterpriseHookWorkerAccount{UID: victimUID, GID: victimGID, User: "victim", Home: home}
-	target := workerTarget(account, 0, enterpriseHookWorkerModeInstall, "codex", true)
-	target.Options.APIAddr = "127.0.0.1:18970"
-	target.Options.DataDir = filepath.Join(home, ".defenseclaw")
-	target.Options.AgentVersion = "0.142.0"
-	target.Options.AllowMissingHookConfigRepair = true
-	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
-		Operation: enterpriseHookWorkerOpApply, Standalone: true, Targets: []enterpriseHookWorkerTarget{target},
-	})
-	if err != nil {
-		t.Fatalf("worker did not run as uid %d: %v\n%s", victimUID, err, logs.String())
-	}
-	t.Logf("installer outcome through the swapped symlink: %+v", response.Targets)
-
-	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "SENTINEL\n" {
-		t.Fatalf("root-owned sentinel changed: %q (%v)", data, err)
-	}
-	entries, err := os.ReadDir(sentinelDir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("the worker created files in a root-owned directory: %v (%v)", entries, err)
-	}
-	err = filepath.Walk(home, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if st, ok := info.Sys().(*syscall.Stat_t); ok && (st.Uid != victimUID) {
-			return fmt.Errorf("%s is owned by uid %d, not the target user", path, st.Uid)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 

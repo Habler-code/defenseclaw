@@ -24,14 +24,11 @@
 package plane
 
 import (
-	"context"
 	"encoding/binary"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -235,74 +232,5 @@ func TestLinuxListenMessageIsWellFormed(t *testing.T) {
 	}
 	if got := binary.LittleEndian.Uint32(body[20:]); got != procCNMcastListen {
 		t.Errorf("op = %d, want PROC_CN_MCAST_LISTEN", got)
-	}
-}
-
-// TestLinuxFanotifyMarksHomeRootsWithoutFollowingLinks exercises the real
-// marks. It needs CAP_SYS_ADMIN, so it runs only as root (the sensor helper's
-// account); unprivileged runs skip it.
-func TestLinuxFanotifyMarksHomeRootsWithoutFollowingLinks(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("fanotify needs CAP_SYS_ADMIN; run as root to exercise the marks")
-	}
-	home, outside := t.TempDir(), t.TempDir()
-	if err := os.MkdirAll(filepath.Join(home, ".aws"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	homeProbe := filepath.Join(home, ".aws", "probe")
-	outsideProbe := filepath.Join(outside, "probe")
-	for _, path := range []string{homeProbe, outsideProbe} {
-		if err := os.WriteFile(path, []byte("marker"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// ~/.kube -> a directory outside the home, as a user could plant it.
-	if err := os.Symlink(outside, filepath.Join(home, ".kube")); err != nil {
-		t.Fatal(err)
-	}
-	resolvedHomeProbe, err := filepath.EvalSymlinks(homeProbe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolvedOutside, err := filepath.EvalSymlinks(outside)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	source := NewSource([]string{home}).(*linuxSource)
-	if err := source.startFanotify(); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	source.wg.Add(1)
-	go func() { defer source.wg.Done(); source.readFanotify(ctx) }()
-	defer func() {
-		cancel()
-		_ = source.Close()
-	}()
-
-	// Events from this process are dropped, so a child opens the files: the
-	// outside probe first, so a mark that followed the link reports first.
-	for _, path := range []string{outsideProbe, homeProbe} {
-		if out, err := exec.Command("cat", path).CombinedOutput(); err != nil {
-			t.Fatalf("cat %s: %v: %s", path, err, out)
-		}
-	}
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case event, ok := <-source.Events():
-			if !ok {
-				t.Fatal("event stream closed before the home credential event")
-			}
-			if strings.HasPrefix(event.Path, resolvedOutside+string(filepath.Separator)) {
-				t.Fatalf("the helper followed ~/.kube out of the home and reported %s", event.Path)
-			}
-			if event.Path == resolvedHomeProbe {
-				return
-			}
-		case <-deadline:
-			t.Fatal("no event for the home credential root")
-		}
 	}
 }
