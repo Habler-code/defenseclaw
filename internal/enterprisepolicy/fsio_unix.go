@@ -96,6 +96,18 @@ func validateTrustedPolicyFile(opts Options, path string) error {
 	return validateTrustedAncestors(opts, path)
 }
 
+// The managed OpenCode plugin is an ordinary public policy file here:
+// OpenCode reads it with a read-only open.
+func validateOpenCodePluginFile(opts Options, path string) error {
+	return validateTrustedPolicyFile(opts, path)
+}
+
+func atomicWriteOpenCodePlugin(opts Options, path string, data []byte) error {
+	return atomicWrite(opts, path, data, true)
+}
+
+func openCodePluginLoadable(Options, string) (bool, error) { return true, nil }
+
 func openNoFollow(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }

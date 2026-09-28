@@ -56,6 +56,25 @@ func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
 	if err != nil || again.Changed {
 		t.Fatalf("a second publish must be a no-op: changed=%v err=%v", again.Changed, err)
 	}
+	// OpenCode's runtime opens a module with FILE_WRITE_ATTRIBUTES, so a
+	// standard account loads the plugin only when Users hold that right
+	// (WIN-F43). A copy with read and execute only, as 1.0.52 wrote it, is
+	// rewritten by the next publish.
+	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || !loadable {
+		t.Fatalf("the installed plugin must be loadable by Users: %v %v", loadable, err)
+	}
+	if err := applySDDL(opts.OpenCodePluginPath, publicFileSDDL); err != nil {
+		t.Fatal(err)
+	}
+	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || loadable {
+		t.Fatalf("a read-only plugin descriptor must be trusted but not loadable: %v %v", loadable, err)
+	}
+	if upgraded, err := PublishWindowsGoOwned(opts, []string{ConnectorOpenCode}); err != nil || !upgraded.Changed {
+		t.Fatalf("publish must rewrite a plugin standard accounts cannot load: changed=%v err=%v", upgraded.Changed, err)
+	}
+	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || !loadable {
+		t.Fatalf("the rewritten plugin must be loadable by Users: %v %v", loadable, err)
+	}
 	if err := os.WriteFile(opts.OpenCodePluginPath, []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
