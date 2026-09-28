@@ -733,19 +733,6 @@ func TestWindowsProfileEnrollmentDecision(t *testing.T) {
 	}
 }
 
-// A directory outage must never turn a name-form entry into a non-match.
-func TestWindowsProfileEnrollmentDecisionLeavesLookupFailuresUndecided(t *testing.T) {
-	profile := windowsUserProfile{SID: "S-1-5-21-1-2-3-1012", Home: `C:\Users\bob`}
-	failing, _ := staticEnrollmentLookup("", "", windows.ERROR_NONE_MAPPED)
-	got, reason := windowsProfileEnrollmentDecision(profile, []string{`CONTOSO\alice`}, nil, failing)
-	if got != windowsEnrollmentUndecided || !strings.Contains(reason, "keeping the existing rows unchanged") {
-		t.Fatalf("decision = %d (%s), want undecided while the account name is unavailable", got, reason)
-	}
-	if got, _ := windowsProfileEnrollmentDecision(profile, []string{"bob"}, nil, failing); got != windowsEnrollmentExcluded {
-		t.Fatalf("a directory-name exclusion must still apply during a lookup failure, got %d", got)
-	}
-}
-
 func TestWindowsEnrollmentAccountLookupIsBounded(t *testing.T) {
 	previous, previousTimeout, previousBudget := windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget
 	t.Cleanup(func() {
@@ -768,28 +755,28 @@ func TestWindowsEnrollmentAccountLookupIsBounded(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("ten hung lookups took %s; the cycle budget must bound them", elapsed)
 	}
-}
 
-// The lookup budget counts only time spent waiting on lookups. Probing the
-// profiles before a lookup (package manifests, executables) must not use it
-// up, or a slow host would leave later profiles undecided with a healthy
-// domain controller.
-func TestWindowsEnrollmentAccountLookupBudgetCountsOnlyLookupTime(t *testing.T) {
-	previous, previousTimeout, previousBudget := windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget
-	t.Cleanup(func() {
-		windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = previous, previousTimeout, previousBudget
-	})
-	windowsEnrollmentLookupAccountSID = func(string) (string, string, error) { return "alice", "CONTOSO", nil }
-	windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = 20*time.Millisecond, 40*time.Millisecond
-	lookup := newWindowsEnrollmentAccountLookup()
-	for i := 0; i < 3; i++ {
-		// Profile probing between lookups, longer than the whole budget.
-		time.Sleep(60 * time.Millisecond)
-		account, domain, err := lookup("S-1-5-21-1-2-3-1012")
-		if err != nil || account != "alice" || domain != "CONTOSO" {
-			t.Fatalf("lookup %d after probing = %q, %q, %v; want the account name", i, account, domain, err)
+	// The lookup budget counts only time spent waiting on lookups. Probing the
+	// profiles before a lookup (package manifests, executables) must not use it
+	// up, or a slow host would leave later profiles undecided with a healthy
+	// domain controller.
+	t.Run("only lookup time counts", func(t *testing.T) {
+		previous, previousTimeout, previousBudget := windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget
+		t.Cleanup(func() {
+			windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = previous, previousTimeout, previousBudget
+		})
+		windowsEnrollmentLookupAccountSID = func(string) (string, string, error) { return "alice", "CONTOSO", nil }
+		windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = 20*time.Millisecond, 40*time.Millisecond
+		lookup := newWindowsEnrollmentAccountLookup()
+		for i := 0; i < 3; i++ {
+			// Profile probing between lookups, longer than the whole budget.
+			time.Sleep(60 * time.Millisecond)
+			account, domain, err := lookup("S-1-5-21-1-2-3-1012")
+			if err != nil || account != "alice" || domain != "CONTOSO" {
+				t.Fatalf("lookup %d after probing = %q, %q, %v; want the account name", i, account, domain, err)
+			}
 		}
-	}
+	})
 }
 
 // An exempt user gets no new per-user connector rows, but a row already
@@ -971,4 +958,17 @@ func TestEnumerateWindowsStandaloneKeepsRowsWhenTheAccountNameIsUnavailable(t *t
 	if !strings.Contains(strings.Join(logged, "\n"), "account name lookup failed") {
 		t.Fatalf("the lookup failure must be logged; log:\n%s", strings.Join(logged, "\n"))
 	}
+
+	// A directory outage must never turn a name-form entry into a non-match.
+	t.Run("the decision stays undecided", func(t *testing.T) {
+		profile := windowsUserProfile{SID: "S-1-5-21-1-2-3-1012", Home: `C:\Users\bob`}
+		failing, _ := staticEnrollmentLookup("", "", windows.ERROR_NONE_MAPPED)
+		got, reason := windowsProfileEnrollmentDecision(profile, []string{`CONTOSO\alice`}, nil, failing)
+		if got != windowsEnrollmentUndecided || !strings.Contains(reason, "keeping the existing rows unchanged") {
+			t.Fatalf("decision = %d (%s), want undecided while the account name is unavailable", got, reason)
+		}
+		if got, _ := windowsProfileEnrollmentDecision(profile, []string{"bob"}, nil, failing); got != windowsEnrollmentExcluded {
+			t.Fatalf("a directory-name exclusion must still apply during a lookup failure, got %d", got)
+		}
+	})
 }

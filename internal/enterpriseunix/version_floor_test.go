@@ -49,56 +49,39 @@ func TestInstallWritesAndUninstallRemovesTheClaudeVersionFloor(t *testing.T) {
 	}
 }
 
-// The version-floor export an administrator deployed at DefenseClaw's own
-// drop-in name is theirs: install, ensure and uninstall leave it byte for
-// byte and it is not incomplete machine policy.
-func TestInstallKeepsAnAdministratorFileAtTheFloorName(t *testing.T) {
-	h := newTestHost(t, "linux")
-	if err := os.MkdirAll(h.env.P(path.Dir(claudeVersionFloorDropIn)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(h.env.P(claudeVersionFloorDropIn), []byte(wantClaudeVersionFloor), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")})
-	requireOK(t, r)
-	if hasWarning(r, codeMachinePolicyIncomplete) {
-		t.Fatalf("an administrator floor is not incomplete machine policy: %+v", r.Warnings)
-	}
-	if got := h.read(claudeVersionFloorDropIn); got != wantClaudeVersionFloor {
-		t.Fatalf("install changed the administrator's floor file: %q", got)
-	}
-	if noop := h.run(Options{Action: ActionEnsure}); !noop.Noop {
-		t.Fatalf("ensure after install must be a no-op: %+v", noop.Warnings)
-	}
-	requireOK(t, h.run(Options{Action: ActionUninstall}))
-	if got := h.read(claudeVersionFloorDropIn); got != wantClaudeVersionFloor {
-		t.Fatalf("uninstall changed the administrator's floor file: %q", got)
-	}
-}
-
-// An administrator file that already sets requiredMinimumVersion is left
-// byte for byte and no DefenseClaw floor is written; uninstall leaves it too.
+// An administrator's floor is theirs: a file at DefenseClaw's own drop-in
+// name (the version-floor export), or a requiredMinimumVersion in the base
+// managed settings. Install, ensure and uninstall leave it byte for byte,
+// DefenseClaw writes no floor of its own over it, and it is not incomplete
+// machine policy.
 func TestInstallKeepsAnAdministratorClaudeVersionFloor(t *testing.T) {
-	h := newTestHost(t, "linux")
-	base := "/etc/claude-code/managed-settings.json"
-	admin := "{\"requiredMinimumVersion\": \"2.1.300\"}\n"
-	if err := os.MkdirAll(h.env.P("/etc/claude-code"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(h.env.P(base), []byte(admin), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")})
-	requireOK(t, r)
-	if exists(h.env.P(claudeVersionFloorDropIn)) {
-		t.Fatal("DefenseClaw wrote a floor over an administrator requiredMinimumVersion")
-	}
-	if hasWarning(r, codeMachinePolicyIncomplete) {
-		t.Fatalf("an administrator floor is not incomplete machine policy: %+v", r.Warnings)
-	}
-	requireOK(t, h.run(Options{Action: ActionUninstall}))
-	if got := h.read(base); got != admin {
-		t.Fatalf("uninstall changed the administrator's managed settings: %q", got)
+	for _, tc := range []struct{ name, file, content string }{
+		{"file at the floor name", claudeVersionFloorDropIn, wantClaudeVersionFloor},
+		{"value in the base settings", "/etc/claude-code/managed-settings.json", "{\"requiredMinimumVersion\": \"2.1.300\"}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			if err := os.MkdirAll(h.env.P(path.Dir(tc.file)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(tc.file), []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")})
+			requireOK(t, r)
+			if hasWarning(r, codeMachinePolicyIncomplete) {
+				t.Fatalf("an administrator floor is not incomplete machine policy: %+v", r.Warnings)
+			}
+			if tc.file != claudeVersionFloorDropIn && exists(h.env.P(claudeVersionFloorDropIn)) {
+				t.Fatal("DefenseClaw wrote a floor over an administrator requiredMinimumVersion")
+			}
+			if noop := h.run(Options{Action: ActionEnsure}); !noop.Noop {
+				t.Fatalf("ensure after install must be a no-op: %+v", noop.Warnings)
+			}
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			if got := h.read(tc.file); got != tc.content {
+				t.Fatalf("install or uninstall changed the administrator's file: %q", got)
+			}
+		})
 	}
 }

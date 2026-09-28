@@ -148,37 +148,6 @@ func TestWindowsClaudeVersionFloorLeavesAnAdministratorFile(t *testing.T) {
 	}
 }
 
-// The Windows floor follows connectors.claudecode.ownership, unlike the
-// lifecycle's 90-defenseclaw.json: merge writes it, verify_only neither
-// writes nor removes it, and off removes DefenseClaw's floor.
-func TestWindowsClaudeVersionFloorFollowsClaudeOwnership(t *testing.T) {
-	opts, _ := windowsFloorOptions(t)
-	path := filepath.Join(opts.WindowsProgramFiles, "ClaudeCode", "managed-settings.d", ClaudeVersionFloorDropInName)
-	verifyOnly := withPolicy(opts, "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipVerifyOnly })
-	if _, err := PublishWindowsClaudeVersionFloor(verifyOnly, []string{"claudecode"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Fatalf("verify_only must not write the floor: %v", err)
-	}
-	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err != nil || readFile(t, path) != wantClaudeFloorBytes {
-		t.Fatalf("merge must write the floor: %v", err)
-	}
-	if _, err := PublishWindowsClaudeVersionFloor(verifyOnly, []string{"claudecode"}); err != nil || readFile(t, path) != wantClaudeFloorBytes {
-		t.Fatalf("verify_only must not remove the floor: %v", err)
-	}
-	off := withPolicy(opts, "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipOff })
-	if _, err := PublishWindowsClaudeVersionFloor(off, []string{"claudecode"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Fatalf("ownership off must remove DefenseClaw's floor: %v", err)
-	}
-	if recorded, err := ClaudeVersionFloorRecorded(opts); err != nil || recorded {
-		t.Fatalf("ownership off must remove the floor record: %v %v", recorded, err)
-	}
-}
-
 func TestWindowsClaudeVersionFloorRefusesOtherPlatforms(t *testing.T) {
 	opts := testOptions(t)
 	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err == nil {

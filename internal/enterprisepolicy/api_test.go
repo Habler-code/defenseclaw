@@ -71,6 +71,23 @@ func TestPublishVerifyRemoveAll(t *testing.T) {
 	}
 }
 
+// Kiro's route must say what the guardian does with it. The Linux and macOS
+// guardians enroll Kiro per user (the hook goes into each user's global
+// ~/.kiro/hooks), so reporting ACP there told administrators Kiro was
+// protected only through the ACP guard. The Windows guardian refuses Kiro,
+// so it stays on ACP there.
+func TestKiroRouteFollowsItsEnrollment(t *testing.T) {
+	for goos, want := range map[string]string{
+		"linux":   RoutePerUser,
+		"darwin":  RoutePerUser,
+		"windows": RouteACP,
+	} {
+		if got := RouteFor("kiro", goos); got != want {
+			t.Errorf("RouteFor(kiro, %s) = %q, want %q", goos, got, want)
+		}
+	}
+}
+
 func TestTrustChecksRejectWritableAncestors(t *testing.T) {
 	opts := testOptions(t)
 	opts.SkipTrustChecks = false
@@ -92,5 +109,60 @@ func TestTrustChecksRejectWritableAncestors(t *testing.T) {
 	_, err := codexTarget{}.Reconcile(opts)
 	if err == nil || !strings.Contains(err.Error(), "group/other-writable") {
 		t.Fatalf("a world-writable ancestor must be refused, got %v", err)
+	}
+}
+
+// Disabling a connector or setting ownership: off removes DefenseClaw's
+// earlier entries on the next publish instead of leaving them (and the
+// managed-hooks-only lock) until uninstall.
+func TestPublishRetiresConnectorsNoLongerPublished(t *testing.T) {
+	withHigherSources(t)
+	opts := testOptions(t)
+	codexFile := codexPath(t, opts)
+	writeFile(t, codexFile, adminCodexRequirements)
+	if _, err := Publish(opts, []string{"codex", "claudecode", "cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(claudeFloorFile(t, opts)) {
+		t.Fatal("publish must write the Claude Code version floor")
+	}
+
+	off := withPolicy(opts, "codex", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = "off" })
+	result, err := Publish(off, []string{"codex", "claudecode", "cursor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, codexFile); got != adminCodexRequirements {
+		t.Fatalf("ownership: off must restore the administrator requirements:\n%s", got)
+	}
+	if len(result.Retired) != 1 || result.Retired[0].Connector != "codex" || !result.Changed {
+		t.Fatalf("retired = %+v", result.Retired)
+	}
+	if !result.Complete() {
+		t.Fatalf("a retired connector must not make the publish incomplete: %+v", result.States)
+	}
+
+	result, err = Publish(off, []string{"codex", "cursor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNotExist(t, claudeDropIn(t, opts), "the drop-in of a disabled connector")
+	if recorded, _ := ClaudeVersionFloorRecorded(opts); recorded || fileExists(claudeFloorFile(t, opts)) {
+		t.Fatal("disabling claudecode must withdraw the version floor and its record")
+	}
+	if len(result.Retired) != 1 || result.Retired[0].Connector != "claudecode" {
+		t.Fatalf("retired = %+v", result.Retired)
+	}
+
+	verify := withPolicy(off, "cursor", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = "verify_only" })
+	result, err = Publish(verify, []string{"codex", "cursor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Retired) != 0 || !strings.Contains(readFile(t, cursorHooksPath(t, opts)), testHookBinary) {
+		t.Fatalf("verify_only keeps DefenseClaw's entries (it still verifies them): %+v", result.Retired)
+	}
+	if again, err := Publish(verify, []string{"codex", "cursor"}); err != nil || len(again.Retired) != 0 || again.Changed {
+		t.Fatalf("retirement must be a one-time change: %+v %v", again, err)
 	}
 }

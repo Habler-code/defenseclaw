@@ -11,6 +11,8 @@
 package enterprisepolicy
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -323,5 +325,90 @@ func TestCodexWindowsRendering(t *testing.T) {
 	}
 	if strings.Contains(text, connector.WindowsCodexManagedHookCommand(opts.HookBinary)) {
 		t.Fatal("the unbound Secure Client command must not appear in standalone requirements")
+	}
+}
+
+func withCodexHigherSources(t *testing.T, sources map[string][]byte) {
+	t.Helper()
+	previous := codexHigherSources
+	codexHigherSources = func(Options) (map[string][]byte, error) { return sources, nil }
+	t.Cleanup(func() { codexHigherSources = previous })
+}
+
+func TestCodexMDMRequirementsOutrankTheSystemFile(t *testing.T) {
+	opts := testOptions(t)
+	withCodexHigherSources(t, map[string][]byte{"MDM com.openai.codex": []byte("allowed_approval_policies = [\"never\"]\n")})
+	state, err := codexTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Covered || len(state.HigherPrecedence) != 1 || !hasConflict(state, "--format plist") {
+		t.Fatalf("an MDM layer without DefenseClaw's hooks must block coverage: %+v", state)
+	}
+
+	warn := withPolicy(testOptions(t), "codex", func(p *config.EnterpriseConnectorPolicy) { p.HigherPrecedenceSources = config.HigherPrecedenceWarn })
+	state, err = codexTarget{}.Reconcile(warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Covered || len(state.HigherPrecedence) != 0 {
+		t.Fatalf("warn must report without blocking: %+v", state)
+	}
+
+	embedded := testOptions(t)
+	plist, err := codexTarget{}.Export(embedded, "plist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(plistJSONForTest(t, plist), &payload); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload["requirements_toml_base64"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	withCodexHigherSources(t, map[string][]byte{"MDM com.openai.codex": decoded})
+	state, err = codexTarget{}.Reconcile(embedded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Covered {
+		t.Fatalf("an MDM layer carrying the exported requirements must be covered: %+v", state)
+	}
+}
+
+// plistJSONForTest extracts the single string key from the rendered plist.
+func plistJSONForTest(t *testing.T, plist []byte) []byte {
+	t.Helper()
+	text := string(plist)
+	const key = "<key>requirements_toml_base64</key>"
+	start := strings.Index(text, key)
+	if start < 0 {
+		t.Fatalf("plist lacks requirements_toml_base64: %s", text)
+	}
+	rest := text[start+len(key):]
+	open := strings.Index(rest, "<string>")
+	end := strings.Index(rest, "</string>")
+	if open < 0 || end < open {
+		t.Fatalf("plist value: %s", text)
+	}
+	value, _ := json.Marshal(map[string]string{"requirements_toml_base64": rest[open+len("<string>") : end]})
+	return value
+}
+
+func TestCodexPinsFeaturesHooksInEveryLockMode(t *testing.T) {
+	for _, mode := range []string{config.ManagedHooksOnlyEnforce, config.ManagedHooksOnlyPreserve} {
+		opts := withPolicy(testOptions(t), "codex", func(p *config.EnterpriseConnectorPolicy) { p.ManagedHooksOnly = mode })
+		if _, err := (codexTarget{}).Reconcile(opts); err != nil {
+			t.Fatal(err)
+		}
+		data := readFile(t, codexPath(t, opts))
+		if !strings.Contains(data, "[features]") || !strings.Contains(data, "hooks = true") {
+			t.Fatalf("%s: features.hooks must be pinned:\n%s", mode, data)
+		}
+		if got := strings.Contains(data, "allow_managed_hooks_only = true"); got != (mode == config.ManagedHooksOnlyEnforce) {
+			t.Fatalf("%s: lock line present = %v:\n%s", mode, got, data)
+		}
 	}
 }

@@ -98,6 +98,40 @@ func TestDiscoverUnixAgentVersionSkipsSharedPrefixesOthersCanWrite(t *testing.T)
 	if version, reason := DiscoverUnixAgentVersion(context.Background(), home, "codex", false); version != "" {
 		t.Fatalf("codex metadata below a world-writable directory was read: %q (%s)", version, reason)
 	}
+
+	// The standalone per-user worker's PATH leaves out a machine bin directory
+	// another account could change, as discovery does, so connector setup never
+	// finds an agent there; the Secure Client guardian's PATH is unchanged.
+	t.Run("search dirs", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("ownership checks need a non-root test account")
+		}
+		uid := os.Geteuid()
+		prefix := trustChainTestDir(t)
+		bin := filepath.Join(prefix, "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		previous := machinePrefixes
+		machinePrefixes = func() []string { return []string{prefix} }
+		t.Cleanup(func() { machinePrefixes = previous; SetStandaloneUnix(false) })
+		home := filepath.Join(t.TempDir(), "alice")
+
+		SetStandaloneUnix(true)
+		if dirs := UnixAgentSearchDirsFor(home, uid); !containsString(dirs, bin) {
+			t.Fatalf("a machine dir only root and the user can change was left out: %v", dirs)
+		}
+		if dirs := UnixAgentSearchDirsFor(home, uid+1); containsString(dirs, bin) {
+			t.Fatalf("a machine dir another account owns stayed on the worker PATH: %v", dirs)
+		}
+		if dirs := UnixAgentSearchDirsFor(home, uid+1); !containsString(dirs, filepath.Join(home, ".local", "bin")) {
+			t.Fatalf("the user's own bin dir was left out: %v", dirs)
+		}
+		SetStandaloneUnix(false)
+		if dirs := UnixAgentSearchDirsFor(home, uid+1); !containsString(dirs, bin) {
+			t.Fatalf("outside the standalone profile the machine dirs changed: %v", dirs)
+		}
+	})
 }
 
 // The worker runs discovery as each enrolled user. A CLI outside the home
@@ -262,40 +296,6 @@ func TestUnixPathTrustedForAdmitsTheMacOSAdminGroup(t *testing.T) {
 	}
 	if unixPathTrustedFor(tool, uid+1) {
 		t.Fatal("a world-writable folder was trusted")
-	}
-}
-
-// The standalone per-user worker's PATH leaves out a machine bin directory
-// another account could change, as discovery does, so connector setup never
-// finds an agent there; the Secure Client guardian's PATH is unchanged.
-func TestUnixAgentSearchDirsForLeavesOutMachineDirsOthersCanChange(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("ownership checks need a non-root test account")
-	}
-	uid := os.Geteuid()
-	prefix := trustChainTestDir(t)
-	bin := filepath.Join(prefix, "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	previous := machinePrefixes
-	machinePrefixes = func() []string { return []string{prefix} }
-	t.Cleanup(func() { machinePrefixes = previous; SetStandaloneUnix(false) })
-	home := filepath.Join(t.TempDir(), "alice")
-
-	SetStandaloneUnix(true)
-	if dirs := UnixAgentSearchDirsFor(home, uid); !containsString(dirs, bin) {
-		t.Fatalf("a machine dir only root and the user can change was left out: %v", dirs)
-	}
-	if dirs := UnixAgentSearchDirsFor(home, uid+1); containsString(dirs, bin) {
-		t.Fatalf("a machine dir another account owns stayed on the worker PATH: %v", dirs)
-	}
-	if dirs := UnixAgentSearchDirsFor(home, uid+1); !containsString(dirs, filepath.Join(home, ".local", "bin")) {
-		t.Fatalf("the user's own bin dir was left out: %v", dirs)
-	}
-	SetStandaloneUnix(false)
-	if dirs := UnixAgentSearchDirsFor(home, uid+1); !containsString(dirs, bin) {
-		t.Fatalf("outside the standalone profile the machine dirs changed: %v", dirs)
 	}
 }
 

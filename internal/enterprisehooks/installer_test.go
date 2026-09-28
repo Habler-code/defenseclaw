@@ -1757,67 +1757,43 @@ func sliceContains(values []string, want string) bool {
 	return false
 }
 
-// agy never creates ~/.gemini/config/hooks.json; a first install creates
-// it as the user and registers the DefenseClaw hooks there.
-func TestInstallBootstrapsMissingAntigravityHooksFile(t *testing.T) {
-	requireEnterpriseHookInstaller(t)
-	skipIfRoot(t)
-	setStandaloneProfileForTest(t, true)
-	home := newTestHome(t)
-	cfgPath := filepath.Join(home, ".gemini", "config", "hooks.json")
-	if _, err := Install(context.Background(), InstallOptions{
-		ConnectorName: "antigravity",
-		UserHome:      home,
-		OwnerUID:      os.Getuid(),
-		OwnerGID:      os.Getgid(),
-		APIAddr:       "127.0.0.1:18970",
-		APIToken:      "test-token",
-		AgentVersion:  "1.2.11",
-		GuardrailMode: "action",
-		Registry:      connector.NewDefaultRegistry(),
-	}); err != nil {
-		t.Fatalf("Install with missing Antigravity hooks file: %v", err)
-	}
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "antigravity-hook") && !strings.Contains(string(data), "defenseclaw") {
-		t.Fatalf("hooks file lacks the DefenseClaw hook:\n%s", data)
-	}
-}
-
-// OpenHands CLI loads ~/.openhands/hooks.json but only creates it when the
+// Antigravity and OpenHands load a hooks file that they create only when the
 // user writes hooks; a first install creates it as the user and registers
 // the DefenseClaw hooks there.
-func TestInstallBootstrapsMissingOpenHandsHooksFile(t *testing.T) {
+func TestInstallBootstrapsAMissingHooksFile(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS OpenHands setup also needs the user's executable; covered by TestInstallOpenHandsRecordsTheUsersExecutableOnDarwin")
-	}
 	setStandaloneProfileForTest(t, true)
-	home := newTestHome(t)
-	cfgPath := filepath.Join(home, ".openhands", "hooks.json")
-	if _, err := Install(context.Background(), InstallOptions{
-		ConnectorName: "openhands",
-		UserHome:      home,
-		OwnerUID:      os.Getuid(),
-		OwnerGID:      os.Getgid(),
-		APIAddr:       "127.0.0.1:18970",
-		APIToken:      "test-token",
-		AgentVersion:  "1.16.0",
-		GuardrailMode: "action",
-		Registry:      connector.NewDefaultRegistry(),
-	}); err != nil {
-		t.Fatalf("Install with missing OpenHands hooks file: %v", err)
-	}
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "openhands-hook") && !strings.Contains(string(data), "defenseclaw") {
-		t.Fatalf("hooks file lacks the DefenseClaw hook:\n%s", data)
+	for _, tc := range []struct{ connector, version, config string }{
+		{"antigravity", "1.2.11", filepath.Join(".gemini", "config", "hooks.json")},
+		{"openhands", "1.16.0", filepath.Join(".openhands", "hooks.json")},
+	} {
+		if tc.connector == "openhands" && runtime.GOOS == "darwin" {
+			// macOS OpenHands setup also needs the user's executable; covered
+			// by TestInstallOpenHandsRecordsTheUsersExecutableOnDarwin.
+			continue
+		}
+		home := newTestHome(t)
+		if _, err := Install(context.Background(), InstallOptions{
+			ConnectorName: tc.connector,
+			UserHome:      home,
+			OwnerUID:      os.Getuid(),
+			OwnerGID:      os.Getgid(),
+			APIAddr:       "127.0.0.1:18970",
+			APIToken:      "test-token",
+			AgentVersion:  tc.version,
+			GuardrailMode: "action",
+			Registry:      connector.NewDefaultRegistry(),
+		}); err != nil {
+			t.Fatalf("%s: Install with a missing hooks file: %v", tc.connector, err)
+		}
+		data, err := os.ReadFile(filepath.Join(home, tc.config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), tc.connector+"-hook") && !strings.Contains(string(data), "defenseclaw") {
+			t.Fatalf("%s: hooks file lacks the DefenseClaw hook:\n%s", tc.connector, data)
+		}
 	}
 }
 
@@ -1870,5 +1846,41 @@ func TestHookConfigStubsForOpenHandsAndAntigravityAreStandaloneOnly(t *testing.T
 	}
 	if _, err := os.Lstat(filepath.Join(home, ".gemini")); !os.IsNotExist(err) {
 		t.Fatalf("Secure Client install created the Antigravity config tree: %v", err)
+	}
+}
+
+// TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone
+// covers the standalone version re-check: once an enrolled user's agent
+// moves to another version, the standalone guardian re-renders the hooks
+// when that version has a known, verified hook contract, refuses a version
+// without one (reported as hook_contract_unverified), and the Secure Client
+// profile keeps refusing every change.
+func TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	conn := connector.NewClaudeCodeConnector()
+	dataDir := t.TempDir()
+	installed := connector.SetupOpts{DataDir: dataDir, AgentVersion: "2.1.154"}
+	if err := connector.SaveHookContractLockEntry(dataDir, connector.NewHookContractLockEntry(installed, conn, "test-build")); err != nil {
+		t.Fatalf("seed contract lock: %v", err)
+	}
+	withVersion := func(version string) connector.SetupOpts {
+		return connector.SetupOpts{DataDir: dataDir, AgentVersion: version, ManagedEnterprise: true}
+	}
+
+	setStandaloneProfileForTest(t, false)
+	if err := validateHookContract("action", conn, withVersion("2.1.230")); err == nil ||
+		!strings.Contains(err.Error(), "hook contract drift detected") {
+		t.Fatalf("Secure Client version change = %v, want the drift refusal", err)
+	}
+
+	setStandaloneProfileForTest(t, true)
+	for _, version := range []string{"2.1.230", "2.1.200"} {
+		if err := validateHookContract("action", conn, withVersion(version)); err != nil {
+			t.Fatalf("standalone change to verified version %s = %v, want it accepted for re-render", version, err)
+		}
+	}
+	err := validateHookContract("action", conn, withVersion("2.1.100"))
+	if err == nil || !strings.Contains(err.Error(), "is not verified against a known hook contract") {
+		t.Fatalf("standalone change to unverified version = %v, want the hook_contract_unverified refusal", err)
 	}
 }

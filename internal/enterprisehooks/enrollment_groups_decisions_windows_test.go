@@ -48,11 +48,12 @@ func manifestSIDs(manifest Manifest) string {
 	return strings.Join(sids, ",")
 }
 
-// A shared cross-platform config lists a Linux group (wheel) that no
-// Windows computer has. It used to leave every user pending, the signed-in
-// ones too: no new rows and no report. An exclusion that cannot be
-// evaluated now excludes no one, as on Linux and macOS.
-func TestEnumerateWindowsExcludeGroupThatDoesNotResolveExcludesNoOne(t *testing.T) {
+// A group name that does not resolve on Windows. A shared cross-platform
+// config can list a Linux group (wheel) that no Windows computer has; it used
+// to leave every user pending, the signed-in ones too, with no new rows and no
+// report. An exclusion that cannot be evaluated now excludes no one, as on
+// Linux and macOS.
+func TestEnumerateWindowsGroupThatDoesNotResolve(t *testing.T) {
 	stubMachineWinGet(t, nil)
 	stubGroupDirectory(t, map[string]string{}, map[string][]string{})
 	stubActiveSessions(t, map[string][]string{testLocalUserSID: {"S-1-5-32-545"}})
@@ -86,58 +87,58 @@ func TestEnumerateWindowsExcludeGroupThatDoesNotResolveExcludesNoOne(t *testing.
 	if strings.Contains(log, "until the user signs in") {
 		t.Fatalf("no user may be reported pending on sign-in for an unresolved name:\n%s", log)
 	}
-}
 
-// An include_groups name that does not resolve cannot admit anyone, and
-// must not revoke anyone either: users no other entry admits are pending
-// (known rows kept, no new rows). A signed-in pending user can run the
-// agent already installed, so it is reported with the real reason; a
-// signed-out one is not, since nothing runs until they sign in.
-func TestEnumerateWindowsIncludeGroupThatDoesNotResolveLeavesUsersPendingAndReported(t *testing.T) {
-	stubMachineWinGet(t, nil)
-	stubGroupDirectory(t, map[string]string{}, map[string][]string{})
-	stubActiveSessions(t, map[string][]string{testLocalUserSID: {"S-1-5-32-545"}})
-	signedOutHome := codexProfile(t, "0.150.0")
-	injectWindowsProfileList(t, map[string]string{
-		testLocalUserSID:   codexProfile(t, "0.150.0"), // signed in, no row
-		testLocalUserTwo:   signedOutHome,              // signed out, known row
-		testLocalUserThree: codexProfile(t, "0.150.0"), // signed out, no row
+	// An include_groups name that does not resolve cannot admit anyone, and
+	// must not revoke anyone either: users no other entry admits are pending
+	// (known rows kept, no new rows). A signed-in pending user can run the
+	// agent already installed, so it is reported with the real reason; a
+	// signed-out one is not, since nothing runs until they sign in.
+	t.Run("include group", func(t *testing.T) {
+		stubMachineWinGet(t, nil)
+		stubGroupDirectory(t, map[string]string{}, map[string][]string{})
+		stubActiveSessions(t, map[string][]string{testLocalUserSID: {"S-1-5-32-545"}})
+		signedOutHome := codexProfile(t, "0.150.0")
+		injectWindowsProfileList(t, map[string]string{
+			testLocalUserSID:   codexProfile(t, "0.150.0"), // signed in, no row
+			testLocalUserTwo:   signedOutHome,              // signed out, known row
+			testLocalUserThree: codexProfile(t, "0.150.0"), // signed out, no row
+		})
+		enabled := true
+		path := writeWindowsTestManifest(t, ManifestTarget{
+			SID: testLocalUserTwo, Connector: "codex", UserHome: signedOutHome,
+			DataDir: filepath.Join(signedOutHome, ".defenseclaw"), AgentVersion: "0.150.0", Enabled: &enabled,
+		})
+		var reported []UnprotectedAgent
+		manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
+			ExistingManifestPath: path,
+			IncludeGroups:        []string{"Develpers"},
+			GroupCache:           NewWindowsEnrollmentGroupCache(),
+			ReportUnprotected:    func(agent UnprotectedAgent) { reported = append(reported, agent) },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := manifestSIDs(manifest); got != testLocalUserTwo {
+			t.Fatalf("targets = %s, want only the pending user's existing row", got)
+		}
+		if len(reported) != 1 {
+			t.Fatalf("reported = %+v, want the signed-in pending user's codex only", reported)
+		}
+		got := reported[0]
+		if got.SID != testLocalUserSID || got.Connector != "codex" || got.Version != "0.150.0" || got.Code != UnprotectedCodeAgentUnprotected {
+			t.Fatalf("reported = %+v", got)
+		}
+		if !strings.Contains(got.Reason, `include_groups "Develpers" does not resolve`) || !strings.Contains(got.Reason, "pending") ||
+			strings.Contains(got.Reason, "until the user signs in") {
+			t.Fatalf("reason %q must name the unresolved entry, not a sign-in", got.Reason)
+		}
+		// A member of another, resolvable include group is still admitted.
+		stubGroupDirectory(t, map[string]string{"developers": testLocalDevelopers}, map[string][]string{testLocalDevelopers: {testLocalUserThree}})
+		groups := newWindowsEnrollmentGroups([]string{"Develpers", "Developers"}, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
+		if decision, reason := groups.decide(testLocalUserThree); decision != windowsEnrollmentEnrolled {
+			t.Fatalf("a member of a resolvable include group: %d (%s)", decision, reason)
+		}
 	})
-	enabled := true
-	path := writeWindowsTestManifest(t, ManifestTarget{
-		SID: testLocalUserTwo, Connector: "codex", UserHome: signedOutHome,
-		DataDir: filepath.Join(signedOutHome, ".defenseclaw"), AgentVersion: "0.150.0", Enabled: &enabled,
-	})
-	var reported []UnprotectedAgent
-	manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
-		ExistingManifestPath: path,
-		IncludeGroups:        []string{"Develpers"},
-		GroupCache:           NewWindowsEnrollmentGroupCache(),
-		ReportUnprotected:    func(agent UnprotectedAgent) { reported = append(reported, agent) },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := manifestSIDs(manifest); got != testLocalUserTwo {
-		t.Fatalf("targets = %s, want only the pending user's existing row", got)
-	}
-	if len(reported) != 1 {
-		t.Fatalf("reported = %+v, want the signed-in pending user's codex only", reported)
-	}
-	got := reported[0]
-	if got.SID != testLocalUserSID || got.Connector != "codex" || got.Version != "0.150.0" || got.Code != UnprotectedCodeAgentUnprotected {
-		t.Fatalf("reported = %+v", got)
-	}
-	if !strings.Contains(got.Reason, `include_groups "Develpers" does not resolve`) || !strings.Contains(got.Reason, "pending") ||
-		strings.Contains(got.Reason, "until the user signs in") {
-		t.Fatalf("reason %q must name the unresolved entry, not a sign-in", got.Reason)
-	}
-	// A member of another, resolvable include group is still admitted.
-	stubGroupDirectory(t, map[string]string{"developers": testLocalDevelopers}, map[string][]string{testLocalDevelopers: {testLocalUserThree}})
-	groups := newWindowsEnrollmentGroups([]string{"Develpers", "Developers"}, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
-	if decision, reason := groups.decide(testLocalUserThree); decision != windowsEnrollmentEnrolled {
-		t.Fatalf("a member of a resolvable include group: %d (%s)", decision, reason)
-	}
 }
 
 // Well-known groups other than Everyone (Authenticated Users, INTERACTIVE)
@@ -179,6 +180,64 @@ func TestWindowsEnrollmentGroupsDecideWellKnownGroupsFromTokens(t *testing.T) {
 			}
 		})
 	}
+
+	// Named groups decide from the signed-in token, the cached token groups and
+	// local account membership; resolved names and tokens are cached for offline
+	// cycles, unresolved names never exclude, and SIDs need no lookup.
+	t.Run("tokens, cache and local accounts", func(t *testing.T) {
+		stubGroupDirectory(t,
+			map[string]string{"developers": testLocalDevelopers, `contoso\contractors`: testDomainGroupSID},
+			map[string][]string{testLocalDevelopers: {testLocalUserSID, testDomainUserC}},
+		)
+		cache := NewWindowsEnrollmentGroupCache()
+		cache.Users[testDomainUserB] = []string{testLocalDevelopers}
+		sessions := map[string][]string{testDomainUserA: {testDomainGroupSID, testLocalDevelopers}}
+		groups := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, sessions, cache, nil)
+
+		for sid, want := range map[string]windowsEnrollmentDecision{
+			testLocalUserSID: windowsEnrollmentEnrolled,  // local account, direct member of Developers
+			testLocalUserTwo: windowsEnrollmentExcluded,  // local account, not a member
+			testDomainUserA:  windowsEnrollmentExcluded,  // signed in; token lists the excluded group
+			testDomainUserB:  windowsEnrollmentEnrolled,  // signed out; cached token lists Developers
+			testDomainUserC:  windowsEnrollmentUndecided, // direct member, but exclusion is unknown until sign-in
+			testEntraUserSID: windowsEnrollmentUndecided, // never signed in since install: pending
+		} {
+			if got, reason := groups.decide(sid); got != want {
+				t.Errorf("%s: decision %d (%s), want %d", sid, got, reason, want)
+			}
+		}
+		if got := cache.Users[testDomainUserA]; len(got) != 2 {
+			t.Fatalf("the signed-in user's token groups must be cached: %v", cache.Users)
+		}
+		if cache.Names["developers"] != testLocalDevelopers || cache.Names[`contoso\contractors`] != testDomainGroupSID {
+			t.Fatalf("resolved names must be cached: %v", cache.Names)
+		}
+
+		// Off the network the names no longer resolve; the cached SIDs keep
+		// deciding.
+		stubGroupDirectory(t, map[string]string{}, map[string][]string{testLocalDevelopers: {testLocalUserSID}})
+		offline := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, nil, cache, nil)
+		if got, reason := offline.decide(testDomainUserA); got != windowsEnrollmentExcluded {
+			t.Fatalf("cached membership off the network: %d (%s)", got, reason)
+		}
+		// An exclude_groups name that never resolved excludes no one; an
+		// include_groups one leaves the users no other entry admits pending,
+		// never excluded.
+		unknown := newWindowsEnrollmentGroups(nil, []string{`CONTOSO\Offline`}, nil, NewWindowsEnrollmentGroupCache(), nil)
+		if got, reason := unknown.decide(testLocalUserSID); got != windowsEnrollmentEnrolled {
+			t.Fatalf("unresolved exclude group: %d (%s), want enrolled", got, reason)
+		}
+		unknownInclude := newWindowsEnrollmentGroups([]string{`CONTOSO\Offline`}, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
+		if got, _ := unknownInclude.decide(testLocalUserSID); got != windowsEnrollmentUndecided {
+			t.Fatalf("unresolved include group: %d, want undecided", got)
+		}
+		// SIDs work without any lookup, including Entra ID groups.
+		const entraGroup = "S-1-12-1-1111111111-2222222222-3333333333-4044444444"
+		bySID := newWindowsEnrollmentGroups([]string{entraGroup}, nil, map[string][]string{testEntraUserSID: {entraGroup}}, NewWindowsEnrollmentGroupCache(), nil)
+		if got, _ := bySID.decide(testEntraUserSID); got != windowsEnrollmentEnrolled {
+			t.Fatalf("Entra ID group by SID: %d", got)
+		}
+	})
 }
 
 // A known Claude Code row used to follow its user to any verified version,

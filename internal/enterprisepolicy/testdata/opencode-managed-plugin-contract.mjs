@@ -46,13 +46,13 @@ function resetCalls() {
   rmSync(join(fakeDir, "calls.jsonl"), { force: true });
 }
 
-async function load({ guard = JSON.stringify({ deny: false }), guardExit = 0, origins, mcp } = {}) {
+async function load({ guard = JSON.stringify({ deny: false }), guardExit = 0, origins, mcp, client } = {}) {
   answer("guard.json", guard, guardExit);
   serial += 1;
   const url = pathToFileURL(pluginPath).href + "?instance=" + serial;
   const mod = await import(url);
   assert.deepEqual(Object.keys(mod), ["DefenseClawManaged"]);
-  const hooks = await mod.DefenseClawManaged({ directory: "/work/repo", worktree: "/work/repo" });
+  const hooks = await mod.DefenseClawManaged({ client, directory: "/work/repo", worktree: "/work/repo" });
   answer("event.json", JSON.stringify({ action: "allow", mode: "observe", hook_output: { decision: "allow" } }));
   await hooks.config({
     plugin_origins: origins || [{ spec: "file:///other/plugin.js" }, { spec: pluginPath }],
@@ -89,11 +89,19 @@ async function before(hooks, tool = "bash", args = { command: "ls" }) {
   assert.equal(payload.mcp_identity_status, "not_mcp");
 }
 
-// A gateway deny aborts the tool with its reason.
+// A gateway deny aborts the tool with its reason and says DefenseClaw blocked
+// it under the organization's policy; a confirm verdict, which this plugin
+// cannot ask about, shows a visible notice instead of running silently.
 {
-  const hooks = await load();
+  const toasts = [];
+  const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
+  const hooks = await load({ client });
   answer("event.json", JSON.stringify({ action: "block", mode: "action", hook_output: { decision: "deny", reason: "policy marker rule" } }));
-  await assert.rejects(before(hooks), /policy marker rule/);
+  await assert.rejects(before(hooks), /under your organization's policy, so it did not run: policy marker rule/);
+  answer("event.json", JSON.stringify({ action: "alert", raw_action: "confirm", mode: "action", severity: "HIGH", reason: "review marker rule" }));
+  await before(hooks);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(toasts.some((toast) => toast.variant === "warning" && /flagged this tool call for review/.test(toast.message)), JSON.stringify(toasts));
 }
 
 // Every failure of the hook blocks.
@@ -143,9 +151,13 @@ for (const [stdout, exit, pattern] of [
   const hooks = await load({ guard: "garbage" });
   await assert.rejects(before(hooks), /unapproved plugin/);
 }
+// A failed load-time check holds for the process (OpenCode loads plugins
+// once), so the reason says to restart the agent.
 {
   const hooks = await load({ guard: "", guardExit: 1 });
-  await assert.rejects(before(hooks), /could not check for unapproved plugins/);
+  await assert.rejects(before(hooks), /could not check for unapproved plugins when the agent started.*Restart the agent/);
+  answer("guard.json", JSON.stringify({ deny: false }));
+  await assert.rejects(before(hooks), /Restart the agent/);
 }
 
 // Post-tool telemetry and lifecycle events never throw.

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -131,5 +132,50 @@ func TestCopilotWindowsRendering(t *testing.T) {
 	}
 	if path, _ := copilotDropInPath(opts); path != `C:\ProgramData\GitHub\Copilot\policy.d\90-defenseclaw.json` {
 		t.Fatalf("path = %q", path)
+	}
+}
+
+func TestCopilotUntrustedDropInIsAConflict(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix ownership rule")
+	}
+	opts := testOptions(t)
+	opts.SkipTrustChecks = false
+	previous := trustedOwner
+	uid := uint32(os.Getuid())
+	trustedOwner = func(owner uint32) bool { return owner == uid }
+	t.Cleanup(func() { trustedOwner = previous })
+	if err := os.Chmod(opts.Root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state, err := copilotTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNoConflicts(t, state)
+	path, _ := copilotDropInPath(opts)
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("drop-in must be written 0644: %v %v", info, err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	state, err = copilotTarget{}.Verify(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Covered || !hasConflict(state, "Copilot silently ignores") {
+		t.Fatalf("a world-writable drop-in is ignored by Copilot and must not count: %+v", state)
+	}
+	// Reconcile replaces DefenseClaw's own drop-in when it is untrusted
+	// instead of failing every pass.
+	state, err = copilotTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatalf("reconcile must repair an untrusted DefenseClaw drop-in: %v", err)
+	}
+	mustNoConflicts(t, state)
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 || !state.Covered {
+		t.Fatalf("repaired drop-in: %v %v %+v", info, err, state)
 	}
 }

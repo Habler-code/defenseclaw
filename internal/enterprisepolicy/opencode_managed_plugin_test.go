@@ -255,3 +255,57 @@ func TestInstallOpenCodeManagedPlugin(t *testing.T) {
 		t.Fatalf("removal must keep other share content: %v", err)
 	}
 }
+
+func TestOpenCodeManagedPluginRoute(t *testing.T) {
+	opts := testOptions(t)
+	if route := opts.Route("opencode"); route != RoutePerUser {
+		t.Fatalf("without an artifact OpenCode stays per-user, got %s", route)
+	}
+	opts.OpenCodePluginPath = testOpenCodePlugin
+	if route := opts.Route("opencode"); route != RoutePerUser {
+		t.Fatalf("a configured but missing artifact must stay per-user, got %s", route)
+	}
+	installTestOpenCodePlugin(t, &opts)
+	if route := opts.Route("opencode"); route != RouteMachinePolicy {
+		t.Fatalf("with an artifact OpenCode uses machine policy, got %s", route)
+	}
+	configPath, _ := OpenCodeManagedConfigPath(opts)
+	admin := "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"plugin\": [\"company-audit\"],\n  \"share\": \"disabled\"\n}\n"
+	writeFile(t, configPath, admin)
+
+	state, err := opencodeTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNoConflicts(t, state)
+	if !state.Covered || state.ForeignEntries != 1 || !state.Changed {
+		t.Fatalf("state: %+v", state)
+	}
+	merged := readFile(t, configPath)
+	if !strings.Contains(merged, `"company-audit",`) || !strings.Contains(merged, opts.OpenCodePluginPath) || strings.Index(merged, "$schema") > strings.Index(merged, "plugin") {
+		t.Fatalf("merge must keep the administrator's keys and order:\n%s", merged)
+	}
+	again, err := opencodeTarget{}.Reconcile(opts)
+	if err != nil || again.Changed {
+		t.Fatalf("reconcile must be idempotent: %+v %v", again, err)
+	}
+	if _, err := (opencodeTarget{}).RemoveOwned(opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, configPath); got != admin {
+		t.Fatalf("removal must restore the preimage exactly:\n%s", got)
+	}
+
+	jsonc := filepath.Join(filepath.Dir(configPath), "opencode.jsonc")
+	writeFile(t, jsonc, "{\n  // company policy\n  \"plugin\": []\n}\n")
+	state, err = opencodeTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Covered || !hasConflict(state, "verify_only") {
+		t.Fatalf("a commented .jsonc cannot be merged: %+v", state)
+	}
+	if got := readFile(t, jsonc); !strings.Contains(got, "// company policy") {
+		t.Fatalf("commented config must stay untouched:\n%s", got)
+	}
+}

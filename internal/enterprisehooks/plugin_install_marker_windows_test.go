@@ -17,10 +17,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// Only the standalone in-agent plugin connectors carry the install marker;
-// every hook-binary and machine-policy connector, and Secure Client, keep an
-// unconditional fail mode.
-func TestWindowsStandalonePluginInstallMarkerNamesTheHookRuntimeRoot(t *testing.T) {
+// Only the standalone in-agent plugin connectors (OpenCode and Amp) carry the
+// install marker and the listener proof; every hook-binary and
+// machine-policy connector, and Secure Client, carry neither, so their
+// renders keep an unconditional fail mode.
+func TestWindowsStandalonePluginOptionsCarryTheMarkerAndListenerProof(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
 	previousRoot := windowsStandaloneHookRuntimeRoot
 	previousStandalone := windowsEnterpriseStandaloneProcess
@@ -29,68 +30,38 @@ func TestWindowsStandalonePluginInstallMarkerNamesTheHookRuntimeRoot(t *testing.
 		windowsEnterpriseStandaloneProcess = previousStandalone
 	})
 	windowsStandaloneHookRuntimeRoot = func() (string, error) { return root, nil }
-	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	options := func(name string) (connector.SetupOpts, error) {
+		setup := connector.SetupOpts{ManagedEnterprise: true}
+		err := applyWindowsStandalonePluginOptions(name, &setup)
+		return setup, err
+	}
 
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
 	for _, name := range []string{"opencode", "amp"} {
 		if got, err := windowsStandalonePluginInstallMarker(name); err != nil || got != root {
 			t.Fatalf("%s install marker = %q, %v; want %q", name, got, err, root)
 		}
-	}
-	for _, name := range []string{"antigravity", "copilot", "devin", "hermes", "claudecode", "codex", "cursor"} {
-		if got, err := windowsStandalonePluginInstallMarker(name); got != "" || err != nil {
-			t.Fatalf("%s must not carry an install marker, got %q, %v", name, got, err)
-		}
-	}
-
-	windowsEnterpriseStandaloneProcess = func() bool { return false }
-	if got, err := windowsStandalonePluginInstallMarker("opencode"); got != "" || err != nil {
-		t.Fatalf("Secure Client install marker = %q, %v; want none", got, err)
-	}
-
-	windowsEnterpriseStandaloneProcess = func() bool { return true }
-	windowsStandaloneHookRuntimeRoot = func() (string, error) { return `DefenseClaw-HookRuntime`, nil }
-	if _, err := windowsStandalonePluginInstallMarker("opencode"); err == nil {
-		t.Fatal("a relative install marker was accepted")
-	}
-}
-
-// A standalone render of the OpenCode and Amp plugins carries both the
-// install marker and the listener proof; every hook-binary and
-// machine-policy connector, and Secure Client, carry neither, so their
-// renders are unchanged.
-func TestWindowsStandalonePluginOptionsCarryTheListenerProof(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
-	previousRoot := windowsStandaloneHookRuntimeRoot
-	previousStandalone := windowsEnterpriseStandaloneProcess
-	t.Cleanup(func() {
-		windowsStandaloneHookRuntimeRoot = previousRoot
-		windowsEnterpriseStandaloneProcess = previousStandalone
-	})
-	windowsStandaloneHookRuntimeRoot = func() (string, error) { return root, nil }
-	windowsEnterpriseStandaloneProcess = func() bool { return true }
-
-	for _, name := range []string{"opencode", "amp"} {
-		setup := connector.SetupOpts{ManagedEnterprise: true}
-		if err := applyWindowsStandalonePluginOptions(name, &setup); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if !setup.ManagedListenerProof || setup.ManagedInstallMarker != root {
-			t.Fatalf("%s standalone options = proof %v marker %q; want the proof and %q", name, setup.ManagedListenerProof, setup.ManagedInstallMarker, root)
+		if setup, err := options(name); err != nil || !setup.ManagedListenerProof || setup.ManagedInstallMarker != root {
+			t.Fatalf("%s standalone options = proof %v marker %q err %v; want the proof and %q", name, setup.ManagedListenerProof, setup.ManagedInstallMarker, err, root)
 		}
 	}
 	for _, name := range []string{"antigravity", "copilot", "devin", "hermes", "claudecode", "codex", "cursor"} {
-		setup := connector.SetupOpts{ManagedEnterprise: true}
-		if err := applyWindowsStandalonePluginOptions(name, &setup); err != nil || setup.ManagedListenerProof || setup.ManagedInstallMarker != "" {
+		if setup, err := options(name); err != nil || setup.ManagedListenerProof || setup.ManagedInstallMarker != "" {
 			t.Fatalf("%s must carry neither option: proof %v marker %q err %v", name, setup.ManagedListenerProof, setup.ManagedInstallMarker, err)
 		}
 	}
 
 	windowsEnterpriseStandaloneProcess = func() bool { return false }
 	for _, name := range []string{"opencode", "amp"} {
-		setup := connector.SetupOpts{ManagedEnterprise: true}
-		if err := applyWindowsStandalonePluginOptions(name, &setup); err != nil || setup.ManagedListenerProof || setup.ManagedInstallMarker != "" {
+		if setup, err := options(name); err != nil || setup.ManagedListenerProof || setup.ManagedInstallMarker != "" {
 			t.Fatalf("Secure Client %s options = proof %v marker %q err %v; want none", name, setup.ManagedListenerProof, setup.ManagedInstallMarker, err)
 		}
+	}
+
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsStandaloneHookRuntimeRoot = func() (string, error) { return `DefenseClaw-HookRuntime`, nil }
+	if _, err := windowsStandalonePluginInstallMarker("opencode"); err == nil {
+		t.Fatal("a relative install marker was accepted")
 	}
 }
 

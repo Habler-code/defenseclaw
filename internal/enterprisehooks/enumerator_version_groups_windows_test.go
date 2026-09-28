@@ -159,61 +159,6 @@ func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
 	}
 }
 
-func TestWindowsEnrollmentGroupsDecideFromTokensCacheAndLocalAccounts(t *testing.T) {
-	stubGroupDirectory(t,
-		map[string]string{"developers": testLocalDevelopers, `contoso\contractors`: testDomainGroupSID},
-		map[string][]string{testLocalDevelopers: {testLocalUserSID, testDomainUserC}},
-	)
-	cache := NewWindowsEnrollmentGroupCache()
-	cache.Users[testDomainUserB] = []string{testLocalDevelopers}
-	sessions := map[string][]string{testDomainUserA: {testDomainGroupSID, testLocalDevelopers}}
-	groups := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, sessions, cache, nil)
-
-	for sid, want := range map[string]windowsEnrollmentDecision{
-		testLocalUserSID: windowsEnrollmentEnrolled,  // local account, direct member of Developers
-		testLocalUserTwo: windowsEnrollmentExcluded,  // local account, not a member
-		testDomainUserA:  windowsEnrollmentExcluded,  // signed in; token lists the excluded group
-		testDomainUserB:  windowsEnrollmentEnrolled,  // signed out; cached token lists Developers
-		testDomainUserC:  windowsEnrollmentUndecided, // direct member, but exclusion is unknown until sign-in
-		testEntraUserSID: windowsEnrollmentUndecided, // never signed in since install: pending
-	} {
-		if got, reason := groups.decide(sid); got != want {
-			t.Errorf("%s: decision %d (%s), want %d", sid, got, reason, want)
-		}
-	}
-	if got := cache.Users[testDomainUserA]; len(got) != 2 {
-		t.Fatalf("the signed-in user's token groups must be cached: %v", cache.Users)
-	}
-	if cache.Names["developers"] != testLocalDevelopers || cache.Names[`contoso\contractors`] != testDomainGroupSID {
-		t.Fatalf("resolved names must be cached: %v", cache.Names)
-	}
-
-	// Off the network the names no longer resolve; the cached SIDs keep
-	// deciding.
-	stubGroupDirectory(t, map[string]string{}, map[string][]string{testLocalDevelopers: {testLocalUserSID}})
-	offline := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, nil, cache, nil)
-	if got, reason := offline.decide(testDomainUserA); got != windowsEnrollmentExcluded {
-		t.Fatalf("cached membership off the network: %d (%s)", got, reason)
-	}
-	// An exclude_groups name that never resolved excludes no one; an
-	// include_groups one leaves the users no other entry admits pending,
-	// never excluded.
-	unknown := newWindowsEnrollmentGroups(nil, []string{`CONTOSO\Offline`}, nil, NewWindowsEnrollmentGroupCache(), nil)
-	if got, reason := unknown.decide(testLocalUserSID); got != windowsEnrollmentEnrolled {
-		t.Fatalf("unresolved exclude group: %d (%s), want enrolled", got, reason)
-	}
-	unknownInclude := newWindowsEnrollmentGroups([]string{`CONTOSO\Offline`}, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
-	if got, _ := unknownInclude.decide(testLocalUserSID); got != windowsEnrollmentUndecided {
-		t.Fatalf("unresolved include group: %d, want undecided", got)
-	}
-	// SIDs work without any lookup, including Entra ID groups.
-	const entraGroup = "S-1-12-1-1111111111-2222222222-3333333333-4044444444"
-	bySID := newWindowsEnrollmentGroups([]string{entraGroup}, nil, map[string][]string{testEntraUserSID: {entraGroup}}, NewWindowsEnrollmentGroupCache(), nil)
-	if got, _ := bySID.decide(testEntraUserSID); got != windowsEnrollmentEnrolled {
-		t.Fatalf("Entra ID group by SID: %d", got)
-	}
-}
-
 // End to end: an excluded member loses its rows, a pending (unknown) user
 // keeps its existing rows and gets no new ones, and a member is enrolled.
 func TestEnumerateWindowsAppliesGroupFilters(t *testing.T) {
@@ -308,5 +253,29 @@ func TestWindowsEnrollmentGroupPrimitivesAgainstThisHost(t *testing.T) {
 	}
 	if _, err := readWindowsActiveSessionGroups(); err != nil {
 		t.Fatalf("active sessions: %v", err)
+	}
+}
+
+// A known row dropped because the user removed the agent is no gap and is
+// not reported; one dropped while the agent is still installed is.
+func TestStandaloneDroppedKnownRowIsReportedOnlyWhileInstalled(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	enabled := true
+	prior := ManifestTarget{SID: testLocalUserSID, Connector: "codex", AgentVersion: "0.125.0", Enabled: &enabled}
+	previous := map[string]ManifestTarget{previousManifestKey(prior.SID, prior.Connector): prior}
+	var reported []UnprotectedAgent
+	rowContext := windowsStandaloneRowContext{user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+
+	removed := ManifestTarget{SID: testLocalUserSID, Connector: "codex", UserHome: t.TempDir()}
+	if applyStandaloneRowStateFor(&removed, previous, nil, rowContext) || len(reported) != 0 {
+		t.Fatalf("removed agent: emitted=%+v reported=%+v, want dropped and not reported", removed, reported)
+	}
+
+	installed := ManifestTarget{SID: testLocalUserSID, Connector: "codex", UserHome: codexProfile(t, "0.125.0")}
+	if applyStandaloneRowStateFor(&installed, previous, nil, rowContext) {
+		t.Fatalf("a row below the Windows minimum must be dropped: %+v", installed)
+	}
+	if len(reported) != 1 || reported[0].Version != "0.125.0" || reported[0].Code != UnprotectedCodeAgentUnprotected {
+		t.Fatalf("reported = %+v, want the installed agent below the minimum", reported)
 	}
 }

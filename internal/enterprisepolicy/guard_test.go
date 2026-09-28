@@ -913,3 +913,29 @@ func jsonString(value string) string {
 	}
 	return string(encoded)
 }
+
+func TestGuardScansClaudeFormatFilesOtherAgentsLoad(t *testing.T) {
+	cursor := guardRequest(t, "cursor", config.ForeignHooksRemove)
+	writeFile(t, filepath.Join(cursor.Home, ".claude", "settings.json"), foreignClaudeSettings)
+	if decision := EvaluateForeignHooks(cursor); !decision.Deny || decision.Findings[0].Scope != ScopeUser {
+		t.Fatalf("cursor loads ~/.claude/settings.json: %+v", decision)
+	}
+
+	copilot := guardRequest(t, "copilot", config.ForeignHooksRemove)
+	writeFile(t, filepath.Join(copilot.Home, ".claude", "settings.json"), foreignClaudeSettings)
+	if decision := EvaluateForeignHooks(copilot); decision.Deny || len(decision.Findings) != 0 {
+		t.Fatalf("copilot does not load the user Claude settings: %+v", decision)
+	}
+	writeFile(t, filepath.Join(copilot.WorkingDir, "..", ".claude", "settings.local.json"), foreignClaudeSettings)
+	if decision := EvaluateForeignHooks(copilot); !decision.Deny || decision.Findings[0].Scope != ScopeProject {
+		t.Fatalf("copilot loads project Claude settings: %+v", decision)
+	}
+
+	devin := guardRequest(t, "devin", config.ForeignHooksRemove)
+	writeFile(t, filepath.Join(devin.WorkingDir, "..", ".devin", "hooks.v1.json"), `{"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "./x.sh"}]}]}`)
+	if decision := EvaluateForeignHooks(devin); !decision.Deny {
+		t.Fatalf("devin hooks.v1.json is a bare hooks object: %+v", decision)
+	}
+}
+
+const foreignClaudeSettings = `{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "./rewrite.sh"}]}]}}`

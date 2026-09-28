@@ -120,6 +120,26 @@ func TestClaudeVersionFloorWrittenWhenNoSourceSetsIt(t *testing.T) {
 	if recorded, err := ClaudeVersionFloorRecorded(opts); err != nil || !recorded {
 		t.Fatalf("floor ownership record: %v %v", recorded, err)
 	}
+
+	// Removal deletes a floor DefenseClaw wrote, and the drop-in directory it
+	// created for it.
+	t.Run("removal", func(t *testing.T) {
+		withHigherSources(t)
+		opts := testOptions(t)
+		reconcileClaude(t, opts)
+		if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
+			t.Fatal(err)
+		}
+		if fileExists(claudeFloorFile(t, opts)) {
+			t.Fatal("removal must delete a floor DefenseClaw wrote")
+		}
+		if fileExists(filepath.Join(claudeDir(t, opts), "managed-settings.d")) {
+			t.Fatal("removal must also remove the drop-in directory DefenseClaw created")
+		}
+		if recorded, _ := ClaudeVersionFloorRecorded(opts); recorded {
+			t.Fatal("removal must delete the floor record")
+		}
+	})
 }
 
 // An administrator value in the base file, any drop-in (one sorting before
@@ -351,26 +371,6 @@ func TestClaudeVersionFloorModes(t *testing.T) {
 	}
 }
 
-// Removal deletes a floor DefenseClaw wrote, and the drop-in directory it
-// created for it.
-func TestClaudeVersionFloorRemovalDeletesItsOwnFloor(t *testing.T) {
-	withHigherSources(t)
-	opts := testOptions(t)
-	reconcileClaude(t, opts)
-	if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
-		t.Fatal(err)
-	}
-	if fileExists(claudeFloorFile(t, opts)) {
-		t.Fatal("removal must delete a floor DefenseClaw wrote")
-	}
-	if fileExists(filepath.Join(claudeDir(t, opts), "managed-settings.d")) {
-		t.Fatal("removal must also remove the drop-in directory DefenseClaw created")
-	}
-	if recorded, _ := ClaudeVersionFloorRecorded(opts); recorded {
-		t.Fatal("removal must delete the floor record")
-	}
-}
-
 // requireUnrecordedFloorFile fails unless the file under DefenseClaw's floor
 // name still holds want and DefenseClaw records no floor.
 func requireUnrecordedFloorFile(t *testing.T, opts Options, want, step string) {
@@ -452,107 +452,86 @@ func TestClaudeVersionFloorLeavesAnUnrecordedAdministratorFloor(t *testing.T) {
 			})
 		}
 	}
-}
 
-// Any other content under DefenseClaw's floor name is also the
-// administrator's: DefenseClaw never rewrites it to place its floor. Under
-// enforce and merge no floor applies, so verify fails and says how to fix it;
-// report only reports; removal leaves the file.
-func TestClaudeVersionFloorNeverRewritesAFileUnderItsName(t *testing.T) {
-	for _, tc := range []struct {
-		name, content, conflict string
-	}{
-		{name: "other settings", content: `{"env": {"COMPANY": "1"}}` + "\n", conflict: "holds a file DefenseClaw did not write"},
-		{name: "invalid value", content: `{"requiredMinimumVersion": "latest"}` + "\n", conflict: "a file DefenseClaw did not write under its drop-in name"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			withHigherSources(t)
-			opts := testOptions(t)
-			writeFile(t, claudeFloorFile(t, opts), tc.content)
-			state := reconcileClaude(t, opts)
-			requireUnrecordedFloorFile(t, opts, tc.content, "reconcile")
-			if conflicts := floorConflicts(state); len(conflicts) != 1 || !strings.Contains(conflicts[0], tc.conflict) || state.Covered {
-				t.Fatalf("no floor applies, which enforce must report: %v", state.Conflicts)
-			}
-			if state.VersionFloor.Owner == VersionFloorOwnerDefenseClaw {
-				t.Fatalf("floor state: %+v", state.VersionFloor)
-			}
-			verify, err := claudeTarget{}.Verify(opts)
-			if err != nil || len(floorConflicts(verify)) != 1 || verify.Covered {
-				t.Fatalf("verify: %v %v", err, verify.Conflicts)
-			}
+	// Any other content under DefenseClaw's floor name is also the
+	// administrator's: DefenseClaw never rewrites it to place its floor. Under
+	// enforce and merge no floor applies, so verify fails and says how to fix it;
+	// report only reports; removal leaves the file.
+	t.Run("any content under the name", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, content, conflict string
+		}{
+			{name: "other settings", content: `{"env": {"COMPANY": "1"}}` + "\n", conflict: "holds a file DefenseClaw did not write"},
+			{name: "invalid value", content: `{"requiredMinimumVersion": "latest"}` + "\n", conflict: "a file DefenseClaw did not write under its drop-in name"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				withHigherSources(t)
+				opts := testOptions(t)
+				writeFile(t, claudeFloorFile(t, opts), tc.content)
+				state := reconcileClaude(t, opts)
+				requireUnrecordedFloorFile(t, opts, tc.content, "reconcile")
+				if conflicts := floorConflicts(state); len(conflicts) != 1 || !strings.Contains(conflicts[0], tc.conflict) || state.Covered {
+					t.Fatalf("no floor applies, which enforce must report: %v", state.Conflicts)
+				}
+				if state.VersionFloor.Owner == VersionFloorOwnerDefenseClaw {
+					t.Fatalf("floor state: %+v", state.VersionFloor)
+				}
+				verify, err := claudeTarget{}.Verify(opts)
+				if err != nil || len(floorConflicts(verify)) != 1 || verify.Covered {
+					t.Fatalf("verify: %v %v", err, verify.Conflicts)
+				}
 
-			report := opts
-			report.ClaudeVersionFloor = config.ClaudeVersionFloorReport
-			if state := reconcileClaude(t, report); len(floorConflicts(state)) != 0 {
-				t.Fatalf("report only reports: %v", state.Conflicts)
-			}
-			requireUnrecordedFloorFile(t, opts, tc.content, "report")
+				report := opts
+				report.ClaudeVersionFloor = config.ClaudeVersionFloorReport
+				if state := reconcileClaude(t, report); len(floorConflicts(state)) != 0 {
+					t.Fatalf("report only reports: %v", state.Conflicts)
+				}
+				requireUnrecordedFloorFile(t, opts, tc.content, "report")
 
-			if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
-				t.Fatal(err)
-			}
-			requireUnrecordedFloorFile(t, opts, tc.content, "removal")
+				if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
+					t.Fatal(err)
+				}
+				requireUnrecordedFloorFile(t, opts, tc.content, "removal")
 
-			// Once the administrator removes the file, the floor comes back.
-			if err := os.Remove(claudeFloorFile(t, opts)); err != nil {
-				t.Fatal(err)
-			}
-			reconcileClaude(t, opts)
-			if readFile(t, claudeFloorFile(t, opts)) != wantClaudeFloorBytes {
-				t.Fatal("the floor must return once the name is free")
-			}
-		})
-	}
-}
+				// Once the administrator removes the file, the floor comes back.
+				if err := os.Remove(claudeFloorFile(t, opts)); err != nil {
+					t.Fatal(err)
+				}
+				reconcileClaude(t, opts)
+				if readFile(t, claudeFloorFile(t, opts)) != wantClaudeFloorBytes {
+					t.Fatal("the floor must return once the name is free")
+				}
+			})
+		}
+	})
 
-// A floor DefenseClaw wrote becomes the administrator's once someone changes
-// it: DefenseClaw drops its record and leaves the new bytes in every mode and
-// at removal.
-func TestClaudeVersionFloorChangedFloorBecomesTheAdministrators(t *testing.T) {
-	withHigherSources(t)
-	opts := testOptions(t)
-	reconcileClaude(t, opts)
-	if recorded, _ := ClaudeVersionFloorRecorded(opts); !recorded {
-		t.Fatal("DefenseClaw must record the floor it writes")
-	}
-	edited := "{\n  \"requiredMinimumVersion\": \"2.1.200\"\n}\n"
-	writeFile(t, claudeFloorFile(t, opts), edited)
-	state := reconcileClaude(t, opts)
-	requireUnrecordedFloorFile(t, opts, edited, "reconcile")
-	if state.VersionFloor.Owner != VersionFloorOwnerAdministrator || len(floorConflicts(state)) != 0 || !hasDetail(state, "no longer holds DefenseClaw entries") {
-		t.Fatalf("floor %+v conflicts %v details %v", state.VersionFloor, state.Conflicts, state.Details)
-	}
-	for _, mode := range []string{config.ClaudeVersionFloorReport, config.ClaudeVersionFloorOff, config.ClaudeVersionFloorEnforce} {
-		opts.ClaudeVersionFloor = mode
+	// A floor DefenseClaw wrote becomes the administrator's once someone changes
+	// it: DefenseClaw drops its record and leaves the new bytes in every mode and
+	// at removal.
+	t.Run("a changed floor", func(t *testing.T) {
+		withHigherSources(t)
+		opts := testOptions(t)
 		reconcileClaude(t, opts)
-		requireUnrecordedFloorFile(t, opts, edited, "version_floor "+mode)
-	}
-	if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
-		t.Fatal(err)
-	}
-	requireUnrecordedFloorFile(t, opts, edited, "removal")
-}
-
-func TestClaudeVersionFloorRetiredWithClaude(t *testing.T) {
-	withHigherSources(t)
-	opts := publishTestOptions(t)
-	if _, err := Publish(opts, []string{"claudecode", "codex"}); err != nil {
-		t.Fatal(err)
-	}
-	if !fileExists(claudeFloorFile(t, opts)) {
-		t.Fatal("publish must write the floor")
-	}
-	result, err := Publish(opts, []string{"codex"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fileExists(claudeFloorFile(t, opts)) || len(result.Retired) != 1 {
-		t.Fatalf("disabling claudecode must withdraw the floor: %+v", result.Retired)
-	}
-	if recorded, _ := ClaudeVersionFloorRecorded(opts); recorded {
-		t.Fatal("retire must delete the floor record")
-	}
+		if recorded, _ := ClaudeVersionFloorRecorded(opts); !recorded {
+			t.Fatal("DefenseClaw must record the floor it writes")
+		}
+		edited := "{\n  \"requiredMinimumVersion\": \"2.1.200\"\n}\n"
+		writeFile(t, claudeFloorFile(t, opts), edited)
+		state := reconcileClaude(t, opts)
+		requireUnrecordedFloorFile(t, opts, edited, "reconcile")
+		if state.VersionFloor.Owner != VersionFloorOwnerAdministrator || len(floorConflicts(state)) != 0 || !hasDetail(state, "no longer holds DefenseClaw entries") {
+			t.Fatalf("floor %+v conflicts %v details %v", state.VersionFloor, state.Conflicts, state.Details)
+		}
+		for _, mode := range []string{config.ClaudeVersionFloorReport, config.ClaudeVersionFloorOff, config.ClaudeVersionFloorEnforce} {
+			opts.ClaudeVersionFloor = mode
+			reconcileClaude(t, opts)
+			requireUnrecordedFloorFile(t, opts, edited, "version_floor "+mode)
+		}
+		if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
+			t.Fatal(err)
+		}
+		requireUnrecordedFloorFile(t, opts, edited, "removal")
+	})
 }
 
 func TestClaudeVersionFloorOnDarwinAndItsPlist(t *testing.T) {
@@ -630,22 +609,6 @@ func TestClaudeVersionFloorIsNotAppliedUnderAHigherPrecedenceSource(t *testing.T
 	}
 }
 
-func TestClaudeVersionFloorExport(t *testing.T) {
-	opts := testOptions(t)
-	data, err := claudeTarget{}.Export(opts, "version-floor")
-	if err != nil || string(data) != wantClaudeFloorBytes {
-		t.Fatalf("version-floor export: %v %q", err, data)
-	}
-	opts.ClaudeVersionFloor = config.ClaudeVersionFloorOff
-	if _, err := (claudeTarget{}).Export(opts, "version-floor"); err == nil || !strings.Contains(err.Error(), "version_floor") {
-		t.Fatalf("off must refuse the export, got %v", err)
-	}
-	hooks, err := claudeTarget{}.Export(testOptions(t), "json")
-	if err != nil || strings.Contains(string(hooks), "requiredMinimumVersion") {
-		t.Fatalf("the hook drop-in export must not carry the floor: %v", err)
-	}
-}
-
 // The Windows pass runs inside the lifecycle's lock, only for the directory
 // that lock guards, and takes no lock when there is nothing to do.
 func TestClaudeVersionFloorLockedPass(t *testing.T) {
@@ -690,60 +653,60 @@ func TestClaudeVersionFloorLockedPass(t *testing.T) {
 	if err := removeClaudeVersionFloorWith(opts, locked, &state); err != nil || fileExists(claudeFloorFile(t, opts)) {
 		t.Fatalf("locked removal: %v", err)
 	}
-}
 
-// The locked pass (the Windows guardian's) follows
-// connectors.claudecode.ownership: merge writes the floor, verify_only
-// neither writes nor removes it, and off removes DefenseClaw's floor.
-func TestClaudeVersionFloorLockedPassFollowsOwnership(t *testing.T) {
-	withHigherSources(t)
-	opts := testOptions(t)
-	dir := path.Dir(claudeFloorFile(t, opts))
-	locked := func(fn func(string) error) error { return fn(dir) }
-	ownership := func(mode string) Options {
-		return withPolicy(opts, "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = mode })
-	}
-	var state State
-	if err := reconcileClaudeVersionFloorFor(ownership(config.MachinePolicyOwnershipVerifyOnly), []string{"claudecode"}, locked, &state); err != nil || fileExists(claudeFloorFile(t, opts)) {
-		t.Fatalf("verify_only must not write the floor: %v", err)
-	}
-	if err := reconcileClaudeVersionFloorFor(ownership(config.MachinePolicyOwnershipMerge), []string{"claudecode"}, locked, &state); err != nil || readFile(t, claudeFloorFile(t, opts)) != wantClaudeFloorBytes {
-		t.Fatalf("merge must write the floor: %v", err)
-	}
-	if err := reconcileClaudeVersionFloorFor(ownership(config.MachinePolicyOwnershipVerifyOnly), []string{"claudecode"}, locked, &state); err != nil || readFile(t, claudeFloorFile(t, opts)) != wantClaudeFloorBytes {
-		t.Fatalf("verify_only must not remove the floor: %v", err)
-	}
-	if err := reconcileClaudeVersionFloorFor(ownership(config.MachinePolicyOwnershipOff), []string{"claudecode"}, locked, &state); err != nil || fileExists(claudeFloorFile(t, opts)) {
-		t.Fatalf("ownership off must remove DefenseClaw's floor: %v", err)
-	}
-	if recorded, _ := ClaudeVersionFloorRecorded(opts); recorded {
-		t.Fatal("ownership off must remove the floor record")
-	}
-}
+	// The locked pass (the Windows guardian's) follows
+	// connectors.claudecode.ownership: merge writes the floor, verify_only
+	// neither writes nor removes it, and off removes DefenseClaw's floor.
+	t.Run("ownership", func(t *testing.T) {
+		withHigherSources(t)
+		opts := testOptions(t)
+		dir := path.Dir(claudeFloorFile(t, opts))
+		locked := func(fn func(string) error) error { return fn(dir) }
+		ownership := func(mode string) Options {
+			return withPolicy(opts, "claudecode", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = mode })
+		}
+		var state State
+		if err := reconcileClaudeVersionFloorFor(ownership(config.MachinePolicyOwnershipVerifyOnly), []string{"claudecode"}, locked, &state); err != nil || fileExists(claudeFloorFile(t, opts)) {
+			t.Fatalf("verify_only must not write the floor: %v", err)
+		}
+		if err := reconcileClaudeVersionFloorFor(ownership(config.MachinePolicyOwnershipMerge), []string{"claudecode"}, locked, &state); err != nil || readFile(t, claudeFloorFile(t, opts)) != wantClaudeFloorBytes {
+			t.Fatalf("merge must write the floor: %v", err)
+		}
+		if err := reconcileClaudeVersionFloorFor(ownership(config.MachinePolicyOwnershipVerifyOnly), []string{"claudecode"}, locked, &state); err != nil || readFile(t, claudeFloorFile(t, opts)) != wantClaudeFloorBytes {
+			t.Fatalf("verify_only must not remove the floor: %v", err)
+		}
+		if err := reconcileClaudeVersionFloorFor(ownership(config.MachinePolicyOwnershipOff), []string{"claudecode"}, locked, &state); err != nil || fileExists(claudeFloorFile(t, opts)) {
+			t.Fatalf("ownership off must remove DefenseClaw's floor: %v", err)
+		}
+		if recorded, _ := ClaudeVersionFloorRecorded(opts); recorded {
+			t.Fatal("ownership off must remove the floor record")
+		}
+	})
 
-// The locked pass (Windows) takes no lock for a file it did not write: an
-// unrecorded floor file never needs removing.
-func TestClaudeVersionFloorLockedPassLeavesAnUnrecordedFile(t *testing.T) {
-	withHigherSources(t)
-	opts := testOptions(t)
-	dir := path.Dir(claudeFloorFile(t, opts))
-	calls := 0
-	locked := func(fn func(string) error) error {
-		calls++
-		return fn(dir)
-	}
-	writeFile(t, claudeFloorFile(t, opts), wantClaudeFloorBytes)
-	var state State
-	if err := reconcileClaudeVersionFloorFor(opts, []string{"codex"}, locked, &state); err != nil || calls != 0 {
-		t.Fatalf("an inactive claudecode with only an administrator file takes no lock: calls=%d %v", calls, err)
-	}
-	if err := removeClaudeVersionFloorWith(opts, locked, &state); err != nil || calls != 0 {
-		t.Fatalf("removal with nothing recorded takes no lock: calls=%d %v", calls, err)
-	}
-	if err := reconcileClaudeVersionFloorFor(opts, []string{"claudecode"}, locked, &state); err != nil || calls != 1 {
-		t.Fatalf("publish: calls=%d %v", calls, err)
-	}
-	requireUnrecordedFloorFile(t, opts, wantClaudeFloorBytes, "the locked pass")
+	// The locked pass (Windows) takes no lock for a file it did not write: an
+	// unrecorded floor file never needs removing.
+	t.Run("unrecorded file", func(t *testing.T) {
+		withHigherSources(t)
+		opts := testOptions(t)
+		dir := path.Dir(claudeFloorFile(t, opts))
+		calls := 0
+		locked := func(fn func(string) error) error {
+			calls++
+			return fn(dir)
+		}
+		writeFile(t, claudeFloorFile(t, opts), wantClaudeFloorBytes)
+		var state State
+		if err := reconcileClaudeVersionFloorFor(opts, []string{"codex"}, locked, &state); err != nil || calls != 0 {
+			t.Fatalf("an inactive claudecode with only an administrator file takes no lock: calls=%d %v", calls, err)
+		}
+		if err := removeClaudeVersionFloorWith(opts, locked, &state); err != nil || calls != 0 {
+			t.Fatalf("removal with nothing recorded takes no lock: calls=%d %v", calls, err)
+		}
+		if err := reconcileClaudeVersionFloorFor(opts, []string{"claudecode"}, locked, &state); err != nil || calls != 1 {
+			t.Fatalf("publish: calls=%d %v", calls, err)
+		}
+		requireUnrecordedFloorFile(t, opts, wantClaudeFloorBytes, "the locked pass")
+	})
 }
 
 func TestStandaloneOptionsCarryTheVersionFloorMode(t *testing.T) {
@@ -814,6 +777,22 @@ func TestClaudeHigherPrecedenceExportsCarryTheVersionFloor(t *testing.T) {
 	if !verify.Covered || len(verify.Conflicts) != 0 || verify.VersionFloor.Owner != VersionFloorOwnerAdministrator || verify.VersionFloor.Value != "2.1.154" {
 		t.Fatalf("an HKLM source deployed from DefenseClaw's export must pass verify: covered=%v %v %+v", verify.Covered, verify.Conflicts, verify.VersionFloor)
 	}
+
+	t.Run("export", func(t *testing.T) {
+		opts := testOptions(t)
+		data, err := claudeTarget{}.Export(opts, "version-floor")
+		if err != nil || string(data) != wantClaudeFloorBytes {
+			t.Fatalf("version-floor export: %v %q", err, data)
+		}
+		opts.ClaudeVersionFloor = config.ClaudeVersionFloorOff
+		if _, err := (claudeTarget{}).Export(opts, "version-floor"); err == nil || !strings.Contains(err.Error(), "version_floor") {
+			t.Fatalf("off must refuse the export, got %v", err)
+		}
+		hooks, err := claudeTarget{}.Export(testOptions(t), "json")
+		if err != nil || strings.Contains(string(hooks), "requiredMinimumVersion") {
+			t.Fatalf("the hook drop-in export must not carry the floor: %v", err)
+		}
+	})
 }
 
 // A crash, or a failed save, between replacing the floor drop-in (a release

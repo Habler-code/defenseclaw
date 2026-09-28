@@ -77,46 +77,6 @@ func TestObservedEnvRedirectSkipsInlineContent(t *testing.T) {
 	}
 }
 
-func TestEnvRedirectRecordRoundTrip(t *testing.T) {
-	home := t.TempDir()
-	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
-	one := EnvRedirect{Vars: map[string]string{"CODEX_HOME": filepath.Join(home, "codex-a")}}
-	if err := RecordEnvRedirect(home, "codex", one, now); err != nil {
-		t.Fatal(err)
-	}
-	// Seeing the same redirect again soon does not rewrite the record; a
-	// day later it refreshes its last-seen time.
-	if err := RecordEnvRedirect(home, "codex", one, now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if redirects, err := LoadEnvRedirects(home, "codex"); err != nil || len(redirects) != 1 || redirects[0].Seen != now.Format(time.RFC3339) {
-		t.Fatalf("an unchanged redirect must not rewrite the record: %+v %v", redirects, err)
-	}
-	if err := RecordEnvRedirect(home, "codex", one, now.Add(envRefreshAfter+time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if redirects, _ := LoadEnvRedirects(home, "codex"); len(redirects) != 1 || redirects[0].Seen != now.Add(envRefreshAfter+time.Hour).Format(time.RFC3339) {
-		t.Fatalf("a redirect seen again a day later is refreshed, not duplicated: %+v", redirects)
-	}
-	now = now.Add(envRefreshAfter + time.Hour)
-	for i := 0; i < envRedirectLimit+3; i++ {
-		redirect := EnvRedirect{Vars: map[string]string{"CODEX_HOME": filepath.Join(home, "codex-"+string(rune('b'+i)))}}
-		if err := RecordEnvRedirect(home, "codex", redirect, now.Add(time.Duration(i+2)*time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	redirects, err := LoadEnvRedirects(home, "codex")
-	if err != nil || len(redirects) != envRedirectLimit {
-		t.Fatalf("the record keeps the %d most recent redirects: %d %v", envRedirectLimit, len(redirects), err)
-	}
-	if !strings.HasSuffix(redirects[0].Vars["CODEX_HOME"], "codex-"+string(rune('b'+envRedirectLimit+2))) {
-		t.Fatalf("the most recent redirect comes first: %+v", redirects[0])
-	}
-	if other, _ := LoadEnvRedirects(home, "cursor"); len(other) != 0 {
-		t.Fatalf("redirects are per connector: %+v", other)
-	}
-}
-
 // The record is the user's: LoadEnvRedirects keeps only absolute, plain
 // location values under well-formed variable names.
 func TestLoadEnvRedirectsDropsInvalidValues(t *testing.T) {
@@ -153,6 +113,46 @@ func TestLoadEnvRedirectsDropsInvalidValues(t *testing.T) {
 	if _, err := LoadEnvRedirects("relative", "claudecode"); err == nil {
 		t.Fatal("a relative home is an error")
 	}
+
+	t.Run("round trip", func(t *testing.T) {
+		home := t.TempDir()
+		now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+		one := EnvRedirect{Vars: map[string]string{"CODEX_HOME": filepath.Join(home, "codex-a")}}
+		if err := RecordEnvRedirect(home, "codex", one, now); err != nil {
+			t.Fatal(err)
+		}
+		// Seeing the same redirect again soon does not rewrite the record; a
+		// day later it refreshes its last-seen time.
+		if err := RecordEnvRedirect(home, "codex", one, now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if redirects, err := LoadEnvRedirects(home, "codex"); err != nil || len(redirects) != 1 || redirects[0].Seen != now.Format(time.RFC3339) {
+			t.Fatalf("an unchanged redirect must not rewrite the record: %+v %v", redirects, err)
+		}
+		if err := RecordEnvRedirect(home, "codex", one, now.Add(envRefreshAfter+time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if redirects, _ := LoadEnvRedirects(home, "codex"); len(redirects) != 1 || redirects[0].Seen != now.Add(envRefreshAfter+time.Hour).Format(time.RFC3339) {
+			t.Fatalf("a redirect seen again a day later is refreshed, not duplicated: %+v", redirects)
+		}
+		now = now.Add(envRefreshAfter + time.Hour)
+		for i := 0; i < envRedirectLimit+3; i++ {
+			redirect := EnvRedirect{Vars: map[string]string{"CODEX_HOME": filepath.Join(home, "codex-"+string(rune('b'+i)))}}
+			if err := RecordEnvRedirect(home, "codex", redirect, now.Add(time.Duration(i+2)*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		redirects, err := LoadEnvRedirects(home, "codex")
+		if err != nil || len(redirects) != envRedirectLimit {
+			t.Fatalf("the record keeps the %d most recent redirects: %d %v", envRedirectLimit, len(redirects), err)
+		}
+		if !strings.HasSuffix(redirects[0].Vars["CODEX_HOME"], "codex-"+string(rune('b'+envRedirectLimit+2))) {
+			t.Fatalf("the most recent redirect comes first: %+v", redirects[0])
+		}
+		if other, _ := LoadEnvRedirects(home, "cursor"); len(other) != 0 {
+			t.Fatalf("redirects are per connector: %+v", other)
+		}
+	})
 }
 
 // The guardian's cleanup has no user environment: with the redirect the

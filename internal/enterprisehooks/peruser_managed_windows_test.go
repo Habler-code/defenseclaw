@@ -289,7 +289,9 @@ func TestCertifyWindowsEnterpriseConnectorPerUserRequiresStandalone(t *testing.T
 	}
 }
 
-func TestWindowsEnterpriseRegistryAddsPerUserConnectorsOnlyInStandalone(t *testing.T) {
+// The per-user connectors join the registry, the effective hook connectors
+// and the managed runtime only in the standalone profile, and fail closed.
+func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 	pinWindowsStandaloneProfileForTest(t, false)
 	if _, ok := newWindowsEnterpriseConnectorRegistry().Get("devin"); ok {
 		t.Fatal("Secure Client registry gained devin")
@@ -298,33 +300,8 @@ func TestWindowsEnterpriseRegistryAddsPerUserConnectorsOnlyInStandalone(t *testi
 	if _, ok := newWindowsEnterpriseConnectorRegistry().Get("devin"); !ok {
 		t.Fatal("standalone registry is missing devin")
 	}
-}
 
-func TestWindowsEnterpriseHookFailModeClosesPerUserConnectors(t *testing.T) {
-	for _, name := range WindowsStandalonePerUserConnectorNames() {
-		if got := windowsEnterpriseHookFailMode(name, "open"); got != "closed" {
-			t.Fatalf("%s fail mode = %q, want closed", name, got)
-		}
-	}
-	if got := windowsEnterpriseHookFailMode("openhands", "open"); got != "open" {
-		t.Fatalf("unmanaged connector fail mode changed to %q", got)
-	}
-}
-
-func TestCanonicalWindowsManagedRuntimeConnectorPerUser(t *testing.T) {
-	for _, name := range []string{"copilot", "antigravity", "devin", "hermes", "opencode", "amp"} {
-		if got, err := canonicalWindowsManagedRuntimeConnector(name); err != nil || got != name {
-			t.Fatalf("%s canonical = %q err=%v", name, got, err)
-		}
-	}
-	for _, name := range []string{"Copilot", "openhands", "kiro"} {
-		if _, err := canonicalWindowsManagedRuntimeConnector(name); err == nil {
-			t.Fatalf("%s accepted as a managed runtime connector", name)
-		}
-	}
-}
-
-func TestEffectiveWindowsHookConnectorsAddsPerUserOnlyInStandalone(t *testing.T) {
+	// The effective hook connectors add the per-user ones only in standalone.
 	cfg := &config.Config{Guardrail: config.GuardrailConfig{
 		Connectors: map[string]config.PerConnectorGuardrailConfig{
 			"codex": {}, "copilot": {}, "amp": {}, "openhands": {},
@@ -337,6 +314,28 @@ func TestEffectiveWindowsHookConnectorsAddsPerUserOnlyInStandalone(t *testing.T)
 	pinWindowsStandaloneProfileForTest(t, true)
 	if got := effectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"amp", "codex", "copilot"}) {
 		t.Fatalf("standalone connectors = %v", got)
+	}
+
+	// Per-user connectors fail closed; an unmanaged connector keeps its mode.
+	for _, name := range WindowsStandalonePerUserConnectorNames() {
+		if got := windowsEnterpriseHookFailMode(name, "open"); got != "closed" {
+			t.Fatalf("%s fail mode = %q, want closed", name, got)
+		}
+	}
+	if got := windowsEnterpriseHookFailMode("openhands", "open"); got != "open" {
+		t.Fatalf("unmanaged connector fail mode changed to %q", got)
+	}
+
+	// The managed runtime accepts exactly the per-user connector names.
+	for _, name := range []string{"copilot", "antigravity", "devin", "hermes", "opencode", "amp"} {
+		if got, err := canonicalWindowsManagedRuntimeConnector(name); err != nil || got != name {
+			t.Fatalf("%s canonical = %q err=%v", name, got, err)
+		}
+	}
+	for _, name := range []string{"Copilot", "openhands", "kiro"} {
+		if _, err := canonicalWindowsManagedRuntimeConnector(name); err == nil {
+			t.Fatalf("%s accepted as a managed runtime connector", name)
+		}
 	}
 }
 

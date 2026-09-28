@@ -285,66 +285,11 @@ func TestStandaloneVerifyFollowsAnObserveToActionChangeForOpenHands(t *testing.T
 	}
 }
 
-// Verification must not report drift right after an install: for each
-// per-user connector the tests can install on this OS, Install and then
-// Verify in the same mode pass. Codex and Claude Code are left out: an
-// administrator policy on the test host (for example Codex's
-// allow_managed_hooks_only) can refuse their per-user hooks.
-func TestStandaloneVerifyAcceptsAFreshInstallOfEachConnector(t *testing.T) {
-	requireEnterpriseHookInstaller(t)
-	skipIfRoot(t)
-	setStandaloneProfileForTest(t, true)
-	both := []string{"observe", "action"}
-	for _, c := range []struct {
-		name, version, config string
-		modes                 []string
-	}{
-		{"hermes", "0.9.0", ".hermes/config.yaml", []string{"observe"}},
-		{"hermes", "0.19.0", ".hermes/config.yaml", both},
-		{"openhands", "1.16.0", "", both},
-		{"kiro", "2.24.1", "", both},
-		{"copilot", "1.0.3", "", []string{"observe"}},
-		{"copilot", "1.0.20", "", both},
-		{"devin", "2026.1.2", ".config/devin/config.json", []string{"observe"}},
-		{"devin", "3000.4.25", ".config/devin/config.json", both},
-		{"amp", "0.0.170", "", []string{"observe"}},
-		{"amp", "0.0.1785334300", "", both},
-		{"opencode", "1.2.0", "", []string{"observe"}},
-		{"opencode", "1.18.31", "", both},
-		{"antigravity", "1.2.11", "", both},
-		// Cursor renders a different command in action mode; codex and
-		// claudecode have per-user rows where machine policy does not cover
-		// a user.
-		{"cursor", "2.4.1", "", both},
-		{"codex", "0.145.0", "", both},
-		{"claudecode", "2.1.220", "", both},
-	} {
-		for _, mode := range c.modes {
-			home := standaloneOpenHandsHome(t)
-			t.Setenv("HOME", home)
-			if c.config != "" {
-				path := filepath.Join(home, c.config)
-				mustMkdir(t, filepath.Dir(path), 0o700)
-				if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			opts := openHandsStandaloneOptions(home, mode)
-			opts.ConnectorName, opts.AgentVersion = c.name, c.version
-			if _, err := Install(context.Background(), opts); err != nil {
-				t.Fatalf("%s %s: install: %v", c.name, mode, err)
-			}
-			if _, err := Verify(context.Background(), opts); err != nil {
-				t.Fatalf("%s %s: verify right after the install: %v", c.name, mode, err)
-			}
-		}
-	}
-}
-
 // One home with every per-user connector installed follows a guardrail
 // mode switch both ways: after the reinstall for the new mode, Verify
 // passes for every connector, so the guardian's next cycle repairs nothing
-// (a Cursor row in action mode used to be repaired on every cycle).
+// (a Cursor row in action mode used to be repaired on every cycle), and
+// verification reports no drift right after an install.
 func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
@@ -377,6 +322,31 @@ func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
 			if _, err := Verify(context.Background(), opts); err != nil {
 				t.Fatalf("%s after switching to %s: verify: %v", c.name, mode, err)
 			}
+		}
+	}
+
+	// An agent on an older hook contract installs in observe mode only, and
+	// verifies right after its install too.
+	for _, c := range []struct{ name, version, config string }{
+		{"hermes", "0.9.0", ".hermes/config.yaml"}, {"copilot", "1.0.3", ""},
+		{"devin", "2026.1.2", ".config/devin/config.json"}, {"amp", "0.0.170", ""}, {"opencode", "1.2.0", ""},
+	} {
+		home := standaloneOpenHandsHome(t)
+		t.Setenv("HOME", home)
+		if c.config != "" {
+			path := filepath.Join(home, c.config)
+			mustMkdir(t, filepath.Dir(path), 0o700)
+			if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		opts := openHandsStandaloneOptions(home, "observe")
+		opts.ConnectorName, opts.AgentVersion = c.name, c.version
+		if _, err := Install(context.Background(), opts); err != nil {
+			t.Fatalf("%s %s: install: %v", c.name, c.version, err)
+		}
+		if _, err := Verify(context.Background(), opts); err != nil {
+			t.Fatalf("%s %s: verify right after the install: %v", c.name, c.version, err)
 		}
 	}
 }

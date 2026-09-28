@@ -52,50 +52,64 @@ func deferredPendingProofFixture(t *testing.T, standalone bool) ManifestTarget {
 	}
 }
 
-func TestStandaloneDeferredPendingProofAcceptsAnAbsentDataDirectory(t *testing.T) {
-	target := deferredPendingProofFixture(t, true)
-	if _, err := os.Lstat(filepath.Join(target.UserHome, ".defenseclaw")); !os.IsNotExist(err) {
-		t.Fatalf("fixture data directory must be absent, got %v", err)
-	}
-	if err := RequireWindowsEnterpriseDeferredTargetPending(target); err != nil {
-		t.Fatalf("standalone pending proof for a never-touched profile failed: %v", err)
-	}
-}
-
-func TestSecureClientDeferredPendingProofStillRequiresTheDataDirectory(t *testing.T) {
-	target := deferredPendingProofFixture(t, false)
-	err := RequireWindowsEnterpriseDeferredTargetPending(target)
-	if err == nil || !strings.Contains(err.Error(), "deferred target data directory is untrusted") {
-		t.Fatalf("Secure Client pending proof error = %v, want the untrusted data directory refusal", err)
-	}
-}
-
-func TestStandaloneDeferredPendingProofRejectsADataDirectoryOfTheWrongType(t *testing.T) {
-	target := deferredPendingProofFixture(t, true)
-	if err := os.WriteFile(filepath.Join(target.UserHome, ".defenseclaw"), []byte("not a directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	err := RequireWindowsEnterpriseDeferredTargetPending(target)
-	if err == nil || !strings.Contains(err.Error(), "deferred target data directory is untrusted") {
-		t.Fatalf("pending proof error = %v, want a file in place of the data directory refused", err)
-	}
-}
-
-func TestStandaloneDeferredPendingProofStillRequiresSelectorAbsence(t *testing.T) {
-	target := deferredPendingProofFixture(t, true)
-	selector, err := windowsManagedRuntimeSelectorPathResolver("claudecode")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(selector), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	// Any published selector must be read and judged; an unreadable one is an
-	// error, never proof of absence.
-	if err := os.WriteFile(selector, []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := RequireWindowsEnterpriseDeferredTargetPending(target); err == nil {
-		t.Fatal("pending proof accepted a profile while a runtime selector was published")
+// The pending proof for a deferred row of a profile DefenseClaw never
+// touched: on the standalone profile an absent data directory is accepted,
+// while a file in its place or a published runtime selector is refused; the
+// Secure Client profile still requires the data directory.
+func TestDeferredPendingProofForAnUntouchedProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		standalone bool
+		prepare    func(t *testing.T, target ManifestTarget)
+		want       string // the refusal; "" accepts unless refused is set
+		refused    bool
+	}{
+		{name: "standalone, absent data directory", standalone: true, prepare: func(t *testing.T, target ManifestTarget) {
+			if _, err := os.Lstat(filepath.Join(target.UserHome, ".defenseclaw")); !os.IsNotExist(err) {
+				t.Fatalf("fixture data directory must be absent, got %v", err)
+			}
+		}},
+		{name: "secure client", want: "deferred target data directory is untrusted"},
+		{name: "standalone, file in place of the data directory", standalone: true, want: "deferred target data directory is untrusted",
+			prepare: func(t *testing.T, target ManifestTarget) {
+				if err := os.WriteFile(filepath.Join(target.UserHome, ".defenseclaw"), []byte("not a directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		// Any published selector must be read and judged; an unreadable one
+		// is an error, never proof of absence.
+		{name: "standalone, selector published", standalone: true, refused: true,
+			prepare: func(t *testing.T, _ ManifestTarget) {
+				selector, err := windowsManagedRuntimeSelectorPathResolver("claudecode")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(selector), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(selector, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := deferredPendingProofFixture(t, tc.standalone)
+			if tc.prepare != nil {
+				tc.prepare(t, target)
+			}
+			err := RequireWindowsEnterpriseDeferredTargetPending(target)
+			switch {
+			case tc.refused:
+				if err == nil {
+					t.Fatal("pending proof accepted a profile while a runtime selector was published")
+				}
+			case tc.want == "":
+				if err != nil {
+					t.Fatalf("pending proof: %v", err)
+				}
+			case err == nil || !strings.Contains(err.Error(), tc.want):
+				t.Fatalf("pending proof error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }

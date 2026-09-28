@@ -178,6 +178,37 @@ enterprise:
 			t.Errorf("v8 schema accepted %s", name)
 		}
 	}
+
+	t.Run("claude version floor", func(t *testing.T) {
+		validate := func(name, doc string) error {
+			document, err := ParseV8YAML(name, []byte(doc))
+			if err != nil {
+				return err
+			}
+			return validateV8Schema(name, document)
+		}
+		const head = "config_version: 8\nenterprise:\n  machine_policy:\n"
+		for name, doc := range map[string]string{
+			"version_floor":         head + "    connectors:\n      claudecode:\n        version_floor: report\n",
+			"with the other keys":   head + "    connectors:\n      claudecode:\n        ownership: merge\n        managed_hooks_only: preserve\n        allowed_hooks: [\"sha256:" + strings.Repeat("a", 64) + "\"]\n        version_floor: \"off\"\n",
+			"other connectors keep": head + "    connectors:\n      codex:\n        ownership: verify_only\n",
+		} {
+			if err := validate(name+".yaml", doc); err != nil {
+				t.Fatalf("v8 schema rejected %s: %v", name, err)
+			}
+		}
+		for name, doc := range map[string]string{
+			"bad mode":               head + "    connectors:\n      claudecode:\n        version_floor: strict\n",
+			"unknown key":            head + "    connectors:\n      claudecode:\n        version_ceiling: enforce\n",
+			"another connector":      head + "    connectors:\n      codex:\n        version_floor: enforce\n",
+			"the default block":      head + "    default:\n      version_floor: enforce\n",
+			"a top-level claudecode": head + "    claudecode:\n      version_floor: enforce\n",
+		} {
+			if err := validate(name+".yaml", doc); err == nil {
+				t.Errorf("v8 schema accepted %s", name)
+			}
+		}
+	})
 }
 
 // enterprise.trust.mode "" is the documented default (the hash_pinned
@@ -273,10 +304,15 @@ func TestStandalonePolicyInputsMustBeAdministratorControlled(t *testing.T) {
 	}
 }
 
-// The loader's implicit rule pack lives under data_dir, which the
-// standalone gateway can write; standalone keeps it inside policy_dir.
-func TestStandaloneImplicitRulePackFollowsPolicyDir(t *testing.T) {
-	implicit := filepath.Join("/var/lib/defenseclaw", "policies", "guardrail", "default")
+// Outside the standalone layout the implicit rule pack follows policy_dir. On
+// the Linux and macOS standalone layouts (a config read from the layout's
+// config path) the implicit rule pack always names a pack that exists: the
+// administrator's pack in policy_dir when that folder exists, otherwise the
+// vendor default pack the lifecycle installs. An explicit rule_pack_dir is
+// kept for the lifecycle to check.
+func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
+	// Outside the layout the implicit pack follows policy_dir.
+	dataDirPack := filepath.Join("/var/lib/defenseclaw", "policies", "guardrail", "default")
 	cases := []struct {
 		name    string
 		goos    string
@@ -285,10 +321,10 @@ func TestStandaloneImplicitRulePackFollowsPolicyDir(t *testing.T) {
 		profile string
 		want    string
 	}{
-		{name: "standalone implicit follows policy_dir", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: implicit, want: "/opt/defenseclaw/share/policies/guardrail/default"},
+		{name: "standalone implicit follows policy_dir", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, want: "/opt/defenseclaw/share/policies/guardrail/default"},
 		{name: "standalone explicit pack is kept", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: "/etc/defenseclaw/policies/guardrail/custom", want: "/etc/defenseclaw/policies/guardrail/custom"},
-		{name: "standalone with data_dir policies is unchanged", goos: "linux", policy: "/var/lib/defenseclaw/policies", pack: implicit, want: implicit},
-		{name: "secure client is unchanged", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: implicit, profile: managed.ProfileSecureClient, want: implicit},
+		{name: "standalone with data_dir policies is unchanged", goos: "linux", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, want: dataDirPack},
+		{name: "secure client is unchanged", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileSecureClient, want: dataDirPack},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -303,14 +339,7 @@ func TestStandaloneImplicitRulePackFollowsPolicyDir(t *testing.T) {
 			}
 		})
 	}
-}
 
-// On the Linux and macOS standalone layouts (a config read from the layout's
-// config path) the implicit rule pack always names a pack that exists: the
-// administrator's pack in policy_dir when that folder exists, otherwise the
-// vendor default pack the lifecycle installs. An explicit rule_pack_dir is
-// kept for the lifecycle to check.
-func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Linux and macOS layout paths are not paths on Windows")
 	}
@@ -437,5 +466,65 @@ func TestEnterpriseEnrollmentUIDMax(t *testing.T) {
 	cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client", Enrollment: EnterpriseEnrollmentConfig{UIDMax: 70000}}}
 	if err := resolveEnterpriseConfig(&cfg, "windows", ""); err == nil {
 		t.Fatal("secure_client accepted enrollment.uid_max")
+	}
+}
+
+func claudeFloorPolicy(mode string) EnterpriseMachinePolicyConfig {
+	return EnterpriseMachinePolicyConfig{Connectors: map[string]EnterpriseConnectorPolicy{"claudecode": {VersionFloor: mode}}}
+}
+
+func TestClaudeVersionFloorDefaultsToEnforce(t *testing.T) {
+	if got := (EnterpriseMachinePolicyConfig{}).ClaudeVersionFloor(); got != ClaudeVersionFloorEnforce {
+		t.Fatalf("default version_floor = %q, want enforce", got)
+	}
+	if got := claudeFloorPolicy(" Report ").ClaudeVersionFloor(); got != ClaudeVersionFloorReport {
+		t.Fatalf("version_floor = %q, want report", got)
+	}
+	// Other claudecode keys leave the floor at its default, and the floor
+	// leaves them at theirs.
+	m := EnterpriseMachinePolicyConfig{Connectors: map[string]EnterpriseConnectorPolicy{"claudecode": {Ownership: "verify_only"}}}
+	if got := m.ClaudeVersionFloor(); got != ClaudeVersionFloorEnforce {
+		t.Fatalf("version_floor = %q, want enforce", got)
+	}
+	if got := claudeFloorPolicy("off").PolicyFor("claudecode"); got.Ownership != MachinePolicyOwnershipMerge || got.ManagedHooksOnly != ManagedHooksOnlyEnforce {
+		t.Fatalf("version_floor changed the other claudecode keys: %+v", got)
+	}
+}
+
+func TestClaudeVersionFloorValidation(t *testing.T) {
+	managedConfig := func(m EnterpriseMachinePolicyConfig) Config {
+		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{MachinePolicy: m}}
+	}
+	for _, mode := range []string{"enforce", "report", "off", "OFF"} {
+		cfg := managedConfig(claudeFloorPolicy(mode))
+		if err := resolveEnterpriseConfig(&cfg, "linux", ""); err != nil {
+			t.Fatalf("version_floor %q rejected: %v", mode, err)
+		}
+	}
+	bad := managedConfig(claudeFloorPolicy("strict"))
+	if err := resolveEnterpriseConfig(&bad, "linux", ""); err == nil || !strings.Contains(err.Error(), "enterprise.machine_policy.connectors.claudecode.version_floor") {
+		t.Fatalf("an unknown version_floor must be rejected, got %v", err)
+	}
+	// The key belongs to connectors.claudecode only: default does not carry
+	// it, and no other connector has a version floor.
+	for name, m := range map[string]EnterpriseMachinePolicyConfig{
+		"enterprise.machine_policy.default.version_floor":          {Default: EnterpriseConnectorPolicy{VersionFloor: "off"}},
+		"enterprise.machine_policy.connectors.codex.version_floor": {Connectors: map[string]EnterpriseConnectorPolicy{"codex": {VersionFloor: "off"}}},
+	} {
+		cfg := managedConfig(m)
+		if err := resolveEnterpriseConfig(&cfg, "linux", ""); err == nil || !strings.Contains(err.Error(), name+" is not a setting") || !strings.Contains(err.Error(), "connectors.claudecode.version_floor") {
+			t.Fatalf("%s must be rejected and name the right key, got %v", name, err)
+		}
+	}
+	// The floor is a standalone knob: Secure Client configs keep their exact
+	// behavior and refuse it.
+	secureClient := managedConfig(claudeFloorPolicy("off"))
+	secureClient.Enterprise.Profile = "secure_client"
+	if err := resolveEnterpriseConfig(&secureClient, "windows", ""); err == nil || !strings.Contains(err.Error(), "apply only to the standalone profile") {
+		t.Fatalf("secure_client accepted version_floor: %v", err)
+	}
+	unmanaged := Config{Enterprise: EnterpriseConfig{MachinePolicy: claudeFloorPolicy("off")}}
+	if err := resolveEnterpriseConfig(&unmanaged, "linux", ""); err == nil || !strings.Contains(err.Error(), "requires deployment_mode") {
+		t.Fatalf("an unmanaged config accepted version_floor: %v", err)
 	}
 }
