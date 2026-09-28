@@ -180,7 +180,7 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 	}
 	userReport := &enterprisePolicyUserReport{User: enterprisePolicyUser, Decisions: map[string]enterprisepolicy.GuardDecision{}}
 	report.User = userReport
-	target, targetErr := enterprisePolicyTarget(enterprisePolicyUser)
+	target, targetErr := enterprisePolicyResolveTarget(enterprisePolicyUser)
 	if targetErr != nil {
 		userReport.Error = targetErr.Error()
 		report.Complete = false
@@ -188,7 +188,13 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 	}
 	userReport.Home = target.UserHome
 	if ctx.opts.GOOS != "windows" && cfg != nil {
-		userReport.Enrollment = unixEnrollmentExclusion(cfg.Enterprise.Enrollment, enterprisePolicyUser, target.UID)
+		// Match the name the account database returns, as the enumerator
+		// does: macOS resolves a differently cased name to the same account.
+		name := strings.TrimSpace(target.Username)
+		if name == "" {
+			name = enterprisePolicyUser
+		}
+		userReport.Enrollment = unixEnrollmentExclusion(cfg.Enterprise.Enrollment, name, target.UID)
 	}
 	scanErr := runAsEnterprisePolicyTarget(target, func() error {
 		for _, name := range connectors {
@@ -219,6 +225,9 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 	}
 	return report, errors.Join(err, scanErr)
 }
+
+// enterprisePolicyResolveTarget resolves --user; replaceable in tests.
+var enterprisePolicyResolveTarget = enterprisePolicyTarget
 
 // unixEnrollmentExclusion names the Linux and macOS enrollment rule that
 // keeps an account out of the guardian manifest regardless of its agents:

@@ -84,7 +84,7 @@ func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, err
 	if uidErr != nil || gidErr != nil {
 		return enterprisehooks.TargetCredentials{}, fmt.Errorf("user %q has a non-numeric uid/gid", name)
 	}
-	return enterprisehooks.TargetCredentials{UserHome: account.HomeDir, UID: uid, GID: gid}, nil
+	return enterprisehooks.TargetCredentials{UserHome: account.HomeDir, UID: uid, GID: gid, Username: account.Username}, nil
 }
 
 // runAsEnterprisePolicyTarget reads the user's files with the user's own

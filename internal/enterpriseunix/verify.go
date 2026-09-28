@@ -400,7 +400,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0
-	l.describeHookContracts()
+	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	if r.Inspection.Local == "" {
 		r.Inspection.Local = "unknown"

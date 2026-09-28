@@ -51,7 +51,7 @@ var unverifiedVersionPattern = regexp.MustCompile(`agent version "([^"]*)"`)
 // not protect (an unverified hook contract gets its own code) and marks the
 // deployment security-incomplete: an unprotected agent must never look like
 // a healthy deployment.
-func (l *lifecycle) describeHookContracts() {
+func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20)
 	if err != nil {
@@ -73,7 +73,7 @@ func (l *lifecycle) describeHookContracts() {
 		if result.OK || strings.TrimSpace(result.Error) == "" {
 			continue
 		}
-		if targetAccountMissingError(result.Error) {
+		if targetAccountMissingError(result.Error) && l.accountAbsent(ctx, result.User) {
 			removed = append(removed, fmt.Sprintf(
 				"%s for user %s: the account no longer exists (the directory answers \"no such account\"); the enumerator removes this target after %d consecutive definitive misses, one per enumeration cycle",
 				result.Connector, result.User, enterprisehooks.UnixRevokeAfterMisses))
@@ -216,13 +216,51 @@ func truncateUTF8(value string, limit int) string {
 	return value[:limit]
 }
 
+// targetAccountMissingPattern is the whole of the guardian's definitive
+// "no such account" resolution error (resolveEnterpriseHookStandaloneAccount
+// in internal/cli), with the account name quoted as Go's %q does.
+var targetAccountMissingPattern = regexp.MustCompile(`^enterprise hooks: target account "(?:[^"\\]|\\.)*" does not exist: no such account$`)
+
 // targetAccountMissingError matches the guardian's definitive "no such
-// account" resolution error (resolveEnterpriseHookStandaloneAccount in
-// internal/cli): `target account "<name>" does not exist: no such
-// account`. A directory that cannot answer produces a different error,
-// which stays a guardian_target_failed.
+// account" resolution error: `enterprise hooks: target account "<name>"
+// does not exist: no such account`, and nothing else. The match is on the
+// whole message, because other guardian errors can quote text from a
+// user's own files. A directory that cannot answer produces a different
+// error, which stays a guardian_target_failed.
 func targetAccountMissingError(message string) bool {
-	return strings.Contains(message, "does not exist: no such account")
+	return targetAccountMissingPattern.MatchString(strings.TrimSpace(message))
+}
+
+// accountAbsent reports whether the host's own account lookup also finds no
+// account named user (getent passwd on Linux, the local directory node on
+// macOS). An account that still exists, a lookup that fails, or a name that
+// is not a plain account name keeps the target a guardian_target_failed.
+func (l *lifecycle) accountAbsent(ctx context.Context, user string) bool {
+	user = strings.TrimSpace(user)
+	if l.env.Accounts == nil || !plainAccountName(user) {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, found, err := l.env.Accounts.Lookup(lookupCtx, user)
+	return err == nil && !found
+}
+
+// plainAccountName accepts the account names Linux and macOS create: no
+// path separator, whitespace or leading dash, bounded length.
+func plainAccountName(name string) bool {
+	if name == "" || len(name) > 256 || strings.HasPrefix(name, "-") {
+		return false
+	}
+	for _, r := range name {
+		if r == '/' || r == '\\' || r == ':' || r <= ' ' || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func unverifiedHookContractError(message string) bool {

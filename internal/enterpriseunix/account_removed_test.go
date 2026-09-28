@@ -65,3 +65,42 @@ func TestDeletedAccountTargetDoesNotFailTheHost(t *testing.T) {
 		})
 	}
 }
+
+// The deleted-account warning must not hide a real failure. The guardian's
+// per-target error can quote text from a user's own files (a TOML parser
+// reports a duplicated quoted key verbatim), so a failure of an account that
+// still exists was reported as "account removed" when it merely contained
+// the text. The message must now be exactly the guardian's "no such
+// account" error, and the host's own lookup must also find no account.
+func TestAccountRemovedWarningNeedsTheWholeErrorAndAMissingAccount(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.accounts.accounts["alice"] = Account{Name: "alice", UID: 1500, GID: 1500}
+	quoted := `parse Codex config for hook guardian: toml: key does not exist: no such account is already defined`
+	for _, tc := range []struct {
+		name, user, message string
+		removed             bool
+	}{
+		{"a user's file text for an existing account", "alice", quoted, false},
+		{"the exact error for an account that still exists", "alice", `enterprise hooks: target account "alice" does not exist: no such account`, false},
+		{"the exact error with text after it", "gone1", `enterprise hooks: target account "gone1" does not exist: no such account; also something else`, false},
+		{"the exact error for a missing account", "gone1", `enterprise hooks: target account "gone1" does not exist: no such account`, true},
+		{"a name that is not an account name", "../x", `enterprise hooks: target account "../x" does not exist: no such account`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, _ := json.Marshal(map[string]any{"results": []map[string]any{
+				{"user": tc.user, "connector": "codex", "ok": false, "error": tc.message},
+			}})
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			status := h.run(Options{Action: ActionStatus})
+			if got := hasWarning(status, codeGuardianTargetAccountRemoved); got != tc.removed {
+				t.Fatalf("account-removed warning = %v, want %v: %+v", got, tc.removed, status.Warnings)
+			}
+			if got := hasWarning(status, codeGuardianTargetFailed); got == tc.removed {
+				t.Fatalf("target-failed warning = %v, want %v: %+v", got, !tc.removed, status.Warnings)
+			}
+		})
+	}
+}

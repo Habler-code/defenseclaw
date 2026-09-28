@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -66,6 +67,23 @@ func TestEnterprisePolicyShowSaysWhyTheUserIsNotEnrolled(t *testing.T) {
 	out, _ = runPolicyCommand(t, runEnterprisePolicyShow)
 	if strings.Contains(out, "enrollment:") != (current.Uid == "0") {
 		t.Fatalf("an account no rule excludes got an enrollment line:\n%s", out)
+	}
+
+	// macOS resolves a differently cased --user to the same account. The
+	// rules match the name the account database returns, as the enumerator
+	// does, not the text typed.
+	previousResolve := enterprisePolicyResolveTarget
+	t.Cleanup(func() { enterprisePolicyResolveTarget = previousResolve })
+	enterprisePolicyResolveTarget = func(string) (enterprisehooks.TargetCredentials, error) {
+		target, err := enterprisePolicyTarget(current.Username)
+		target.Username = current.Username
+		return target, err
+	}
+	enterprisePolicyUser = strings.ToUpper(current.Username) + "-TYPED"
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{current.Username}
+	out, _ = runPolicyCommand(t, runEnterprisePolicyShow)
+	if !strings.Contains(out, "enrollment: excluded by enterprise.enrollment.exclude_users") {
+		t.Fatalf("a differently typed name of an excluded account must still show the exclusion:\n%s", out)
 	}
 }
 
