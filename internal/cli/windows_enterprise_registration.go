@@ -12,7 +12,6 @@ package cli
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -429,8 +428,7 @@ func writeWindowsEnterpriseEvent(result *enterprisestatus.Result) *windowsEnterp
 	if err := windowsEnterpriseEventWriter(id, severity, message); err != nil {
 		return nil
 	}
-	digest := sha256.Sum256([]byte(message))
-	return &windowsEnterpriseEventRecord{ID: id, Record: record, SHA256: hex.EncodeToString(digest[:])}
+	return &windowsEnterpriseEventRecord{ID: id, Record: record, SHA256: windowsEnterpriseEventDigest(message)}
 }
 
 func writeWindowsEnterpriseApplicationEvent(id uint32, severity, message string) error {

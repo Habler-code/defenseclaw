@@ -141,15 +141,30 @@ Any account can write Application-log entries under any source name,
 including `DefenseClaw Enterprise`. Each DefenseClaw event therefore ends
 with `record <id>`, and the matching line of `enterprise-lifecycle.log`, which
 only administrators and LocalSystem can write, holds the same id under
-`event.record` with the event ID and the SHA-256 of the exact message. Treat
-an entry without a record, or one whose record is not in the lifecycle log,
-as not written by DefenseClaw:
+`event.record` with the event ID (`event.id`) and the SHA-256 of the exact
+message (`event.sha256`). Check the entries from any prompt:
 
-```powershell title="Check the newest DefenseClaw event"
-$event = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'DefenseClaw Enterprise' } -MaxEvents 1
-$record = [regex]::Match($event.Message, 'record ([0-9a-f]{32})\s*$').Groups[1].Value
-Select-String -Path "$env:WINDIR\Logs\DefenseClaw\enterprise-lifecycle.log*" -SimpleMatch "`"record`":`"$record`""
+```powershell title="Check the DefenseClaw Application-log entries"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --json
 ```
+
+An entry is DefenseClaw's only when all of these hold:
+
+- its message ends with `record <id>` and the lifecycle log has a line with
+  that record;
+- the entry's event ID and the SHA-256 of its message (the UTF-8 bytes of the
+  event's insertion string, `$event.Properties[0].Value`) match that line;
+- it was written within two minutes of that line's `time`;
+- no earlier entry carried the same record. A later entry with the same
+  record is a copy.
+
+`events` exits 1 and names each entry that fails, and also when the newest
+lifecycle line's record has no DefenseClaw entry in the Application log.
+Entries older than the lifecycle log's first event record, such as those an
+earlier release wrote without records, show as unverifiable. Apply the same
+rules in a SIEM: matching a record alone is not enough, because anyone can
+copy a genuine entry.
 
 ## Verify, repair, remove
 
