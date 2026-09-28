@@ -52,8 +52,9 @@ second column names the matching Windows row.
 7. A normal user cannot disable DefenseClaw's hooks through vendor settings,
    and a foreign hook cannot rewrite a tool call DefenseClaw inspected for a
    connector with a vendor lock or the foreign-hook guard, within the bounds
-   of enterprise residuals R3, R4, R13 and R14. Antigravity, Hermes,
-   OpenHands and OmniGent have neither (R24).
+   of enterprise residuals R3, R4, R13 and R14. Antigravity, OpenHands and
+   OmniGent have neither, and the guard covers Hermes shell hooks with the
+   gaps listed in R24.
 
 ## Zones on macOS (standalone)
 
@@ -135,7 +136,7 @@ not-found answers.
 | M-09 | — | TCC blocks the worker from reading the agent's configuration | Agent configs live in dotdirs in the home, which TCC does not protect. For sites that relocate them into TCC-protected folders, a PPPC profile can grant Full Disk Access to `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`, the binary that runs the guardian (`enterprise hooks watch`) and its per-user worker. This has not yet been checked on a real host | Host run with each connector |
 | M-10 | W-26, W-49 | A user disables Codex or Claude Code hooks | `/etc/codex/requirements.toml` with `allow_managed_hooks_only` and `[features] hooks = true`; `/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json` with `allowManagedHooksOnly` (default `managed_hooks_only: enforce`) | Machine-policy tests; `sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --live --user <user> --connector <codex or claudecode> --agent-binary <absolute path>` |
 | M-11 | W-51 | A higher-precedence source shadows DefenseClaw's policy: the Codex MDM preference `com.openai.codex` `requirements_toml_base64` outranks `/etc/codex`, and Claude Code managed preferences outrank the file drop-in | Detect the preference and accept it when it carries DefenseClaw's hooks (or, for Claude Code 2.1.242 or later, sets `managedSourcesBehavior: merge`); `enterprise policy export` produces the plist block the MDM should carry (`--format plist` for both connectors). For Codex and Claude Code alike, `higher_precedence_sources: fail` (default) records a conflict and reports the connector as not covered, and `warn` only reports it. On this code the policy commands read the config named by `DEFENSECLAW_CONFIG`, so run them with `DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml` | `codex_sources_darwin.go`, `claude_sources_darwin.go`, `codex.go`, `claude.go` tests |
-| M-12 | W-50 | A user or project hook rewrites a tool call (Cursor, Copilot, Devin, OpenCode, Amp) | Foreign-hook guard | `guard_test.go` |
+| M-12 | W-50 | A user or project hook rewrites a tool call (Cursor, Copilot, Devin, OpenCode, Amp, and Hermes shell hooks in `~/.hermes/config.yaml`, checked by the per-user `hermes-hook.sh` through `defenseclaw-hook`; R24 lists the Hermes gaps) | Foreign-hook guard | `guard_test.go`, `guard_hermes_test.go`, `hermes_foreign_guard_test.go` |
 | M-13 | W-48 | A user reads the AI Defense key | `root:_defenseclaw 0640` in a `0750` directory; the reader requires root ownership, a single link and no access for others | Credential tests |
 | M-14 | W-52 | A per-user install competes with the managed deployment | `scripts/install.sh`, `defenseclaw upgrade` and the per-user gateway refuse while the descriptor exists | Refusal tests |
 | M-15 | W-15 | A failed upgrade leaves mixed state | Transaction snapshot and rollback | Lifecycle tests |

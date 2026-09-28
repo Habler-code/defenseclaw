@@ -152,16 +152,19 @@ func foreignHookGuardedEvent(connectorName, event string) bool {
 // otherwise never run for them), and on Linux and macOS the binary the
 // standalone Devin hook command runs in managed mode (the per-user
 // devin-hook.sh never ran the guard; Windows already registers the
-// administrator-owned binary for Devin). Empty for every other connector
-// and on any non-standalone profile, so Secure Client and per-user installs
-// render unchanged.
+// administrator-owned binary for Devin), and on Linux and macOS the binary
+// the standalone hermes-hook.sh asks for the guard's decision before each
+// tool call (Hermes has no managed hook source, so its per-user shell hook
+// stays the registered command). Empty for every other connector and on
+// any non-standalone profile, so Secure Client and per-user installs render
+// unchanged.
 func standaloneForeignHookGuardBinary(connectorName string) string {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return ""
 	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "amp", enterprisepolicy.ConnectorOpenCode:
-	case "devin":
+	case "devin", enterprisepolicy.ConnectorHermes:
 		if runtime.GOOS == "windows" {
 			return ""
 		}
@@ -190,25 +193,54 @@ func hookForeignGuardHomes(accountHome string) []string {
 	return homes
 }
 
-// foreignHookCheckResult is the JSON the in-agent plugins read from
-// `hook --foreign-hook-check`. Anything but {"deny": false} blocks.
+// foreignHookCheckResult is the JSON the in-agent plugins and the
+// standalone Hermes shell hook read from `hook --foreign-hook-check`.
+// Anything but {"deny": false} blocks.
 type foreignHookCheckResult struct {
 	Deny     bool     `json:"deny"`
 	Reason   string   `json:"reason,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// HookOutput is the Hermes block object hermes-hook.sh prints for a
+	// denied tool call (Hermes shows its message). Hermes only.
+	HookOutput *hermesForeignHookBlock `json:"hook_output,omitempty"`
+}
+
+// hermesForeignHookBlock is Hermes' pre_tool_call block response.
+type hermesForeignHookBlock struct {
+	Action  string `json:"action"`
+	Message string `json:"message"`
+}
+
+// hermesForeignHookBlockMessage is what Hermes shows when the guard blocks
+// a tool call: that DefenseClaw blocked it, the guard's reason (the file,
+// the digest and the allowlist key) and the reason code last in
+// parentheses, as the other standalone block messages read.
+func hermesForeignHookBlockMessage(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if rest, ok := strings.CutPrefix(reason, hookexec.ForeignHookBlockedReasonPrefix); ok {
+		return "DefenseClaw blocked this tool call: " + strings.TrimSpace(rest) + " (" + strings.TrimSuffix(hookexec.ForeignHookBlockedReasonPrefix, ":") + ")"
+	}
+	return "DefenseClaw blocked this tool call: DefenseClaw is not set up correctly on this computer. Contact your administrator. (" + reason + ")"
 }
 
 // runForeignHookCheck evaluates the foreign-hook guard for an in-agent
-// plugin (Amp, OpenCode) that calls the gateway directly. It reads the
-// plugin's {hook_event_name, cwd} from stdin, applies the same summary
-// trust, scan and budget as the hook-time guard, records a block for the
-// guardian, and always exits 0 with one JSON object: the plugin treats a
-// missing or malformed answer as a block. Hosts without a standalone
-// summary answer allow, like the hook-time guard.
+// plugin (Amp, OpenCode) that calls the gateway directly, or for the
+// standalone Hermes shell hook, which runs it before its gateway request
+// (Hermes runs every registered shell hook, so the guard cannot run inside
+// the gateway request). It reads the caller's {hook_event_name, cwd,
+// session_id} from stdin, applies the same summary trust, scan and budget
+// as the hook-time guard, records a block for the guardian, and always
+// exits 0 with one JSON object: the caller treats a missing or malformed
+// answer as a block. Hosts without a standalone summary answer allow, like
+// the hook-time guard.
 func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer) int {
 	startedAt := time.Now()
 	result := foreignHookCheckResult{}
+	hermes := strings.EqualFold(strings.TrimSpace(connectorName), enterprisepolicy.ConnectorHermes)
 	defer func() {
+		if hermes && result.Deny {
+			result.HookOutput = &hermesForeignHookBlock{Action: "block", Message: hermesForeignHookBlockMessage(result.Reason)}
+		}
 		_ = json.NewEncoder(stdout).Encode(result)
 	}()
 	path, ok := hookForeignGuardSummaryPath()
@@ -353,11 +385,13 @@ func exchangeForeignHookSession(name, event string, scanDeadline time.Time, upda
 
 // hookForeignGuardSessionStart reports an agent's session-start event,
 // where the session's snapshot is taken: Claude Code, Codex and Devin
-// SessionStart, Cursor and Copilot sessionStart, and the startup checks of
-// the OpenCode and Amp plugins (which load plugins once per process).
+// SessionStart, Cursor and Copilot sessionStart, Hermes on_session_start
+// (Hermes registers its shell hooks when the process starts), and the
+// startup checks of the OpenCode and Amp plugins (which load plugins once
+// per process).
 func hookForeignGuardSessionStart(event string) bool {
 	switch strings.ToLower(strings.TrimSpace(event)) {
-	case "sessionstart", "session_start", "session.start", "defenseclaw.plugin.loaded", "session.load":
+	case "sessionstart", "session_start", "session.start", "defenseclaw.plugin.loaded", "session.load", "on_session_start":
 		return true
 	}
 	return false

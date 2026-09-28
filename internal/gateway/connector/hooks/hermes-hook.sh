@@ -6,7 +6,8 @@ set -euo pipefail
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
-
+{{if .ForeignHookGuardSH}}DEFENSECLAW_GUARD_AGENT_HOME="$HOME"
+{{end}}
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
@@ -116,7 +117,7 @@ fail_response() {
   exit 0
 }
 
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{.HookSocketTransportSH}}{{.ForeignHookGuardSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi

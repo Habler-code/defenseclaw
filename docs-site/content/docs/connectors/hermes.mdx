@@ -101,6 +101,20 @@ managed, Team, ProgramData, cloud-dashboard, and MDM surfaces are outside this
 connector contract.
 </Callout>
 
+<Callout type="info" title="Standalone enterprise profile: other hooks in config.yaml">
+Hermes runs every hook registered for an event, in order, and a
+`pre_tool_call` hook can rewrite the tool input, so a hook added after
+DefenseClaw's could change a command DefenseClaw already checked. Hermes has
+no way to lock or order hooks. On Linux and macOS hosts with the standalone
+enterprise profile, DefenseClaw's Hermes hook runs the
+[foreign-hook guard](/docs/enterprise/foreign-hook-guard) before each tool
+call: while `config.yaml` has a hook entry that is not DefenseClaw's and that
+your organization has not approved, tool calls are blocked with a message
+that names the file and the digest to approve, and the guardian removes the
+entry (with a backup). A Hermes process that started with the entry keeps
+running it, so it stays blocked until Hermes restarts.
+</Callout>
+
 #### What `setup hermes` actually does
 
 The table highlights convenience options rather than the complete alias

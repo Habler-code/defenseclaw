@@ -54,6 +54,15 @@ var guardConnectors = map[string]bool{
 	"amp":            true,
 }
 
+// unixGuardConnectors are guarded on Linux and macOS only. Hermes runs
+// every shell hook registered for an event and lets a later one rewrite the
+// tool call; its standalone hermes-hook.sh runs the guard there. The
+// Windows Hermes registration does not run it, so Windows keeps its
+// current behavior.
+var unixGuardConnectors = map[string]bool{
+	ConnectorHermes: true,
+}
+
 // lockConnectors have a vendor managed-hooks-only lock; the guard covers
 // them only when the lock is not in effect.
 var lockConnectors = map[string]bool{
@@ -62,13 +71,17 @@ var lockConnectors = map[string]bool{
 }
 
 // GuardApplies reports whether the foreign-hook guard protects connector
-// under policy (the vendor lock covers Codex and Claude when enforced).
-func GuardApplies(connector string, policy config.ResolvedConnectorPolicy) bool {
+// on goos under policy (the vendor lock covers Codex and Claude when
+// enforced).
+func GuardApplies(connector, goos string, policy config.ResolvedConnectorPolicy) bool {
 	if policy.ForeignHooks == config.ForeignHooksAllow {
 		return false
 	}
 	if guardConnectors[connector] {
 		return true
+	}
+	if unixGuardConnectors[connector] {
+		return goos != "windows"
 	}
 	return lockConnectors[connector] && policy.ManagedHooksOnly != config.ManagedHooksOnlyEnforce
 }
@@ -83,7 +96,7 @@ func BuildPublicPolicy(opts Options, connectors []string) PublicPolicy {
 		summary.Connectors[name] = PublicConnectorPolicy{
 			Route:        publicRoute(opts, name),
 			ForeignHooks: policy.ForeignHooks,
-			Guard:        GuardApplies(name, policy),
+			Guard:        GuardApplies(name, opts.goos(), policy),
 			AllowedHooks: allowed,
 		}
 	}

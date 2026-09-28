@@ -4091,6 +4091,18 @@ func marshalTopLevelYAMLFieldPreservingOtherBytes(
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+	return replaceTopLevelYAMLFieldPreservingOtherBytes(path, original, field, value)
+}
+
+// replaceTopLevelYAMLFieldPreservingOtherBytes is
+// marshalTopLevelYAMLFieldPreservingOtherBytes for bytes already read; path
+// only names the document in errors.
+func replaceTopLevelYAMLFieldPreservingOtherBytes(
+	path string,
+	original []byte,
+	field string,
+	value interface{},
+) ([]byte, error) {
 	rendered, err := yaml.Marshal(map[string]interface{}{field: value})
 	if err != nil {
 		return nil, err

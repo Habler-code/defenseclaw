@@ -85,6 +85,11 @@ type templateData struct {
 	// shellHookSocketTransport). Empty keeps the TCP transport, and the
 	// rendered hook is then byte-identical to one without the block.
 	HookSocketTransportSH string
+	// ForeignHookGuardSH is the standalone foreign-hook guard block the
+	// Hermes shell hook runs before its gateway request (see
+	// shellHookForeignGuard). Empty for every other hook and install, whose
+	// renders are then byte-identical to one without it.
+	ForeignHookGuardSH string
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -501,14 +506,15 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 }
 
 func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool) error {
-	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, extras, managed, connectorName, scopedToken, "")
+	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, extras, managed, connectorName, scopedToken, "", "")
 }
 
 // writeHookScriptsCommonWithTransport is writeHookScriptsCommonWithOptions
 // plus the connector scripts' standalone socket transport block (empty for
-// TCP). The shared inspect-* scripts keep TCP: no per-user enterprise hook
-// registration invokes them.
-func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport string) error {
+// TCP) and foreign-hook guard block (empty unless the connector's standalone
+// shell hook runs the guard). The shared inspect-* scripts keep TCP: no
+// per-user enterprise hook registration invokes them.
+func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -542,6 +548,7 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode strin
 		// Rendered only when a managed standalone install names a hook
 		// socket; see WriteHookScriptsForConnectorObjectWithOpts.
 		HookSocketTransportSH: socketTransport,
+		ForeignHookGuardSH:    foreignGuard,
 	}
 	// The inspect-* family has one physical copy per data directory.  Its
 	// bytes must therefore depend only on install-wide inputs; connector mode,
@@ -1396,7 +1403,13 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
 		socketTransport = shellHookSocketTransport(socket, serviceUID)
 	}
-	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken, socketTransport)
+	// The standalone Hermes hook also runs the foreign-hook guard first
+	// (shellHookForeignGuardBinary); no other hook or install does.
+	foreignGuard := ""
+	if binary := shellHookForeignGuardBinary(opts, c.Name()); binary != "" {
+		foreignGuard = shellHookForeignGuard(binary)
+	}
+	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken, socketTransport, foreignGuard)
 }
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render

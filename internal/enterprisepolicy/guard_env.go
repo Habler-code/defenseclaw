@@ -24,10 +24,10 @@ import (
 //
 // An agent may read its user-level config from a directory its environment
 // names (CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_HOME, XDG_CONFIG_HOME,
-// OPENCODE_CONFIG, OPENCODE_CONFIG_DIR, APPDATA) or from a HOME that is not
-// the account's home. The hook runs inside the agent's environment and
-// scans those locations; the guardian's cleanup does not have that
-// environment. So the hook records the redirects it sees in the user's
+// OPENCODE_CONFIG, OPENCODE_CONFIG_DIR, APPDATA, HERMES_HOME) or from a HOME
+// that is not the account's home. The hook runs inside the agent's
+// environment and scans those locations; the guardian's cleanup does not
+// have that environment. So the hook records the redirects it sees in the user's
 // data directory, and the cleanup, running as the user, cleans the
 // recorded locations too. A redirect no DefenseClaw hook has run with is
 // not cleaned (the hook still denies while a foreign hook is there). Like

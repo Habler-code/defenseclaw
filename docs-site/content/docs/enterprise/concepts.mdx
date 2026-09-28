@@ -236,13 +236,13 @@ after DefenseClaw could change a tool call that DefenseClaw already allowed.
 ### Foreign-hook guard
 
 The protection against [foreign hooks](#foreign-hook). It covers Cursor, GitHub
-Copilot, Devin, OpenCode, and Amp, and also Codex and Claude Code when their
-`managed_hooks_only` setting is not `enforce`. With the default
+Copilot, Devin, OpenCode, and Amp, Hermes on Linux and macOS, and also Codex
+and Claude Code when their `managed_hooks_only` setting is not `enforce`. With the default
 `foreign_hooks: remove`, the guardian removes foreign entries from the user's
 config, and `defenseclaw-hook` blocks tool calls while an unapproved one is in
 the user or project config. The OpenCode and Amp plugins ask
 `defenseclaw-hook` for the same decision when they load and before each tool
-call. A session that started while an unapproved hook was present stays
+call, and DefenseClaw's Hermes hook asks before each Hermes tool call. A session that started while an unapproved hook was present stays
 blocked until the agent restarts, for at most 7 days. See
 [Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
 

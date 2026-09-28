@@ -39,7 +39,9 @@ type CleanupResult struct {
 // <home>/.defenseclaw/foreign-hooks-backup/<connector>/<timestamp>/ before
 // any change. Project files are never modified; their findings are
 // reported. Codex TOML config is reported rather than rewritten so a user's
-// comments and layout are never re-marshalled.
+// comments and layout are never re-marshalled; in a Hermes config.yaml only
+// the hooks mapping is rewritten (as Setup writes it) and every other byte
+// is kept.
 func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, error) {
 	return CleanUserForeignHooksWithRedirects(req, nil, now)
 }
@@ -48,7 +50,7 @@ func CleanUserForeignHooks(req GuardRequest, now time.Time) (CleanupResult, erro
 // default locations and then for each environment redirect the user's
 // hooks recorded (LoadEnvRedirects): the user config an agent reads from
 // CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_HOME, XDG_CONFIG_HOME,
-// OPENCODE_CONFIG, OPENCODE_CONFIG_DIR, APPDATA or another HOME. A file
+// OPENCODE_CONFIG, OPENCODE_CONFIG_DIR, APPDATA, HERMES_HOME or another HOME. A file
 // reached through more than one of them is cleaned once. It runs with the
 // user's credentials, so a recorded location reaches only what the user
 // can write.
@@ -136,6 +138,10 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 				result.BackupDir = backupDir
 				result.Removed = append(result.Removed, finding)
 				result.FilesTouch = appendUnique(result.FilesTouch, finding.Path)
+			}
+		case formatHermesYAML:
+			if err := cleanHermesYAMLSource(scan, source, backupDir, result); err != nil {
+				errs = append(errs, err)
 			}
 		case formatFlatDir:
 			entries, exists, err := scan.readDir(source.path)

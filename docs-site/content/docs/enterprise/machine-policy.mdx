@@ -32,7 +32,8 @@ Only agents you select in the config are protected; see
 | OpenCode (`opencode`) | Machine policy through the [managed OpenCode plugin](#managed-opencode-plugin), with the foreign-hook guard | Same |
 | Amp (`amp`) | Per user, with the foreign-hook guard | Per user (in-agent plugin), with the guard |
 | Devin (`devin`) | Per user, with the foreign-hook guard | Per user (hook binary), with the guard |
-| Antigravity (`antigravity`), Hermes (`hermes`) | Per user | Per user (hook binary) |
+| Hermes (`hermes`) | Per user, with the foreign-hook guard | Per user (hook binary) |
+| Antigravity (`antigravity`) | Per user | Per user (hook binary) |
 | OpenHands (`openhands`), OmniGent (`omnigent`) | Per user | Not managed: the enumerator writes no targets for them, and a manifest row that names one is refused |
 | Kiro (`kiro`) | Per user: each user's global `~/.kiro/hooks/defenseclaw.json` plus the CLI 2.x `defenseclaw` agent; ACP stays optional (see [Kiro](/docs/connectors/kiro#enterprise-standalone-profile)) | ACP, through `defenseclaw-gateway enterprise acp`; see [ACP guard](/docs/acp-guard). The Windows guardian does not enroll Kiro |
 | OpenClaw (`openclaw`), ZeptoClaw (`zeptoclaw`) | Not managed: they need the guardrail proxy, which a managed host does not run, so the enumerator skips them (route `unsupported`) | Not managed, as for OpenHands |
@@ -73,7 +74,8 @@ The per-user registrations differ by OS:
   OmniGent a DefenseClaw policy bridge there. The script sends the event to
   the gateway over the hook socket itself, and the guardian verifies and
   repairs it. Amp and the per-user OpenCode plugin call the gateway from
-  inside the agent and run `defenseclaw-hook` for the foreign-hook check.
+  inside the agent and run `defenseclaw-hook` for the foreign-hook check,
+  and so does `hermes-hook.sh` before each Hermes tool call.
 
 ## Machine policy files
 

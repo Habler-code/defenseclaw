@@ -7,13 +7,16 @@ keywords:
   - Cursor hooks.json
   - Copilot hooks
   - OpenCode plugins
+  - Hermes hooks
   - allowed_hooks
 ---
 
 Most agents run every hook they find, and several let any hook change a
 tool call's input: Codex and Claude Code (`updatedInput`), Cursor
 (`updated_input`), Copilot (`modifiedArgs`), Devin (`updatedInput`),
-OpenCode (`tool.execute.before`) and Amp plugins. A hook in a user's own
+OpenCode (`tool.execute.before`), Amp plugins and Hermes (`pre_tool_call`
+shell hooks, which Hermes runs in order, so a later one can rewrite the tool
+input). A hook in a user's own
 config or in a repository could then change a command after DefenseClaw
 inspected it. The foreign-hook guard covers that gap for agents without a
 vendor lock. A **foreign hook** is any hook or plugin that DefenseClaw did
@@ -25,6 +28,7 @@ not write and you have not approved. See
 | Connector | Covered | Why |
 | --- | --- | --- |
 | Cursor, Copilot, Devin, OpenCode, Amp | Always, unless `foreign_hooks: allow` | These agents have no vendor lock. |
+| Hermes | On Linux and macOS, unless `foreign_hooks: allow` | Hermes has no vendor lock and no way to order hooks. The Windows Hermes registration does not run the guard. |
 | Codex, Claude Code | Only with `managed_hooks_only: preserve` | By default the vendor lock already stops user and project hooks. |
 
 **Windows and Claude Code.** On Windows the Claude Code drop-in carries
@@ -48,10 +52,11 @@ On Linux and macOS, `preserve` also removes the vendor lock; see
 1. **Removes foreign hooks from user-level config.** Within about five
    minutes, the guardian, running as the user, removes unapproved hook
    entries and plugins from the user's own files (listed below). It backs
-   up each changed file first and logs each removal. A Codex `config.toml`,
-   Devin's `~/.claude.json` (Claude Code owns and rewrites that file), and a
-   file or plugin the guardian cannot read or verify, is reported, never
-   changed.
+   up each changed file first and logs each removal. In a Hermes
+   `config.yaml` only the `hooks` section is rewritten; every other line of
+   the file is kept as it was. A Codex `config.toml`, Devin's
+   `~/.claude.json` (Claude Code owns and rewrites that file), and a file or
+   plugin the guardian cannot read or verify, is reported, never changed.
 2. **Blocks while a foreign hook is present.** Before each call,
    `defenseclaw-hook` checks the user's own files and the project files
    below, in the working directory and its parents up to and including the
@@ -91,8 +96,9 @@ On Linux and macOS, `preserve` also removes the vendor lock; see
    is denied.
 5. **Follows redirected user config.** An agent whose environment moves its
    user configuration (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
-   `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`, or a
-   `HOME` that is not the account's) is checked at that location. The hook
+   `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`,
+   `HERMES_HOME`, or a `HOME` that is not the account's) is checked at that
+   location. The hook
    also records each absolute location it sees in
    `~/.defenseclaw/foreign-hook-env.json` (at most 8 per connector), and the
    guardian cleans those locations after the default ones on its next pass.
@@ -110,6 +116,18 @@ project plugins are checked as for the other connectors. The managed
 OpenCode plugin runs `defenseclaw-hook` for every event. Only the
 DefenseClaw plugin DefenseClaw installed is exempt; another file with the
 same name is foreign.
+
+**Hermes.** Hermes has no managed hook location, so its DefenseClaw hook
+stays the per-user `~/.defenseclaw/hooks/hermes-hook.sh` in
+`~/.hermes/config.yaml`. On Linux and macOS that hook asks
+`defenseclaw-hook` for the guard's decision before each tool call
+(`pre_tool_call`) and at `on_session_start`, where the session's snapshot is
+taken; Hermes loads its shell hooks when the process starts. A denied tool
+call is blocked with the message below, and the call never reaches the
+gateway. If the check gives no clear answer, the tool call is blocked too.
+Hermes lets a shell hook block only `pre_tool_call`, so other Hermes events
+are not blocked. `hermes --accept-hooks` and `hooks_auto_accept` skip only
+Hermes' own consent prompt; the guard still applies.
 
 The guard does not follow links and reads at most 1 MiB per file. A file it
 cannot read or parse, or a path that is not a regular file (a FIFO, device,
@@ -147,12 +165,14 @@ repository root.
 | Devin | `~/.config/devin/config.json` on Linux and macOS (or under `XDG_CONFIG_HOME`), `%APPDATA%\devin\config.json` on Windows, `~/.claude.json` (reported, never rewritten), `~/.claude/settings.json`, `~/.claude/settings.local.json` | `.devin/hooks.v1.json`, `.devin/config.json`, `.devin/config.local.json`, `.claude/settings.json`, `.claude/settings.local.json` |
 | OpenCode | `~/.config/opencode/plugins/`, `~/.config/opencode/plugin/`, `~/.config/opencode/opencode.json`, `opencode.jsonc` and `config.json` (or under `XDG_CONFIG_HOME`); the file named by `OPENCODE_CONFIG`; the folder named by `OPENCODE_CONFIG_DIR`; the inline `OPENCODE_CONFIG_CONTENT` (reported) | `.opencode/plugins/`, `.opencode/plugin/`, `opencode.json`, `opencode.jsonc`, `.opencode/opencode.json`, `.opencode/opencode.jsonc` |
 | Amp | `~/.config/amp/plugins/` (or under `XDG_CONFIG_HOME`) | `.amp/plugins/` |
+| Hermes (Linux and macOS) | `~/.hermes/config.yaml` (or under `HERMES_HOME`; a named Hermes profile sets it) | None: Hermes reads no project hook file |
 | Claude Code (when covered) | `~/.claude/settings.json` (or under `CLAUDE_CONFIG_DIR`), and the hooks of plugins it enables | `.claude/settings.json`, `.claude/settings.local.json`, and the hooks of plugins they enable |
 | Codex (when covered) | `~/.codex/config.toml`, `~/.codex/hooks.json` (or under `CODEX_HOME`) | `.codex/config.toml`, `.codex/hooks.json` |
 
 `defenseclaw-hook` reads the locations under `COPILOT_HOME`, `CODEX_HOME`,
 `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`,
-`OPENCODE_CONFIG_DIR` and `%APPDATA%` from the agent's environment. The
+`OPENCODE_CONFIG_DIR`, `HERMES_HOME` and `%APPDATA%` from the agent's
+environment. The
 guardian has no user environment: it cleans the default locations and the
 redirected ones a DefenseClaw hook has recorded. `enterprise policy show
 --user` uses the default locations.
@@ -173,6 +193,9 @@ removing the hook, restart the agent.
 The last sentence appears when the hook was present at session start. A
 hook found later in a session gets the message without it; removing the
 hook is enough.
+
+Hermes shows the same text after `DefenseClaw blocked this tool call:`, with
+`(enterprise_foreign_hook_blocked)` at the end.
 
 Later in a session that was blocked, the message says so:
 
@@ -323,9 +346,20 @@ with `enterprise_machine_policy_summary_untrusted`.
   process still needs a hook run. A relative `OPENCODE_CONFIG` and
   `OPENCODE_CONFIG_CONTENT` are never cleaned; the hook still blocks while
   they name a foreign plugin.
-- Antigravity, Hermes, OpenHands and OmniGent have neither a vendor lock nor
-  the guard. Hooks a user or project adds for them run next to
-  DefenseClaw's. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
+- Antigravity, OpenHands and OmniGent have neither a vendor lock nor the
+  guard, and neither does Hermes on Windows. Hooks a user or project adds
+  for them run next to DefenseClaw's. See
+  [Residual risks](/docs/enterprise/threat-model#residual-risks).
+- Hermes has no vendor lock and no way to order hooks, so the guard is the
+  only control, and it runs inside DefenseClaw's own Hermes hook. A Hermes
+  process keeps the shell hooks it loaded at start: if a user removes an
+  unapproved entry after Hermes started but before its `on_session_start`
+  event or first tool call, that process keeps running the entry and the
+  guard cannot see it. Hermes Python plugins (under `HERMES_HOME/plugins`,
+  project plugins, installed plugin packages) run inside Hermes and can
+  change a tool call too; the guard does not inspect them. A Hermes session
+  that does not load DefenseClaw's hook at all is not checked either (see
+  [Residual risks](/docs/enterprise/threat-model#residual-risks)).
 - For OpenHands a project hook file is worse than an extra hook: OpenHands
   loads a project's `.openhands/hooks.json` instead of the user's
   `~/.openhands/hooks.json`, so in that project none of DefenseClaw's hooks

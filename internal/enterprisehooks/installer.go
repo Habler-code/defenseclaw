@@ -282,6 +282,12 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if connector.HookCredentialDrifted(lock, setupOpts) {
 				return fmt.Errorf("enterprise hooks: connector %s hooks were installed with credentials that are not bound to this user", conn.Name())
 			}
+			// A standalone Hermes hook installed before it ran the
+			// foreign-hook guard (or for another hook binary) is
+			// reinstalled with the guard the configuration selects.
+			if connector.HookForeignGuardDrifted(lock, setupOpts) {
+				return fmt.Errorf("enterprise hooks: connector %s hooks were installed with a different foreign-hook guard than the configuration selects", conn.Name())
+			}
 			// The standalone per-user worker also checks the hook runtime
 			// itself: the recorded scripts and plugin bytes, and the fail
 			// and guardrail modes the hooks were rendered for.

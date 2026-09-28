@@ -30,7 +30,8 @@ import (
 // The foreign-hook guard exists because several agents run every
 // registered hook or plugin and let any of them rewrite a tool call's input
 // (Claude/Codex/Devin updatedInput, Cursor updated_input, Copilot
-// modifiedArgs, OpenCode tool.execute.before) or approve it after
+// modifiedArgs, OpenCode tool.execute.before, a Hermes pre_tool_call shell
+// hook) or approve it after
 // DefenseClaw inspected the original. Where the vendor has no
 // managed-hooks-only lock, a standard user (or a prompt-injected agent)
 // could otherwise add such a hook and run something DefenseClaw never saw.
@@ -485,6 +486,9 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 	case "amp":
 		user(formatPluginDir, xdgConfig, "amp", "plugins")
 		project(formatPluginDir, ".amp", "plugins")
+	case ConnectorHermes:
+		// User config only: Hermes reads shell hooks from no project file.
+		hermesUserConfig(req, home, envPath, user)
 	}
 }
 
@@ -1180,6 +1184,8 @@ func (s *guardScan) scanFile(source hookSource) []Finding {
 		return s.scanCodexTOML(source, data)
 	case formatPluginList:
 		return s.scanPluginList(source, data)
+	case formatHermesYAML:
+		return s.scanHermesYAML(source, data)
 	default:
 		return s.scanJSONHooks(source, data)
 	}

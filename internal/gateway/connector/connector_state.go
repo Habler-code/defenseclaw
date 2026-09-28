@@ -296,6 +296,12 @@ type HookRegistrationPosture struct {
 	// does not bind credentials to a user. HookCredentialDrifted compares
 	// it with the configured credentials.
 	HookCredentialBinding string `json:"hook_credential_binding,omitempty"`
+	// ForeignHookGuard records the administrator-owned hook binary the
+	// standalone Hermes shell hook was rendered to run for the foreign-hook
+	// guard (see shellHookForeignGuardBinary). Empty for every other hook
+	// and install. HookForeignGuardDrifted compares it with the configured
+	// guard.
+	ForeignHookGuard string `json:"foreign_hook_guard,omitempty"`
 }
 
 // LoadActiveConnector reads the previously active connector name from
@@ -1163,6 +1169,7 @@ func newHookContractLockEntry(
 			HookSocket:            hookSocket,
 			HookSocketServiceUID:  hookSocketServiceUID,
 			HookCredentialBinding: hookCredentialBinding(opts),
+			ForeignHookGuard:      shellHookForeignGuardBinary(opts, name),
 		},
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}

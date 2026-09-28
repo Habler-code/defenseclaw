@@ -440,9 +440,13 @@ func TestStandaloneForeignHookGuardBinaryOnlyForStandalonePlugins(t *testing.T) 
 		}
 	}
 	// The Unix standalone Devin hook command runs the admin binary in
-	// managed mode; Windows already registers that binary for Devin.
-	if binary := standaloneForeignHookGuardBinary("devin"); (runtime.GOOS == "windows") != (binary == "") {
-		t.Fatalf("devin on %s: guard binary %q", runtime.GOOS, binary)
+	// managed mode; Windows already registers that binary for Devin. The
+	// Unix standalone hermes-hook.sh asks it for the guard's decision; the
+	// Windows Hermes registration does not run the guard.
+	for _, name := range []string{"devin", "hermes"} {
+		if binary := standaloneForeignHookGuardBinary(name); (runtime.GOOS == "windows") != (binary == "") {
+			t.Fatalf("%s on %s: guard binary %q", name, runtime.GOOS, binary)
+		}
 	}
 	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
 	if binary := standaloneForeignHookGuardBinary("amp"); binary != "" {
