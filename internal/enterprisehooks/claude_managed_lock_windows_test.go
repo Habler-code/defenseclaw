@@ -7,7 +7,11 @@
 package enterprisehooks
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -90,5 +94,49 @@ func TestWindowsClaudePolicyIdentityAcceptsTheLockedAndThePreLockPolicy(t *testi
 	}
 	if claudeManagedPolicyMatchesKnownContract(provider, foreign, setup) {
 		t.Fatal("a locked policy for another hook executable matched this deployment")
+	}
+}
+
+// WIN-F37 follow-ups: a standalone verify of a drop-in without the lock (an
+// earlier release's) names the missing lock, and a later administrator
+// drop-in that sets allowManagedHooksOnly to false fails verify naming that
+// file, although DefenseClaw's own drop-in is canonical.
+func TestStandaloneClaudeVerifyNamesTheMissingLockAndALaterOverride(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	t.Cleanup(func() { SetWindowsClaudeManagedHooksOnlyPolicy(nil) })
+	setStandaloneProfileForTest(t, true)
+	opts := windowsManagedInstallOptions(fixture)
+
+	// Publish the drop-in without the lock, then verify under enforce.
+	SetWindowsClaudeManagedHooksOnlyPolicy(func() bool { return false })
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("Install under preserve: %v", err)
+	}
+	SetWindowsClaudeManagedHooksOnlyPolicy(nil)
+	_, err := Verify(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Verify under enforce accepted a drop-in without allowManagedHooksOnly")
+	}
+	if !strings.Contains(err.Error(), "does not set allowManagedHooksOnly: true") {
+		t.Fatalf("Verify error %q does not name the missing lock", err)
+	}
+
+	// Repair publishes the lock; a later administrator drop-in turns it off.
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("Install under enforce: %v", err)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify of the locked drop-in: %v", err)
+	}
+	later := filepath.Join(filepath.Dir(fixture.policyPath), "95-x.json")
+	if err := os.WriteFile(later, []byte("{\"allowManagedHooksOnly\": false}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Verify(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Verify accepted a later drop-in that sets allowManagedHooksOnly to false")
+	}
+	if !strings.Contains(err.Error(), later) {
+		t.Fatalf("Verify error %q does not name %s", err, later)
 	}
 }

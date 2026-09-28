@@ -344,10 +344,23 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		return InstallResult{}, fmt.Errorf("enterprise hooks: build canonical Claude Code managed policy: %w", err)
 	}
 	if !bytes.Equal(policySnapshot.data, expectedPolicy) {
+		// Name the lock when it is what is missing, as after an upgrade from
+		// a release whose drop-in did not carry it.
+		if policySetup.ClaudeAllowManagedHooksOnly && !windowsClaudeManagedPolicyHasLock(policySnapshot.data) {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: Claude Code managed policy differs from the canonical DefenseClaw hook matrix: %s does not set allowManagedHooksOnly: true, so user and project hooks can rewrite tool input after inspection; repair rewrites it", policyPath)
+		}
 		return InstallResult{}, fmt.Errorf("enterprise hooks: Claude Code managed policy differs from the canonical DefenseClaw hook matrix")
 	}
 	if err := provider.VerifyManagedHookPolicy(policySnapshot.data, policySetup); err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: verify Claude Code managed policy: %w", err)
+	}
+	// Claude Code applies later managed-settings.d files over DefenseClaw's
+	// drop-in, so an administrator file there can turn the lock off although
+	// the drop-in itself is canonical.
+	if policySetup.ClaudeAllowManagedHooksOnly {
+		if err := connector.ClaudeCodeManagedHooksOnlyOverride(policyPath); err != nil {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: %w", err)
+		}
 	}
 
 	lock, err := verifyWindowsClaudeUserRuntimeReadOnly(home, dataDir, policyPath, targetSID, setupOpts, conn)

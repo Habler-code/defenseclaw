@@ -7,6 +7,7 @@
 package enterprisehooks
 
 import (
+	"encoding/json"
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -55,4 +56,14 @@ func windowsClaudeManagedHooksOnlyEnforced() bool {
 func withWindowsClaudeManagedHooksOnly(setup connector.SetupOpts) connector.SetupOpts {
 	setup.ClaudeAllowManagedHooksOnly = windowsEnterpriseStandaloneProcess() && windowsClaudeManagedHooksOnlyEnforced()
 	return setup
+}
+
+// windowsClaudeManagedPolicyHasLock reports whether a persisted drop-in sets
+// allowManagedHooksOnly: true; an unreadable document has no lock.
+func windowsClaudeManagedPolicyHasLock(data []byte) bool {
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+	return settings["allowManagedHooksOnly"] == true
 }

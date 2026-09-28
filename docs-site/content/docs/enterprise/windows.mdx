@@ -233,7 +233,11 @@ while coverage is incomplete. With `managed_hooks_only: enforce` (the
 default) the Claude Code drop-in
 `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` sets
 `allowManagedHooksOnly: true`, so user and project Claude Code hooks do not
-run. Standard accounts are told to use an elevated prompt.
+run. Claude Code applies the files in `managed-settings.d` in name order, so a
+file that sorts after `90-defenseclaw.json` and sets `allowManagedHooksOnly`
+to `false` turns the lock off; `enterprise policy verify` and `enterprise
+windows verify` report that file. Standard accounts are told to use an
+elevated prompt.
 
 ## Recover a pending transaction
 

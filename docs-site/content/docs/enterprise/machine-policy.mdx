@@ -112,8 +112,9 @@ With `managed_hooks_only: enforce` (the default):
   project hooks do not run. A user's `disableAllHooks` does not disable
   managed hooks.
 - If your own policy sets a lock to `false` (for example
-  `allow_managed_hooks_only = false` in `requirements.toml`), DefenseClaw
-  reports a conflict and leaves your value alone.
+  `allow_managed_hooks_only = false` in `requirements.toml`, or a Claude Code
+  `managed-settings.d` file that sorts after `90-defenseclaw.json`),
+  DefenseClaw reports a conflict and leaves your value alone.
 
 Hooks your developers need then run only when you deploy them through
 machine policy. Set `managed_hooks_only: preserve` for a connector to leave
