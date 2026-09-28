@@ -177,6 +177,8 @@ for (const [stdout, exit, pattern] of [
 // allows once uninstall removed this plugin file too.
 {
   const hooks = await load();
+  // The startup guard runs the binary concurrently with load; let it finish.
+  await before(hooks);
   rmSync(hookBinary);
   try {
     await assert.rejects(before(hooks), /failed closed/);
