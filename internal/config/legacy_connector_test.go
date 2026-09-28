@@ -109,6 +109,73 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 		}
 	})
 
+	t.Run("connector_hooks", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+retired+"\n  mode: observe\n"+
+			"connector_hooks:\n  "+retired+":\n    enabled: true\n    mode: action\n")
+		if _, ok := cfg.ConnectorHooks[retired]; ok {
+			t.Fatalf("connector_hooks kept the retired key: %v", cfg.ConnectorHooks)
+		}
+		if hook := cfg.ConnectorHookConfig(replacement); !hook.Enabled || hook.Mode != "action" {
+			t.Fatalf("connector_hooks.%s = %+v, want the retired block's settings", replacement, hook)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "connector_hooks") {
+			t.Fatalf("notices = %v, want one naming connector_hooks", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("connector_hooks keeps an explicit replacement", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n"+
+			"connector_hooks:\n  "+replacement+":\n    mode: observe\n  "+retired+":\n    mode: action\n")
+		if len(cfg.ConnectorHooks) != 1 || cfg.ConnectorHookConfig(replacement).Mode != "observe" {
+			t.Fatalf("connector_hooks = %+v, want only the explicit %s entry", cfg.ConnectorHooks, replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "connector_hooks."+retired) {
+			t.Fatalf("notices = %v, want one naming the dropped connector_hooks key", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("guardrail.judge.hook_connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n"+
+			"  judge:\n    enabled: true\n    hook_connectors: [codex, "+retired+", "+replacement+"]\n")
+		if got := strings.Join(cfg.Guardrail.Judge.HookConnectors, ","); got != "codex,"+replacement {
+			t.Fatalf("hook_connectors = %v, want codex and %s once", cfg.Guardrail.Judge.HookConnectors, replacement)
+		}
+		if !cfg.Guardrail.Judge.HookConnectorEnabled(replacement) {
+			t.Fatalf("the hook-lane judge is off for %s", replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "guardrail.judge.hook_connectors") {
+			t.Fatalf("notices = %v, want one naming guardrail.judge.hook_connectors", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("application_protection.include_connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+			"application_protection:\n  include_connectors: ["+retired+"]\n")
+		if got := strings.Join(cfg.ApplicationProtection.IncludeConnectors, ","); got != replacement {
+			t.Fatalf("include_connectors = %v, want [%s]", cfg.ApplicationProtection.IncludeConnectors, replacement)
+		}
+		if !cfg.ApplicationProtection.AllowsConnector(replacement) || cfg.ApplicationProtection.AllowsConnector("codex") {
+			t.Fatalf("include_connectors must now include only %s", replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "application_protection.include_connectors") {
+			t.Fatalf("notices = %v, want one naming application_protection.include_connectors", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("application_protection.exclude_connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+			"application_protection:\n  exclude_connectors: ["+retired+", "+retired+"]\n")
+		if got := strings.Join(cfg.ApplicationProtection.ExcludeConnectors, ","); got != replacement {
+			t.Fatalf("exclude_connectors = %v, want [%s]", cfg.ApplicationProtection.ExcludeConnectors, replacement)
+		}
+		if cfg.ApplicationProtection.AllowsConnector(replacement) {
+			t.Fatalf("exclude_connectors no longer excludes %s", replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "application_protection.exclude_connectors") {
+			t.Fatalf("notices = %v, want one naming application_protection.exclude_connectors", cfg.LegacyConnectorNotices)
+		}
+	})
+
 	t.Run("unaffected config has no notice", func(t *testing.T) {
 		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: cursor\n")
 		if cfg.Guardrail.Connector != "cursor" || len(cfg.LegacyConnectorNotices) != 0 {

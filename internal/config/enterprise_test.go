@@ -13,6 +13,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -179,6 +180,47 @@ enterprise:
 	}
 }
 
+// enterprise.trust.mode "" is the documented default (the hash_pinned
+// minimum; Linux and macOS do not read the key), so the v8 schema and the
+// loader accept it for a config shared across Linux, macOS and Windows. An
+// unknown mode stays refused.
+func TestEnterpriseTrustModeEmptyIsTheDefault(t *testing.T) {
+	validate := func(name, doc string) error {
+		document, err := ParseV8YAML(name, []byte(doc))
+		if err != nil {
+			return err
+		}
+		return validateV8Schema(name, document)
+	}
+	const empty = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n  trust:\n    mode: \"\"\n"
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			if err := validate("trust-empty.yaml", empty); err != nil {
+				t.Fatalf("v8 schema rejected enterprise.trust.mode \"\": %v", err)
+			}
+			if err := validate("trust-unknown.yaml", strings.Replace(empty, `mode: ""`, "mode: signed", 1)); err == nil {
+				t.Fatal("v8 schema accepted an unknown enterprise.trust.mode")
+			}
+			cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
+			if err := resolveEnterpriseConfig(&cfg, goos, ""); err != nil {
+				t.Fatalf("an empty enterprise.trust.mode was rejected on %s: %v", goos, err)
+			}
+			bad := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone", Trust: EnterpriseTrustConfig{Mode: "signed"}}}
+			if err := resolveEnterpriseConfig(&bad, goos, ""); err == nil || !strings.Contains(err.Error(), "enterprise.trust.mode") {
+				t.Fatalf("unknown enterprise.trust.mode on %s: error = %v", goos, err)
+			}
+		})
+	}
+	// The runtime loader of the OS running the test accepts it end to end.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if _, err := ParseCompileObservabilityV8(path, []byte(empty), ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()}); err != nil {
+		t.Fatalf("compile rejected an empty enterprise.trust.mode: %v", err)
+	}
+	if _, err := LoadRuntimeV8InspectionCandidateFromBytes(path, []byte(empty)); err != nil {
+		t.Fatalf("load rejected an empty enterprise.trust.mode: %v", err)
+	}
+}
+
 func TestStandaloneDropsSecureClientSurfaces(t *testing.T) {
 	standalone := &Config{
 		DeploymentMode: "managed_enterprise",
@@ -263,10 +305,80 @@ func TestStandaloneImplicitRulePackFollowsPolicyDir(t *testing.T) {
 	}
 }
 
+// On the Linux and macOS standalone layouts (a config read from the layout's
+// config path) the implicit rule pack always names a pack that exists: the
+// administrator's pack in policy_dir when that folder exists, otherwise the
+// vendor default pack the lifecycle installs. An explicit rule_pack_dir is
+// kept for the lifecycle to check.
+func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Linux and macOS layout paths are not paths on Windows")
+	}
+	emptyPolicy := t.TempDir()
+	seededPolicy := t.TempDir()
+	seededPack := filepath.Join(seededPolicy, "guardrail", "default")
+	if err := os.MkdirAll(seededPack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		layout, err := managed.StandaloneLayoutFor(goos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vendor := layout.VendorPolicyDir + "/guardrail/default"
+		implicit := filepath.Join(layout.DataDir, "policies", "guardrail", "default")
+		for _, tc := range []struct {
+			name, policy, pack, want string
+			declared                 bool
+		}{
+			{name: "absent admin pack falls back to the vendor pack", policy: emptyPolicy, pack: implicit, want: vendor},
+			{name: "a missing policy_dir folder", policy: filepath.Join(emptyPolicy, "policies"), pack: implicit, want: vendor},
+			{name: "an existing admin pack wins", policy: seededPolicy, pack: implicit, want: seededPack},
+			{name: "policy_dir inside data_dir never supplies the pack", policy: filepath.Join(layout.DataDir, "policies"), pack: implicit, want: vendor},
+			{name: "vendor policy_dir", policy: layout.VendorPolicyDir, pack: implicit, want: vendor},
+			{name: "explicit pack is kept", policy: emptyPolicy, pack: filepath.Join(emptyPolicy, "guardrail", "custom"), want: filepath.Join(emptyPolicy, "guardrail", "custom")},
+			{name: "an explicit pack inside data_dir is kept for the lifecycle to refuse", policy: filepath.Join(layout.DataDir, "policies"), pack: implicit, want: implicit, declared: true},
+		} {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				cfg := Config{
+					DeploymentMode: "managed_enterprise",
+					ConfigFilePath: layout.ConfigPath,
+					DataDir:        layout.DataDir,
+					PolicyDir:      tc.policy,
+					Enterprise:     EnterpriseConfig{Profile: managed.ProfileStandalone},
+				}
+				cfg.Guardrail.RulePackDir = tc.pack
+				cfg.rulePackDirDeclared = tc.declared
+				if err := resolveEnterpriseConfig(&cfg, goos, ""); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Guardrail.RulePackDir != tc.want {
+					t.Fatalf("rule_pack_dir = %q, want %q", cfg.Guardrail.RulePackDir, tc.want)
+				}
+			})
+		}
+	}
+	// Secure Client never gets a standalone rule pack default.
+	secureClient := Config{DeploymentMode: "managed_enterprise", ConfigFilePath: "/opt/cisco/defenseclaw/etc/config.yaml", DataDir: "/opt/cisco/defenseclaw/runtime", PolicyDir: emptyPolicy}
+	implicit := filepath.Join("/opt/cisco/defenseclaw/runtime", "policies", "guardrail", "default")
+	secureClient.Guardrail.RulePackDir = implicit
+	if err := resolveEnterpriseConfig(&secureClient, "darwin", ""); err != nil {
+		t.Fatal(err)
+	}
+	if secureClient.Guardrail.RulePackDir != implicit {
+		t.Fatalf("secure client rule_pack_dir = %q, want %q", secureClient.Guardrail.RulePackDir, implicit)
+	}
+}
+
+// agent_prefixes applies to Linux and macOS, but one standalone config may
+// be shared with Windows hosts, so every OS validates it the same way (Unix
+// path semantics) whatever OS runs the check.
 func TestEnterpriseAgentPrefixes(t *testing.T) {
-	for prefix, wantErr := range map[string]string{
+	cases := map[string]string{
 		"/opt/tools":         "",
 		"/usr/local/company": "",
+		"/opt/tools/":        "clean absolute path",
+		"/opt//tools":        "clean absolute path",
 		"relative/path":      "clean absolute path",
 		"/opt/a:/opt/b":      "clean absolute path",
 		"/opt/../home/x":     "clean absolute path",
@@ -274,17 +386,20 @@ func TestEnterpriseAgentPrefixes(t *testing.T) {
 		"/home/alice/.npm":   "users can write",
 		"/tmp/agents":        "users can write",
 		"/Users/bob/tools":   "users can write",
-	} {
-		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Enrollment: EnterpriseEnrollmentConfig{AgentPrefixes: []string{prefix}}}}
-		err := resolveEnterpriseConfig(&cfg, "linux", "")
-		if wantErr == "" {
-			if err != nil {
-				t.Fatalf("agent prefix %q rejected: %v", prefix, err)
+	}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for prefix, wantErr := range cases {
+			cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone", Enrollment: EnterpriseEnrollmentConfig{AgentPrefixes: []string{prefix}}}}
+			err := resolveEnterpriseConfig(&cfg, goos, "")
+			if wantErr == "" {
+				if err != nil {
+					t.Fatalf("%s: agent prefix %q rejected: %v", goos, prefix, err)
+				}
+				continue
 			}
-			continue
-		}
-		if err == nil || !strings.Contains(err.Error(), wantErr) {
-			t.Fatalf("agent prefix %q error = %v, want %q", prefix, err, wantErr)
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("%s: agent prefix %q error = %v, want %q", goos, prefix, err, wantErr)
+			}
 		}
 	}
 	// Secure Client keeps rejecting standalone-only enrollment knobs.

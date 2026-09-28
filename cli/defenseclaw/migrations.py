@@ -2754,9 +2754,10 @@ def _persist_retired_desktop_connector(ctx: MigrationContext) -> None:
 
 
 def _rewrite_retired_desktop_connector_text(text: str) -> str:
-    """Rename the retired ID in ``claw.mode``, ``guardrail.connector`` and the
-    per-connector map keys (``legacy_connector.CONNECTOR_MAP_BLOCKS``),
-    keeping every other byte."""
+    """Rename the retired ID in ``claw.mode``, ``guardrail.connector``, the
+    per-connector map keys (``legacy_connector.CONNECTOR_MAP_BLOCKS`` and
+    ``TOP_LEVEL_CONNECTOR_MAPS``) and the connector name lists
+    (``legacy_connector.CONNECTOR_NAME_LISTS``), keeping every other byte."""
     retired = re.escape(legacy_connector.RETIRED_DESKTOP_ID)
     replacement = legacy_connector.REPLACEMENT
     for block_key, field_name in (("claw", "mode"), ("guardrail", "connector")):
@@ -2768,6 +2769,10 @@ def _rewrite_retired_desktop_connector_text(text: str) -> str:
 
     for block_key in legacy_connector.CONNECTOR_MAP_BLOCKS:
         text = _edit_connector_map_keys(text, block_key, plan)
+    for map_key in legacy_connector.TOP_LEVEL_CONNECTOR_MAPS:
+        text = _edit_top_level_map_keys(text, map_key, plan)
+    for path in legacy_connector.CONNECTOR_NAME_LISTS:
+        text = _replace_connector_list_text(text, path, retired, replacement)
     return text
 
 
@@ -2791,6 +2796,48 @@ def _replace_block_scalar_text(text: str, block_key: str, field_name: str, value
     return text[: block.start("body")] + body + text[block.end("body") :]
 
 
+def _yaml_indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _yaml_is_blank(line: str) -> bool:
+    return not line.strip() or line.lstrip().startswith("#")
+
+
+def _edit_mapping_rows(
+    lines: list[str],
+    start: int,
+    end: int,
+    plan: Callable[[list[str]], tuple[dict[str, str], set[str]]],
+) -> str | None:
+    """Rename or drop the keys of the block mapping in ``lines[start:end]``.
+
+    Returns the edited lines joined, or ``None`` when *plan* changes nothing.
+    """
+    children = [i for i in range(start, end) if not _yaml_is_blank(lines[i])]
+    if not children:
+        return None
+    child = _yaml_indent_of(lines[children[0]])
+    key_re = re.compile(r"^[ \t]*(?P<quote>[\"']?)(?P<key>[^:\"'#]+)(?P=quote)[ \t]*:")
+    keyed = [i for i in children if _yaml_indent_of(lines[i]) == child and key_re.match(lines[i])]
+    keys = {i: key_re.match(lines[i]).group("key").strip() for i in keyed}
+    rename, drop_keys = plan([keys[i] for i in keyed])
+    if not rename and not drop_keys:
+        return None
+    drop: set[int] = set()
+    for row in keyed:
+        key = keys[row]
+        if key in drop_keys:
+            stop = row + 1
+            while stop < end and (_yaml_is_blank(lines[stop]) or _yaml_indent_of(lines[stop]) > child):
+                stop += 1
+            drop.update(range(row, stop))
+        elif key in rename:
+            match = key_re.match(lines[row])
+            lines[row] = lines[row][: match.start("key")] + rename[key] + lines[row][match.end("key") :]
+    return "".join(line for i, line in enumerate(lines) if i not in drop)
+
+
 def _edit_connector_map_keys(
     text: str,
     block_key: str,
@@ -2807,55 +2854,100 @@ def _edit_connector_map_keys(
     if not block:
         return text
     lines = block.group("body").splitlines(keepends=True)
-
-    def indent_of(line: str) -> int:
-        return len(line) - len(line.lstrip(" \t"))
-
-    def is_blank(line: str) -> bool:
-        return not line.strip() or line.lstrip().startswith("#")
-
-    first = next((i for i, line in enumerate(lines) if not is_blank(line)), None)
+    first = next((i for i, line in enumerate(lines) if not _yaml_is_blank(line)), None)
     if first is None:
         return text
-    block_child = indent_of(lines[first])
+    block_child = _yaml_indent_of(lines[first])
     header = next(
         (
             i
             for i, line in enumerate(lines)
-            if indent_of(line) == block_child
-            and re.match(r"^[ \t]+connectors:[ \t]*(?:#[^\n]*)?\r?\n?$", line)
+            if _yaml_indent_of(line) == block_child and re.match(r"^[ \t]+connectors:[ \t]*(?:#[^\n]*)?\r?\n?$", line)
         ),
         None,
     )
     if header is None:
         return text
-    parent = indent_of(lines[header])
+    parent = _yaml_indent_of(lines[header])
     end = header + 1
-    while end < len(lines) and (is_blank(lines[end]) or indent_of(lines[end]) > parent):
+    while end < len(lines) and (_yaml_is_blank(lines[end]) or _yaml_indent_of(lines[end]) > parent):
         end += 1
-    children = [i for i in range(header + 1, end) if not is_blank(lines[i])]
-    if not children:
+    body = _edit_mapping_rows(lines, header + 1, end, plan)
+    if body is None:
         return text
-    child = indent_of(lines[children[0]])
-    key_re = re.compile(r"^[ \t]*(?P<quote>[\"']?)(?P<key>[^:\"'#]+)(?P=quote)[ \t]*:")
-    keyed = [i for i in children if indent_of(lines[i]) == child and key_re.match(lines[i])]
-    keys = {i: key_re.match(lines[i]).group("key").strip() for i in keyed}
-    rename, drop_keys = plan([keys[i] for i in keyed])
-    if not rename and not drop_keys:
-        return text
-    drop: set[int] = set()
-    for row in keyed:
-        key = keys[row]
-        if key in drop_keys:
-            stop = row + 1
-            while stop < end and (is_blank(lines[stop]) or indent_of(lines[stop]) > child):
-                stop += 1
-            drop.update(range(row, stop))
-        elif key in rename:
-            match = key_re.match(lines[row])
-            lines[row] = lines[row][: match.start("key")] + rename[key] + lines[row][match.end("key") :]
-    body = "".join(line for i, line in enumerate(lines) if i not in drop)
     return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+def _edit_top_level_map_keys(
+    text: str,
+    block_key: str,
+    plan: Callable[[list[str]], tuple[dict[str, str], set[str]]],
+) -> str:
+    """Rename or drop keys of the column-0 block mapping ``<block_key>`` (for
+    example ``connector_hooks``) as *plan* decides, keeping every other byte.
+    A flow-style map is left alone (callers verify the result)."""
+    block = _find_top_level_block(text, block_key)
+    if not block:
+        return text
+    lines = block.group("body").splitlines(keepends=True)
+    body = _edit_mapping_rows(lines, 0, len(lines), plan)
+    if body is None:
+        return text
+    return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+def _replace_connector_list_text(text: str, path: tuple[str, ...], value_re: str, new_value: str) -> str:
+    """Replace list entries matching *value_re* (case-insensitive, optionally
+    quoted) in the list ``path[-1]`` inside the column-0 block ``path[0]``,
+    keeping every other byte. Handles a one-line flow list and a block list.
+    Entries are replaced, not deduplicated; callers compare the result with
+    the migrated document and fall back to a full rewrite when they differ."""
+    block = _find_top_level_block(text, path[0])
+    if not block:
+        return text
+    lines = block.group("body").splitlines(keepends=True)
+    header_re = re.compile(r"^(?P<head>[ \t]+" + re.escape(path[-1]) + r":)(?P<rest>[^\r\n]*)")
+    flow_re = re.compile(
+        r"(?P<lead>[\[,][ \t]*)(?P<quote>[\"']?)" + value_re + r"(?P=quote)(?=[ \t]*[,\]])",
+        flags=re.IGNORECASE,
+    )
+    item_re = re.compile(
+        r"^(?P<prefix>[ \t]*-[ \t]+)(?P<quote>[\"']?)"
+        + value_re
+        + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\r\n]*)?\r?\n?)$",
+        flags=re.IGNORECASE,
+    )
+    changed = False
+    index = 0
+    while index < len(lines):
+        header = header_re.match(lines[index])
+        index += 1
+        if not header:
+            continue
+        rest = header.group("rest")
+        if "[" in rest:
+            new_rest = flow_re.sub(lambda m: f"{m.group('lead')}{m.group('quote')}{new_value}{m.group('quote')}", rest)
+            if new_rest != rest:
+                line = lines[index - 1]
+                lines[index - 1] = line[: header.start("rest")] + new_rest + line[header.end("rest") :]
+                changed = True
+            continue
+        indent = _yaml_indent_of(lines[index - 1])
+        while index < len(lines):
+            line = lines[index]
+            if not _yaml_is_blank(line):
+                level = _yaml_indent_of(line)
+                if level < indent or (level == indent and not line.lstrip().startswith("-")):
+                    break
+                item = item_re.match(line)
+                if item:
+                    quote = item.group("quote")
+                    lines[index] = f"{item.group('prefix')}{quote}{new_value}{quote}{item.group('suffix')}"
+                    changed = True
+            index += 1
+    if not changed:
+        return text
+    return text[: block.start("body")] + "".join(lines) + text[block.end("body") :]
 
 
 # ---------------------------------------------------------------------------
@@ -2924,17 +3016,25 @@ def _migrate_unshipped_connectors(ctx: MigrationContext) -> None:
         ux.warn(f"unshipped connector cleanup step failed: {exc}", indent="    ")
 
 
-def _shipped_connector_names(raw: dict, data_dir: str) -> set[str]:
-    from defenseclaw.connector_paths import KNOWN_CONNECTORS, declared_plugin_connectors
+def _shipped_connector_names(raw: dict, data_dir: str) -> tuple[set[str], bool]:
+    """Return ``(shipped names, open_ended)``.
+
+    *open_ended* is true while ``plugin_dir`` holds a plugin manifest the
+    gateway would load: the gateway registers that plugin under the name its
+    code reports, which need not match the directory or manifest name, so no
+    name can be ruled out without loading it. Raises RuntimeError when the
+    plugin directory cannot be read.
+    """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, scan_plugin_connectors
 
     plugin_dir = raw.get("plugin_dir") if isinstance(raw.get("plugin_dir"), str) else ""
     plugin_dir = (plugin_dir or "").strip() or os.path.join(data_dir, "plugins")
     try:
-        declared = declared_plugin_connectors(plugin_dir)
+        declared, open_ended = scan_plugin_connectors(plugin_dir)
     except OSError as exc:
         # Cannot tell which plugins exist: treat nothing as unshipped.
         raise RuntimeError(f"cannot read plugin directory {plugin_dir}: {exc}") from exc
-    return set(KNOWN_CONNECTORS) | declared
+    return set(KNOWN_CONNECTORS) | declared, open_ended
 
 
 def _configured_connector_fields(raw: dict) -> tuple[dict, dict, str, str]:
@@ -2953,11 +3053,11 @@ def _unshipped_predicate(raw: dict, data_dir: str) -> Callable[[object], bool]:
     RuntimeError when the plugin directory cannot be read."""
     from defenseclaw.connector_contracts import normalize_connector
 
-    shipped = _shipped_connector_names(raw, data_dir)
+    shipped, open_ended = _shipped_connector_names(raw, data_dir)
 
     def unshipped(name: object) -> bool:
         value = normalize_connector(str(name or ""))
-        return bool(value) and value not in shipped and not legacy_connector.is_retired(value)
+        return bool(value) and not open_ended and value not in shipped and not legacy_connector.is_retired(value)
 
     return unshipped
 
@@ -2969,6 +3069,70 @@ def _unshipped_connector_names(raw: object, data_dir: str) -> list[str]:
     _guardrail, connectors, primary, mode = _configured_connector_fields(raw)
     unshipped = _unshipped_predicate(raw, data_dir)
     return sorted({*(str(key) for key in connectors if unshipped(key)), *(n.strip() for n in (primary, mode) if unshipped(n))})
+
+
+def _unshipped_roster(raw: dict, data_dir: str) -> tuple[list[str], list[str], list[str]]:
+    """``(unshipped names, remaining shipped names, removable names)`` for a
+    parsed config. *removable* are the unshipped names ``setup remove``
+    accepts (``guardrail.connectors`` keys, or the primary when that map is
+    empty). Raises RuntimeError when the plugin directory cannot be read."""
+    _guardrail, connectors, primary, mode = _configured_connector_fields(raw)
+    unshipped = _unshipped_predicate(raw, data_dir)
+    names = sorted(
+        {*(str(key) for key in connectors if unshipped(key)), *(n.strip() for n in (primary, mode) if unshipped(n))}
+    )
+    remaining = sorted(str(key) for key in connectors if not unshipped(key))
+    if not connectors and primary and not unshipped(primary):
+        remaining = [primary.strip()]
+    if connectors:
+        removable = sorted(str(key) for key in connectors if unshipped(key))
+    else:
+        removable = [primary.strip()] if primary and unshipped(primary) else []
+    return names, remaining, removable
+
+
+def _remove_or_replace_hint(removable: list[str], *, force: bool) -> str:
+    setup = "`defenseclaw setup <connector>`"
+    if not removable:
+        return f"set up a supported connector ({setup})"
+    flags = " --yes --force" if force else " --yes"
+    remove = " and ".join(f"`defenseclaw setup remove {name}{flags}`" for name in removable)
+    return f"remove it ({remove}) or set up another connector ({setup})"
+
+
+def _check_connector_roster(config_path: str, data_dir: str, version: str) -> None:
+    """Fail ``migrate --check`` when no configured connector would remain.
+
+    The installer runs the check before it swaps anything. Upgrading anyway
+    would leave config.yaml naming only connectors the new gateway cannot
+    load, so the new gateway would not start (and the installer would roll
+    back a running install). The fix has to happen on the installed release,
+    so the message gives commands that release accepts: ``setup remove``
+    refuses the last connector there without ``--force``.
+    """
+    text = _read_config_text(config_path) if os.path.isfile(config_path) else None
+    if text is None:
+        return
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return
+    if not isinstance(raw, dict):
+        return
+    # The roster step renames the retired Desktop ID before it drops names.
+    raw, _notices = legacy_connector.migrated_copy(raw)
+    try:
+        names, remaining, removable = _unshipped_roster(raw, data_dir)
+    except RuntimeError:
+        return
+    if not names or remaining:
+        return
+    listed = ", ".join(repr(n) for n in names)
+    raise MigrationError(
+        f"connector {listed} is not shipped by DefenseClaw {version} and no other connector is configured, "
+        f"so the gateway could not start after the upgrade; nothing was changed. With the DefenseClaw you have "
+        f"now, {_remove_or_replace_hint(removable, force=True)}, then upgrade again; {_REMOVED_CONNECTORS_DOC}"
+    )
 
 
 def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
@@ -2984,19 +3148,15 @@ def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
     guardrail, connectors, primary, mode = _configured_connector_fields(raw)
     unshipped = _unshipped_predicate(raw, ctx.data_dir)
     dropped_keys = [str(key) for key in connectors if unshipped(key)]
-    names = sorted({*dropped_keys, *(n.strip() for n in (primary, mode) if unshipped(n))})
+    names, remaining, removable = _unshipped_roster(raw, ctx.data_dir)
     if not names:
         return
-    remaining = sorted(str(key) for key in connectors if not unshipped(key))
-    if not connectors and primary and not unshipped(primary):
-        remaining = [primary.strip()]
     listed = ", ".join(repr(n) for n in names)
     if not remaining:
         message = (
             f"connector {listed} is not shipped by this release and is the only connector configured; "
-            f"config.yaml was left unchanged and the gateway will not start until you choose a supported "
-            f"connector (`defenseclaw setup <connector>`) or remove it (`defenseclaw setup remove <name> --yes`); "
-            f"{_REMOVED_CONNECTORS_DOC}"
+            f"config.yaml was left unchanged and the gateway will not start until you "
+            f"{_remove_or_replace_hint(removable, force=False)}; {_REMOVED_CONNECTORS_DOC}"
         )
         ux.warn(message, indent="    ")
         ctx.changes.append(message)
@@ -3151,7 +3311,10 @@ def migrate(
     alone cannot tell; without it the 0.x cursor is used, if present.
 
     ``check`` changes nothing: it reports the pending steps and raises
-    :class:`ConfigTooNewError` for a config from a newer release. For a 0.x
+    :class:`ConfigTooNewError` for a config from a newer release, and
+    :class:`MigrationError` when every configured connector is one this
+    release does not ship (the upgrade would leave a gateway that cannot
+    start). For a 0.x
     install with ``gateway_binary`` set, it also converts a scratch copy with
     that (staged) gateway so a conversion failure surfaces before the
     installer swaps anything.
@@ -3185,6 +3348,7 @@ def migrate(
     steps = _pending_migration_steps(version, from_version, data_dir, config_path, CURRENT_CONFIG_VERSION)
     names = [name for name, _step in steps]
     if check:
+        _check_connector_roster(config_path, data_dir, __version__)
         # The v8 conversion reads the config as it is now, so the preflight is
         # only meaningful when no earlier 0.x step would change it first; the
         # real migration still validates and the installer rolls back on failure.

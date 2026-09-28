@@ -54,6 +54,16 @@ CONNECTOR_MAP_BLOCKS: tuple[str, ...] = (
     "observability",
 )
 
+# Top-level maps that are themselves keyed by connector ID.
+TOP_LEVEL_CONNECTOR_MAPS: tuple[str, ...] = ("connector_hooks",)
+
+# Connector name lists, as key paths from the document root.
+CONNECTOR_NAME_LISTS: tuple[tuple[str, ...], ...] = (
+    ("guardrail", "judge", "hook_connectors"),
+    ("application_protection", "include_connectors"),
+    ("application_protection", "exclude_connectors"),
+)
+
 
 def _fold(name: Any) -> str:
     return "".join(str(name or "").split()).lower()
@@ -89,9 +99,16 @@ def migrate_connector_keys(primary: Any, keys: list[str]) -> tuple[Any, dict[str
     return new_primary, {retired[0]: REPLACEMENT}, retired[1:]
 
 
-def notice(config_path: str = "", dropped: list[str] | None = None) -> str:
-    """Operator-facing summary of one config migration."""
+def notice(config_path: str = "", dropped: list[str] | None = None, updated: list[str] | None = None) -> str:
+    """Operator-facing summary of one config migration.
+
+    *updated* names the settings that moved (``guardrail.connector``,
+    ``connector_hooks`` ...); *dropped* the retired keys removed because an
+    explicit replacement entry won. Mirrors the Go loader's notice.
+    """
     where = (config_path or "").strip() or "config"
+    if updated:
+        where = f"{', '.join(updated)} of {where}"
     msg = f"{HEADLINE}: moved connector {RETIRED_DESKTOP_ID!r} to {REPLACEMENT!r} in {where}"
     if dropped:
         listed = ", ".join(repr(d) for d in dropped)
@@ -99,34 +116,71 @@ def notice(config_path: str = "", dropped: list[str] | None = None) -> str:
     return msg
 
 
-def _migrate_connector_map(block: dict[Any, Any]) -> tuple[bool, list[str]]:
-    """Apply the rename to ``block["connectors"]`` keys, in place."""
-    connectors = block.get("connectors")
+def _migrate_key_map(connectors: Any) -> tuple[Any, bool, list[str]]:
+    """Apply the rename to the keys of one connector-keyed mapping.
+
+    Returns ``(mapping, changed, dropped)``; *mapping* is a rebuilt dict when
+    anything changed (key order kept), else the input.
+    """
     if not isinstance(connectors, dict):
-        return False, []
+        return connectors, False, []
     _, rename, dropped = migrate_connector_keys("", [str(k) for k in connectors])
     if not rename and not dropped:
-        return False, []
+        return connectors, False, []
     rebuilt: dict[Any, Any] = {}
     for key, value in connectors.items():
         if str(key) in dropped:
             continue
         rebuilt[rename.get(str(key), key)] = value
-    block["connectors"] = rebuilt
-    return True, dropped
+    return rebuilt, True, dropped
+
+
+def _migrate_connector_map(block: dict[Any, Any]) -> tuple[bool, list[str]]:
+    """Apply the rename to ``block["connectors"]`` keys, in place."""
+    rebuilt, changed, dropped = _migrate_key_map(block.get("connectors"))
+    if changed:
+        block["connectors"] = rebuilt
+    return changed, dropped
+
+
+def migrate_connector_list(values: Any) -> tuple[Any, bool]:
+    """Apply the rename to one connector name list.
+
+    Mirrors the Go ``migrateLegacyConnectorList``: the first retired entry
+    becomes the replacement unless the replacement is already listed, and
+    further retired entries are removed, so the list names each connector
+    once. Returns ``(values, changed)``; *values* is a new list when changed.
+    """
+    if not isinstance(values, list) or not values:
+        return values, False
+    listed = any(isinstance(v, str) and v.strip().lower() == REPLACEMENT for v in values)
+    changed = False
+    out: list[Any] = []
+    for value in values:
+        if not (isinstance(value, str) and is_retired(value)):
+            out.append(value)
+            continue
+        changed = True
+        if not listed:
+            out.append(REPLACEMENT)
+            listed = True
+    return (out, True) if changed else (values, False)
 
 
 def migrate_raw_config(raw: Any, config_path: str = "") -> list[str]:
     """Rename the retired ID in a raw ``config.yaml`` mapping, in place.
 
-    Touches ``guardrail.connector``, ``claw.mode`` and the keys of every
-    per-connector map in :data:`CONNECTOR_MAP_BLOCKS`. Must run before
-    connector keys are normalized or checked for duplicates. Returns the
-    notices (empty when nothing changed).
+    Touches ``guardrail.connector``, ``claw.mode``, the keys of every
+    per-connector map in :data:`CONNECTOR_MAP_BLOCKS` and
+    :data:`TOP_LEVEL_CONNECTOR_MAPS`, and the name lists in
+    :data:`CONNECTOR_NAME_LISTS`. Must run before connector keys are
+    normalized or checked for duplicates. Returns the notices (empty when
+    nothing changed); the notice names every setting that moved and every
+    retired key that was dropped.
     """
     if not isinstance(raw, dict):
         return []
-    changed = False
+    updated: list[str] = []
     dropped: list[str] = []
     guardrail = raw.get("guardrail")
     if isinstance(guardrail, dict) and "connector" in guardrail:
@@ -134,24 +188,56 @@ def migrate_raw_config(raw: Any, config_path: str = "") -> list[str]:
         new_primary, _ = canonical(primary)
         if new_primary != primary:
             guardrail["connector"] = new_primary
-            changed = True
-    for block_key in CONNECTOR_MAP_BLOCKS:
-        block = raw.get(block_key)
-        if not isinstance(block, dict):
-            continue
-        moved, dropped_keys = _migrate_connector_map(block)
-        changed = changed or moved
-        if block_key == "guardrail":
-            dropped.extend(dropped_keys)
-        else:
-            dropped.extend(f"{block_key}.connectors.{key}" for key in dropped_keys)
+            updated.append("guardrail.connector")
     claw = raw.get("claw")
     if isinstance(claw, dict) and "mode" in claw:
         mode, migrated = canonical(claw.get("mode"))
         if migrated:
             claw["mode"] = mode
-            changed = True
-    return [notice(config_path, dropped)] if changed else []
+            updated.append("claw.mode")
+    for block_key in CONNECTOR_MAP_BLOCKS:
+        block = raw.get(block_key)
+        if not isinstance(block, dict):
+            continue
+        moved, dropped_keys = _migrate_connector_map(block)
+        if moved:
+            updated.append(f"{block_key}.connectors")
+        if block_key == "guardrail":
+            dropped.extend(dropped_keys)
+        else:
+            dropped.extend(f"{block_key}.connectors.{key}" for key in dropped_keys)
+    for map_key in TOP_LEVEL_CONNECTOR_MAPS:
+        rebuilt, moved, dropped_keys = _migrate_key_map(raw.get(map_key))
+        if moved:
+            raw[map_key] = rebuilt
+            updated.append(map_key)
+            dropped.extend(f"{map_key}.{key}" for key in dropped_keys)
+    for path in CONNECTOR_NAME_LISTS:
+        parent: Any = raw
+        for key in path[:-1]:
+            parent = parent.get(key) if isinstance(parent, dict) else None
+        if not isinstance(parent, dict):
+            continue
+        values, moved = migrate_connector_list(parent.get(path[-1]))
+        if moved:
+            parent[path[-1]] = values
+            updated.append(".".join(path))
+    return [notice(config_path, dropped, _in_go_order(updated))] if updated else []
+
+
+# The order the Go loader lists moved settings in its notice.
+_NOTICE_ORDER: tuple[str, ...] = (
+    "guardrail.connector",
+    "guardrail.connectors",
+    "claw.mode",
+    *(f"{block}.connectors" for block in CONNECTOR_MAP_BLOCKS if block != "guardrail"),
+    *TOP_LEVEL_CONNECTOR_MAPS,
+    *(".".join(path) for path in CONNECTOR_NAME_LISTS),
+)
+
+
+def _in_go_order(updated: list[str]) -> list[str]:
+    return sorted(updated, key=_NOTICE_ORDER.index)
 
 
 def migrated_copy(raw: Any, config_path: str = "") -> tuple[Any, list[str]]:

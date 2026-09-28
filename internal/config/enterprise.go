@@ -13,11 +13,15 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
@@ -349,17 +353,127 @@ func (c *Config) DeclaredEnterpriseProfile() string {
 	return c.declaredEnterpriseProfile
 }
 
-// standaloneRulePackDefault keeps the default rule pack inside policy_dir.
-// The loader's generic default lives under data_dir, which the standalone
-// gateway service can write, so in the standalone profile that path always
-// maps to the pack a per-user install would seed in policy_dir.
+// standaloneRulePackDefault moves the loader's implicit rule pack out of
+// data_dir, which the standalone gateway service can write. The pack a
+// per-user install would seed in policy_dir wins when policy_dir is outside
+// data_dir. For a config read from the Linux or macOS standalone layout's
+// config path, where the lifecycle installs the vendor rule packs, the
+// implicit pack is the vendor default pack when that policy_dir folder does
+// not exist or policy_dir is inside data_dir, so leaving rule_pack_dir unset
+// always names a pack that exists. An explicit rule_pack_dir is kept as
+// written.
 func standaloneRulePackDefault(cfg *Config, dataDir string) {
 	implicit := filepath.Join(dataDir, "policies", "guardrail", "default")
-	if cfg.Guardrail.RulePackDir != implicit || strings.TrimSpace(cfg.PolicyDir) == "" ||
-		filepath.Clean(cfg.PolicyDir) == filepath.Join(dataDir, "policies") {
+	if cfg.Guardrail.RulePackDir != implicit {
 		return
 	}
-	cfg.Guardrail.RulePackDir = filepath.Join(cfg.PolicyDir, "guardrail", "default")
+	policyPack := ""
+	if policyDir := strings.TrimSpace(cfg.PolicyDir); policyDir != "" &&
+		filepath.Clean(policyDir) != filepath.Join(dataDir, "policies") {
+		policyPack = filepath.Join(policyDir, "guardrail", "default")
+	}
+	layout, onLayout := standaloneUnixLayoutForConfig(cfg.ConfigFilePath)
+	if !onLayout {
+		if policyPack != "" {
+			cfg.Guardrail.RulePackDir = policyPack
+		}
+		return
+	}
+	if cfg.rulePackDirDeclared {
+		// An explicit value that happens to equal the implicit path stays
+		// for the lifecycle to refuse (it is inside data_dir).
+		return
+	}
+	if policyPack != "" {
+		// Only a folder known to be absent falls back: any other stat
+		// error keeps the policy_dir pack, which the trust checks report.
+		if _, err := os.Stat(policyPack); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			cfg.Guardrail.RulePackDir = policyPack
+			return
+		}
+	}
+	cfg.Guardrail.RulePackDir = path.Join(layout.VendorPolicyDir, "guardrail", "default")
+}
+
+// standaloneUnixLayoutForConfig returns the Linux or macOS standalone layout
+// whose fixed config path is configFile. The services read the deployment's
+// config there and the lifecycle validates a staged config under that path,
+// so every process that loads it resolves the same layout, including a
+// lifecycle plan checked on a host of another OS. A Windows path never
+// matches.
+func standaloneUnixLayoutForConfig(configFile string) (managed.StandaloneLayout, bool) {
+	configFile = strings.TrimSpace(configFile)
+	if !strings.HasPrefix(configFile, "/") {
+		return managed.StandaloneLayout{}, false
+	}
+	clean := path.Clean(configFile)
+	for _, goos := range []string{"linux", "darwin"} {
+		if layout, err := managed.StandaloneLayoutFor(goos); err == nil && layout.ConfigPath == clean {
+			return layout, true
+		}
+	}
+	return managed.StandaloneLayout{}, false
+}
+
+// standaloneLayoutDataDir returns the layout's data directory for a managed
+// standalone config read from a Linux or macOS standalone layout config path
+// that leaves data_dir unset. The service sandbox lets the gateway write only
+// there and the service units already point DEFENSECLAW_HOME at it, so it is
+// the only value the lifecycle accepts; without this default the loader
+// would use the config's own folder and the lifecycle would refuse the
+// config. An explicit data_dir, even a wrong one, is kept so the lifecycle
+// can refuse it.
+func standaloneLayoutDataDir(configFile string, document *yaml.Node) (string, bool) {
+	layout, ok := standaloneUnixLayoutForConfig(configFile)
+	if !ok {
+		return "", false
+	}
+	root := v8DocumentRoot(document)
+	if root == nil || root.Kind != yaml.MappingNode || v8YAMLMapValue(root, "data_dir") != nil {
+		return "", false
+	}
+	mode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	if mode == "" {
+		mode = normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
+	}
+	if !managed.IsManagedEnterprise(mode) {
+		return "", false
+	}
+	declared := yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "profile"))
+	profile, err := managed.ResolveEnterpriseProfile(layout.GOOS, mode, os.Getenv(managed.EnterpriseProfileEnv), declared)
+	if err != nil || !managed.IsStandaloneProfile(profile) {
+		return "", false
+	}
+	return layout.DataDir, true
+}
+
+// standaloneLayoutDataDirForSource applies standaloneLayoutDataDir to the
+// source the loader is about to read: sourceBytes when provided, else the
+// file. A read or parse error returns false; the loader reports it itself.
+func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte, sourceProvided bool) (string, bool) {
+	if _, ok := standaloneUnixLayoutForConfig(configFile); !ok {
+		return "", false
+	}
+	raw := sourceBytes
+	if !sourceProvided {
+		data, err := os.ReadFile(configFile)
+		if err != nil {
+			return "", false
+		}
+		raw = data
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return "", false
+	}
+	return standaloneLayoutDataDir(configFile, &document)
+}
+
+func yamlScalarValue(node *yaml.Node) string {
+	if node == nil || node.Kind != yaml.ScalarNode {
+		return ""
+	}
+	return node.Value
 }
 
 func enterpriseBlockEmpty(e EnterpriseConfig) bool {
@@ -534,11 +648,13 @@ func validateConnectorPolicy(prefix string, p EnterpriseConnectorPolicy) error {
 
 // validateEnterpriseAgentPrefix accepts an absolute, administrator-style
 // install prefix. User-writable trees are refused: an agent binary found
-// there could be anything a user put there.
+// there could be anything a user put there. The key applies to Linux and
+// macOS only, so it is checked with Unix path semantics on every OS: a config
+// shared with Windows hosts loads there too.
 func validateEnterpriseAgentPrefix(prefix string) error {
 	clean := strings.TrimSpace(prefix)
 	if clean == "" || !strings.HasPrefix(clean, "/") || strings.Contains(clean, "..") ||
-		strings.ContainsAny(clean, ":\x00\r\n") || filepath.Clean(clean) != clean {
+		strings.ContainsAny(clean, ":\x00\r\n") || path.Clean(clean) != clean {
 		return fmt.Errorf("config: enterprise.enrollment.agent_prefixes entry %q must be a clean absolute path", prefix)
 	}
 	if clean == "/" {

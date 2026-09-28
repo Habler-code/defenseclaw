@@ -236,6 +236,10 @@ type Config struct {
 	// declared it, before the service pin or the per-OS default filled it
 	// in. Set only by the loader; not serialized.
 	declaredEnterpriseProfile string
+	// rulePackDirDeclared records that the config source sets
+	// guardrail.rule_pack_dir, so the standalone implicit rule pack default
+	// never rewrites an explicit value. Set only by the loader.
+	rulePackDirDeclared bool
 	// LegacyConnectorNotices records connector IDs this load moved to their
 	// replacement (see internal/legacyconnector). The gateway logs them once
 	// per boot and finishes the host-side cleanup. Never serialized.
@@ -2738,6 +2742,12 @@ func loadConfigSource(
 		filepath.Clean(configuredPath) == configFile {
 		dataDir = DefaultDataPath()
 	}
+	// A managed standalone config at the Linux or macOS layout path that
+	// leaves data_dir unset uses the layout's data directory, the one the
+	// services and the lifecycle require, instead of the config's folder.
+	if layoutDataDir, ok := standaloneLayoutDataDirForSource(configFile, sourceBytes, sourceProvided); ok {
+		dataDir = layoutDataDir
+	}
 	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
 	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", managed.DeploymentModeEnv, err)
@@ -2841,6 +2851,7 @@ func loadConfigSource(
 		}
 	}
 	cfg.ConfigFilePath = configFile
+	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)

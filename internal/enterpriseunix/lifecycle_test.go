@@ -345,32 +345,22 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 	cases := map[string]struct {
 		replace, with, want string
 	}{
-		"missing admin pack":                      {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist"},
-		"service-writable":                        {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir"},
-		"unknown vendor pack":                     {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships"},
-		"implicit follows empty admin policy_dir": {"policy_dir: /opt/defenseclaw/share/policies\n", "policy_dir: /etc/defenseclaw/policies\n", ""},
+		"missing admin pack":  {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist"},
+		"service-writable":    {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir"},
+		"unknown vendor pack": {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			h := newTestHost(t, "linux")
 			cfg := filepath.Join(t.TempDir(), "config.yaml")
 			raw := strings.Replace(string(DefaultConfig(h.env.Layout)), tc.replace, tc.with, 1)
-			if tc.want == "" {
-				// Without rule_pack_dir the pack follows policy_dir, which is
-				// empty here.
-				raw = strings.Replace(raw, "  rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default\n", "", 1)
-			}
 			if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
 			requireError(t, r, codeConfig)
-			want := tc.want
-			if want == "" {
-				want = "does not exist"
-			}
-			if len(r.Errors) == 0 || !strings.Contains(r.Errors[0].Message, want) {
-				t.Fatalf("errors = %+v, want %q", r.Errors, want)
+			if len(r.Errors) == 0 || !strings.Contains(r.Errors[0].Message, tc.want) {
+				t.Fatalf("errors = %+v, want %q", r.Errors, tc.want)
 			}
 			if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
 				t.Fatal("binaries installed despite an unusable rule pack")

@@ -62,6 +62,49 @@ class MigrateRawConfigTests(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertIn(repr(f"observability.connectors.{RETIRED}"), notices[0])
 
+    def test_connector_hooks_map_is_renamed(self):
+        raw = {"guardrail": {"connector": DEVIN}, "connector_hooks": {RETIRED: {"enabled": True, "mode": "action"}}}
+        notices = legacy_connector.migrate_raw_config(raw, "/etc/dc/config.yaml")
+        self.assertEqual(raw["connector_hooks"], {DEVIN: {"enabled": True, "mode": "action"}})
+        self.assertEqual(len(notices), 1)
+        self.assertIn("connector_hooks of /etc/dc/config.yaml", notices[0])
+
+    def test_connector_hooks_keeps_an_explicit_devin_entry(self):
+        raw = {"connector_hooks": {DEVIN: {"mode": "observe"}, RETIRED: {"mode": "action"}}}
+        notices = legacy_connector.migrate_raw_config(raw)
+        self.assertEqual(raw["connector_hooks"], {DEVIN: {"mode": "observe"}})
+        self.assertIn(repr(f"connector_hooks.{RETIRED}"), notices[0])
+
+    def test_judge_hook_connectors_list_is_renamed_once(self):
+        raw = {"guardrail": {"judge": {"enabled": True, "hook_connectors": ["codex", RETIRED, DEVIN]}}}
+        notices = legacy_connector.migrate_raw_config(raw)
+        self.assertEqual(raw["guardrail"]["judge"]["hook_connectors"], ["codex", DEVIN])
+        self.assertIn("guardrail.judge.hook_connectors", notices[0])
+
+    def test_application_protection_include_connectors_is_renamed(self):
+        raw = {"application_protection": {"include_connectors": [RETIRED, "cursor"]}}
+        notices = legacy_connector.migrate_raw_config(raw)
+        self.assertEqual(raw["application_protection"]["include_connectors"], [DEVIN, "cursor"])
+        self.assertIn("application_protection.include_connectors", notices[0])
+
+    def test_application_protection_exclude_connectors_is_renamed(self):
+        raw = {"application_protection": {"exclude_connectors": [RETIRED.capitalize(), RETIRED]}}
+        notices = legacy_connector.migrate_raw_config(raw)
+        self.assertEqual(raw["application_protection"]["exclude_connectors"], [DEVIN])
+        self.assertIn("application_protection.exclude_connectors", notices[0])
+
+    def test_notice_names_every_moved_setting_in_the_go_order(self):
+        raw = {
+            "claw": {"mode": RETIRED},
+            "guardrail": {"connector": RETIRED, "judge": {"hook_connectors": [RETIRED]}},
+            "connector_hooks": {RETIRED: {}},
+        }
+        notices = legacy_connector.migrate_raw_config(raw, "config.yaml")
+        self.assertIn(
+            "in guardrail.connector, claw.mode, connector_hooks, guardrail.judge.hook_connectors of config.yaml",
+            notices[0],
+        )
+
     def test_unaffected_config_is_untouched(self):
         raw = {"claw": {"mode": "cursor"}, "guardrail": {"connector": "cursor", "connectors": {"cursor": {}}}}
         before = yaml.safe_dump(raw)
@@ -184,11 +227,49 @@ class UpgradeMigrationTests(unittest.TestCase):
         self.assertEqual(doc["observability"]["connectors"], {DEVIN: {"webhooks": []}})
         self.assertEqual(doc["observability"]["destinations"][0]["select"]["connectors"], ["codex"])
 
+    def test_migration_renames_connector_hooks_and_lists_in_place(self):
+        body = (
+            "# operator comment kept\n"
+            "guardrail:\n  connector: codex\n  judge:\n    enabled: true\n"
+            f"    hook_connectors: [codex, {RETIRED}]  # judge comment kept\n"
+            "connector_hooks:\n"
+            f"  {RETIRED}:\n    enabled: true\n    mode: action\n"
+            "application_protection:\n  include_connectors:\n    - cursor\n"
+            f"    - {RETIRED}\n  exclude_connectors:\n  - '{RETIRED}'\n"
+        )
+        text, changes = self._run(body)
+        self.assertEqual(len(changes), 1)
+        self.assertIn("connector_hooks", changes[0])
+        self.assertIn("# operator comment kept", text)
+        self.assertIn("# judge comment kept", text)
+        self.assertNotIn(RETIRED, text)
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["guardrail"]["judge"]["hook_connectors"], ["codex", DEVIN])
+        self.assertEqual(doc["connector_hooks"], {DEVIN: {"enabled": True, "mode": "action"}})
+        self.assertEqual(doc["application_protection"]["include_connectors"], ["cursor", DEVIN])
+        self.assertEqual(doc["application_protection"]["exclude_connectors"], [DEVIN])
+
+    def test_migration_deduplicates_a_list_that_already_names_devin(self):
+        body = f"guardrail:\n  connector: codex\n  judge:\n    hook_connectors:\n      - {DEVIN}\n      - {RETIRED}\n"
+        text, changes = self._run(body)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(yaml.safe_load(text)["guardrail"]["judge"]["hook_connectors"], [DEVIN])
+
     def test_migration_leaves_unaffected_config_alone(self):
         body = "guardrail:\n  connector: cursor\n"
         text, changes = self._run(body)
         self.assertEqual(text, body)
         self.assertEqual(changes, [])
+
+    def test_migrate_runs_the_step_for_a_retired_name_only_in_a_list(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    f"config_version: 8\nguardrail:\n  connector: codex\napplication_protection:\n  exclude_connectors: [{RETIRED}]\n"
+                )
+            steps = migrations._pending_migration_steps(8, None, tmpdir, path, 8)
+            self.assertEqual([fn for _name, fn in steps], [migrations._migrate_connector_roster])
 
     def test_migrate_runs_the_step_only_when_the_config_names_the_old_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:

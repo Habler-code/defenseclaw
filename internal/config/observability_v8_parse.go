@@ -56,6 +56,11 @@ func ParseCompileObservabilityV8(
 	dataDir := strings.TrimSpace(envelope.DataDir)
 	if dataDir == "" {
 		dataDir = strings.TrimSpace(options.DefaultDataDir)
+		// The runtime loader defaults the same way (standaloneLayoutDataDir),
+		// so the compiled local store paths match the runtime data_dir.
+		if layoutDataDir, ok := standaloneLayoutDataDir(sourceName, document.Document); ok {
+			dataDir = layoutDataDir
+		}
 	}
 	if dataDir == "" {
 		return nil, annotateObservabilityV8SemanticError(document, fmt.Errorf("config: v8 compilation requires a data_dir or explicit DefaultDataDir option"))

@@ -3937,6 +3937,7 @@
             "mode": {
               "type": "string",
               "enum": [
+                "",
                 "authenticode",
                 "hash_pinned"
               ]
