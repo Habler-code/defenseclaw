@@ -15,9 +15,35 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
+
+// WIN-F37: the Claude managed-hooks-only lock follows the claudecode machine
+// policy: enforce by default and without a config, off only for preserve.
+func TestWindowsClaudeManagedHooksOnlyFollowsTheMachinePolicy(t *testing.T) {
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = nil
+	if !windowsClaudeManagedHooksOnlyEnforced() {
+		t.Fatal("no config must keep the secure default (enforce)")
+	}
+	cfg = &config.Config{}
+	if !windowsClaudeManagedHooksOnlyEnforced() {
+		t.Fatal("the default policy must enforce the lock")
+	}
+	cfg.Enterprise.MachinePolicy.Default.ManagedHooksOnly = config.ManagedHooksOnlyPreserve
+	if windowsClaudeManagedHooksOnlyEnforced() {
+		t.Fatal("default managed_hooks_only: preserve must drop the lock")
+	}
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{
+		"claudecode": {ManagedHooksOnly: config.ManagedHooksOnlyEnforce},
+	}
+	if !windowsClaudeManagedHooksOnlyEnforced() {
+		t.Fatal("a claudecode enforce override must keep the lock")
+	}
+}
 
 // A Windows user whose connectors are all machine policy (Cursor, Codex,
 // Claude) has no per-user manifest row, but can still add a user-level

@@ -336,7 +336,9 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		return InstallResult{}, fmt.Errorf("enterprise hooks: managed policy executable %s does not match trusted hook executable %s", state.HookExecutable, hookExecutable)
 	}
 	// Standalone verifies every row against the one deployment-wide body.
-	policySetup := claudeMachinePolicySetup(setupOpts, opts.MachinePolicyContractID, windowsEnterpriseStandaloneProcess())
+	policySetup := withWindowsClaudeManagedHooksOnly(
+		claudeMachinePolicySetup(setupOpts, opts.MachinePolicyContractID, windowsEnterpriseStandaloneProcess()),
+	)
 	expectedPolicy, err := provider.ManagedHookPolicy(policySetup)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: build canonical Claude Code managed policy: %w", err)

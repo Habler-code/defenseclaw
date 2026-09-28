@@ -369,3 +369,53 @@ func TestClaudeManagedSettingsRejectsDoctorOversizePolicy(t *testing.T) {
 		t.Fatalf("oversize managed settings = (exists=%v, err=%v)", exists, err)
 	}
 }
+
+// WIN-F37: the Windows standalone lifecycle asks for the managed-hooks-only
+// lock, so user and project hooks cannot rewrite tool input after
+// inspection. The default rendering (Secure Client, per-user) never carries
+// it, and neither rendering verifies as the other.
+func TestClaudeManagedHookPolicyRendersTheManagedHooksOnlyLockOnlyWhenAsked(t *testing.T) {
+	_, opts, _, _ := isolatedClaudePolicyFixture(t)
+	opts.ManagedEnterprise = true
+	opts.HookExecutable = filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	conn := NewClaudeCodeConnector()
+	plain, err := conn.ManagedHookPolicy(opts)
+	if err != nil {
+		t.Fatalf("render default policy: %v", err)
+	}
+	if strings.Contains(string(plain), "allowManagedHooksOnly") {
+		t.Fatalf("the default managed policy carries the lock:\n%s", plain)
+	}
+	lockedOpts := opts
+	lockedOpts.ClaudeAllowManagedHooksOnly = true
+	locked, err := conn.ManagedHookPolicy(lockedOpts)
+	if err != nil {
+		t.Fatalf("render locked policy: %v", err)
+	}
+	var plainDoc, lockedDoc map[string]interface{}
+	if err := json.Unmarshal(plain, &plainDoc); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(locked, &lockedDoc); err != nil {
+		t.Fatal(err)
+	}
+	if lockedDoc["allowManagedHooksOnly"] != true {
+		t.Fatalf("locked policy allowManagedHooksOnly = %v, want true:\n%s", lockedDoc["allowManagedHooksOnly"], locked)
+	}
+	plainHooks, _ := json.Marshal(plainDoc["hooks"])
+	lockedHooks, _ := json.Marshal(lockedDoc["hooks"])
+	if string(plainHooks) != string(lockedHooks) || len(lockedDoc) != 2 {
+		t.Fatalf("the lock changed more than one key:\n%s", locked)
+	}
+	if err := conn.VerifyManagedHookPolicy(locked, lockedOpts); err != nil {
+		t.Fatalf("canonical locked policy rejected: %v", err)
+	}
+	if err := conn.VerifyManagedHookPolicy(plain, lockedOpts); err == nil ||
+		!strings.Contains(err.Error(), "allowManagedHooksOnly: true") {
+		t.Fatalf("unlocked policy under the lock = %v, want the missing-lock diagnostic", err)
+	}
+	if err := conn.VerifyManagedHookPolicy(locked, opts); err == nil ||
+		!strings.Contains(err.Error(), "canonical DefenseClaw policy") {
+		t.Fatalf("locked policy for the default profile = %v, want a canonical mismatch", err)
+	}
+}
