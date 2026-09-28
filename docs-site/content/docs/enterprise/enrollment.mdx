@@ -94,6 +94,15 @@ RHEL 9, run with `--no-auto-update`), which does not load
 [Vendor limits](/docs/enterprise/machine-policy#vendor-limits); tracked in
 [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
 
+A per-user agent that a user runs without installing it is not found
+either. OpenHands before 1.12.0 does not load DefenseClaw's hooks, and a
+user can start one straight from the uv cache
+(`uvx --from openhands==1.11.0 openhands`): in DefenseClaw's testing on
+macOS 15 it ran a command the policy blocks with no DefenseClaw decision
+and no audit record, and the user's enrolled OpenHands stayed ready. Only
+application control that allows approved agent versions closes it; see
+[Residual risks](/docs/enterprise/threat-model#residual-risks).
+
 ## Agents that cannot be enrolled
 
 When the enumerator finds an agent installed for an eligible user but cannot
