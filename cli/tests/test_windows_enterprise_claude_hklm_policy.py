@@ -106,13 +106,34 @@ def test_status_reports_hklm_shadowing_with_the_fix() -> None:
     # gateway read them; PSObject.Properties[...] ignores case.
     for owner in (
         "function Get-DefenseClawClaudeHKLMPolicyVerdict",
-        "function Test-DefenseClawClaudeHKLMCarriesInstalledHooks",
+        "function Get-DefenseClawClaudeHKLMHookCopies",
         "function Get-DefenseClawClaudeInstalledHookContract",
         "function Test-DefenseClawClaudeHandlerTargetsHook",
     ):
         body = _slice(module, owner, "\nfunction ")
         assert ".PSObject.Properties['" not in body, owner
         assert "Get-DefenseClawJsonMember" in body, owner
+
+
+def test_status_reads_the_hklm_policy_as_strict_case_sensitive_json() -> None:
+    # #899 review: ConvertFrom-Json accepts comments, trailing commas and
+    # single quotes (differently on Windows PowerShell 5.1 and PowerShell 7)
+    # and rejects keys that differ only in case, while Claude Code and the
+    # gateway do the opposite.
+    module = MODULE.read_text(encoding="utf-8")
+    verdict = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyVerdict", "function Get-DefenseClawClaudeHKLMPolicyState")
+    assert "ConvertFrom-DefenseClawStrictJson -Text $Raw" in verdict
+    begin = module.index("function ConvertFrom-DefenseClawStrictJsonString")
+    helpers = module[begin : module.index("function Get-DefenseClawClaudeHKLMPolicyState", begin)]
+    assert "ConvertFrom-Json" not in helpers.replace("ConvertFrom-Json differs", "")
+    assert "PSCustomObject" not in helpers[: helpers.index("function Get-DefenseClawClaudeMergePendingTargets")]
+    parser = _slice(module, "function ConvertFrom-DefenseClawStrictJson {", "\nfunction ")
+    assert "[StringComparer]::Ordinal" in parser
+    assert "JSON nesting exceeds 10000 levels" in parser
+    # The remedy names the version the gate compares with: the target's
+    # recorded contract, not the client the endpoints happen to run.
+    assert "the agent_version recorded for the target" in verdict
+    assert "the Claude Code version your endpoints run" not in module
 
 
 def test_status_and_gate_share_the_hklm_admission_vectors() -> None:
@@ -128,6 +149,23 @@ def test_status_and_gate_share_the_hklm_admission_vectors() -> None:
     )
     assert "//go:embed testdata/claude_hklm_admission_vectors.json" in go_test
     assert "ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, caseOpts)" in go_test
+    # #899 review: Claude Code runs one copy of a repeated DefenseClaw hook and
+    # a changed copy can be the one that runs, so it is refused under carry
+    # and merge.
+    wanted = {case["name"]: case["want"] for case in data["cases"]}
+    for name in (
+        "merge with a shorter DefenseClaw copy",
+        "exported hooks with a shorter PreToolUse copy after them",
+        "exported hooks with an async PreToolUse copy after them",
+        "merge with a shorter PreToolUse copy after the exported one",
+        "merge with an async PreToolUse copy after the exported one",
+        "single-quoted JSON",
+        "block comment inside the object",
+        "trailing comma in the object",
+    ):
+        assert wanted[name] == "refuse", name
+    for name in ("keys that differ only in case", "event keys that differ only in case"):
+        assert wanted[name] == "merge", name
 
 
 
@@ -145,7 +183,7 @@ def test_status_withholds_claude_verification_under_merge_until_the_floor_is_att
     # A merge policy that carries the DefenseClaw hooks is effective on every
     # client; only one that relies on merge raises the approved-client floor.
     floor = view[view.index("$merge = [bool]") :]
-    assert floor.index("Test-DefenseClawClaudeHKLMCarriesInstalledHooks") < floor.index(
+    assert floor.index("Get-DefenseClawClaudeHKLMHookCopies") < floor.index(
         "$state.merge_client_floor_required = $true"
     )
     status = _slice(module, "function Get-DefenseClawLifecycleStatus", "function Test-DefenseClawGuardianCoverageReport")

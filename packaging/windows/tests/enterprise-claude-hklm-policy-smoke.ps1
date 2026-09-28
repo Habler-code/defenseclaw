@@ -97,13 +97,23 @@ try {
                 want = $false
                 json = '{"hooks":{"Stop":[{"hooks":[{"args":["hook","--connector","claudecode"],"command":"' + $hook + '","timeout":30,"type":"command"}]}],"PreToolUse":[{"matcher":"*","hooks":[{"args":["hook","--connector","claudecode"],"command":"' + $hook + '","timeout":30,"type":"command"}]}]}}'
             }
+            # A second DefenseClaw PreToolUse copy: Claude Code runs one copy
+            # of a repeated hook, whatever its timeout.
+            'repeats the PreToolUse entry' = @{
+                want = $false
+                json = '{"hooks":{"Stop":[{"hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":30,"type":"command"}]}],"PreToolUse":[{"matcher":"*","hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":30,"type":"command"}]},{"matcher":"*","hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":30,"type":"command"}]}]}}'
+            }
+            'adds a shorter PreToolUse copy' = @{
+                want = $false
+                json = '{"hooks":{"Stop":[{"hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":30,"type":"command"}]}],"PreToolUse":[{"matcher":"*","hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":30,"type":"command"}]},{"matcher":"Bash","hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":1,"type":"command"}]}]}}'
+            }
             'has no hooks' = @{ want = $false; json = '{"model":"x"}' }
             'has non-object hooks' = @{ want = $false; json = '{"hooks":"none"}' }
         }
         foreach ($name in $cases.Keys) {
             $case = $cases[$name]
             try {
-                $settings = $case.json | Microsoft.PowerShell.Utility\ConvertFrom-Json
+                $settings = ConvertFrom-DefenseClawStrictJson -Text $case.json
                 $got = Test-DefenseClawClaudeHKLMCarriesInstalledHooks -Settings $settings -Layout $layout
                 if ([bool]$got -ne [bool]$case.want) {
                     $failures.Add("${name}: carries=$got, want $($case.want)")
@@ -114,7 +124,7 @@ try {
             }
         }
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $policyPath -Force
-        $settings = $cases['carries the installed matrix'].json | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $settings = ConvertFrom-DefenseClawStrictJson -Text $cases['carries the installed matrix'].json
         if (Test-DefenseClawClaudeHKLMCarriesInstalledHooks -Settings $settings -Layout $layout) {
             $failures.Add('without an installed DefenseClaw policy nothing can be carried')
         }
@@ -122,11 +132,65 @@ try {
             @('{"b":1,"a":[true,null,"x"]}', '{"a":[true,null,"x"],"b":1}'),
             @('{"a":{"d":2,"c":1}}', '{"a":{"c":1,"d":2}}')
         )) {
-            $left = ConvertTo-DefenseClawCanonicalJsonText -Value ($pair[0] | Microsoft.PowerShell.Utility\ConvertFrom-Json)
-            $right = ConvertTo-DefenseClawCanonicalJsonText -Value ($pair[1] | Microsoft.PowerShell.Utility\ConvertFrom-Json)
+            $left = ConvertTo-DefenseClawCanonicalJsonText -Value (ConvertFrom-DefenseClawStrictJson -Text $pair[0])
+            $right = ConvertTo-DefenseClawCanonicalJsonText -Value (ConvertFrom-DefenseClawStrictJson -Text $pair[1])
             if ($left -cne $right) {
                 $failures.Add("canonical JSON differs by key order: $left vs $right")
             }
+        }
+        # #899 review: the Status verdict parses the HKLM value as strict JSON
+        # with case-sensitive keys, as Claude Code and the gateway do.
+        foreach ($pair in @(
+            @('[1,[2,[]],{},true,false,null,-0.5e1,"x"]', '[1,[2,[]],{},true,false,null,-5,"x"]'),
+            @('{"a":1,"A":2}', '{"A":2,"a":1}'),
+            @('{"a":1,"a":{"b":2}}', '{"a":{"b":2}}'),
+            @('{"":{"":[]}}', '{"" : {"" : [ ]}}'),
+            @('["\u0041\n\"\\\/\t"]', '["A\n\"\\/\t"]'),
+            @(" `r`n`t{} ", '{}')
+        )) {
+            try {
+                $got = ConvertTo-DefenseClawCanonicalJsonText -Value (ConvertFrom-DefenseClawStrictJson -Text $pair[0])
+                $want = ConvertTo-DefenseClawCanonicalJsonText -Value (ConvertFrom-DefenseClawStrictJson -Text $pair[1])
+                if ($got -cne $want) {
+                    $failures.Add("strict JSON $($pair[0]) = $got, want $want")
+                }
+            }
+            catch {
+                $failures.Add("strict JSON $($pair[0]) threw $($_.Exception.Message)")
+            }
+        }
+        $cased = ConvertFrom-DefenseClawStrictJson -Text '{"hooks":1,"Hooks":2}'
+        if ($cased.Count -ne 2 -or [double](Get-DefenseClawJsonMember -Object $cased -Name 'Hooks').Value -ne 2 -or
+            $null -ne (Get-DefenseClawJsonMember -Object $cased -Name 'HOOKS')) {
+            $failures.Add('strict JSON did not keep keys that differ only in case')
+        }
+        foreach ($bad in @(
+            '', ' ', '{', '}', '{"a":1,}', '[1,]', '[,1]', '{,}', "{'a':1}", '{"a":1/*c*/}', '{"a":1}//c',
+            '[01]', '[1.]', '[.5]', '[+1]', '[-]', '[NaN]', '[Infinity]', "[`"a`tb`"]", '["\x"]', '["\u12"]',
+            '{"a" 1}', '{"a":}', '{a:1}', '[1 2]', '{"a":1} x', '{"a":1}{}', 'tru', 'nul', "`v{}", "{}`v",
+            ([string][char]0xFEFF + '{}')
+        )) {
+            try {
+                $null = ConvertFrom-DefenseClawStrictJson -Text $bad
+                $failures.Add("strict JSON accepted $bad")
+            }
+            catch {
+                # Refused, as Claude Code and the gateway refuse it.
+            }
+        }
+        # Windows PowerShell 5.1 ConvertFrom-Json stops at 100 levels; the
+        # gateway reads up to 10000.
+        $node = ConvertFrom-DefenseClawStrictJson -Text (('[' * 300) + (']' * 300))
+        $depth = 0
+        while ($node -is [Collections.IList]) {
+            $depth++
+            if ($node.Count -eq 0) {
+                break
+            }
+            $node = $node[0]
+        }
+        if ($depth -ne 300) {
+            $failures.Add("strict JSON kept $depth of 300 nested lists")
         }
         # The Status view reads the live registry and must never throw.
         try {
