@@ -35,6 +35,17 @@ Per-user connectors register the administrator-owned hook binary
 (`defenseclaw-hook --connector <name> --enterprise-managed`) in each enrolled
 user's configuration, and the guardian repairs it.
 
+On Windows, the guardian publishes Cursor's `hooks.json`, and the protected
+PowerShell adapter next to it, only while at least one user is enrolled for
+Cursor. A user is enrolled when the enumerator finds Cursor Desktop or the
+Cursor Agent CLI (`%LOCALAPPDATA%\cursor-agent`) in their profile at a
+version with a verified hook contract. Until then the file does not exist
+and Cursor runs without DefenseClaw hooks. `enterprise windows status` names
+each Cursor install it could not enroll (`hook_contract_unverified` for an
+Agent CLI build DefenseClaw has not reviewed), and `policy show` and
+`policy verify` report the missing file with this reason. Once a user is
+enrolled, Cursor refuses the tool calls of every user who is not.
+
 ## Managed OpenCode plugin
 
 The standalone payload ships a managed OpenCode plugin at

@@ -32,7 +32,7 @@ of the common Node version managers and package managers:
 | Platform | Also searched |
 | --- | --- |
 | Linux and macOS | nvm, fnm, Volta, asdf and mise Node installs, pnpm and yarn global directories, the npm prefix set in the user's `~/.npmrc`, Linuxbrew, the machine prefixes `/usr/local`, `/usr` and `/opt/homebrew`, and `agent_prefixes` |
-| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, and the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile (read by the enumerator as static files; nothing is executed) |
+| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, and the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed). The enumerator reads these as static files; nothing is executed |
 
 ## Filters
 
@@ -123,7 +123,11 @@ enroll it, it records the agent, and `status` and `verify` report it with
 
 A per-user connector in this state runs without DefenseClaw hooks. A
 machine-policy connector refuses the unenrolled user on Windows, and on
-Linux and macOS with `unenrolled_users: deny`.
+Linux and macOS with `unenrolled_users: deny`. Cursor on Windows is the
+exception while no user is enrolled for Cursor: its machine hooks file is
+published only while one is, so until then Cursor runs without DefenseClaw
+hooks, and the report says so (see
+[Machine policy](/docs/enterprise/machine-policy#routes-by-connector)).
 
 On Linux and macOS a user who has never been enrolled and whose home is
 untrusted (group- or other-writable, a symlink, owned by another account, or
