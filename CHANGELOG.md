@@ -143,6 +143,14 @@ rest also reach per-user installs.
 - **Amp's `async_shell_command` is inspected like its bash tool.** Commands
   an Amp release ran through `async_shell_command` got no command facts, so
   a rule that needs them was recorded but did not block.
+- **Kiro CLI 2.x runs DefenseClaw's tool hooks.** The `defenseclaw` agent
+  used the matcher `.*`, which kiro-cli 2.x never matches, so its tool hooks
+  never ran. It now uses `*`, and an agent with the old matcher fails
+  verification and is rewritten.
+- **Kiro shell calls get command facts.** The `__tool_use_purpose` note
+  (2.x) and the unset `cwd`, `description` and `timeout` (v3) left every Kiro
+  command partly parsed, so a command rule was only detected. They are now
+  dropped from the analyzed copy.
 - **Audit rows name the account for per-user connector hooks.** Rejected
   connector-hook and inspect-tool rows now carry `user.id` and
   `defenseclaw.user.name` when the caller is known, like hook decision rows.

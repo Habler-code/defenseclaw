@@ -51,8 +51,12 @@ func antigravityBoundedText(value any) bool {
 // exactly CommandLine, Cwd and those keys with their expected value types,
 // the metadata is dropped from the analyzed copy; any other shape is
 // returned unchanged and keeps its conservative parse. The audited
-// and inspected arguments are not changed.
+// and inspected arguments are not changed. Kiro's shell tools get the same
+// treatment (kiroShellActionArgs).
 func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) json.RawMessage {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") {
+		return kiroShellActionArgs(toolName, args)
+	}
 	if !strings.EqualFold(strings.TrimSpace(connectorName), "antigravity") ||
 		!strings.EqualFold(strings.TrimSpace(toolName), "run_command") {
 		return args
@@ -89,4 +93,75 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 		return args
 	}
 	return out
+}
+
+// kiroShellActionArgs drops what Kiro's shell tools send beside the closed
+// shell schema ActionFacts accepts: the CLI 2.x `shell` tool's
+// __tool_use_purpose note, and the unset cwd, description and timeout (JSON
+// null) of the v3 `execute_bash` tool. Neither carries command text, but as sent every real
+// Kiro command parsed as partial, so a command-fact rule matched only as text
+// (CRITICAL, allow). Any other key, or a note of another type, is kept, so an
+// unreviewed shape keeps its conservative parse.
+func kiroShellActionArgs(toolName string, args json.RawMessage) json.RawMessage {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "shell", "execute_bash":
+	default:
+		return args
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(args, &object); err != nil || object == nil || !jsonObjectKeysUnique(args) {
+		return args
+	}
+	projected := make(map[string]json.RawMessage, len(object))
+	dropped := false
+	for key, raw := range object {
+		switch key {
+		case "__tool_use_purpose":
+			var value any
+			if err := json.Unmarshal(raw, &value); err != nil || !antigravityBoundedText(value) {
+				return args
+			}
+			dropped = true
+		case "cwd", "description", "timeout":
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				dropped = true
+				continue
+			}
+			projected[key] = raw
+		default:
+			projected[key] = raw
+		}
+	}
+	if !dropped {
+		return args
+	}
+	out, err := json.Marshal(projected)
+	if err != nil {
+		return args
+	}
+	return out
+}
+
+// jsonObjectKeysUnique reports whether raw is one JSON object whose top-level
+// keys are all distinct. A projection must not hide a duplicate key that the
+// unprojected parse would report as ambiguous.
+func jsonObjectKeysUnique(raw json.RawMessage) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]bool)
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || seen[key] {
+			return false
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+	}
+	return true
 }
