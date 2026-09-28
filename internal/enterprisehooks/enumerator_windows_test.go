@@ -704,7 +704,7 @@ func staticEnrollmentLookup(account, domain string, err error) (windowsEnrollmen
 }
 
 func TestWindowsProfileEnrollmentDecision(t *testing.T) {
-	profile := windowsUserProfile{SID: "S-1-5-21-1-2-3-1012", Home: `C:\Users\dcrtvafbe30d1ee`}
+	profile := windowsUserProfile{SID: "S-1-5-21-1-2-3-1012", Home: `C:\Users\alice.CONTOSO`}
 	lookup, calls := staticEnrollmentLookup("alice", "CONTOSO", nil)
 	for _, tc := range []struct {
 		name            string
@@ -712,13 +712,13 @@ func TestWindowsProfileEnrollmentDecision(t *testing.T) {
 		want            windowsEnrollmentDecision
 	}{
 		{name: "no filters", want: windowsEnrollmentEnrolled},
-		{name: "exclude by directory name", exclude: []string{"DCRTVAFBE30D1EE"}, want: windowsEnrollmentExcluded},
+		{name: "exclude by directory name", exclude: []string{"ALICE.CONTOSO"}, want: windowsEnrollmentExcluded},
 		{name: "exclude by SID", exclude: []string{"s-1-5-21-1-2-3-1012"}, want: windowsEnrollmentExcluded},
 		{name: "exclude by account", exclude: []string{"alice"}, want: windowsEnrollmentExcluded},
 		{name: "exclude by domain account", exclude: []string{`contoso\ALICE`}, want: windowsEnrollmentExcluded},
 		{name: "exclude someone else", exclude: []string{"bob", "S-1-5-21-1-2-3-1013"}, want: windowsEnrollmentEnrolled},
 		{name: "exempt by account", exempt: []string{"alice"}, want: windowsEnrollmentExempt},
-		{name: "exclusion wins over exemption", exclude: []string{`CONTOSO\alice`}, exempt: []string{"dcrtvafbe30d1ee"}, want: windowsEnrollmentExcluded},
+		{name: "exclusion wins over exemption", exclude: []string{`CONTOSO\alice`}, exempt: []string{"alice.CONTOSO"}, want: windowsEnrollmentExcluded},
 	} {
 		got, _ := windowsProfileEnrollmentDecision(profile, tc.exclude, tc.exempt, lookup)
 		if got != tc.want {
@@ -726,7 +726,7 @@ func TestWindowsProfileEnrollmentDecision(t *testing.T) {
 		}
 	}
 	before := *calls
-	windowsProfileEnrollmentDecision(profile, []string{"S-1-5-21-9-9-9-1001", "dcrtvafbe30d1ee"}, nil, lookup)
+	windowsProfileEnrollmentDecision(profile, []string{"S-1-5-21-9-9-9-1001", "alice.CONTOSO"}, nil, lookup)
 	windowsProfileEnrollmentDecision(profile, nil, nil, lookup)
 	if *calls != before {
 		t.Fatal("SID, directory-name and empty filters must be decided without an account lookup")

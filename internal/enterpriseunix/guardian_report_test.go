@@ -40,9 +40,9 @@ func TestEnsureReportsTheGuardianTargetsAfterTheChange(t *testing.T) {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n  - user: dcm-std1\n    uid: 501\n    connector: devin\n")
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n  - user: alice\n    uid: 501\n    connector: devin\n")
 			// The guardian's report from before the change: everything protected.
-			if err := writeGuardianState(h, time.Now().Add(-time.Hour), []map[string]any{{"user": "dcm-std1", "connector": "devin", "ok": true}}); err != nil {
+			if err := writeGuardianState(h, time.Now().Add(-time.Hour), []map[string]any{{"user": "alice", "connector": "devin", "ok": true}}); err != nil {
 				t.Fatal(err)
 			}
 			h.env.GuardianReportTimeout = 10 * time.Second
@@ -57,7 +57,7 @@ func TestEnsureReportsTheGuardianTargetsAfterTheChange(t *testing.T) {
 				// The restarted guardian reconciles and reports a moment later.
 				go func() {
 					time.Sleep(200 * time.Millisecond)
-					reported <- writeGuardianState(h, time.Now(), []map[string]any{{"user": "dcm-std1", "connector": "devin", "ok": false,
+					reported <- writeGuardianState(h, time.Now(), []map[string]any{{"user": "alice", "connector": "devin", "ok": false,
 						"error": `enterprise hooks: connector devin agent version "3000.11.3" is not verified against a known hook contract: no hook contract matches normalized agent version`}})
 				}()
 			}}

@@ -948,20 +948,20 @@ func TestEnumerateUnixRevokesADeletedLocalAccountThatACachedLookupStillResolves(
 	homes := filepath.Join(root, "Users")
 	manifestPath := filepath.Join(root, "targets.yaml")
 	writeTestManifest(t, manifestPath,
-		ManifestTarget{User: "dcm-f1", UserHome: filepath.Join(homes, "dcm-f1"), UID: intPointer(505), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
-		ManifestTarget{User: "dcm-std1", UserHome: filepath.Join(homes, "dcm-std1"), UID: intPointer(502), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "bob", UserHome: filepath.Join(homes, "bob"), UID: intPointer(505), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(502), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
 	)
-	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"dcm-f1": unixSourceFiles, "dcm-std1": unixSourceFiles}}
-	// The lookup cache still answers for dcm-f1; the local node lists only
-	// dcm-std1 and so does the account listing.
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"bob": unixSourceFiles, "alice": unixSourceFiles}}
+	// The lookup cache still answers for bob; the local node lists only
+	// alice and so does the account listing.
 	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
-		"dcm-f1":   {Name: "dcm-f1", UID: 505, GID: 20, Home: filepath.Join(homes, "dcm-f1"), Shell: "/bin/zsh"},
-		"dcm-std1": {Name: "dcm-std1", UID: 502, GID: 20, Home: filepath.Join(homes, "dcm-std1"), Shell: "/bin/zsh"},
-	}, listed: []string{"dcm-std1"}}
+		"bob":   {Name: "bob", UID: 505, GID: 20, Home: filepath.Join(homes, "bob"), Shell: "/bin/zsh"},
+		"alice": {Name: "alice", UID: 502, GID: 20, Home: filepath.Join(homes, "alice"), Shell: "/bin/zsh"},
+	}, listed: []string{"alice"}}
 	opts := UnixEnumerateOptions{
 		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 501, UIDMax: 60000,
 		CheckHome: availableHome, State: state,
-		LocalAccounts:       func() (map[string]int, error) { return map[string]int{"dcm-std1": 502}, nil },
+		LocalAccounts:       func() (map[string]int, error) { return map[string]int{"alice": 502}, nil },
 		DirectoryConfigured: func() bool { return true },
 	}
 	cfg := enumeratorConfig("opencode")
@@ -978,18 +978,18 @@ func TestEnumerateUnixRevokesADeletedLocalAccountThatACachedLookupStillResolves(
 			t.Fatal(err)
 		}
 		users := manifestUsers(manifest)
-		if !users["dcm-std1"] {
+		if !users["alice"] {
 			t.Fatalf("cycle %d: the remaining account lost its row", cycle)
 		}
-		if wantDeleted := cycle < UnixRevokeAfterMisses; users["dcm-f1"] != wantDeleted {
-			t.Fatalf("cycle %d: deleted account present=%v, want %v (misses=%v, sources=%v, report=%+v)", cycle, users["dcm-f1"], wantDeleted, state.Misses, state.Sources, report)
+		if wantDeleted := cycle < UnixRevokeAfterMisses; users["bob"] != wantDeleted {
+			t.Fatalf("cycle %d: deleted account present=%v, want %v (misses=%v, sources=%v, report=%+v)", cycle, users["bob"], wantDeleted, state.Misses, state.Sources, report)
 		}
-		if source := state.Sources["dcm-f1"]; source == unixSourceDirectory {
+		if source := state.Sources["bob"]; source == unixSourceDirectory {
 			t.Fatalf("cycle %d: a cached lookup reclassified the deleted local account as a directory account", cycle)
 		}
 		writeTestManifest(t, manifestPath, manifest.Targets...)
 	}
-	if _, ok := state.Sources["dcm-f1"]; ok {
+	if _, ok := state.Sources["bob"]; ok {
 		t.Fatalf("a revoked user's source must be forgotten: %v", state.Sources)
 	}
 }

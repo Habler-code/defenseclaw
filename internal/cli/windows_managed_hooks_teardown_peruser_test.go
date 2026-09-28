@@ -21,7 +21,7 @@ import (
 func perUserTeardownManifest(connectorName string) enterprisehooks.Manifest {
 	return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{{
 		Connector:    connectorName,
-		UserHome:     `C:\Users\dcw-std1`,
+		UserHome:     `C:\Users\alice`,
 		SID:          "S-1-5-21-1000000000-2000000000-3000000000-1017",
 		AgentVersion: "1.0.88",
 	}}}

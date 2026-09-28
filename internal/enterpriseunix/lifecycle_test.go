@@ -924,7 +924,7 @@ func TestGuardianTargetReasonKeepsItsRemedy(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	remedy := "install it under an administrator-owned prefix listed in enterprise.enrollment.agent_prefixes"
-	realistic := "connector omnigent setup failed: Python interpreter /home/dcr-std1/.local/share/uv/tools/omnigent/bin/python3.12 resolves to /home/dcr-std1/.local/share/uv/python/cpython-3.12.11-linux-x86_64-gnu/bin/python3.12, which is not in a trusted install prefix; " + remedy
+	realistic := "connector omnigent setup failed: Python interpreter /home/alice/.local/share/uv/tools/omnigent/bin/python3.12 resolves to /home/alice/.local/share/uv/python/cpython-3.12.11-linux-x86_64-gnu/bin/python3.12, which is not in a trusted install prefix; " + remedy
 	oversized := "connector omnigent setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
 		{"user": "alice", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + realistic},
