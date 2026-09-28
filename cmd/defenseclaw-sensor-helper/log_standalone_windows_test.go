@@ -71,7 +71,8 @@ func TestStandaloneSensorHelperServiceLogPath(t *testing.T) {
 	if got := standaloneSensorHelperServiceLogPath(); got != "" {
 		t.Fatalf("a console run got a derived log %q", got)
 	}
-	stubStandaloneLog(t, true, logDir)
+	// A fresh root: the reused one already holds the helper directory.
+	stubStandaloneLog(t, true, t.TempDir())
 	standaloneLogDirTrustCheck = func(string) error { return errors.New("untrusted") }
 	if got := standaloneSensorHelperServiceLogPath(); got != "" {
 		t.Fatalf("an untrusted log root must fall back to stderr, got %q", got)
