@@ -17,11 +17,13 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -144,11 +146,14 @@ func (c enterprisePolicyContext) selected() ([]string, error) {
 
 // enterprisePolicyUserReport is the per-user part of show/verify.
 type enterprisePolicyUserReport struct {
-	User      string                                    `json:"user"`
-	Home      string                                    `json:"home"`
-	Decisions map[string]enterprisepolicy.GuardDecision `json:"foreign_hooks"`
-	Live      []enterprisepolicy.LiveResult             `json:"live,omitempty"`
-	Error     string                                    `json:"error,omitempty"`
+	User string `json:"user"`
+	Home string `json:"home"`
+	// Enrollment says why the enumerator never enrolls this account
+	// (Linux and macOS), or is empty.
+	Enrollment string                                    `json:"enrollment,omitempty"`
+	Decisions  map[string]enterprisepolicy.GuardDecision `json:"foreign_hooks"`
+	Live       []enterprisepolicy.LiveResult             `json:"live,omitempty"`
+	Error      string                                    `json:"error,omitempty"`
 }
 
 type enterprisePolicyReport struct {
@@ -182,6 +187,9 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		return report, errors.Join(err, targetErr)
 	}
 	userReport.Home = target.UserHome
+	if ctx.opts.GOOS != "windows" && cfg != nil {
+		userReport.Enrollment = unixEnrollmentExclusion(cfg.Enterprise.Enrollment, enterprisePolicyUser, target.UID)
+	}
 	scanErr := runAsEnterprisePolicyTarget(target, func() error {
 		for _, name := range connectors {
 			policy, ok := summary.Connectors[name]
@@ -210,6 +218,34 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		report.Complete = false
 	}
 	return report, errors.Join(err, scanErr)
+}
+
+// unixEnrollmentExclusion names the Linux and macOS enrollment rule that
+// keeps an account out of the guardian manifest regardless of its agents:
+// exclude_users, exempt_users (both match the name or the decimal uid, as
+// the enumerator does) and uid 0. It returns "" for any other account.
+func unixEnrollmentExclusion(enrollment config.EnterpriseEnrollmentConfig, name string, uid int) string {
+	listed := func(values []string) bool {
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" && (value == name || value == strconv.Itoa(uid)) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case listed(enrollment.ExcludeUsers):
+		return "excluded by enterprise.enrollment.exclude_users: never enrolled, so DefenseClaw installs no per-user hooks for this account"
+	case listed(enrollment.ExemptUsers):
+		return "exempt by enterprise.enrollment.exempt_users: not enrolled; its agent calls are allowed, inspected and logged"
+	case uid == 0:
+		root := strings.TrimSpace(enrollment.Root)
+		if root == "" {
+			root = config.EnterpriseRootInspect
+		}
+		return "root is never enrolled; enterprise.enrollment.root (" + root + ") decides how its agent calls are treated"
+	}
+	return ""
 }
 
 func runEnterprisePolicyShow(cmd *cobra.Command, _ []string) error {
@@ -347,6 +383,9 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 	}
 	if report.User != nil {
 		fmt.Fprintf(out, "\nUser %s (%s)\n", report.User.User, dashIfEmpty(report.User.Home))
+		if report.User.Enrollment != "" {
+			fmt.Fprintf(out, "    enrollment: %s\n", report.User.Enrollment)
+		}
 		if report.User.Error != "" {
 			fmt.Fprintf(out, "    error: %s\n", report.User.Error)
 		}

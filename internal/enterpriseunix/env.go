@@ -183,8 +183,14 @@ type Env struct {
 	OwnerOf func(path string) (int, int, error)
 	// Trust runs the managed trust checks on a rooted path.
 	Trust func(path string, kind TrustKind) error
-	// HealthGet fetches the gateway /health document.
+	// HealthGet fetches the gateway /health document over the hook socket
+	// (see gatewayHealth).
 	HealthGet func(ctx context.Context) (int, []byte, error)
+	// APIHealthGet fetches /health from the TCP API address. Only a gateway
+	// that does not answer /health on its hook socket (an earlier release,
+	// between a package upgrade and the restart or after a rollback) is
+	// probed there.
+	APIHealthGet func(ctx context.Context) (int, []byte, error)
 	// HookSocketPeer connects to the hook socket and returns the kernel
 	// credentials of the process serving it.
 	HookSocketPeer func(ctx context.Context) (peercred.Credentials, error)
@@ -273,8 +279,12 @@ func (e *Env) fillDefaults() {
 		e.Trust = defaultTrust
 	}
 	if e.HealthGet == nil {
+		path, addr := e.P(e.Layout.HookSocketPath), e.Layout.APIAddr
+		e.HealthGet = func(ctx context.Context) (int, []byte, error) { return getHealth(ctx, "unix", path, addr) }
+	}
+	if e.APIHealthGet == nil {
 		addr := e.Layout.APIAddr
-		e.HealthGet = func(ctx context.Context) (int, []byte, error) { return httpHealth(ctx, addr) }
+		e.APIHealthGet = func(ctx context.Context) (int, []byte, error) { return getHealth(ctx, "tcp", addr, addr) }
 	}
 	if e.HookSocketPeer == nil {
 		path := e.P(e.Layout.HookSocketPath)
@@ -347,14 +357,20 @@ func defaultTrust(path string, kind TrustKind) error {
 	return fmt.Errorf("unknown trust kind %d", kind)
 }
 
-// httpHealth probes the loopback gateway health endpoint without proxies.
-func httpHealth(ctx context.Context, addr string) (int, []byte, error) {
+// getHealth probes the gateway health endpoint at address on network
+// ("unix" for the hook socket, "tcp" for the loopback API) without proxies;
+// host is the request's Host.
+func getHealth(ctx context.Context, network, address, host string) (int, []byte, error) {
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	transport := &http.Transport{
-		Proxy:       nil,
-		DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		},
+		DisableKeepAlives: true,
 	}
 	client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/health", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+"/health", nil)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -378,25 +394,25 @@ func hookSocketPeer(ctx context.Context, path string) (peercred.Credentials, err
 	return peercred.FromConn(conn)
 }
 
-// gatewayServing checks, on macOS, that the gateway job itself serves the
-// hook socket. There the gateway binds 127.0.0.1:18970 itself, so a /health
-// answer on that port can come from any local process that bound it first,
-// while the real gateway retries its bind and launchd still reports it
-// running; the gateway serves the hook socket only after its TCP listener is
-// up. The socket lives in a directory only the service account can write,
-// and the kernel reports who is listening on it. On Linux PID 1 holds both
-// listeners and hands them only to the gateway unit, so the check is not
-// needed (and dialling a socket-activated listener would start the unit).
+// gatewayServing checks that the gateway serves the hook socket, where the
+// lifecycle reads its health (gatewayHealth). A /health answer on
+// 127.0.0.1:18970 can come from any local process that bound the port while
+// the gateway's own listener is down (on macOS while the gateway job
+// restarts, on Linux while the socket unit is stopped). The hook socket
+// lives in a directory only the service account can write, and the kernel
+// reports who is listening on it: the service account, or root. On Linux
+// PID 1 holds the socket-activated listener and hands it only to the
+// gateway unit; elsewhere the listener must be the gateway process itself.
 func (e *Env) gatewayServing(ctx context.Context, gateway Unit, serviceUID int) error {
-	if e.GOOS != "darwin" {
-		return nil
-	}
 	peer, err := e.HookSocketPeer(ctx)
 	if err != nil {
 		return fmt.Errorf("the gateway does not serve the hook socket %s: %w", e.Layout.HookSocketPath, err)
 	}
 	if peer.UID != serviceUID && peer.UID != 0 {
 		return fmt.Errorf("the hook socket %s is served by uid %d, not the %s service account (uid %d)", e.Layout.HookSocketPath, peer.UID, e.Layout.ServiceUser, serviceUID)
+	}
+	if e.GOOS == "linux" && peer.PID == 1 {
+		return nil
 	}
 	if status, err := e.Services.Status(ctx, gateway); err == nil && status.PID > 0 && peer.PID > 0 && status.PID != peer.PID {
 		return fmt.Errorf("the hook socket %s is served by pid %d, not the gateway job (pid %d)", e.Layout.HookSocketPath, peer.PID, status.PID)

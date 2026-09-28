@@ -267,19 +267,25 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	// The real machine-policy writers run inside the temporary root; only
 	// the root-ownership ancestor checks are off.
 	env.MachinePolicy = &policyManager{env: env, skipTrust: true}
+	gatewayName := unitGateway
+	if goos == "darwin" {
+		gatewayName = labelGateway
+	}
+	// The gateway's health document on its hook socket.
 	env.HealthGet = func(context.Context) (int, []byte, error) {
-		gateway := unitGateway
-		if goos == "darwin" {
-			gateway = labelGateway
-		}
-		if h.healthy && h.services.isActive(gateway) {
-			return 200, []byte(`{"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
+		if h.healthy && h.services.isActive(gatewayName) {
+			return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
 		}
 		return 0, nil, errors.New("connection refused")
 	}
+	// The TCP API is probed only for a gateway that refuses /health on its
+	// socket; tests that model one replace this.
+	env.APIHealthGet = func(context.Context) (int, []byte, error) {
+		return 0, nil, errors.New("the TCP API must not be probed")
+	}
 	env.HookSocketPeer = func(context.Context) (peercred.Credentials, error) {
 		// The gateway serves its hook socket when it is healthy.
-		if h.healthy && h.services.isActive(labelGateway) {
+		if h.healthy && h.services.isActive(gatewayName) {
 			account := h.accounts.accounts[layout.ServiceUser]
 			return peercred.Credentials{UID: account.UID, GID: account.GID}, nil
 		}

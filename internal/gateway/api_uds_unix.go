@@ -80,13 +80,30 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 		return nil, nil, fmt.Errorf("api: socket-activated hook listener %s is not a unix socket", listener.Addr())
 	}
 
-	handler := base(a.managedHookPeerAuth(authorizer, a.managedHookSocketMux()))
+	handler := base(managedHookSocketHealth(a.handleHealth, a.managedHookPeerAuth(authorizer, a.managedHookSocketMux())))
 	server := &http.Server{
 		Handler:     managedHookPeerIdentityMiddleware(handler),
 		BaseContext: func(net.Listener) context.Context { return ctx },
 		ConnContext: managedHookConnContext,
 	}
 	return server, listener, nil
+}
+
+// managedHookSocketHealth answers GET /health on the hook socket with the
+// same document as the TCP API, where /health needs no credential either.
+// The Linux and macOS lifecycle probes readiness here: the socket lives in
+// a directory only the service account can write and the kernel names its
+// listener, while another local account can hold 127.0.0.1:<port> whenever
+// the gateway's own TCP listener is down and answer /health there. Every
+// other path keeps peer authorization.
+func managedHookSocketHealth(health http.HandlerFunc, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" && r.Method == http.MethodGet {
+			health(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // hookSocketPeerCredentials reads a hook-socket connection's kernel

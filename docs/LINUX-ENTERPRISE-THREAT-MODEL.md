@@ -119,7 +119,7 @@ removed.
    it will touch, and stages replacements in the destination directory.
 3. It stops the services, applies files, owners and modes, reloads systemd,
    and starts the sensor helper, the gateway (waiting for `READY=1` and
-   `/health`), the guardian (waiting for a fresh ledger) and the enumerator.
+   `/health` on the hook socket), the guardian (waiting for a fresh ledger) and the enumerator.
 4. It verifies every file, mode, unit property and readiness check, then
    commits the deployment record or restores the snapshot and the previously
    running services. `ensure` is a no-op when nothing changed. Exit codes are

@@ -36,6 +36,12 @@ const codeHookContractUnverified = "hook_contract_unverified"
 // could not protect.
 const codeGuardianTargetFailed = "guardian_target_failed"
 
+// codeGuardianTargetAccountRemoved names a guardian target whose account
+// the guardian's directory lookup definitively reports as gone, typically a
+// deleted account whose target the enumerator has not revoked yet. It is a
+// warning: verify, MDM detection and security_complete do not fail on it.
+const codeGuardianTargetAccountRemoved = "guardian_target_account_removed"
+
 // guardianStateFile is the guardian state the gateway reads in DataDir.
 const guardianStateFile = "hook_guardian_state.json"
 
@@ -62,9 +68,15 @@ func (l *lifecycle) describeHookContracts() {
 	if json.Unmarshal(data, &state) != nil {
 		return
 	}
-	var unverified, failed []string
+	var unverified, failed, removed []string
 	for _, result := range state.Results {
 		if result.OK || strings.TrimSpace(result.Error) == "" {
+			continue
+		}
+		if targetAccountMissingError(result.Error) {
+			removed = append(removed, fmt.Sprintf(
+				"%s for user %s: the account no longer exists (the directory answers \"no such account\"); the enumerator removes this target after %d consecutive definitive misses, one per enumeration cycle",
+				result.Connector, result.User, enterprisehooks.UnixRevokeAfterMisses))
 			continue
 		}
 		if !unverifiedHookContractError(result.Error) {
@@ -79,6 +91,10 @@ func (l *lifecycle) describeHookContracts() {
 		unverified = append(unverified, fmt.Sprintf(
 			"%s %s for user %s has no verified DefenseClaw hook contract, so it runs without DefenseClaw hooks; pin a verified agent version or add a verified hook contract",
 			result.Connector, version, result.User))
+	}
+	sort.Strings(removed)
+	for _, message := range removed {
+		r.AddWarning(codeGuardianTargetAccountRemoved, message)
 	}
 	if len(unverified)+len(failed) == 0 {
 		return
@@ -198,6 +214,15 @@ func truncateUTF8(value string, limit int) string {
 		limit--
 	}
 	return value[:limit]
+}
+
+// targetAccountMissingError matches the guardian's definitive "no such
+// account" resolution error (resolveEnterpriseHookStandaloneAccount in
+// internal/cli): `target account "<name>" does not exist: no such
+// account`. A directory that cannot answer produces a different error,
+// which stays a guardian_target_failed.
+func targetAccountMissingError(message string) bool {
+	return strings.Contains(message, "does not exist: no such account")
 }
 
 func unverifiedHookContractError(message string) bool {

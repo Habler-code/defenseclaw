@@ -41,7 +41,7 @@ func TestDarwinReadinessNeedsTheGatewayOnTheHookSocket(t *testing.T) {
 			h := newTestHost(t, "darwin")
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			// Another process answers /health on the gateway port.
-			h.env.HealthGet = func(context.Context) (int, []byte, error) { return 200, []byte(`{}`), nil }
+			h.env.APIHealthGet = func(context.Context) (int, []byte, error) { return 200, []byte(`{}`), nil }
 			h.env.HookSocketPeer = func(context.Context) (peercred.Credentials, error) { return peer(h) }
 
 			verify := h.run(Options{Action: ActionVerify})

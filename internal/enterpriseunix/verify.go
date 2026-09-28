@@ -194,32 +194,23 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 				add("%s is not active", unit.Name)
 			}
 		}
-		healthProblem := ""
-		if status, _, err := env.HealthGet(ctx); err != nil {
-			healthProblem = fmt.Sprintf("gateway health: %v", err)
-		} else if status != 200 {
-			healthProblem = fmt.Sprintf("gateway health returned HTTP %d", status)
-		}
-		servingErr := error(nil)
 		for _, unit := range env.Services.Units() {
-			if unit.Kind == "gateway" {
-				servingErr = env.gatewayServing(ctx, unit, record.ServiceUID)
+			if unit.Kind != "gateway" {
+				continue
 			}
-		}
-		// The probe may have reached another process holding the API port
-		// (it answers or closes the connection); name it instead.
-		held := ""
-		if healthProblem != "" || env.GOOS == "darwin" || !l.apiSocketActive(ctx) {
-			held = l.portHeldProblem(ctx, record.ServiceUID, env.GOOS == "darwin" && servingErr == nil)
-		}
-		switch {
-		case held != "":
-			add("%s", held)
-		case healthProblem != "":
-			add("%s", healthProblem)
-		}
-		if servingErr != nil {
-			add("%v", servingErr)
+			_, err := l.gatewayHealth(ctx, unit, record.ServiceUID)
+			var held *apiPortHeldError
+			if err != nil && !errors.As(err, &held) && (env.GOOS == "darwin" || !l.apiSocketActive(ctx)) {
+				// The gateway is down: another process may hold the API
+				// port so that it cannot start (on Linux while the socket
+				// unit is stopped). Name it.
+				if problem := l.portHeldProblem(ctx, record.ServiceUID, false); problem != "" {
+					add("%s", problem)
+				}
+			}
+			if err != nil {
+				add("%v", err)
+			}
 		}
 	}
 
@@ -380,19 +371,13 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		switch unit.Kind {
 		case "gateway":
 			if active {
-				if code, body, err := env.HealthGet(ctx); err == nil && code == 200 {
-					serviceUID := 0
-					if record != nil {
-						serviceUID = record.ServiceUID
-					}
-					r.Readiness.Gateway = env.gatewayServing(ctx, unit, serviceUID) == nil
-					if r.Readiness.Gateway && env.GOOS == "darwin" && len(l.foreignAPIPortHolders(ctx, serviceUID)) > 0 {
-						// The answer came from another process on the port.
-						r.Readiness.Gateway = false
-					}
-					if r.Readiness.Gateway {
-						l.readInspection(body)
-					}
+				serviceUID := l.serviceUID
+				if record != nil {
+					serviceUID = record.ServiceUID
+				}
+				if body, err := l.gatewayHealth(ctx, unit, serviceUID); err == nil {
+					r.Readiness.Gateway = true
+					l.readInspection(body)
 				}
 			}
 		case "guardian":

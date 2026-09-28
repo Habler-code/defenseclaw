@@ -914,8 +914,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	activationStarted := env.Now()
 	if !l.opts.NoStart {
 		if err := l.activate(ctx, units, restartSockets); err != nil {
-			if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
-				err = fmt.Errorf("%w; %s", err, held)
+			// A readiness failure on the API port already names the holder.
+			if named := (*apiPortHeldError)(nil); !errors.As(err, &named) {
+				if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
+					err = fmt.Errorf("%w; %s", err, held)
+				}
 			}
 			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
 				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
@@ -1216,23 +1219,16 @@ func (l *lifecycle) waitGatewayReady(ctx context.Context, unit Unit) error {
 	var lastErr error
 	for {
 		if env.Services.Active(ctx, unit) {
-			status, _, err := env.HealthGet(ctx)
-			if err == nil && status == 200 {
-				err = env.gatewayServing(ctx, unit, l.serviceUID)
-				if err == nil {
-					return nil
-				}
+			_, err := l.gatewayHealth(ctx, unit, l.serviceUID)
+			if err == nil {
+				return nil
 			}
-			if err != nil {
-				lastErr = err
-			} else {
-				lastErr = fmt.Errorf("gateway /health returned HTTP %d", status)
-			}
+			lastErr = err
 		} else {
 			lastErr = fmt.Errorf("%s is not active", unit.Name)
 		}
 		if !env.Now().Before(deadline) {
-			return fmt.Errorf("gateway did not become ready within %s: %v", env.ReadyTimeout, lastErr)
+			return fmt.Errorf("gateway did not become ready within %s: %w", env.ReadyTimeout, lastErr)
 		}
 		select {
 		case <-ctx.Done():

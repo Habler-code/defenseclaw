@@ -169,7 +169,9 @@ not-found answers.
    needs `launch_activate_socket(3)`, which the cgo-free release build does
    not call), so during every gateway restart a local user can bind the
    port. Hooks and plugins use the hook socket and are
-   unaffected. The Codex, Claude Code, OpenHands and OmniGent
+   unaffected. `status`, `verify` and `repair` read the gateway's health
+   over the hook socket, never from the port, and name the process that
+   holds the port. The Codex, Claude Code, OpenHands and OmniGent
    telemetry exporters do not verify the listener: the holder receives
    their telemetry, which can include prompt text, and the sending user's
    per-user telemetry credential, and can replay that credential once the

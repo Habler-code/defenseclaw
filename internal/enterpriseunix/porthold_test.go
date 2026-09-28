@@ -68,7 +68,9 @@ func TestLinuxPortHolderIsNamedByVerifyAndRepair(t *testing.T) {
 	plantLinuxListener(t, h, "31337", "4242")
 	h.services.active[unitAPISocket] = false
 	h.services.active[unitGateway] = false
-	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+	// The other process closes connections on the port; the lifecycle no
+	// longer asks it.
+	h.env.APIHealthGet = func(context.Context) (int, []byte, error) {
 		return 0, nil, errors.New(`Get "http://127.0.0.1:18970/health": EOF`)
 	}
 	want := "the gateway API port 127.0.0.1:18970 is held by pid 31337 (uid 4242"
@@ -89,23 +91,37 @@ func TestLinuxPortHolderIsNamedByVerifyAndRepair(t *testing.T) {
 	}
 }
 
+// retryingAPIHealth is the gateway's /health document on its hook socket
+// while another process holds the API port.
+const retryingAPIHealth = `{"api":{"state":"error","last_error":"listen tcp 127.0.0.1:18970: bind: address already in use","details":{"addr":"127.0.0.1:18970","tcp_bind_retrying":true}},"inspection":{"local":"active","ai_defense":"disabled"}}`
+
 // MAC-F24: while another account held 127.0.0.1:18970 across a gateway
 // restart, status said only "gateway health returned HTTP 503" (the other
 // listener's answer) and nothing about the gateway serving the hook socket.
+// Readiness now comes from the gateway's own report on its hook socket; the
+// answer on the port is never asked for.
 func TestDarwinPortHolderIsNamedAndNotTrusted(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	h.env.Runner = lsofRunner{Runner: h.runner, output: "p94782\nu4243\nf5\n"}
 	for name, answer := range map[string]int{"503": 503, "200": 200} {
 		t.Run(name, func(t *testing.T) {
-			h.env.HealthGet = func(context.Context) (int, []byte, error) { return answer, []byte(`{}`), nil }
+			h.env.HealthGet = func(context.Context) (int, []byte, error) { return 200, []byte(retryingAPIHealth), nil }
+			h.env.APIHealthGet = func(context.Context) (int, []byte, error) {
+				t.Error("the answer on the API port was asked for")
+				return answer, []byte(`{"api":{"state":"running"}}`), nil
+			}
 			status := h.run(Options{Action: ActionStatus})
 			got := messagesOf(status.Warnings, codeVerify)
 			if !strings.Contains(got, "is held by pid 94782 (uid 4243") || !strings.Contains(got, "serves hooks on its socket and keeps retrying the port") {
 				t.Fatalf("status does not name the port holder: %s", got)
 			}
 			if status.Readiness.Gateway {
-				t.Fatal("status trusted the other listener's /health answer")
+				t.Fatal("status reports the gateway ready while another process holds its API port")
+			}
+			verify := h.run(Options{Action: ActionVerify})
+			if got := messagesOf(verify.Errors, codeVerify); strings.Count(got, "is held by pid 94782") != 1 {
+				t.Fatalf("verify must name the port holder once: %s", got)
 			}
 		})
 	}

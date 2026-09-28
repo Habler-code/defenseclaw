@@ -180,6 +180,10 @@ The enumerator applies these checks to each account, in this order:
    link, and not writable by group or others. No parent directory may be
    writable by everyone.
 
+`enterprise policy show --user <name>` prints an `enrollment:` line when
+`exclude_users`, `exempt_users` or uid 0 keeps that account out of
+enrollment.
+
 ```yaml title="config.yaml (Linux example)"
 enterprise:
   enrollment:

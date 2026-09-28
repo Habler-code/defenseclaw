@@ -134,11 +134,14 @@ The two summary fields are computed differently on each OS:
 
 | Field | Linux and macOS | Windows |
 | --- | --- | --- |
-| `coverage_complete` | The gateway answers its health check, the guardian is active with a fresh authorization ledger, and the enumerator is active | The deployment is installed, the guardian is ready, and no transaction is pending |
+| `coverage_complete` | The gateway answers its health check on the hook socket (served by the service account, or by PID 1 on Linux) and reports its API listener on `127.0.0.1:18970` up, the guardian is active with a fresh authorization ledger, and the enumerator is active | The deployment is installed, the guardian is ready, and no transaction is pending |
 | `security_complete` | `coverage_complete`, the sensor helper is active, the run had no errors when the result was built, no agent is reported as `agent_unprotected` or `hook_contract_unverified`, no user target is reported as `guardian_target_failed`, and the config enables at least one agent when there are eligible users (otherwise `no_connectors_enabled`) | The deployment is installed and healthy, the target manifest has at least one enabled Codex, Claude Code, or Cursor row, no agent is reported as `agent_unprotected` or `hook_contract_unverified`, and, when a Claude Code row is enabled, the Claude Code attestation described below is recorded |
 
 - **Enrollment counts.** Linux and macOS read the counts from the guardian's
-  authorization ledger. Windows counts the rows of the target manifest:
+  authorization ledger, and `exempt` is always `0` there: accounts that
+  `exclude_users` or `exempt_users` keep out of enrollment have no target,
+  and `enterprise policy show --user <name>` names the rule for one account.
+  Windows counts the rows of the target manifest:
   `pending` is deferred rows, `exempt` is disabled rows, and `failed` is
   always `0`.
 - **Inspection.** On Windows, `inspection.ai_defense` is `ok` when AI Defense
