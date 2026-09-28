@@ -631,13 +631,17 @@ jobs:
       - run: make connector-matrix-test
 
   enterprise-hook-hardening:
+    # The Secure Client profile flow: a synthetic target home and a TCP fake
+    # gateway. Linux has only the standalone profile (real account homes and
+    # the peer-authorized hook socket), which the Unix Standalone Lifecycle
+    # job and the deb and rpm install lanes cover.
     name: Enterprise Hook Hardening (${{ matrix.os }}, ${{ matrix.connector }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
         connector: [codex, claudecode, amp]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
