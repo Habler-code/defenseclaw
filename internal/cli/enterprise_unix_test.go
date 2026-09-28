@@ -10,7 +10,13 @@
 
 package cli
 
-import "testing"
+import (
+	"errors"
+	"runtime"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+)
 
 func TestUnixEnterpriseCommandTree(t *testing.T) {
 	for _, group := range []string{"linux", "macos"} {
@@ -33,6 +39,13 @@ func TestUnixEnterpriseCommandTree(t *testing.T) {
 		if uninstall.Flags().Lookup("purge") == nil || uninstall.Flags().Lookup("payload") != nil {
 			t.Fatalf("enterprise %s uninstall flags are wrong", group)
 		}
+		// Package scriptlets remove the deployment with a long lock wait.
+		for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "uninstall"} {
+			cmd, _, _ := rootCmd.Find([]string{"enterprise", group, action})
+			if cmd.Flags().Lookup("lock-wait") == nil {
+				t.Fatalf("enterprise %s %s lacks --lock-wait", group, action)
+			}
+		}
 	}
 	for _, action := range []string{"set", "status", "remove"} {
 		if cmd, _, err := rootCmd.Find([]string{"enterprise", "secret", action}); err != nil || cmd.Name() != action {
@@ -42,5 +55,45 @@ func TestUnixEnterpriseCommandTree(t *testing.T) {
 	set, _, _ := rootCmd.Find([]string{"enterprise", "secret", "set"})
 	if set.Flags().Lookup("from-stdin") == nil || set.Flags().Lookup("name") == nil {
 		t.Fatal("enterprise secret set lacks --name/--from-stdin")
+	}
+}
+
+// The lifecycle help and the platform pages define exit 2 as invalid
+// arguments; an unknown flag, a malformed flag value, a stray argument or an
+// unknown action must use it instead of cobra's generic 1.
+func TestUnixLifecycleInvalidArgumentsExitTwo(t *testing.T) {
+	want := enterprisestatus.InvalidArgsExitCode(runtime.GOOS)
+	for _, group := range []string{"linux", "macos"} {
+		for _, action := range []string{"ensure", "status", "verify", "uninstall"} {
+			cmd, _, err := rootCmd.Find([]string{"enterprise", group, action})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, flags := range [][]string{{"--bogus"}, {"--json=maybe"}} {
+				parseErr := cmd.ParseFlags(flags)
+				if parseErr == nil {
+					t.Fatalf("%s %s accepted %v", group, action, flags)
+				}
+				if got := commandExitCode(cmd.FlagErrorFunc()(cmd, parseErr)); got != want {
+					t.Fatalf("enterprise %s %s %v exits %d, want %d", group, action, flags, got, want)
+				}
+			}
+			argsErr := cmd.ValidateArgs([]string{"extra"})
+			if argsErr == nil || commandExitCode(argsErr) != want {
+				t.Fatalf("enterprise %s %s extra: %v exits %d, want %d", group, action, argsErr, commandExitCode(argsErr), want)
+			}
+		}
+		groupCmd, _, err := rootCmd.Find([]string{"enterprise", group})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if groupCmd.RunE == nil {
+			t.Fatalf("enterprise %s bogus is not refused", group)
+		}
+		runErr := groupCmd.RunE(groupCmd, []string{"bogus"})
+		var coded *exitCodeError
+		if !errors.As(runErr, &coded) || coded.ExitCode() != want {
+			t.Fatalf("enterprise %s bogus: %v", group, runErr)
+		}
 	}
 }

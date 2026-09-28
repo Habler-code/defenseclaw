@@ -70,32 +70,67 @@ func (e *Env) loadPayload(ctx context.Context, dir string) (*payload, error) {
 	return p, nil
 }
 
+// payloadPathError is a payload file or directory the lifecycle refuses.
+// fix, when set, is the command that restores an installed binary.
+type payloadPathError struct {
+	path   string
+	reason string
+	fix    string
+}
+
+func (e *payloadPathError) Error() string { return "payload " + e.path + " " + e.reason }
+
 func checkPayloadPath(path string, dir bool) error {
 	uid, _, mode, err := statOwnerMode(path)
 	if err != nil {
 		return fmt.Errorf("inspect payload %s: %w", path, err)
 	}
 	if mode&os.ModeSymlink != 0 {
-		return fmt.Errorf("payload %s is a symlink", path)
+		return &payloadPathError{path: path, reason: "is a symlink"}
 	}
 	if dir && !mode.IsDir() {
-		return fmt.Errorf("payload %s is not a directory", path)
+		return &payloadPathError{path: path, reason: "is not a directory"}
 	}
 	if !dir {
 		if !mode.IsRegular() {
-			return fmt.Errorf("payload %s is not a regular file", path)
+			return &payloadPathError{path: path, reason: "is not a regular file"}
 		}
 		if mode.Perm()&0o111 == 0 {
-			return fmt.Errorf("payload %s is not executable", path)
+			return &payloadPathError{path: path, reason: "is not executable", fix: "chmod 0755 " + path}
 		}
 	}
 	if mode.Perm()&0o022 != 0 {
-		return fmt.Errorf("payload %s is writable by group or other (%04o)", path, mode.Perm())
+		return &payloadPathError{path: path, reason: fmt.Sprintf("is writable by group or other (%04o)", mode.Perm()), fix: "chmod 0755 " + path}
 	}
 	if uid != 0 && uid != os.Geteuid() {
-		return fmt.Errorf("payload %s is owned by uid %d; stage it as root", path, uid)
+		return &payloadPathError{path: path, reason: fmt.Sprintf("is owned by uid %d; stage it as root", uid), fix: "chown 0 " + path}
 	}
 	return nil
+}
+
+// installedPayloadError adds the remedy to a refusal of the binaries
+// already installed in the layout's bin directory (package channel, or a
+// repair without --payload): restore the file, or put the product's
+// binaries back.
+func (e *Env) installedPayloadError(err error, channel string) error {
+	var pathErr *payloadPathError
+	fix := ""
+	if errors.As(err, &pathErr) && pathErr.fix != "" {
+		fix = "restore it with `" + e.canonicalPayloadFix(pathErr.fix) + "`, or "
+	}
+	if channel == ChannelPackage {
+		return fmt.Errorf("%w; %sreinstall the DefenseClaw enterprise package, then rerun", err, fix)
+	}
+	return fmt.Errorf("%w; %srerun with --payload <staged payload directory>", err, fix)
+}
+
+// canonicalPayloadFix maps the rooted path in a fix command back to the
+// host path the administrator types.
+func (e *Env) canonicalPayloadFix(fix string) string {
+	if e.Root == "" {
+		return fix
+	}
+	return strings.ReplaceAll(fix, e.Root, "")
 }
 
 // binaryVersion runs `<gateway> --version-json` and returns its version.

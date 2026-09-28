@@ -54,6 +54,11 @@ type desiredFile struct {
 	Mode  os.FileMode
 	Owner fileOwner
 	Kind  string
+	// KeepContent marks a file whose bytes are the administrator's input
+	// read from the installed path (config.yaml without --config): the
+	// transaction only fixes its mode and owner and never writes its bytes,
+	// so a change made after the plan read it is not replaced.
+	KeepContent bool
 }
 
 // managedDirs returns the DefenseClaw tree for the service account.

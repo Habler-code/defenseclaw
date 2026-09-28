@@ -31,6 +31,9 @@ import (
 // ledgerFreshness mirrors the gateway's guardian authorization window.
 const ledgerFreshness = 5 * time.Minute
 
+// codeUnitFailed names a DefenseClaw oneshot unit systemd reports failed.
+const codeUnitFailed = "unit_failed"
+
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
@@ -48,7 +51,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
 		}
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", "))
+			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx))
 		}
 		return 0
 	}
@@ -87,6 +90,13 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 // that only make sense on a settled deployment (ledger freshness, sandbox
 // properties). It returns human-readable problems.
 func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, strict bool) []string {
+	return l.verifyDeployment(ctx, record, strict, false)
+}
+
+// verifyDeployment is verifyInstalled; with inputsChanged the checks of
+// config.yaml's bytes and mode and of the protected credentials are left out,
+// because they changed during the transaction and a follow-up applies them.
+func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, strict, inputsChanged bool) []string {
 	env := l.env
 	var problems []string
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
@@ -102,6 +112,9 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 	}
 
 	for _, path := range sortedKeys(record.Files) {
+		if inputsChanged && path == env.Layout.ConfigPath {
+			continue
+		}
 		got, err := sha256File(env.P(path))
 		if err != nil {
 			add("%s: %v", path, err)
@@ -111,6 +124,7 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 			add("%s was modified after install", path)
 		}
 	}
+	problems = append(problems, env.installedModeProblems(record, inputsChanged)...)
 	loadCredential := env.GOOS == "linux" && env.Services.Version(ctx) >= loadCredentialSystemd
 	for _, dir := range env.managedDirs(Account{Name: record.ServiceUser, UID: record.ServiceUID, GID: record.ServiceGID}, loadCredential) {
 		if dir.External {
@@ -139,7 +153,7 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 	}
 	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err != nil {
 		add("config: %v", err)
-	} else if sha256Bytes(raw) != record.ConfigSHA256 {
+	} else if sha256Bytes(raw) != record.ConfigSHA256 && !inputsChanged {
 		add("config.yaml changed since it was applied; run ensure")
 	}
 	if err := env.Trust(env.P(env.Layout.DescriptorPath), TrustAdminFile); err != nil {
@@ -151,7 +165,7 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 	}
 	if _, secretsSHA, err := env.listSecrets(); err != nil {
 		add("secrets: %v", err)
-	} else if secretsSHA != record.SecretsSHA256 {
+	} else if secretsSHA != record.SecretsSHA256 && !inputsChanged {
 		add("protected credentials changed since they were applied; run ensure")
 	}
 	if fragments, ok := env.Services.(fragmentReporter); ok {
@@ -180,17 +194,32 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 				add("%s is not active", unit.Name)
 			}
 		}
+		healthProblem := ""
 		if status, _, err := env.HealthGet(ctx); err != nil {
-			add("gateway health: %v", err)
+			healthProblem = fmt.Sprintf("gateway health: %v", err)
 		} else if status != 200 {
-			add("gateway health returned HTTP %d", status)
+			healthProblem = fmt.Sprintf("gateway health returned HTTP %d", status)
 		}
+		servingErr := error(nil)
 		for _, unit := range env.Services.Units() {
 			if unit.Kind == "gateway" {
-				if err := env.gatewayServing(ctx, unit, record.ServiceUID); err != nil {
-					add("%v", err)
-				}
+				servingErr = env.gatewayServing(ctx, unit, record.ServiceUID)
 			}
+		}
+		// The probe may have reached another process holding the API port
+		// (it answers or closes the connection); name it instead.
+		held := ""
+		if healthProblem != "" || env.GOOS == "darwin" || !l.apiSocketActive(ctx) {
+			held = l.portHeldProblem(ctx, record.ServiceUID, env.GOOS == "darwin" && servingErr == nil)
+		}
+		switch {
+		case held != "":
+			add("%s", held)
+		case healthProblem != "":
+			add("%s", healthProblem)
+		}
+		if servingErr != nil {
+			add("%v", servingErr)
 		}
 	}
 
@@ -212,6 +241,87 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 		}
 	}
 	return problems
+}
+
+// installedModeProblems reports recorded files whose mode or owner drifted,
+// which the digest check cannot see: an installed binary another account
+// could replace, a loosened config.yaml, or any recorded file that became
+// group- or other-writable. Repair restores the modes of the files it
+// writes; it refuses to adopt a replaceable binary, so that problem names
+// the command that restores it.
+func (e *Env) installedModeProblems(record *Deployment, skipConfig bool) []string {
+	var problems []string
+	for _, path := range sortedKeys(record.Files) {
+		if skipConfig && path == e.Layout.ConfigPath {
+			continue
+		}
+		_, _, mode, err := statOwnerMode(e.P(path))
+		if err != nil || mode&os.ModeSymlink != 0 || !mode.IsRegular() {
+			continue // the digest check names it
+		}
+		uid, gid, err := e.OwnerOf(e.P(path))
+		if err != nil {
+			continue
+		}
+		perm := mode.Perm()
+		switch {
+		case filepath.Dir(path) == e.Layout.BinDir:
+			if perm&0o022 != 0 {
+				problems = append(problems, fmt.Sprintf("%s is writable by group or other (%04o), so another account could replace it; restore it with `chmod 0755 %s` or reinstall the package", path, perm, path))
+			} else if uid != 0 {
+				problems = append(problems, fmt.Sprintf("%s is owned by uid %d, not root, so that account could replace it; restore it with `chown 0 %s` or reinstall the package", path, uid, path))
+			}
+		case path == e.Layout.ConfigPath:
+			if perm != 0o640 || uid != 0 || gid != record.ServiceGID {
+				problems = append(problems, fmt.Sprintf("%s is %04o %d:%d, want 0640 0:%d; run `%s` to restore it", path, perm, uid, gid, record.ServiceGID, e.lifecycleCommand("repair")))
+			}
+		case perm&0o022 != 0:
+			problems = append(problems, fmt.Sprintf("%s is writable by group or other (%04o); run `%s` to restore it", path, perm, e.lifecycleCommand("repair")))
+		}
+	}
+	return problems
+}
+
+// lifecycleCommand is the administrator command line for a lifecycle
+// action on this host, with the absolute gateway path (sudo's secure_path
+// does not include the install directory).
+func (e *Env) lifecycleCommand(action string) string {
+	group := "linux"
+	if e.GOOS == "darwin" {
+		group = "macos"
+	}
+	return filepath.Join(e.Layout.BinDir, binGateway) + " enterprise " + group + " " + action
+}
+
+// leftoversNextStep tells the administrator what to do about machine state
+// no committed deployment owns, typically after a lifecycle uninstall that
+// kept the package installed: remove the package, or activate it again.
+func (e *Env) leftoversNextStep(ctx context.Context) string {
+	gateway := filepath.Join(e.Layout.BinDir, binGateway)
+	reactivate := "`" + e.lifecycleCommand("ensure") + " --from-package --config <file>`"
+	if e.GOOS == "linux" {
+		remove := ""
+		if _, err := e.Runner.Run(ctx, "dpkg", "-S", gateway); err == nil {
+			remove = "apt remove defenseclaw-enterprise"
+		} else if _, err := e.Runner.Run(ctx, "rpm", "-qf", "--quiet", gateway); err == nil {
+			remove = "dnf remove defenseclaw-enterprise"
+		}
+		if remove != "" {
+			return "the defenseclaw-enterprise package is still installed: remove it with `" + remove + "` (or the MDM uninstall.sh), or activate the deployment again with " + reactivate
+		}
+	}
+	return "remove it with `" + e.lifecycleCommand("uninstall") + " --purge` (this also deletes the kept config and state), or activate the deployment again with " + reactivate + " (package) or `--payload <dir>` (payload archive)"
+}
+
+// apiSocketActive reports whether the Linux API socket unit is listening
+// (PID 1 then holds the port; nobody else can bind it).
+func (l *lifecycle) apiSocketActive(ctx context.Context) bool {
+	for _, unit := range l.env.Services.Units() {
+		if unit.Name == unitAPISocket {
+			return l.env.Services.Active(ctx, unit)
+		}
+	}
+	return true
 }
 
 // sameUnitFile reports whether systemd's fragment path names the expected
@@ -260,6 +370,12 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
 		r.Services = append(r.Services, status)
+		if !unit.Required && strings.HasPrefix(status.State, "failed") {
+			// A failed oneshot (the apply or daily verify run, the guardian
+			// reconcile) is not a readiness check, but it must not sit under
+			// a green headline either.
+			r.AddWarning(codeUnitFailed, fmt.Sprintf("%s failed on its last run; see `journalctl -u %s`, and clear it with `systemctl reset-failed %s` once resolved", unit.Name, unit.Name, unit.Name))
+		}
 		active := env.Services.Active(ctx, unit)
 		switch unit.Kind {
 		case "gateway":
@@ -270,7 +386,13 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 						serviceUID = record.ServiceUID
 					}
 					r.Readiness.Gateway = env.gatewayServing(ctx, unit, serviceUID) == nil
-					l.readInspection(body)
+					if r.Readiness.Gateway && env.GOOS == "darwin" && len(l.foreignAPIPortHolders(ctx, serviceUID)) > 0 {
+						// The answer came from another process on the port.
+						r.Readiness.Gateway = false
+					}
+					if r.Readiness.Gateway {
+						l.readInspection(body)
+					}
 				}
 			}
 		case "guardian":

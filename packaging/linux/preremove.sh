@@ -4,7 +4,10 @@
 #
 # defenseclaw-enterprise package: stop and unregister the managed deployment
 # before its files are removed. An upgrade is left to the new package's
-# postinstall. Never fails the package transaction.
+# postinstall. The removal fails only when another lifecycle run keeps the
+# lock for the whole wait: removing the files then would leave machine
+# policy and per-user hooks naming a deleted binary. Any other lifecycle
+# problem is reported and does not stop the package transaction.
 
 set -u
 case "${1:-}" in
@@ -17,7 +20,13 @@ state=/var/lib/defenseclaw-enterprise
 if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     umask 077
     mkdir -p "$state"
-    "$gateway" enterprise linux uninstall --json >"$state/last-package-result.json" 2>"$state/last-package-result.log" ||
+    "$gateway" enterprise linux uninstall --json --lock-wait 10m >"$state/last-package-result.json" 2>"$state/last-package-result.log"
+    status=$?
+    if [ "$status" = 75 ]; then
+        echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 10 minutes; nothing was removed. Retry the removal." >&2
+        exit 1
+    fi
+    [ "$status" = 0 ] ||
         echo "defenseclaw-enterprise: uninstall reported a problem; see $state/last-package-result.json" >&2
 fi
 exit 0

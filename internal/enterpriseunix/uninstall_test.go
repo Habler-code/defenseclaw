@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -93,6 +94,59 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 				if unit.Activate && h.services.enabled[unit.Name] {
 					t.Fatalf("%s still enabled after uninstall", unit.Name)
 				}
+			}
+		})
+	}
+}
+
+// An uninstall that cannot remove one file keeps the deployment record, so
+// rerunning uninstall finishes the removal and a reinstall through ensure
+// (the package postinstall, an MDM run) restores the deployment without
+// --adopt-existing. Before, the record was deleted first: the rerun was a
+// not_installed no-op and the reinstall refused the leftovers.
+func TestFailedUninstallKeepsTheRecordForARetryOrReinstall(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can remove files from a read-only directory")
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			configDir := h.env.P(h.env.Layout.ConfigDir)
+			lock := func() {
+				if err := os.Chmod(configDir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+			}
+			unlock := func() {
+				if err := os.Chmod(configDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Cleanup(func() { _ = os.Chmod(configDir, 0o755) })
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+
+			// The runtime descriptor in the config directory cannot be removed.
+			lock()
+			failed := h.run(Options{Action: ActionUninstall})
+			unlock()
+			requireError(t, failed, codeUninstall)
+			if record, err := h.env.loadDeployment(); err != nil || record == nil {
+				t.Fatalf("a failed uninstall removed the deployment record (%v)", err)
+			}
+			// The package postinstall or an MDM run reinstalls through ensure.
+			requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0")}))
+
+			// A rerun of a failed uninstall finishes the removal.
+			lock()
+			requireError(t, h.run(Options{Action: ActionUninstall}), codeUninstall)
+			unlock()
+			retry := h.run(Options{Action: ActionUninstall})
+			requireOK(t, retry)
+			if retry.Noop {
+				t.Fatal("the rerun of a failed uninstall was a no-op")
+			}
+			if exists(h.env.P(h.env.Layout.DescriptorPath)) || exists(h.env.deploymentPath()) {
+				t.Fatal("the rerun did not finish the removal")
 			}
 		})
 	}

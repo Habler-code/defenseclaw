@@ -72,10 +72,60 @@ type validatedConfig struct {
 // needs: the config loader reads the service pins from the environment.
 var envPinMu sync.Mutex
 
-// validateConfig checks raw as the standalone deployment's config: v8
-// schema, observability graph, runtime load with the service pins, and the
-// fixed layout the units assume.
+// validateConfig checks the installed config.yaml bytes; see
+// validateConfigSource.
 func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
+	return e.validateConfigSource(raw, "")
+}
+
+// validateConfigSource checks raw as the standalone deployment's config: v8
+// schema, observability graph, runtime load with the service pins, and the
+// fixed layout the units assume. The bytes are always checked as the
+// installed config.yaml; source, when set, is the file the administrator
+// supplied (--config), and errors name it instead of the installed path.
+func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
+	validated, err := e.checkConfig(raw)
+	if err != nil {
+		return nil, e.explainConfigError(err, source)
+	}
+	return validated, nil
+}
+
+// explainConfigError rewrites a config error for the managed host: it names
+// the administrator's file, and a config_version problem says how to fix the
+// file instead of pointing at `defenseclaw migrate`, a per-user command the
+// enterprise packages do not ship.
+func (e *Env) explainConfigError(err error, source string) error {
+	message := err.Error()
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) {
+		fixed := *yamlErr
+		switch yamlErr.Code {
+		case config.V8YAMLErrorVersionRequired, config.V8YAMLErrorVersionInvalid:
+			fixed.Action = "add `config_version: 8` as the first line of the file"
+		case config.V8YAMLErrorVersionUpgrade:
+			fixed.Action = "write the file in the current (v8) format and set `config_version: 8`"
+		case config.V8YAMLErrorVersionUnsupported:
+			fixed.Action = "install the DefenseClaw enterprise package that matches this config, or set `config_version: 8`"
+		}
+		message = strings.Replace(message, yamlErr.Error(), fixed.Error(), 1)
+	}
+	if strings.Contains(message, "defenseclaw migrate") {
+		message = strings.ReplaceAll(message, "run `defenseclaw migrate` to create a current source", "set `config_version: 8`")
+		message = strings.ReplaceAll(message, "run `defenseclaw migrate`", "write the file in the current (v8) format and set `config_version: 8`")
+	}
+	if source != "" && source != e.Layout.ConfigPath {
+		message = strings.ReplaceAll(message, e.Layout.ConfigPath, source)
+	}
+	if message == err.Error() {
+		return err
+	}
+	return errors.New(message)
+}
+
+// checkConfig is the validation itself; the source path it reports is the
+// installed config.yaml.
+func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	if len(raw) == 0 {
 		return nil, errors.New("config is empty")
 	}

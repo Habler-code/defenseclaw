@@ -227,6 +227,68 @@ func TestVerifyReportsMissingMachinePolicy(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionVerify}))
 }
 
+// A DefenseClaw entry removed from vendor machine policy was reported twice
+// with a generic "vendor machine policy changed since the last transaction;
+// run ensure" that named neither the connector nor the file, while the
+// lifecycle help offers repair for it. It is reported once, names both, and
+// the command it names restores the entry.
+func TestVerifyNamesTheConnectorAndFileOfMachinePolicyDrift(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	writeFreshLedger(t, h)
+	if err := os.Remove(h.env.P(claudeDropIn)); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	var about []string
+	for _, e := range verify.Errors {
+		if strings.Contains(e.Message, "machine policy") {
+			about = append(about, e.Message)
+		}
+	}
+	if len(about) != 1 {
+		t.Fatalf("want one machine-policy problem, got %d: %q", len(about), about)
+	}
+	repair := "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair"
+	if !strings.Contains(about[0], "claudecode (") || !strings.Contains(about[0], claudeDropIn) || !strings.Contains(about[0], "`"+repair+"`") {
+		t.Fatalf("the problem does not name the connector, file and repair: %q", about[0])
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if !exists(h.env.P(claudeDropIn)) {
+		t.Fatal("repair did not restore the Claude drop-in")
+	}
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+}
+
+// With the documented standalone config (no guardrail.connectors block) the
+// enumerator found eligible users but published no target, and status and
+// verify still reported coverage and security complete with 0 targets.
+func TestStatusWarnsWhenNoConnectorIsEnabledForEligibleUsers(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			eligible := filepath.Join(filepath.Dir(h.env.Layout.ManifestPath), "eligible-accounts.json")
+			writeHostFile(t, h, eligible, `{"version": 1, "accounts": [{"user": "alice", "uid": 501}, {"user": "bob", "uid": 502}]}`)
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				r := h.run(Options{Action: action})
+				if got := messagesOf(r.Warnings, "no_connectors_enabled"); !strings.Contains(got, "found 2 eligible users") || !strings.Contains(got, "guardrail.connectors") {
+					t.Fatalf("%s does not warn that no connector is enabled: %+v", action, r.Warnings)
+				}
+				if r.SecurityComplete {
+					t.Fatalf("%s reports security_complete with no connector enabled", action)
+				}
+			}
+			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+			if r := h.run(Options{Action: ActionStatus}); hasWarning(r, "no_connectors_enabled") {
+				t.Fatalf("the warning stays with a connector enabled: %+v", r.Warnings)
+			}
+		})
+	}
+}
+
 func TestDarwinInstallPublishesMachinePolicy(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))

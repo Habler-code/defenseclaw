@@ -13,12 +13,15 @@
 package enterpriseunix
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
@@ -65,10 +68,7 @@ func (l *lifecycle) describeHookContracts() {
 			continue
 		}
 		if !unverifiedHookContractError(result.Error) {
-			reason := strings.TrimSpace(strings.TrimPrefix(result.Error, "enterprise hooks: "))
-			if len(reason) > 240 {
-				reason = reason[:240] + "..."
-			}
+			reason := boundedGuardianReason(strings.TrimSpace(strings.TrimPrefix(result.Error, "enterprise hooks: ")))
 			failed = append(failed, fmt.Sprintf("%s for user %s is not protected: %s", result.Connector, result.User, reason))
 			continue
 		}
@@ -92,6 +92,58 @@ func (l *lifecycle) describeHookContracts() {
 		r.AddWarning(codeGuardianTargetFailed, message)
 	}
 	r.SecurityComplete = false
+}
+
+// codeGuardianReportPending names a change whose guardian report did not
+// arrive in time.
+const codeGuardianReportPending = "guardian_report_pending"
+
+// awaitGuardianReport waits, bounded by GuardianReportTimeout, for the
+// guardian to publish its target report after since (the restarted guardian
+// reconciles every manifest target under the new config), so the result of
+// the change names the targets it left unprotected, for example an agent
+// version without a verified hook contract in the new guardrail mode.
+// Without manifest targets there is nothing to wait for.
+func (l *lifecycle) awaitGuardianReport(ctx context.Context, since time.Time) {
+	env, r := l.env, l.result
+	manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath))
+	if err != nil || len(manifest.Targets) == 0 {
+		return
+	}
+	deadline := env.Now().Add(env.GuardianReportTimeout)
+	for {
+		if updated, ok := l.guardianReportedAt(); ok && !updated.Before(since) {
+			return
+		}
+		if !env.Now().Before(deadline) {
+			r.AddWarning(codeGuardianReportPending, fmt.Sprintf(
+				"the hook guardian has not reported on its %d manifest targets since this change, so their protection is not confirmed yet; run `%s` in a minute to see it",
+				len(manifest.Targets), env.lifecycleCommand("status")))
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(env.PollInterval):
+		}
+	}
+}
+
+// guardianReportedAt is when the guardian last wrote its target report.
+func (l *lifecycle) guardianReportedAt() (time.Time, bool) {
+	env := l.env
+	data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20)
+	if err != nil {
+		return time.Time{}, false
+	}
+	var state struct {
+		UpdatedAt string `json:"updated_at"`
+	}
+	if json.Unmarshal(data, &state) != nil {
+		return time.Time{}, false
+	}
+	updated, err := time.Parse(time.RFC3339Nano, state.UpdatedAt)
+	return updated, err == nil
 }
 
 // codeAgentUnprotected names an agent the enumerator found installed for an
@@ -119,6 +171,33 @@ func (l *lifecycle) describeUnprotectedAgents() {
 	if len(agents) > 0 {
 		r.SecurityComplete = false
 	}
+}
+
+// guardianReasonMaxBytes bounds one guardian target reason in the result.
+// Guardian errors name the refused path and end with the remedy after the
+// last "; ", so the bound is generous and a longer reason keeps its remedy.
+const guardianReasonMaxBytes = 1024
+
+func boundedGuardianReason(reason string) string {
+	if len(reason) <= guardianReasonMaxBytes {
+		return reason
+	}
+	if index := strings.LastIndex(reason, "; "); index > 0 && len(reason)-index <= guardianReasonMaxBytes/2 {
+		remedy := reason[index:]
+		return truncateUTF8(reason[:index], guardianReasonMaxBytes-len(remedy)-len("...")) + "..." + remedy
+	}
+	return truncateUTF8(reason, guardianReasonMaxBytes-len("...")) + "..."
+}
+
+// truncateUTF8 cuts value to at most limit bytes without splitting a rune.
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	for limit > 0 && !utf8.RuneStart(value[limit]) {
+		limit--
+	}
+	return value[:limit]
 }
 
 func unverifiedHookContractError(message string) bool {

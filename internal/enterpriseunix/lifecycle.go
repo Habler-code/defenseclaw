@@ -112,6 +112,17 @@ type lifecycle struct {
 	result *enterprisestatus.Result
 	// serviceUID is the gateway account of the running transaction.
 	serviceUID int
+	// planned are the inputs the last transaction of this run applied.
+	planned *plannedInputs
+}
+
+// plannedInputs are the administrator inputs one transaction planned from.
+type plannedInputs struct {
+	configSHA string
+	// configFromInstalled is set when the config came from the installed
+	// config.yaml rather than --config.
+	configFromInstalled bool
+	secretsSHA          string
 }
 
 // Run executes one lifecycle action and returns its result; the result's
@@ -185,6 +196,19 @@ func (l *lifecycle) run(ctx context.Context) int {
 		r.Installed = true
 		r.InstalledVersion = record.ProductVersion
 	}
+	if l.supersededApplyRun(record) {
+		// A transaction leaves a queued apply run alone. When that
+		// transaction upgraded the deployment, the queued run is still the
+		// previous binary, whose rendering would undo part of the upgrade;
+		// the transaction that upgraded read (or followed up on) the change
+		// that started this run.
+		r.Noop = true
+		r.NoopReason = "superseded"
+		r.AddWarning(codeSuperseded, fmt.Sprintf("this apply run's binary (%s) is older than the installed deployment (%s), which another run applied while this one waited; the installed binary applies later changes",
+			env.ProductVersion, record.ProductVersion))
+		l.describe(ctx, record, false)
+		return 0
+	}
 	if l.opts.Mutate != nil {
 		if l.opts.Action != ActionEnsure {
 			r.AddError(codeInvalidArguments, "a protected-state change can only be applied by ensure")
@@ -202,7 +226,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeAlreadyInstalled, "DefenseClaw enterprise is already installed; use upgrade, repair or ensure")
 			return 0
 		}
-		return l.freshInstall(ctx)
+		return l.settleInputChanges(ctx, l.freshInstall(ctx))
 	case ActionUpgrade:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
@@ -212,16 +236,16 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeInvalidArguments, "upgrade needs --payload or --from-package")
 			return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 		}
-		return l.apply(ctx, record)
+		return l.settleInputChanges(ctx, l.apply(ctx, record))
 	case ActionRepair:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
 			return 0
 		}
-		return l.apply(ctx, record)
+		return l.settleInputChanges(ctx, l.apply(ctx, record))
 	case ActionEnsure:
 		if record == nil {
-			return l.freshInstall(ctx)
+			return l.settleInputChanges(ctx, l.freshInstall(ctx))
 		}
 		if noop, reason := l.ensureNoop(ctx, record); noop {
 			r.Noop = true
@@ -237,7 +261,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 			l.describe(ctx, record, false)
 			return 0
 		}
-		return l.apply(ctx, record)
+		return l.settleInputChanges(ctx, l.apply(ctx, record))
 	case ActionReconcile:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
@@ -248,6 +272,17 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.uninstall(ctx, record)
 	}
 	return 0
+}
+
+// codeSuperseded names an apply run that stood down for a newer binary.
+const codeSuperseded = "lifecycle_superseded"
+
+// supersededApplyRun reports an apply-trigger ensure (--reason path) whose
+// binary is an older release than the recorded deployment.
+func (l *lifecycle) supersededApplyRun(record *Deployment) bool {
+	running := strings.TrimPrefix(l.env.ProductVersion, "v")
+	return record != nil && l.opts.Action == ActionEnsure && l.opts.Reason == "path" && !l.opts.AllowDowngrade &&
+		running != "dev" && versionPattern.MatchString(running) && compareProductVersions(running, record.ProductVersion) < 0
 }
 
 func (l *lifecycle) validateOptions() int {
@@ -433,20 +468,22 @@ func (e *Env) archivePaths(archive string, paths []string) error {
 
 // plan is the complete desired state of one apply.
 type plan struct {
-	account     Account
-	channel     string
-	version     string
-	payload     *payload
-	config      *validatedConfig
-	secrets     []string
-	secretsSHA  string
-	dirs        []desiredDir
-	files       []desiredFile
-	binaries    []desiredFile
-	createdDirs []string
-	stale       []string
-	systemd     int
-	installedAt string
+	account Account
+	channel string
+	version string
+	payload *payload
+	config  *validatedConfig
+	// configFromInstalled is set when config came from the installed file.
+	configFromInstalled bool
+	secrets             []string
+	secretsSHA          string
+	dirs                []desiredDir
+	files               []desiredFile
+	binaries            []desiredFile
+	createdDirs         []string
+	stale               []string
+	systemd             int
+	installedAt         string
 	// intended are the machine-policy connectors the config asks for;
 	// machinePolicy is the subset the descriptor records (all of intended
 	// unless a previous transaction with the same config could not place
@@ -487,7 +524,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	case p.channel == ChannelPackage:
 		pay, err := env.loadPayload(ctx, env.P(env.Layout.BinDir))
 		if err != nil {
-			return nil, &codedError{code: codePayload, err: err}
+			return nil, &codedError{code: codePayload, err: env.installedPayloadError(err, ChannelPackage)}
 		}
 		p.payload = pay
 	default:
@@ -501,7 +538,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		pay, err := env.loadPayload(ctx, env.P(env.Layout.BinDir))
 		if err != nil {
-			return nil, &codedError{code: codePayload, err: err}
+			return nil, &codedError{code: codePayload, err: env.installedPayloadError(err, p.channel)}
 		}
 		p.payload = pay
 	}
@@ -518,11 +555,12 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
-	raw, err := l.configBytes()
+	raw, fromInstalled, err := l.configBytes()
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
-	validated, err := env.validateConfig(raw)
+	p.configFromInstalled = fromInstalled
+	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
@@ -576,7 +614,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 	serviceGroup := fileOwner{UID: 0, GID: account.GID}
-	p.files = append(p.files, desiredFile{Path: env.Layout.ConfigPath, Data: validated.Raw, SHA: validated.SHA, Mode: 0o640, Owner: serviceGroup, Kind: "config"})
+	p.files = append(p.files, desiredFile{Path: env.Layout.ConfigPath, Data: validated.Raw, SHA: validated.SHA, Mode: 0o640, Owner: serviceGroup, Kind: "config", KeepContent: fromInstalled})
 
 	if p.channel == ChannelPayload {
 		for _, name := range sortedKeys(p.payload.Digests) {
@@ -620,20 +658,21 @@ func recordBinaries(env *Env, record *Deployment) map[string]string {
 }
 
 // configBytes picks the config to install: --config, else the installed
-// file, else the default.
-func (l *lifecycle) configBytes() ([]byte, error) {
+// file, else the default. fromInstalled reports the installed file.
+func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 	env := l.env
 	if l.opts.ConfigFile != "" {
-		return readBounded(l.opts.ConfigFile, maxInputBytes)
+		data, err = readBounded(l.opts.ConfigFile, maxInputBytes)
+		return data, false, err
 	}
-	data, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
+	data, err = readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
 	if err == nil {
-		return data, nil
+		return data, true, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return DefaultConfig(env.Layout), nil
+		return DefaultConfig(env.Layout), false, nil
 	}
-	return nil, err
+	return nil, false, err
 }
 
 type codedError struct {
@@ -674,9 +713,16 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
 			l.revertRejectedConfig(record, committedConfig)
 		}
+		if record != nil {
+			// Refused before any change: the running deployment is untouched,
+			// so the result reports its services and readiness rather than
+			// an empty list that reads as a host that is down.
+			l.describe(ctx, record, false)
+		}
 		return 0
 	}
 	l.serviceUID = account.UID
+	l.planned = &plannedInputs{configSHA: p.config.SHA, configFromInstalled: p.configFromInstalled, secretsSHA: p.secretsSHA}
 
 	units := env.Services.Units()
 	previouslyActive := []string{}
@@ -720,6 +766,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	snapshotID := env.Now().UTC().Format("20060102T150405.000000000Z")
 	snapPaths := []string{}
 	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
+		if file.KeepContent {
+			// Never written; a rollback must not put older bytes back over
+			// a change made during the transaction.
+			continue
+		}
 		snapPaths = append(snapPaths, file.Path)
 	}
 	snapPaths = append(snapPaths, p.stale...)
@@ -778,6 +829,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		_ = env.clearPending()
 		env.discardSnapshot(snap)
+		if record != nil {
+			// The previous deployment is back and running; report it.
+			l.describe(ctx, record, false)
+		}
 		return 0
 	}
 
@@ -786,7 +841,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeUnmanagedLayout, err)
 		}
 	}
-	l.quiesce(ctx, units)
+	l.quiesce(ctx, units, l.keepRunningDuringChange(p))
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
 
@@ -819,8 +874,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 
 	pending.Phase = "activate"
 	_ = env.savePending(pending)
+	activationStarted := env.Now()
 	if !l.opts.NoStart {
 		if err := l.activate(ctx, units, restartSockets); err != nil {
+			if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
+				err = fmt.Errorf("%w; %s", err, held)
+			}
 			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
 				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
 					filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
@@ -867,7 +926,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 
 	if !l.opts.NoStart {
-		if problems := l.verifyInstalled(ctx, newRecord, false); len(problems) > 0 {
+		// Inputs written during this transaction are applied by a follow-up
+		// (settleInputChanges); they do not fail this one.
+		if problems := l.verifyDeployment(ctx, newRecord, false, l.inputsChanged()); len(problems) > 0 {
 			return failAndRollback(codeVerify, errors.New(strings.Join(problems, "; ")))
 		}
 	}
@@ -885,22 +946,58 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	env.discardSnapshot(snap)
 	r.Installed = true
 	r.InstalledVersion = newRecord.ProductVersion
+	if !l.opts.NoStart {
+		// The result reports what the guardian found under the new state
+		// (an agent the change left without hooks), not its previous report.
+		l.awaitGuardianReport(ctx, activationStarted)
+	}
 	l.describe(ctx, newRecord, false)
 	return 0
 }
 
 // quiesce stops the services in reverse activation order. Sockets stay up
 // so hooks queue during the change; they are restarted in activation only
-// when their definition changed.
-func (l *lifecycle) quiesce(ctx context.Context, units []Unit) {
+// when their definition changed. The units in keep stay as they are.
+func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]bool) {
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	for _, unit := range ordered {
-		if unit.Kind == "socket" || unit.Name == l.env.SelfUnit {
+		if unit.Kind == "socket" || unit.Name == l.env.SelfUnit || keep[unit.Name] {
 			continue
 		}
 		_ = l.env.Services.Stop(ctx, unit)
 	}
+}
+
+// keepRunningDuringChange lists the config-apply entry points a transaction
+// leaves alone. A run of the apply service (Linux) or job (macOS) that is
+// waiting for the lifecycle lock was started by a change to config.yaml, a
+// secret or a policy, often by this transaction's own writes; stopping it
+// killed the waiting run, which left defenseclaw-enterprise-apply.service
+// failed and dropped an administrator change made during the transaction.
+// Left alone it runs ensure once this transaction releases the lock. The
+// macOS job is also its own path watcher, so it is kept only while its
+// definition stays the same (a changed plist must be reloaded).
+func (l *lifecycle) keepRunningDuringChange(p *plan) map[string]bool {
+	env := l.env
+	keep := map[string]bool{}
+	switch env.GOOS {
+	case "linux":
+		keep[unitApplyService] = true
+	case "darwin":
+		unit := Unit{Name: labelApply}
+		path := env.Services.DefinitionPath(unit, p.channel)
+		current, err := sha256File(env.P(path))
+		if err != nil {
+			return keep
+		}
+		for _, file := range p.files {
+			if file.Path == path && file.SHA == current {
+				keep[labelApply] = true
+			}
+		}
+	}
+	return keep
 }
 
 func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
@@ -942,6 +1039,17 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 		if current == file.SHA {
 			if err := env.fixMetadata(env.P(file.Path), file.Mode, file.Owner); err != nil {
 				return nil, err
+			}
+			continue
+		}
+		if file.KeepContent {
+			// Changed since the plan read it: the newer bytes stay, and the
+			// run applies them in a follow-up transaction. A regular file
+			// still gets the managed mode and owner.
+			if info, err := os.Lstat(env.P(file.Path)); err == nil && info.Mode().IsRegular() {
+				if err := env.fixMetadata(env.P(file.Path), file.Mode, file.Owner); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -1036,6 +1144,11 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		}
 		if unit.Name == env.SelfUnit {
 			// Already running: this transaction executes inside it.
+			continue
+		}
+		if unit.Kind == "path" && env.GOOS == "darwin" && env.Services.Active(ctx, unit) {
+			// The apply job stayed loaded through the change (its definition
+			// did not change); a kickstart would kill a queued run.
 			continue
 		}
 		if unit.Kind == "socket" && env.Services.Active(ctx, unit) {
@@ -1134,6 +1247,11 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		if (unit.Kind == "socket" && contains(previouslyActive, unit.Name)) || unit.Name == env.SelfUnit {
 			continue
 		}
+		if unit.Name == unitApplyService {
+			// A queued apply run is waiting for the lock; it re-applies the
+			// restored state (a no-op) or a change made meanwhile.
+			continue
+		}
 		_ = env.Services.Stop(ctx, unit)
 	}
 	restoreErr := env.restore(snap)
@@ -1149,7 +1267,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	}
 	sort.SliceStable(units, func(i, j int) bool { return units[i].Stage < units[j].Stage })
 	for _, unit := range units {
-		if contains(previouslyActive, unit.Name) && unit.Name != env.SelfUnit {
+		// A queued apply run was left running; starting the oneshot again
+		// would wait for that run, which waits for this transaction's lock.
+		if contains(previouslyActive, unit.Name) && unit.Name != env.SelfUnit && unit.Name != unitApplyService {
 			if err := env.Services.Start(ctx, unit); err != nil {
 				startErrs = append(startErrs, err)
 			}
@@ -1271,7 +1391,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		r.Noop = true
 		r.NoopReason = "not_installed"
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); use uninstall --purge to remove it")
+			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx))
 		}
 		return 0
 	}
@@ -1375,11 +1495,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	if record != nil {
-		for _, dir := range record.CreatedDirs {
+		// Deepest first: a parent is empty only once its children are gone
+		// (/etc/claude-code after /etc/claude-code/managed-settings.d).
+		dirs := append([]string(nil), record.CreatedDirs...)
+		sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+		for _, dir := range dirs {
 			_ = removeDirIfEmpty(env.P(dir))
 		}
 	}
-	_ = removeFile(env.deploymentPath())
 	_ = env.clearPending()
 	// No config is running once the deployment is gone; a reinstall that
 	// keeps the retained config.yaml starts without an old rejection.
@@ -1409,9 +1532,18 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
+		if !l.opts.Purge && record != nil {
+			// The deployment record stays until the removal is complete:
+			// without it a rerun of uninstall is a no-op and a reinstall
+			// (the package postinstall, an MDM ensure) refuses the kept state
+			// as an unmanaged layout. With it, rerunning uninstall finishes
+			// the removal and ensure restores the deployment.
+			err = fmt.Errorf("%w; the deployment record is kept: fix the cause and rerun uninstall (or run ensure to restore the deployment)", err)
+		}
 		r.AddError(codeUninstall, err.Error())
 		return 0
 	}
+	_ = removeFile(env.deploymentPath())
 	if !l.opts.Purge && record != nil {
 		// Record what stays so a reinstall resumes with it instead of
 		// refusing it as an unmanaged layout.

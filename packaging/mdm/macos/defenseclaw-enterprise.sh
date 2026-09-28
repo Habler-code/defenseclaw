@@ -21,6 +21,10 @@
 #      lifecycle-result.schema.json) on stdout, appends it to a root-only log
 #      and exits with the lifecycle exit code: 0 success or no-op, 1 failure
 #      (already rolled back), 2 invalid arguments, 75 busy (retry later).
+#      When the package step installed or upgraded the package (its
+#      postinstall applies the deployment, so the ensure that follows is
+#      usually a no-op), the result says so: action install or upgrade and a
+#      package_installed or package_upgraded warning with the versions.
 #
 # The Linux and macOS copies are identical except DC_SCRIPT_OS; each refuses
 # to run on the other platform.
@@ -87,6 +91,9 @@ DC_CONFIG_STDIN=0
 DC_SECRET_STDIN=0
 DC_STAGE=""
 DC_RESULT=""
+DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
+DC_PACKAGE_PREVIOUS="" # the version it replaced
+DC_PACKAGE_VERSION=""  # the version it installed
 
 dc_platform() {
     case "$(uname -s)" in
@@ -233,7 +240,7 @@ dc_stage_file() {
 }
 
 dc_usage() {
-    sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 dc_parse_args() {
@@ -453,6 +460,10 @@ dc_install_package() {
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "dpkg failed: $output"
                 fi
+                case "$installed" in
+                    "install ok installed "*) dc_package_step "$(dc_package_release_version "${installed#install ok installed }")" "$(dc_package_release_version "$version")" ;;
+                    *) dc_package_step "" "$(dc_package_release_version "$version")" ;;
+                esac
             fi
             ;;
         *.rpm)
@@ -466,6 +477,10 @@ dc_install_package() {
             if [ "$installed" = "$version" ]; then
                 dc_log "package $version already installed"
             else
+                previous=""
+                if rpm -q "$DC_LINUX_PACKAGE" >/dev/null 2>&1; then
+                    previous=$(dc_package_release_version "$installed")
+                fi
                 # rpm -U refuses a downgrade, which keeps an older package
                 # from silently replacing a newer deployment.
                 if ! output=$(rpm -U --quiet "$file" 2>&1); then
@@ -474,6 +489,7 @@ dc_install_package() {
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "rpm failed: $output"
                 fi
+                dc_package_step "$previous" "$(dc_package_release_version "$version")"
             fi
             ;;
         *.pkg)
@@ -494,6 +510,7 @@ dc_install_package() {
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "installer failed: $output"
                 fi
+                dc_package_step "$installed" "$version"
             fi
             ;;
         *)
@@ -501,6 +518,48 @@ dc_install_package() {
             return 0
             ;;
     esac
+}
+
+# dc_package_step <previous version> <installed version>: record that the
+# package manager installed (no previous version) or upgraded the package.
+dc_package_step() {
+    DC_PACKAGE_PREVIOUS=$1
+    DC_PACKAGE_VERSION=$2
+    if [ -n "$1" ]; then DC_PACKAGE_ACTION=upgrade; else DC_PACKAGE_ACTION=install; fi
+    dc_log "package $DC_PACKAGE_ACTION ${1:+$1 -> }$2"
+}
+
+# dc_annotate_package_step: after a successful ensure, make the result
+# document report the package step. The package's postinstall applied the
+# deployment, so the ensure that followed is usually a no-op, and an MDM
+# reading "action ensure, noop true" would conclude nothing changed. The
+# lifecycle prints the document with two-space indentation, one top-level
+# field per line.
+dc_annotate_package_step() {
+    [ -n "$DC_PACKAGE_ACTION" ] && [ -n "$DC_RESULT" ] || return 0
+    if [ "$DC_PACKAGE_ACTION" = upgrade ]; then
+        code=package_upgraded
+        note="the package step upgraded the DefenseClaw enterprise package from $DC_PACKAGE_PREVIOUS to $DC_PACKAGE_VERSION; its postinstall applied the deployment"
+    else
+        code=package_installed
+        note="the package step installed the DefenseClaw enterprise package $DC_PACKAGE_VERSION; its postinstall applied the deployment"
+    fi
+    annotated="$DC_STAGE/result.annotated.json"
+    # The values go through the environment: awk -v would interpret the
+    # backslashes of the JSON escapes.
+    if DC_AWK_ACTION=$DC_PACKAGE_ACTION \
+        DC_AWK_WARNING="{\"code\": \"$code\", \"message\": \"$(dc_json_escape "$note")\"}" \
+        awk '
+            BEGIN { action = ENVIRON["DC_AWK_ACTION"]; warning = ENVIRON["DC_AWK_WARNING"] }
+            /^  "action": "ensure",$/ { print "  \"action\": \"" action "\","; next }
+            /^  "noop": true,$/ { print "  \"noop\": false,"; next }
+            /^  "noop_reason": / { next }
+            /^  "warnings": \[$/ { print; print "    " warning ","; warned = 1; next }
+            /^  "exit_code": / && !warned { print "  \"warnings\": [" warning "],"; warned = 1 }
+            { print }
+        ' "$DC_RESULT" >"$annotated"; then
+        DC_RESULT=$annotated
+    fi
 }
 
 # dc_extract_payload: unpack the payload archive into staging without
@@ -629,6 +688,7 @@ dc_main() {
     [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
     status=0
     dc_run_lifecycle "$gateway" "$@" || status=$?
+    [ "$status" != 0 ] || dc_annotate_package_step
     if [ "$status" != 0 ] || [ -z "$secret" ]; then
         dc_emit_result
         return "$status"

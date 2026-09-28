@@ -339,6 +339,77 @@ func TestInvalidConfigIsRefusedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// A refused ensure (invalid config, or a payload it will not install)
+// changes nothing, so its result reports the running deployment's services
+// and readiness. It printed services [] and readiness all false, which an
+// MDM reads as a host that is down. A rolled-back upgrade reports the
+// restored deployment the same way.
+func TestRefusedChangeReportsTheRunningDeployment(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			cfg := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(cfg, []byte("config_version: 8\nguardrail: [\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requireRunning := func(name string, r *enterprisestatus.Result) {
+				t.Helper()
+				if len(r.Services) != len(h.services.Units()) || !r.Readiness.Gateway || !r.Readiness.Enumerator || !r.Readiness.SensorHelper {
+					t.Fatalf("%s: result does not describe the running deployment: services=%d readiness=%+v", name, len(r.Services), r.Readiness)
+				}
+			}
+			rejected := h.run(Options{Action: ActionEnsure, ConfigFile: cfg})
+			requireError(t, rejected, codeConfig)
+			requireRunning("rejected config", rejected)
+
+			health := h.env.HealthGet
+			h.env.HealthGet = func(ctx context.Context) (int, []byte, error) {
+				// The new gateway never becomes healthy; the restored one does.
+				h.healthy = strings.Contains(h.read(filepath.Join(h.env.Layout.BinDir, binGateway)), "1.0.0")
+				return health(ctx)
+			}
+			rolledBack := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("2.0.0")})
+			requireError(t, rolledBack, codeActivate)
+			if !hasWarning(rolledBack, codeRolledBack) {
+				t.Fatalf("upgrade did not roll back: %+v", rolledBack.Warnings)
+			}
+			requireRunning("rolled back upgrade", rolledBack)
+		})
+	}
+}
+
+// A config error names the file the administrator passed with --config,
+// not the installed path (which made the installed config look broken), and
+// a missing config_version says to add it: `defenseclaw migrate` is a
+// per-user command the enterprise packages do not ship.
+func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			cfg := filepath.Join(t.TempDir(), "staged-config.yaml")
+			unversioned := strings.Replace(string(DefaultConfig(h.env.Layout)), "config_version: 8\n", "", 1)
+			if err := os.WriteFile(cfg, []byte(unversioned), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
+			requireError(t, r, codeConfig)
+			message := ""
+			for _, e := range r.Errors {
+				if e.Code == codeConfig {
+					message = e.Message
+				}
+			}
+			if !strings.Contains(message, cfg) || strings.Contains(message, h.env.Layout.ConfigPath) {
+				t.Fatalf("the error does not name the --config file: %q", message)
+			}
+			if !strings.Contains(message, "config_version_required") || !strings.Contains(message, "`config_version: 8`") || strings.Contains(message, "defenseclaw migrate") {
+				t.Fatalf("the error does not say how to fix the file on this host: %q", message)
+			}
+		})
+	}
+}
+
 // A rule pack the gateway cannot load, or one inside the service-writable
 // data_dir, is refused before any change instead of failing activation.
 func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
@@ -514,7 +585,7 @@ func TestGuardianPathsDropinCoversHomeRootsAndMachinePolicy(t *testing.T) {
 		t.Fatalf("descriptor machine policy connectors %v", descriptor.MachinePolicyConnectors)
 	}
 	requireOK(t, h.run(Options{Action: ActionUninstall}))
-	if exists(h.env.P("/etc/codex")) || exists(h.env.P("/etc/opencode")) {
+	if exists(h.env.P("/etc/codex")) || exists(h.env.P("/etc/opencode")) || exists(h.env.P("/etc/claude-code")) {
 		t.Fatal("uninstall kept an empty machine-policy parent it created")
 	}
 }
@@ -818,6 +889,43 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 	requireError(t, verify, codeVerify)
 	if verify.SecurityComplete {
 		t.Fatal("verify reports security_complete with an unprotected agent")
+	}
+}
+
+// A guardian target reason names the refused path first and the remedy
+// last; status cut it at 240 bytes, which dropped the remedy (seen on RHEL:
+// "add its directory to DEFENSECLAW_TRUSTED_BIN_P..."). A realistic reason
+// is kept whole, and an oversized one keeps its remedy clause.
+func TestGuardianTargetReasonKeepsItsRemedy(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	remedy := "install it under an administrator-owned prefix listed in enterprise.enrollment.agent_prefixes"
+	realistic := "connector omnigent setup failed: Python interpreter /home/dcr-std1/.local/share/uv/tools/omnigent/bin/python3.12 resolves to /home/dcr-std1/.local/share/uv/python/cpython-3.12.11-linux-x86_64-gnu/bin/python3.12, which is not in a trusted install prefix; " + remedy
+	oversized := "connector omnigent setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
+	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
+		{"user": "alice", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + realistic},
+		{"user": "bob", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + oversized},
+	}})
+	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	for _, user := range []string{"alice", "bob"} {
+		found := false
+		for _, w := range status.Warnings {
+			if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "for user "+user) {
+				found = true
+				if !strings.HasSuffix(w.Message, remedy) {
+					t.Fatalf("the reason for %s lost its remedy: %q", user, w.Message)
+				}
+				if len(w.Message) > 1200 {
+					t.Fatalf("the reason for %s is unbounded (%d bytes)", user, len(w.Message))
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("no guardian_target_failed warning for %s: %+v", user, status.Warnings)
+		}
 	}
 }
 

@@ -13,10 +13,13 @@ package cli
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // unixLifecycleOptions are the flags of `enterprise linux|macos <action>`.
@@ -75,7 +78,17 @@ from an administrator shell, a package script or an MDM agent.
 Exit codes: 0 success or no-op, 1 failure (rolled back), 2 invalid
 arguments, 75 another lifecycle run holds the lock.`,
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
+		// An action the group does not know is invalid arguments (exit 2),
+		// not a silent help page.
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return invalidLifecycleArguments(fmt.Errorf("unknown action %q for %q; run %q for the actions", args[0], cmd.CommandPath(), cmd.CommandPath()+" --help"))
+			}
+			return cmd.Help()
+		},
 	}
+	group.SetFlagErrorFunc(lifecycleFlagError)
 	summaries := map[string]string{
 		"install":   "Install the deployment (refuses when one is already installed)",
 		"upgrade":   "Upgrade an installed deployment from a new payload or package",
@@ -92,17 +105,26 @@ arguments, 75 another lifecycle run holds the lock.`,
 	return group
 }
 
+// lockWaitUsage documents --lock-wait on every action that takes the
+// lifecycle lock.
+const lockWaitUsage = "wait up to this long for another lifecycle run (default 5s, at most 15m) before exiting 75"
+
 func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	opts := &unixLifecycleOptions{}
 	cmd := &cobra.Command{
 		Use:          action,
 		Short:        summary,
 		SilenceUsage: true,
-		Args:         cobra.NoArgs,
+		Args: func(cmd *cobra.Command, args []string) error {
+			return invalidLifecycleArguments(cobra.NoArgs(cmd, args))
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUnixLifecycle(cmd, platform, action, opts)
 		},
 	}
+	// An unknown flag or a malformed value fails before RunE; the documented
+	// exit code for it is invalid arguments, not cobra's generic 1.
+	cmd.SetFlagErrorFunc(lifecycleFlagError)
 	flags := cmd.Flags()
 	switch action {
 	case "install", "upgrade", "repair", "ensure":
@@ -118,13 +140,26 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		if action == "ensure" {
 			flags.StringVar(&opts.reason, "reason", "", "why ensure runs (recorded in the result)")
 		}
-		flags.DurationVar(&opts.lockWait, "lock-wait", 0, "wait up to this long for another lifecycle run (default 5s, at most 15m) before exiting 75")
+		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	case "uninstall":
 		flags.BoolVar(&opts.purge, "purge", false, "also remove config, secrets, state and logs")
 		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "with --purge, also delete the gateway service account")
+		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
+	case "reconcile":
+		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	}
 	flags.BoolVar(&opts.json, "json", false, "print the lifecycle result as JSON")
 	return cmd
+}
+
+// invalidLifecycleArguments labels err with the lifecycle's invalid-arguments
+// exit code (2 on Linux and macOS; 1639 where Windows runs these groups).
+func invalidLifecycleArguments(err error) error {
+	return withExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))
+}
+
+func lifecycleFlagError(_ *cobra.Command, err error) error {
+	return invalidLifecycleArguments(err)
 }
 
 func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
@@ -159,11 +194,17 @@ func init() {
 	enterpriseCmd.AddCommand(enterpriseLinuxCmd, enterpriseMacOSCmd, enterpriseSecretCmd)
 }
 
-// writeLifecycleSummary prints a short human-readable result.
+// writeLifecycleSummary prints a short human-readable result. A result
+// with warnings never gets the green check: the headline says how many
+// there are.
 func writeLifecycleSummary(w io.Writer, action string, ok, noop bool, noopReason string, errs, warns []string) {
 	switch {
+	case ok && noop && len(warns) > 0:
+		fmt.Fprintf(w, "! %s: nothing to do (%s), %s\n", action, noopReason, countNoun(len(warns), "warning"))
 	case ok && noop:
 		fmt.Fprintf(w, "✓ %s: nothing to do (%s)\n", action, noopReason)
+	case ok && len(warns) > 0:
+		fmt.Fprintf(w, "! %s: done with %s\n", action, countNoun(len(warns), "warning"))
 	case ok:
 		fmt.Fprintf(w, "✓ %s: done\n", action)
 	default:
@@ -178,3 +219,10 @@ func writeLifecycleSummary(w io.Writer, action string, ok, noop bool, noopReason
 }
 
 func joinMessages(parts []string) string { return strings.Join(parts, "; ") }
+
+func countNoun(count int, noun string) string {
+	if count == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", count, noun)
+}

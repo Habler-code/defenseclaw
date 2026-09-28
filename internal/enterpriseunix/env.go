@@ -73,6 +73,7 @@ var commandCandidates = map[string][]string{
 	"launchctl":        {"/bin/launchctl"},
 	"dscl":             {"/usr/bin/dscl"},
 	"pkgutil":          {"/usr/sbin/pkgutil"},
+	"lsof":             {"/usr/sbin/lsof", "/usr/bin/lsof"},
 }
 
 // ExecRunner is the production Runner.
@@ -199,6 +200,9 @@ type Env struct {
 	LockTimeout  time.Duration
 	ReadyTimeout time.Duration
 	PollInterval time.Duration
+	// GuardianReportTimeout bounds how long a change waits for the hook
+	// guardian's report on its targets.
+	GuardianReportTimeout time.Duration
 }
 
 // NewEnv returns the production environment for goos.
@@ -293,6 +297,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.PollInterval <= 0 {
 		e.PollInterval = 500 * time.Millisecond
+	}
+	if e.GuardianReportTimeout <= 0 {
+		e.GuardianReportTimeout = 30 * time.Second
 	}
 }
 

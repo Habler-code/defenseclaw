@@ -341,7 +341,8 @@ func (m *launchdManager) Disable(ctx context.Context, unit Unit) error {
 }
 
 var (
-	launchdStatePattern = regexp.MustCompile(`(?m)^\s*state = (\S+)`)
+	// launchctl prints multi-word states ("not running", "spawn scheduled").
+	launchdStatePattern = regexp.MustCompile(`(?m)^\s*state = ([^\n]*?)\s*$`)
 	launchdPIDPattern   = regexp.MustCompile(`(?m)^\s*pid = (\d+)`)
 	launchdRunsPattern  = regexp.MustCompile(`(?m)^\s*runs = (\d+)`)
 )
@@ -367,7 +368,24 @@ func (m *launchdManager) Status(ctx context.Context, unit Unit) (enterprisestatu
 		}
 	}
 	service.StartMode = "loaded"
+	service.State = launchdDisplayState(unit.Kind, service.State)
 	return service, nil
+}
+
+// launchdDisplayState renders an on-demand job (the apply job, started by
+// its watched paths, and the daily verify job) that is loaded but not
+// running as idle instead of launchd's bare "not running".
+func launchdDisplayState(kind, state string) string {
+	if state == "running" || state == "" {
+		return state
+	}
+	switch kind {
+	case "path":
+		return "on demand, idle"
+	case "timer":
+		return "scheduled, idle"
+	}
+	return state
 }
 
 // Active is true for a running daemon, and for a loaded on-demand job

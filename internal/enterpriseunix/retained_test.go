@@ -3,7 +3,9 @@
 package enterpriseunix
 
 import (
+	"context"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -114,4 +116,45 @@ func TestReinstallRemovesTheRetainedMarkers(t *testing.T) {
 	if exists(retainedMarkerPath(h.env.P(l.DataDir))) {
 		t.Fatal("the retained marker survived the reinstall")
 	}
+}
+
+// rpmOwnedRunner reports the gateway binary as owned by the rpm database.
+type rpmOwnedRunner struct{ Runner }
+
+func (r rpmOwnedRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	if name == "rpm" && len(args) > 0 && args[0] == "-qf" {
+		return CommandResult{}, nil
+	}
+	return r.Runner.Run(ctx, name, args...)
+}
+
+// RHEL-F17, UBU-F14: after a lifecycle uninstall of a package install the
+// rpm/deb stays installed, and status warned "unmanaged_leftovers ...
+// /opt/defenseclaw/bin/defenseclaw-gateway" with no next step. The warning
+// now says how to remove the package or activate the deployment again.
+func TestLeftoversWarningNamesTheNextStep(t *testing.T) {
+	t.Run("linux-package", func(t *testing.T) {
+		h := packageHost(t, "1.0.0")
+		h.env.Runner = rpmOwnedRunner{Runner: h.runner}
+		requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+		requireOK(t, h.run(Options{Action: ActionUninstall}))
+		for _, action := range []string{ActionStatus, ActionUninstall} {
+			r := h.run(Options{Action: action})
+			got := messagesOf(r.Warnings, codeLeftovers)
+			if !strings.Contains(got, "/opt/defenseclaw/bin/defenseclaw-gateway") || !strings.Contains(got, "`dnf remove defenseclaw-enterprise`") ||
+				!strings.Contains(got, "`/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --config <file>`") {
+				t.Fatalf("%s: the leftovers warning names no next step: %s", action, got)
+			}
+		}
+	})
+	t.Run("darwin", func(t *testing.T) {
+		h := newTestHost(t, "darwin")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		requireOK(t, h.run(Options{Action: ActionUninstall}))
+		writeHostFile(t, h, h.env.Layout.DescriptorPath, "{}")
+		got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeLeftovers)
+		if !strings.Contains(got, "enterprise macos uninstall --purge`") || !strings.Contains(got, "enterprise macos ensure --from-package --config <file>`") {
+			t.Fatalf("the leftovers warning names no next step: %s", got)
+		}
+	})
 }

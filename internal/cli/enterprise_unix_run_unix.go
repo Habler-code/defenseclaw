@@ -18,7 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -69,10 +71,21 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
+	return lifecycleFailure(result, opts.json)
+}
+
+// lifecycleFailure is the command error of a failed result. The human
+// output has already listed every problem, so the error line only says
+// where to look; with --json the document is on stdout and the error line
+// on stderr carries the problems.
+func lifecycleFailure(result *enterprisestatus.Result, asJSON bool) error {
 	if result.OK {
 		return nil
 	}
-	return withExitCode(errors.New(lifecycleErrorSummary(result)), result.ExitCode)
+	if asJSON || len(result.Errors) == 0 {
+		return withExitCode(errors.New(lifecycleErrorSummary(result)), result.ExitCode)
+	}
+	return withExitCode(fmt.Errorf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem")), result.ExitCode)
 }
 
 func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON bool) error {
@@ -81,11 +94,29 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(result)
 	}
+	// verify turns target and machine-policy warnings into verify_failed
+	// errors; each problem is printed once, as an error with the specific
+	// code of the warning it came from.
+	warningCode := map[string]string{}
+	for _, warning := range result.Warnings {
+		if _, seen := warningCode[warning.Message]; !seen {
+			warningCode[warning.Message] = warning.Code
+		}
+	}
+	errorMessages := map[string]bool{}
 	var errs, warns []string
 	for _, e := range result.Errors {
-		errs = append(errs, e.Code+": "+e.Message)
+		code := e.Code
+		if specific, ok := warningCode[e.Message]; ok && code == "verify_failed" {
+			code = specific
+		}
+		errorMessages[e.Message] = true
+		errs = append(errs, code+": "+e.Message)
 	}
 	for _, warning := range result.Warnings {
+		if errorMessages[warning.Message] {
+			continue
+		}
 		warns = append(warns, warning.Code+": "+warning.Message)
 	}
 	writeLifecycleSummary(w, result.Action, result.OK, result.Noop, result.NoopReason, errs, warns)
@@ -123,6 +154,12 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	switch action {
 	case "status":
 		states, err := env.SecretStatus()
+		if errors.Is(err, fs.ErrPermission) {
+			// The credentials directory is root-only (or root and the
+			// service account): a standard account cannot list it.
+			return withExitCode(fmt.Errorf("listing the protected credentials requires administrator rights; run: sudo %s enterprise secret status",
+				filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")), enterprisestatus.UnixExitFailure)
+		}
 		if err != nil {
 			return withExitCode(err, enterprisestatus.UnixExitFailure)
 		}
@@ -166,8 +203,5 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
-	if !result.OK {
-		return withExitCode(errors.New(lifecycleErrorSummary(result)), result.ExitCode)
-	}
-	return nil
+	return lifecycleFailure(result, opts.json)
 }

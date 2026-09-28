@@ -13,11 +13,14 @@
 package enterpriseunix
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -137,6 +140,12 @@ func coveredMachinePolicy(intended []string, result enterprisepolicy.Result) []s
 // lifecycle result and warns for every intended connector that is not
 // covered.
 func reportMachinePolicy(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error) {
+	reportMachinePolicyExcept(r, intended, result, err, nil)
+}
+
+// reportMachinePolicyExcept is reportMachinePolicy for callers that report
+// the connectors in skip themselves.
+func reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error, skip []string) {
 	for _, state := range result.States {
 		if state.Route != enterprisepolicy.RouteMachinePolicy {
 			continue
@@ -146,8 +155,8 @@ func reportMachinePolicy(r *enterprisestatus.Result, intended []string, result e
 	missing := []string{}
 	covered := coveredMachinePolicy(intended, result)
 	for _, name := range intended {
-		if !contains(covered, name) {
-			missing = append(missing, name)
+		if !contains(covered, name) && !contains(skip, name) {
+			missing = append(missing, machinePolicyLabel(name, result))
 		}
 	}
 	if len(missing) > 0 {
@@ -156,9 +165,20 @@ func reportMachinePolicy(r *enterprisestatus.Result, intended []string, result e
 			message += ": " + err.Error()
 		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
-	} else if err != nil {
+	} else if err != nil && len(skip) == 0 {
 		r.AddWarning(codeMachinePolicyIncomplete, err.Error())
 	}
+}
+
+// machinePolicyLabel names a connector with the vendor machine-policy files
+// DefenseClaw writes for it, for example "codex (/etc/codex/requirements.toml)".
+func machinePolicyLabel(connector string, result enterprisepolicy.Result) string {
+	for _, state := range result.States {
+		if state.Connector == connector && state.Route == enterprisepolicy.RouteMachinePolicy && len(state.Paths) > 0 {
+			return connector + " (" + strings.Join(state.Paths, ", ") + ")"
+		}
+	}
+	return connector
 }
 
 func sameStrings(left, right []string) bool {
@@ -245,6 +265,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) {
 	if err != nil {
 		return
 	}
+	l.warnNoConnectorsEnabled(validated)
 	intended, err := env.MachinePolicy.Intended(validated.Loaded)
 	if err != nil {
 		r.AddWarning(codeMachinePolicy, err.Error())
@@ -255,13 +276,71 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) {
 		r.AddWarning(codeMachinePolicy, verifyErr.Error())
 		return
 	}
-	reportMachinePolicy(r, intended, result, verifyErr)
+	// A connector the last transaction placed that is gone from its vendor
+	// file now is reported once, with the file and the command that puts it
+	// back; the general "not in place" message covers the rest.
+	var removed, unwanted []string
 	if record != nil && record.MachinePolicyConnectors != nil {
 		recorded := coveredMachinePolicy(record.MachinePolicyConnectors, result)
-		if !sameStrings(recorded, intersectSorted(record.MachinePolicyConnectors, intended)) {
-			r.AddWarning(codeMachinePolicyIncomplete, "vendor machine policy changed since the last transaction; run ensure")
+		for _, name := range intersectSorted(record.MachinePolicyConnectors, intended) {
+			if !contains(recorded, name) {
+				removed = append(removed, name)
+			}
+		}
+		for _, name := range recorded {
+			if !contains(intended, name) {
+				unwanted = append(unwanted, name)
+			}
 		}
 	}
+	reportMachinePolicyExcept(r, intended, result, verifyErr, removed)
+	for index, name := range removed {
+		message := fmt.Sprintf(
+			"vendor machine policy for %s no longer carries the DefenseClaw hooks the last transaction placed, so %s runs without them; run `%s` to restore them",
+			machinePolicyLabel(name, result), name, env.lifecycleCommand("repair"))
+		if index == 0 && verifyErr != nil {
+			message += " (" + verifyErr.Error() + ")"
+		}
+		r.AddWarning(codeMachinePolicyIncomplete, message)
+	}
+	for _, name := range unwanted {
+		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
+			"vendor machine policy for %s still carries DefenseClaw hooks, but the installed config.yaml no longer asks for them; run `%s` to apply the config",
+			machinePolicyLabel(name, result), env.lifecycleCommand("ensure")))
+	}
+}
+
+// codeNoConnectorsEnabled names a deployment whose config enables no
+// connector although the enumerator found users to protect.
+const codeNoConnectorsEnabled = "no_connectors_enabled"
+
+// warnNoConnectorsEnabled reports a config without an enabled
+// guardrail.connectors entry on a host with eligible users: the enumerator
+// publishes no target for them, and status would otherwise read coverage and
+// security complete with 0 targets.
+func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
+	env, r := l.env, l.result
+	if len(validated.Connectors) > 0 {
+		return
+	}
+	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
+	if err != nil {
+		return
+	}
+	var record struct {
+		Accounts []json.RawMessage `json:"accounts"`
+	}
+	if json.Unmarshal(data, &record) != nil || len(record.Accounts) == 0 {
+		return
+	}
+	users := "users"
+	if len(record.Accounts) == 1 {
+		users = "user"
+	}
+	r.AddWarning(codeNoConnectorsEnabled, fmt.Sprintf(
+		"the enumerator found %d eligible %s, but config.yaml enables no guardrail.connectors entry, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {enabled: true}) and run `%s`",
+		len(record.Accounts), users, env.lifecycleCommand("ensure")))
+	r.SecurityComplete = false
 }
 
 func intersectSorted(values, allowed []string) []string {

@@ -37,14 +37,16 @@ type fakeServices struct {
 	enabled   map[string]bool
 	calls     []string
 	failStart map[string]error
-	reloads   int
-	inner     ServiceManager // definition paths and unit list
-	env       *Env
+	// failed units report systemd's failed state.
+	failed  map[string]bool
+	reloads int
+	inner   ServiceManager // definition paths and unit list
+	env     *Env
 }
 
 func newFakeServices(env *Env) *fakeServices {
 	inner := newServiceManager(env)
-	return &fakeServices{goos: env.GOOS, version: 255, active: map[string]bool{}, enabled: map[string]bool{}, failStart: map[string]error{}, inner: inner, env: env}
+	return &fakeServices{goos: env.GOOS, version: 255, active: map[string]bool{}, enabled: map[string]bool{}, failStart: map[string]error{}, failed: map[string]bool{}, inner: inner, env: env}
 }
 
 func (f *fakeServices) Enabled(_ context.Context, u Unit) bool {
@@ -130,6 +132,11 @@ func (f *fakeServices) Status(_ context.Context, u Unit) (enterprisestatus.Servi
 	if f.isActive(u.Name) {
 		state = "active"
 	}
+	f.mu.Lock()
+	if f.failed[u.Name] {
+		state = "failed/failed"
+	}
+	f.mu.Unlock()
 	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, Required: u.Required}, nil
 }
 
@@ -239,6 +246,8 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		LockTimeout:    300 * time.Millisecond,
 		ReadyTimeout:   200 * time.Millisecond,
 		PollInterval:   10 * time.Millisecond,
+		// No guardian runs in the fake host.
+		GuardianReportTimeout: 50 * time.Millisecond,
 	}
 	env.Lchown = func(path string, uid, gid int) error {
 		h.owners[stagedFinal(path)] = [2]int{uid, gid}

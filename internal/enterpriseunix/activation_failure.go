@@ -14,10 +14,12 @@ package enterpriseunix
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // A gateway that fails to start during install or upgrade usually says why
@@ -53,16 +55,38 @@ func (e *Env) gatewayRecentOutput(ctx context.Context, unit Unit) string {
 		}
 		return tailString(string(result.Stdout), gatewayOutputTailBytes)
 	}
-	file, err := os.Open(e.P(e.gatewayErrorLogPath()))
+	data, err := readLogTail(e.P(e.gatewayErrorLogPath()), gatewayOutputTailBytes)
 	if err != nil {
 		return ""
 	}
-	defer file.Close()
-	if info, err := file.Stat(); err == nil && info.Size() > gatewayOutputTailBytes {
-		_, _ = file.Seek(info.Size()-gatewayOutputTailBytes, io.SeekStart)
-	}
-	data, _ := io.ReadAll(io.LimitReader(file, gatewayOutputTailBytes))
 	return string(data)
+}
+
+// readLogTail reads at most limit bytes from the end of a log file in a
+// directory the service account owns. The lifecycle runs as root, so the
+// file is opened without following a symlink (another account's link would
+// copy a root-readable file into the result) and without blocking (a FIFO
+// would hang the run while it holds the lifecycle lock), and only a regular
+// file is read.
+func readLogTail(path string, limit int64) ([]byte, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if info.Size() > limit {
+		if _, err := file.Seek(info.Size()-limit, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	return io.ReadAll(io.LimitReader(file, limit))
 }
 
 func tailString(value string, limit int) string {
