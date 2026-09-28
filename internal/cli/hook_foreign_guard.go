@@ -64,6 +64,10 @@ var hookForeignGuardAgentProcess = agentprocess.Identity
 // standalone gateway over its authenticated hook transport.
 var hookForeignGuardExchange = exchangeForeignHookSession
 
+// foreignHookSessionUnavailableReason is the block reason when the gateway
+// cannot answer for the agent session's hook record.
+const foreignHookSessionUnavailableReason = "enterprise_foreign_hook_blocked: DefenseClaw could not check this agent session's hook record with its gateway, so the call is blocked. Retry when the DefenseClaw gateway is running; if the block continues, restart the agent."
+
 // applyEnterpriseForeignHookGuard denies a hook invocation on a standalone
 // managed host while an unapproved hook that could rewrite the tool call
 // after DefenseClaw checks it is present in the agent's user or project
@@ -348,9 +352,13 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 	}
 	decision, err := hookForeignGuardExchange(name, event, deadline, update)
 	if err != nil {
+		// The gateway holds the session record. Without its answer the call
+		// is blocked in every fail mode, and the reason must not suggest an
+		// unapproved hook that may not exist (the usual cause is a gateway
+		// that is stopped or restarting).
 		decision = enterprisepolicy.GuardDecision{
 			Deny:     true,
-			Reason:   "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent.",
+			Reason:   foreignHookSessionUnavailableReason,
 			Findings: update.Decision.Findings,
 		}
 	}

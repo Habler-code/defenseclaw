@@ -123,6 +123,12 @@ func TestForeignHookGuardDeniesWhenGatewaySessionStateIsUnavailable(t *testing.T
 	if !strings.HasPrefix(decision.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) || !strings.Contains(decision.ManagedRuntimeFailure, "restart the agent") {
 		t.Fatalf("unavailable gateway state must block the hook: %q", decision.ManagedRuntimeFailure)
 	}
+	// No hook is involved here (the usual cause is a stopped or restarting
+	// gateway), so the reason names the gateway and does not ask the user to
+	// remove a hook.
+	if !strings.Contains(decision.ManagedRuntimeFailure, "with its gateway") || strings.Contains(decision.ManagedRuntimeFailure, "unapproved hook") {
+		t.Fatalf("the unavailable-gateway reason must name the gateway, not a hook: %q", decision.ManagedRuntimeFailure)
+	}
 }
 
 // A hook that appears after the session started denies the calls that find

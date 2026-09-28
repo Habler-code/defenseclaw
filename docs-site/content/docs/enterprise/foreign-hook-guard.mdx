@@ -97,7 +97,8 @@ On Linux and macOS, `preserve` also removes the vendor lock; see
 5. **Follows redirected user config.** An agent whose environment moves its
    user configuration (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
    `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`,
-   `HERMES_HOME`, or a `HOME` that is not the account's) is checked at that
+   `HERMES_HOME`, `HERMES_MANAGED_DIR`, or a `HOME` that is not the
+   account's) is checked at that
    location. The hook
    also records each absolute location it sees in
    `~/.defenseclaw/foreign-hook-env.json` (at most 8 per connector), and the
@@ -165,13 +166,14 @@ repository root.
 | Devin | `~/.config/devin/config.json` on Linux and macOS (or under `XDG_CONFIG_HOME`), `%APPDATA%\devin\config.json` on Windows, `~/.claude.json` (reported, never rewritten), `~/.claude/settings.json`, `~/.claude/settings.local.json` | `.devin/hooks.v1.json`, `.devin/config.json`, `.devin/config.local.json`, `.claude/settings.json`, `.claude/settings.local.json` |
 | OpenCode | `~/.config/opencode/plugins/`, `~/.config/opencode/plugin/`, `~/.config/opencode/opencode.json`, `opencode.jsonc` and `config.json` (or under `XDG_CONFIG_HOME`); the file named by `OPENCODE_CONFIG`; the folder named by `OPENCODE_CONFIG_DIR`; the inline `OPENCODE_CONFIG_CONTENT` (reported) | `.opencode/plugins/`, `.opencode/plugin/`, `opencode.json`, `opencode.jsonc`, `.opencode/opencode.json`, `.opencode/opencode.jsonc` |
 | Amp | `~/.config/amp/plugins/` (or under `XDG_CONFIG_HOME`) | `.amp/plugins/` |
-| Hermes (Linux and macOS) | `~/.hermes/config.yaml` (or under `HERMES_HOME`; a named Hermes profile sets it) | None: Hermes reads no project hook file |
+| Hermes (Linux and macOS) | `~/.hermes/config.yaml` (or under `HERMES_HOME`; a named Hermes profile sets it), and `config.yaml` in the folder `HERMES_MANAGED_DIR` names, which Hermes merges over the user's (the administrator's `/etc/hermes` is not checked). The `output_spill` and `outbound` settings under `hooks` are not hooks and are left alone | None: Hermes reads no project hook file |
 | Claude Code (when covered) | `~/.claude/settings.json` (or under `CLAUDE_CONFIG_DIR`), and the hooks of plugins it enables | `.claude/settings.json`, `.claude/settings.local.json`, and the hooks of plugins they enable |
 | Codex (when covered) | `~/.codex/config.toml`, `~/.codex/hooks.json` (or under `CODEX_HOME`) | `.codex/config.toml`, `.codex/hooks.json` |
 
 `defenseclaw-hook` reads the locations under `COPILOT_HOME`, `CODEX_HOME`,
 `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`,
-`OPENCODE_CONFIG_DIR`, `HERMES_HOME` and `%APPDATA%` from the agent's
+`OPENCODE_CONFIG_DIR`, `HERMES_HOME`, `HERMES_MANAGED_DIR` and `%APPDATA%`
+from the agent's
 environment. The
 guardian has no user environment: it cleans the default locations and the
 redirected ones a DefenseClaw hook has recorded. `enterprise policy show
@@ -217,6 +219,16 @@ without the user's report.
 
 An approval you add while a session is blocked applies to the next agent
 session; the running one stays blocked.
+
+The session record is kept by the gateway. While the gateway cannot answer
+(it is stopped or restarting, or it ended without removing its hook socket),
+guarded tool calls are blocked whatever the fail mode, with this message:
+
+```text
+enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
+session's hook record with its gateway, so the call is blocked. Retry when
+the DefenseClaw gateway is running; if the block continues, restart the agent.
+```
 
 The block applies to tool calls and, where the agent lets a hook block them,
 to prompts and session starts. Stop and session-end events get the agent's
@@ -352,10 +364,13 @@ with `enterprise_machine_policy_summary_untrusted`.
   [Residual risks](/docs/enterprise/threat-model#residual-risks).
 - Hermes has no vendor lock and no way to order hooks, so the guard is the
   only control, and it runs inside DefenseClaw's own Hermes hook. A Hermes
-  process keeps the shell hooks it loaded at start: if a user removes an
-  unapproved entry after Hermes started but before its `on_session_start`
-  event or first tool call, that process keeps running the entry and the
-  guard cannot see it. Hermes Python plugins (under `HERMES_HOME/plugins`,
+  process keeps the shell hooks it loaded at start, and the ones it re-reads
+  when a plugin reload re-registers `config.yaml` hooks (for example when a
+  plugin is activated; entries already in the user's Hermes allowlist are
+  registered without a new prompt): if a user removes an unapproved entry
+  after Hermes loaded it but before the next `on_session_start` event or
+  tool call, that process keeps running the entry and the guard cannot see
+  it. Hermes Python plugins (under `HERMES_HOME/plugins`,
   project plugins, installed plugin packages) run inside Hermes and can
   change a tool call too; the guard does not inspect them. A Hermes session
   that does not load DefenseClaw's hook at all is not checked either (see

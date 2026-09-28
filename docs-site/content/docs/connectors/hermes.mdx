@@ -108,11 +108,14 @@ DefenseClaw's could change a command DefenseClaw already checked. Hermes has
 no way to lock or order hooks. On Linux and macOS hosts with the standalone
 enterprise profile, DefenseClaw's Hermes hook runs the
 [foreign-hook guard](/docs/enterprise/foreign-hook-guard) before each tool
-call: while `config.yaml` has a hook entry that is not DefenseClaw's and that
-your organization has not approved, tool calls are blocked with a message
-that names the file and the digest to approve, and the guardian removes the
-entry (with a backup). A Hermes process that started with the entry keeps
-running it, so it stays blocked until Hermes restarts.
+call: while `config.yaml`, or the managed-scope `config.yaml` in the folder
+`HERMES_MANAGED_DIR` names, has a hook entry that is not DefenseClaw's and
+that your organization has not approved, tool calls are blocked with a
+message that names the file and the digest to approve, and the guardian
+removes the entry (with a backup). A Hermes process that started with the
+entry keeps running it, so it stays blocked until Hermes restarts. The
+`output_spill` and `outbound` settings under `hooks` are not hooks; the
+guard leaves them alone.
 </Callout>
 
 #### What `setup hermes` actually does
@@ -304,7 +307,8 @@ What reduces it:
 - Use application control (fapolicyd on Linux, Santa or similar on macOS,
   WDAC or AppLocker on Windows) so users can start Hermes only the way you
   allow, for example only from an administrator-owned launcher that resets
-  `HERMES_HOME` and refuses `--safe-mode` and `--ignore-user-config`.
+  `HERMES_HOME` and `HERMES_MANAGED_DIR` and refuses `--safe-mode` and
+  `--ignore-user-config`.
 - Use EDR process protection so users cannot stop or kill the hook process.
 
 See R1, R5 and R18 in the

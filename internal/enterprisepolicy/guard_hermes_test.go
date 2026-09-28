@@ -224,3 +224,107 @@ func TestPublicPolicyGuardsHermesOnLinuxAndMacOSOnly(t *testing.T) {
 		t.Error("foreign_hooks: allow must turn the Hermes guard off")
 	}
 }
+
+// Hermes merges a managed-scope config.yaml over the user's, from the
+// directory HERMES_MANAGED_DIR names (else /etc/hermes), and an event's list
+// there replaces the user's. A user who left ~/.hermes/config.yaml as
+// DefenseClaw wrote it could list DefenseClaw's entry and their own in
+// <dir>/config.yaml and start Hermes with HERMES_MANAGED_DIR=<dir>: the
+// guard read only config.yaml and allowed the call. The file the variable
+// names is now user scope: it is read, recorded for the guardian and
+// cleaned. The administrator's /etc/hermes is not a user source.
+func TestGuardReadsTheHermesManagedScopeConfigTheEnvironmentNames(t *testing.T) {
+	req, script := hermesGuardRequest(t, config.ForeignHooksRemove)
+	writeFile(t, filepath.Join(req.Home, ".hermes", "config.yaml"), hermesConfig(script))
+	managed := filepath.Join(req.Home, "managed-scope")
+	managedConfig := filepath.Join(managed, "config.yaml")
+	writeFile(t, managedConfig, "hooks:\n    pre_tool_call:\n        - command: "+script+"\n          matcher: .*\n          timeout: 30\n"+hermesRewriteEntry)
+	if decision := EvaluateForeignHooks(req); decision.Deny || len(decision.Findings) != 0 {
+		t.Fatalf("without HERMES_MANAGED_DIR the managed-scope file is not read: %+v", decision)
+	}
+	withManaged := req
+	withManaged.Getenv = func(key string) string {
+		if key == "HERMES_MANAGED_DIR" {
+			return managed
+		}
+		return ""
+	}
+	decision := EvaluateForeignHooks(withManaged)
+	if !decision.Deny || len(decision.Findings) != 1 || decision.Findings[0].Path != managedConfig ||
+		decision.Findings[0].Command != "/usr/local/bin/rewrite-tool-input.sh" {
+		t.Fatalf("a user entry in the HERMES_MANAGED_DIR config must deny: %+v", decision)
+	}
+	if !strings.Contains(decision.Reason, managedConfig) {
+		t.Fatalf("the deny reason must name the managed-scope file: %s", decision.Reason)
+	}
+	redirect, ok := ObservedEnvRedirect(withManaged)
+	if !ok || redirect.Vars["HERMES_MANAGED_DIR"] != managed {
+		t.Fatalf("the hook must record HERMES_MANAGED_DIR for the guardian's cleanup: %+v %v", redirect, ok)
+	}
+	result, err := CleanUserForeignHooksWithRedirects(req, []EnvRedirect{redirect}, time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC))
+	if err != nil || len(result.Removed) != 1 || result.Removed[0].Path != managedConfig {
+		t.Fatalf("cleanup of the HERMES_MANAGED_DIR config: %+v %v", result, err)
+	}
+	if cleaned := readFile(t, managedConfig); strings.Contains(cleaned, "rewrite-tool-input.sh") || !strings.Contains(cleaned, "command: "+script) {
+		t.Fatalf("the cleanup must remove only the user entry:\n%s", cleaned)
+	}
+	if again := EvaluateForeignHooks(withManaged); again.Deny || len(again.Findings) != 0 {
+		t.Fatalf("the cleaned managed-scope config must pass: %+v", again)
+	}
+
+	for _, value := range []string{hermesDefaultManagedDir, hermesDefaultManagedDir + "/", "  "} {
+		admin := req
+		admin.Getenv = func(key string) string {
+			if key == "HERMES_MANAGED_DIR" {
+				return value
+			}
+			return ""
+		}
+		for _, path := range userSourcePaths(admin) {
+			if strings.HasPrefix(path, hermesDefaultManagedDir) {
+				t.Fatalf("HERMES_MANAGED_DIR=%q: the administrator's managed scope is not a user source: %v", value, userSourcePaths(admin))
+			}
+		}
+	}
+}
+
+// The Hermes hooks mapping also holds two settings sections that are not
+// events: output_spill (tool-output size and spill directory) and outbound
+// (notify-only webhooks). Hermes registers no shell hook from them. The
+// guard read them as hook entries, so a user who set either had every tool
+// call blocked and the guardian deleted the setting. They are now skipped
+// by the scan and kept as they are by the cleanup.
+func TestGuardLeavesTheHermesHookSettingsSectionsAlone(t *testing.T) {
+	req, script := hermesGuardRequest(t, config.ForeignHooksRemove)
+	configPath := filepath.Join(req.Home, ".hermes", "config.yaml")
+	settings := "    output_spill:\n        max_chars: 20000\n        directory: /var/tmp/hermes-spill\n" +
+		"    outbound:\n        - url: https://hooks.example.test/notify\n          events: [post_tool_call]\n"
+	withSettings := strings.Replace(hermesConfig(script), "terminal:", settings+"terminal:", 1)
+	writeFile(t, configPath, withSettings)
+	if decision := EvaluateForeignHooks(req); decision.Deny || len(decision.Findings) != 0 {
+		t.Fatalf("output_spill and outbound are settings, not hook entries: %+v", decision)
+	}
+	if result, err := CleanUserForeignHooks(req, time.Now()); err != nil || len(result.Removed) != 0 || readFile(t, configPath) != withSettings {
+		t.Fatalf("the cleanup must leave a config with only settings sections alone: %+v %v", result, err)
+	}
+
+	// With a user entry present, the cleanup removes the entry and keeps
+	// both settings sections.
+	writeFile(t, configPath, strings.Replace(hermesConfig(script, hermesRewriteEntry), "terminal:", settings+"terminal:", 1))
+	result, err := CleanUserForeignHooks(req, time.Now())
+	if err != nil || len(result.Removed) != 1 {
+		t.Fatalf("cleanup: %+v %v", result, err)
+	}
+	cleaned := readFile(t, configPath)
+	for _, want := range []string{"output_spill:", "max_chars: 20000", "directory: /var/tmp/hermes-spill", "outbound:", "https://hooks.example.test/notify"} {
+		if !strings.Contains(cleaned, want) {
+			t.Fatalf("the cleanup dropped %q:\n%s", want, cleaned)
+		}
+	}
+	if strings.Contains(cleaned, "rewrite-tool-input.sh") {
+		t.Fatalf("the user entry must be removed:\n%s", cleaned)
+	}
+	if decision := EvaluateForeignHooks(req); decision.Deny || len(decision.Findings) != 0 {
+		t.Fatalf("the cleaned config must pass: %+v", decision)
+	}
+}

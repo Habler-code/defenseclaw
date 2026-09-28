@@ -35,17 +35,56 @@ const ConnectorHermes = "hermes"
 // maps to a list of {command, matcher, timeout} entries, and Hermes runs
 // every entry of an event in order. A pre_tool_call entry may block the call
 // or rewrite its input, so an entry after DefenseClaw's can change what
-// DefenseClaw checked. Hermes reads no project hook file and has no
-// managed-only lock: the shell-hook allowlist is the user's consent record
-// and `hermes --accept-hooks` skips it.
+// DefenseClaw checked. Hermes also merges a managed-scope config.yaml
+// (HERMES_MANAGED_DIR, else /etc/hermes) over the user's. Hermes reads no
+// project hook file and has no managed-only lock: the shell-hook allowlist
+// is the user's consent record and `hermes --accept-hooks` skips it.
 const formatHermesYAML = "hermes-yaml"
 
-// hermesUserConfig adds the Hermes config.yaml a Hermes process started
-// with req's environment reads.
+// hermesUserConfig adds the Hermes config.yaml files a Hermes process
+// started with req's environment reads: <HERMES_HOME>/config.yaml, and the
+// managed-scope config.yaml in the directory HERMES_MANAGED_DIR names.
 func hermesUserConfig(req GuardRequest, home string, envPath func(string) string, user func(format string, parts ...string)) {
 	for _, dir := range hermesHomeDirs(req, home, envPath) {
 		user(formatHermesYAML, dir, "config.yaml")
 	}
+	if dir := hermesManagedDir(req, envPath); dir != "" {
+		user(formatHermesYAML, dir, "config.yaml")
+	}
+}
+
+// hermesDefaultManagedDir is the managed scope Hermes reads when
+// HERMES_MANAGED_DIR is not set. Only an administrator can write it.
+const hermesDefaultManagedDir = "/etc/hermes"
+
+// hermesManagedDir returns the managed-scope directory HERMES_MANAGED_DIR
+// names, or "" when the variable is unset or names the administrator's
+// default. Hermes merges <managed dir>/config.yaml over the user's
+// config.yaml, and an event's list there replaces the user's list, so hooks
+// in that file run like the user's own. Any user can set the variable, so
+// the file is user scope: the guard reads it, the hook records the location
+// for the guardian's cleanup (ObservedEnvRedirect), and the cleanup removes
+// unapproved entries from it. Hermes itself honors the variable only when it
+// names an existing directory; a missing file has no entries.
+func hermesManagedDir(req GuardRequest, envPath func(string) string) string {
+	if strings.TrimSpace(req.getenv("HERMES_MANAGED_DIR")) == "" {
+		return ""
+	}
+	dir := envPath("HERMES_MANAGED_DIR")
+	if dir == "" || filepath.Clean(dir) == hermesDefaultManagedDir {
+		return ""
+	}
+	return dir
+}
+
+// hermesReservedHookSections are the keys of the Hermes hooks mapping that
+// hold settings rather than events. Hermes registers no shell hook from them
+// (output_spill sets tool-output size and spill directory; outbound lists
+// notify-only webhooks, which cannot block or change a tool call), so the
+// guard neither reports them nor changes them.
+var hermesReservedHookSections = map[string]bool{
+	"output_spill": true,
+	"outbound":     true,
 }
 
 // hermesHomeDirs resolves HERMES_HOME as Hermes does: an explicit value
@@ -169,6 +208,9 @@ func (s *guardScan) scanHermesYAML(source hookSource, data []byte) []Finding {
 	}
 	var findings []Finding
 	for _, event := range sortedEventNames(hooks) {
+		if hermesReservedHookSections[event] {
+			continue
+		}
 		for _, handler := range hermesEventHandlers(hooks[event]) {
 			if s.req.ownedHandler(handler) {
 				continue
@@ -216,6 +258,10 @@ func cleanHermesYAMLSource(scan *guardScan, source hookSource, backupDir string,
 	}
 	kept := make(map[string]any, len(hooks))
 	for event, value := range hooks {
+		if hermesReservedHookSections[event] {
+			kept[event] = value
+			continue
+		}
 		handlers := hermesEventHandlers(value)
 		if len(handlers) == 0 {
 			kept[event] = value
