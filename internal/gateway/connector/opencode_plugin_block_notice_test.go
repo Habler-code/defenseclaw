@@ -11,7 +11,7 @@ import (
 
 const (
 	openCodeGatewayBlock   = `{"action":"block","mode":"action","severity":"CRITICAL","reason":"matched: TEST-MARKER","hook_output":{"decision":"deny","reason":"matched: TEST-MARKER"}}`
-	openCodeGatewayConfirm = `{"action":"alert","raw_action":"confirm","mode":"action","severity":"HIGH","reason":"matched: REVIEW-MARKER"}`
+	openCodeGatewayConfirm = `{"action":"alert","raw_action":"confirm","mode":"action","severity":"HIGH","reason":"matched: TEST-CONFIRM-MARKER"}`
 )
 
 // OpenCode shows a plugin block as the tool's error and hands it to the
@@ -45,7 +45,7 @@ func TestOpenCodePluginBlockAndConfirmAreVisible(t *testing.T) {
 		t.Fatalf("block notice = %+v", toasts)
 	}
 	if toasts[1].Variant != "warning" ||
-		!strings.HasPrefix(toasts[1].Message, "DefenseClaw flagged this tool call for review (HIGH): matched: REVIEW-MARKER.") {
+		!strings.HasPrefix(toasts[1].Message, "DefenseClaw flagged this tool call for review (HIGH): matched: TEST-CONFIRM-MARKER.") {
 		t.Fatalf("confirm notice = %+v", toasts)
 	}
 }

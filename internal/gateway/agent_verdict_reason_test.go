@@ -108,7 +108,7 @@ func TestAgentVerdictReasonNamesALoadedRulePackTitle(t *testing.T) {
 		}
 		pack.RuleFiles[index].Rules = append(pack.RuleFiles[index].Rules, guardrail.RuleDefYAML{
 			ID:         "TEST-MARKER-BLOCK",
-			Pattern:    `(?i)\bcert-s3-marker-block\b`,
+			Pattern:    `(?i)\btest-marker-block\b`,
 			Title:      "Test marker (block)",
 			Severity:   "HIGH",
 			Confidence: 0.99,

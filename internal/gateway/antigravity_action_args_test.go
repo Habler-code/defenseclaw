@@ -12,12 +12,12 @@ import (
 )
 
 // liveAntigravityRunCommandArgs is the argument shape the Antigravity CLI
-// sent on a live Windows session, with a harmless marker command.
-const liveAntigravityRunCommandArgs = `{"CommandLine":"echo dc-marker","Cwd":"C:\\Users\\alice\\proj\\dc-smoke","WaitMsBeforeAsync":5000,"toolAction":"Running echo command","toolSummary":"Echo marker"}`
+// sends on Windows, with a harmless marker command.
+const liveAntigravityRunCommandArgs = `{"CommandLine":"echo dc-marker","Cwd":"C:\\Users\\alice\\proj\\app","WaitMsBeforeAsync":5000,"toolAction":"Running echo command","toolSummary":"Echo marker"}`
 
 func antigravityCommandFactsStatus(t *testing.T, args json.RawMessage) actionfacts.ParseStatus {
 	t.Helper()
-	facts := actionfacts.Analyze(actionfacts.Input{Tool: "run_command", Args: args, CWD: `C:\Users\alice\proj\dc-smoke`})
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: "run_command", Args: args, CWD: `C:\Users\alice\proj\app`})
 	return facts.Parse.Status
 }
 

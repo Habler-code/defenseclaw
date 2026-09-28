@@ -48,7 +48,7 @@ func installRedirectReductionRules(t *testing.T, connector string, rules ...Patt
 		ruleCategoriesMu.Unlock()
 	})
 	generation, err := compileRulePackGeneration([]ruleCategory{{
-		Name:  "cert-marker",
+		Name:  "test-marker",
 		Rules: rules,
 	}})
 	if err != nil {
