@@ -150,7 +150,7 @@ builds:
       - -trimpath
       - -buildvcs=false
     ldflags:
-      - -s -w -buildid=defenseclaw-sensor-helper-{{.Commit}}-{{.Os}}-{{.Arch}}
+      - -s -w -buildid=defenseclaw-sensor-helper-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}}
 
 # Release asset names are flat and permanent: installers fetch
 # defenseclaw-<version>-<os>-<arch>.{tar.gz,zip} by name.

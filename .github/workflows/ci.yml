@@ -682,8 +682,10 @@ jobs:
     # The standalone Linux and macOS lifecycle engine, its units and the
     # Unix peer-identity code. The go-test jobs run on Linux and go-build
     # only cross-compiles darwin, so the macOS-only code (LOCAL_PEERCRED,
-    # dscl identity, launchd layout) runs here on its own OS, and the
-    # systemd units get a static systemd-analyze check on Linux.
+    # dscl identity, launchd layout, the kern.proc agent-process lookup and
+    # the linux||darwin hook-socket, peer-home and trusted-state code) runs
+    # here on its own OS, and the systemd units get a static systemd-analyze
+    # check on Linux.
     name: Unix Standalone Lifecycle (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -709,6 +711,42 @@ jobs:
           ./internal/enterprisehooks/...
           ./internal/enterprisepolicy/...
           ./internal/ipc/...
+      - name: Go tests of the darwin paths in the agent-process, connector, gateway and CLI packages
+        # The go-test jobs run these packages on Linux only. On macOS this runs
+        # the kern.proc agent-process lookup, every connector package
+        # (hookexec and the /etc/codex requirements path included) and, in
+        # internal/gateway and internal/cli, the tests of their darwin, unix,
+        # linux||darwin and !windows test files plus the foreign-hook guard,
+        # which keys sessions by the agent process.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/gateway/connector/...
+          unix_tests() { # unix_tests <test files...>: a -run pattern for their Test functions
+            local file names=()
+            for file in "$@"; do
+              case "$file" in
+                *_windows_test.go | *_linux_test.go) continue ;;
+                *_darwin_test.go | *_unix_test.go | */hook_foreign_guard*_test.go) ;;
+                *) grep -Eq '^//go:build .*(darwin|unix|!windows|!linux)' "$file" || continue ;;
+              esac
+              names+=($(sed -n 's/^func \(Test[A-Za-z0-9_]*\)(t \*testing\.T).*/\1/p' "$file"))
+            done
+            [ "${#names[@]}" -gt 0 ] || { echo "no unix or darwin tests in $*" >&2; return 1; }
+            local IFS='|'
+            echo "^(${names[*]})\$"
+          }
+          for pkg in internal/gateway internal/cli; do
+            pattern=$(unix_tests "$pkg"/*_test.go)
+            echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
+            go test -count=1 -timeout 20m -run "$pattern" "./$pkg"
+          done
+      - name: The shipped binaries start without stderr output
+        # A dependency's start-up warning (for example sonic's Go-version
+        # notice) would reach admin and MDM output and agent hook errors.
+        shell: bash
+        run: make check-quiet-startup
       - name: systemd-analyze verify the packaged units
         # systemd-analyze exits 0 on unknown keys and bad values, so the
         # script fails on any diagnostic it prints.
@@ -775,7 +813,11 @@ jobs:
   enterprise-linux-install:
     # The deb installs on the Ubuntu 24.04 runner itself (systemd 255 is PID
     # 1); the rpm installs in Red Hat UBI containers that boot systemd: RHEL 9
-    # (systemd 252) and RHEL 8 (systemd 239, the package's minimum).
+    # (systemd 252) and RHEL 8 (systemd 239, the package's minimum). Each lane
+    # also runs systemd-analyze verify on the installed units with that
+    # systemd and fails on any diagnostic outside the lane script's
+    # per-release allow list (directive_minimum), so a directive RHEL 8
+    # silently ignores is either listed there or fails the rpm-el8 lane.
     name: Enterprise Install Lane (${{ matrix.lane }})
     needs: enterprise-install-assets
     runs-on: ubuntu-24.04
@@ -917,6 +959,42 @@ jobs:
       - name: Secure Client source tripwire
         shell: bash
         run: python3 scripts/secure_client_golden.py
+
+  enterprise-required:
+    # One required check for the standalone managed-enterprise gates, in the
+    # same pattern as Go Test and Python Lint & Test: it runs even when a gate
+    # fails or is skipped, and passes only when every gate succeeded. The main
+    # branch ruleset requires this name, so a red install lane, lifecycle job
+    # or Secure Client golden blocks the merge.
+    name: Enterprise Required
+    needs:
+      - enterprise-install-assets
+      - enterprise-linux-install
+      - enterprise-macos-install
+      - enterprise-windows-install
+      - unix-standalone-lifecycle
+      - secure-client-golden
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every enterprise gate
+        env:
+          INSTALL_ASSETS: ${{ needs.enterprise-install-assets.result }}
+          LINUX_INSTALL: ${{ needs.enterprise-linux-install.result }}
+          MACOS_INSTALL: ${{ needs.enterprise-macos-install.result }}
+          WINDOWS_INSTALL: ${{ needs.enterprise-windows-install.result }}
+          UNIX_LIFECYCLE: ${{ needs.unix-standalone-lifecycle.result }}
+          SECURE_CLIENT_GOLDEN: ${{ needs.secure-client-golden.result }}
+        shell: bash
+        run: |
+          status=0
+          for gate in INSTALL_ASSETS LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UNIX_LIFECYCLE SECURE_CLIENT_GOLDEN; do
+            result=${!gate}
+            echo "$gate: $result"
+            [ "$result" = success ] || status=1
+          done
+          exit "$status"
 
   python-audit:
     name: Python Dependency Audit

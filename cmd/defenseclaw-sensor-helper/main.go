@@ -57,11 +57,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 )
 
-// Set by the release build's -ldflags -X, so a service log names the exact
-// helper build that wrote it.
+// Set by the release build's -ldflags -X, so a service log and --version name
+// the exact helper build.
 var (
 	version = "dev"
-	commit  = ""
+	commit  = "unknown"
 )
 
 func main() {
@@ -89,8 +89,13 @@ func run() error {
 			"gateway account: permit its uid and give the socket its group (unless --allow-uid/--socket-gid are set)")
 		homesFromManifest = flag.String("home-dirs-from-manifest", "",
 			"protected guardian manifest whose enabled users' homes Plane C watches; restarts when it changes")
+		showVersion = flag.Bool("version", false, "print the helper's version and commit, then exit")
 	)
 	flag.Parse()
+	if *showVersion {
+		_, err := fmt.Fprintln(os.Stdout, versionString())
+		return err
+	}
 
 	// The log destination comes from the protected service environment, not
 	// the command line, so the ImagePath of an installed helper never changes
@@ -108,6 +113,13 @@ func run() error {
 		logger.Error("sensor helper exited", "error", err)
 	}
 	return err
+}
+
+// versionString names the build in the same form as defenseclaw-gateway
+// --version, so an administrator can match the privileged helper to the
+// package and the gateway it shipped with.
+func versionString() string {
+	return fmt.Sprintf("defenseclaw-sensor-helper version %s (commit=%s)", version, commit)
 }
 
 func runHelper(

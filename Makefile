@@ -65,7 +65,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
@@ -1075,6 +1075,33 @@ lint: py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity
 # OSS builds. See docs/specs/001-windows-deterministic-build/design.md.
 go-mod-no-toolchain:
 	@scripts/check-go-mod-no-toolchain.sh
+
+# check-quiet-startup builds the shipped binaries with this host's Go and runs
+# a no-op command of each (name:package:argument). None may exit non-zero or
+# write to stderr: a dependency that warns at start-up, such as sonic's "only
+# supports go1.x ... will fallback to encoding/json" when the toolchain is newer
+# than the pinned sonic release supports, reaches admin and MDM output and the
+# hook-error text agents show their users.
+QUIET_STARTUP_COMMANDS := \
+	defenseclaw-gateway:./cmd/defenseclaw:--version \
+	defenseclaw-hook:./cmd/defenseclaw-hook:--version-json \
+	defenseclaw-sensor-helper:./cmd/defenseclaw-sensor-helper:--version
+
+check-quiet-startup:
+	@set -e; dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; status=0; \
+	for spec in $(QUIET_STARTUP_COMMANDS); do \
+		name=$${spec%%:*}; rest=$${spec#*:}; package=$${rest%%:*}; argument=$${rest#*:}; \
+		go build -o "$$dir/$$name$(EXE)" "$$package"; \
+		rc=0; HOME="$$dir/home" "$$dir/$$name$(EXE)" $$argument >"$$dir/stdout" 2>"$$dir/stderr" || rc=$$?; \
+		if [ "$$rc" -ne 0 ]; then echo "$$name $$argument exited $$rc" >&2; status=1; fi; \
+		if [ -s "$$dir/stderr" ]; then \
+			echo "$$name $$argument wrote to stderr:" >&2; sed 's/^/  /' "$$dir/stderr" >&2; status=1; \
+		fi; \
+	done; \
+	if [ "$$status" -eq 0 ]; then \
+		echo "no start-up output on stderr ($$(go env GOVERSION) $$(go env GOOS)/$$(go env GOARCH)): $(QUIET_STARTUP_COMMANDS)"; \
+	fi; \
+	exit "$$status"
 
 # repro-flags-parity refuses drift between the bash and pwsh copies of
 # repro-flags.* — both files must ship the same fixed env exports and

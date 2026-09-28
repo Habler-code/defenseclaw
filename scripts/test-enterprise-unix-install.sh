@@ -7,6 +7,7 @@
 # (.pkg). On a real systemd or launchd host it:
 #
 #   1. installs the package; its postinstall runs `ensure --from-package`
+#      (on Linux it then checks what this systemd reports loading the units)
 #   2. applies a config that enables two connectors (a real config change)
 #   3. runs ensure again, which must be a no-op
 #   4. runs verify and status, checks the services and runs the MDM detect.sh
@@ -16,7 +17,9 @@
 #   6. purges (dpkg -P, or `uninstall --purge`) and checks the state is gone
 #
 # Every lifecycle result is saved under --results and checked with
-# scripts/check_enterprise_lifecycle_result.py.
+# scripts/check_enterprise_lifecycle_result.py. For the lifecycle commands the
+# lane runs itself, the process exit status must also be 0 and equal the
+# result's exit_code.
 #
 # It installs and removes system services: run it as root only on a
 # disposable host (a CI runner or a container), never on a workstation.
@@ -43,7 +46,7 @@ while [ "$#" -gt 0 ]; do
         --package) package=${2:?--package needs a value}; shift 2 ;;
         --version) version=${2:?--version needs a value}; shift 2 ;;
         --results) results=${2:?--results needs a value}; shift 2 ;;
-        -h | --help) sed -n '4,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '4,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -97,6 +100,7 @@ if [ "$platform" = linux ]; then
     services=(defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket defenseclaw-gateway.service
         defenseclaw-hook-guardian.service defenseclaw-hook-enumerator.service defenseclaw-sensor-helper.service)
     detect="$repo/packaging/mdm/linux/detect.sh"
+    unit_dir=/usr/lib/systemd/system
 else
     install_root=/opt/cisco/defenseclaw
     config_dir=$install_root/etc
@@ -115,6 +119,9 @@ vendor_policy_dir=$install_root/share/policies
 results=${results:-$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-install-lane.XXXXXX")}
 mkdir -p "$results"
 results=$(cd "$results" && pwd)
+# A status file left by an earlier run in the same directory would be
+# compared with this run's result.
+rm -f "$results"/*.rc
 stage=$(mktemp -d /var/tmp/defenseclaw-install-lane.XXXXXX)
 chmod 0700 "$stage"
 
@@ -150,22 +157,47 @@ finish() {
 trap finish EXIT
 
 # check <result-file> <label> <checker arguments...>: the step fails on any
-# error and on any warning the arguments do not allow (--allow-warning).
+# error and on any warning the arguments do not allow (--allow-warning), and,
+# for a lifecycle the lane ran itself, when the process status disagrees with
+# the result (exit_status_matches).
 check() {
     local file=$1 label=$2
     shift 2
     "$python" "$checker" "$file" --label "$label" --platform "$platform" "$@"
+    exit_status_matches "$file" "$label"
+}
+
+# exit_status_matches <result-file> <label>: MDM scripts and remediation act
+# on the process exit status, not on the JSON, so the status run_lifecycle
+# kept beside the result must be 0 and equal the result's exit_code. Results
+# written by the package scripts have no status file; the lane checks the
+# package manager's own exit status for those.
+exit_status_matches() {
+    local file=$1 label=$2 status_file=${1%.json}.rc rc reported
+    [ -f "$status_file" ] || return 0
+    rc=$(cat "$status_file")
+    reported=$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("exit_code"))' "$file")
+    if [ "$rc" != 0 ] || [ "$rc" != "$reported" ]; then
+        die "$label: the lifecycle process exited $rc, its result reports exit_code $reported"
+    fi
 }
 
 # lifecycle <result-name> <action> [arguments...]: run the installed gateway's
-# lifecycle with --json, keep stdout as the result and stderr beside it.
+# lifecycle (run_lifecycle).
 lifecycle() {
-    local name=$1 action=$2 rc=0
-    shift 2
-    "$gateway" enterprise "$([ "$platform" = linux ] && echo linux || echo macos)" "$action" "$@" --json \
+    run_lifecycle "$gateway" "$@"
+}
+
+# run_lifecycle <gateway> <result-name> <action> [arguments...]: run the
+# lifecycle with --json; keep stdout as the result, stderr beside it and the
+# process exit status in <result-name>.rc for check().
+run_lifecycle() {
+    local binary=$1 name=$2 action=$3 rc=0
+    shift 3
+    "$binary" enterprise "$([ "$platform" = linux ] && echo linux || echo macos)" "$action" "$@" --json \
         >"$results/$name.json" 2>"$results/$name.log" || rc=$?
+    echo "$rc" >"$results/$name.rc"
     echo "$action exited $rc"
-    return 0
 }
 
 services_running() {
@@ -201,6 +233,57 @@ services_gone() {
         fi
     fi
     echo "no DefenseClaw service is loaded"
+}
+
+# directive_minimum <Section.Directive>: the systemd release that added a
+# directive the packaged units set, for each one an older supported systemd
+# does not know (RHEL 8 ships systemd 239, the package's minimum). systemd
+# loads such a unit and ignores the directive, so the unit runs with a weaker
+# sandbox there; docs/LINUX-ENTERPRISE-THREAT-MODEL.md lists them.
+directive_minimum() {
+    case "$1" in
+        Service.ProtectHostname) echo 242 ;;
+        Service.ProtectKernelLogs) echo 244 ;;
+        Service.ProtectClock) echo 245 ;;
+        Service.ProtectProc | Service.ProcSubset) echo 247 ;;
+        Path.TriggerLimitIntervalSec | Path.TriggerLimitBurst) echo 250 ;;
+        *) return 1 ;;
+    esac
+}
+
+# unit_diagnostics: systemd-analyze verify the installed DefenseClaw units
+# with this host's systemd. A directive this systemd does not know passes
+# only when directive_minimum names a newer release for it, and is reported.
+# Any other diagnostic about a DefenseClaw unit, or a failed verify, fails.
+unit_diagnostics() {
+    local version unit line key minimum output rc=0 unexpected="" ignored=""
+    local units=()
+    version=$(systemctl --version | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p')
+    [ -n "$version" ] || die "cannot read the systemd version from systemctl --version"
+    for unit in "$unit_dir"/defenseclaw*; do
+        case "$unit" in *.service | *.socket | *.path | *.timer) units+=("$unit") ;; esac
+    done
+    [ "${#units[@]}" -gt 0 ] || die "no DefenseClaw units in $unit_dir"
+    output=$(systemd-analyze verify "${units[@]}" 2>&1) || rc=$?
+    while IFS= read -r line; do
+        case "$line" in *defenseclaw*) ;; *) continue ;; esac
+        key=$(printf '%s\n' "$line" |
+            sed -n -E "s/.*Unknown (lvalue|key name|key) '([^']+)' in section (\\[|')([^]']+).*/\\4.\\2/p")
+        if [ -n "$key" ] && minimum=$(directive_minimum "$key") && [ "$version" -lt "$minimum" ]; then
+            ignored="$ignored$key (systemd $minimum)"$'\n'
+        else
+            unexpected="$unexpected  $line"$'\n'
+        fi
+    done <<<"$output"
+    if [ "$rc" -ne 0 ] || [ -n "$unexpected" ]; then
+        printf 'systemd-analyze verify exited %s on systemd %s:\n%s\n' "$rc" "$version" "$output" >&2
+        die "unit diagnostics outside the systemd $version allow list:"$'\n'"${unexpected:-  (none; verify failed)}"
+    fi
+    echo "${#units[@]} DefenseClaw units load on systemd $version"
+    if [ -n "$ignored" ]; then
+        echo "systemd $version ignores these directives (added in a later release):"
+        printf '%s' "$ignored" | sort -u | sed 's/^/  /'
+    fi
 }
 
 policy_entries() {
@@ -253,6 +336,10 @@ case "$kind" in
     pkg) pkgutil --pkg-info "$macos_package_id" >/dev/null || die "the package receipt $macos_package_id is missing" ;;
 esac
 services_running
+if [ "$platform" = linux ]; then
+    step "the packaged units load on this systemd (systemd-analyze verify)"
+    unit_diagnostics
+fi
 
 # ---- reconfigure ---------------------------------------------------------------
 step "ensure with an administrator config that enables Claude Code and Codex"
@@ -348,8 +435,7 @@ step "purge the kept configuration and state"
 case "$kind" in
     deb) dpkg -P "$linux_package_name" ;;
     *)
-        "$stage/defenseclaw-gateway" enterprise "$([ "$platform" = linux ] && echo linux || echo macos)" \
-            uninstall --purge --json >"$results/07-purge.json" 2>"$results/07-purge.log" || true
+        run_lifecycle "$stage/defenseclaw-gateway" 07-purge uninstall --purge
         check "$results/07-purge.json" purge --action uninstall --not-installed
         ;;
 esac
