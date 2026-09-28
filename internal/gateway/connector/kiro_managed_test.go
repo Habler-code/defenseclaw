@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -273,6 +274,47 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(custom); string(after) != string(customBefore) {
 		t.Fatalf("teardown left DefenseClaw in the user's agent:\n%s", after)
+	}
+}
+
+// When the earlier workspace copy cannot be removed, managed Setup still
+// makes the defenseclaw agent the default before it reports the failure:
+// the reclaim already took DefenseClaw's hooks out of the user's own
+// agent, which must not stay the default without them.
+func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only folder")
+	}
+	home := t.TempDir()
+	workspace := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	custom, settings, _, _ := writeKiroCustomDefaultAgent(t, home)
+
+	perUser := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: workspace, HookFailMode: "closed"}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), perUser); err != nil {
+		t.Fatalf("per-user Setup: %v", err)
+	}
+	hooks := filepath.Join(workspace, ".kiro", "hooks")
+	if err := os.Chmod(hooks, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
+
+	managed := perUser
+	managed.ManagedEnterprise = true
+	err := conn.Setup(context.Background(), managed)
+	if err == nil || !strings.Contains(err.Error(), "reclaim earlier per-user footprint") {
+		t.Fatalf("managed Setup = %v, want the reclaim failure reported", err)
+	}
+	if hooked, err := kiroV2AgentReferencesAnyHook(custom, conn.hookCommand(perUser)); err != nil || hooked {
+		t.Fatalf("premise: the reclaim removed the hooks from the user's agent (hooked=%v err=%v)", hooked, err)
+	}
+	assertKiroDefaultAgentSetting(t, settings)
+	if present, err := conn.ownedHookContractPresent(managed); err != nil || !present {
+		t.Fatalf("managed hook registration present = %v, %v", present, err)
 	}
 }
 

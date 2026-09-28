@@ -372,6 +372,16 @@ function defenseclawBlockError(reason) {
   return new Error("DefenseClaw blocked this tool call under policy, so it did not run: " + (text || "no reason was given"));
 }
 
+// defenseclawBlock returns the error a blocked tool call fails with, after
+// showing the same text as a best-effort error notice: some OpenCode
+// versions show a failed tool with no text, or as successful, so the error
+// alone did not reliably tell the user DefenseClaw blocked the call.
+function defenseclawBlock(client, reason) {
+  const error = defenseclawBlockError(reason);
+  defenseclawShowNotice(client, error.message, "error");
+  return error;
+}
+
 // defenseclawConfirmNotice is the notice for a verdict that asks for the
 // user's confirmation (human-in-the-loop). This bridge cannot ask, so the
 // call runs; the notice keeps that from happening silently.
@@ -386,11 +396,11 @@ function defenseclawConfirmNotice(data) {
 // defenseclawShowNotice shows a notice in the OpenCode TUI. It is best
 // effort: without a TUI client, or when the notice cannot be shown, nothing
 // else changes.
-function defenseclawShowNotice(client, message) {
+function defenseclawShowNotice(client, message, variant) {
   if (!message) return;
   try {
     const shown = client && client.tui && typeof client.tui.showToast === "function"
-      ? client.tui.showToast({ body: { message, variant: "warning" } })
+      ? client.tui.showToast({ body: { message, variant: variant || "warning" } })
       : undefined;
     if (shown && typeof shown.catch === "function") shown.catch(() => {});
   } catch (_) {
@@ -571,7 +581,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
       const blocked = (await defenseclawStartupGuard) || (await defenseclawForeignHookCheck("tool.execute.before", cwd));
-      if (blocked) throw defenseclawBlockError(blocked);
+      if (blocked) throw defenseclawBlock(client, blocked);
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(
         "tool.execute.before",
@@ -583,13 +593,14 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
         mcpIdentity,
         true,
       );
-      if (verdict && verdict.reason) throw defenseclawBlockError(verdict.reason);
+      if (verdict && verdict.reason) throw defenseclawBlock(client, verdict.reason);
       if (verdict && verdict.notice) defenseclawShowNotice(client, verdict.notice);
       if (verdict && verdict.mode === "action" && mcpIdentity.status === "ambiguous") {
-        throw new Error("DefenseClaw refused an OpenCode tool with ambiguous MCP server identity.");
+        throw defenseclawBlock(client, "DefenseClaw refused an OpenCode tool with ambiguous MCP server identity.");
       }
       if (verdict && verdict.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE) {
-        throw new Error(
+        throw defenseclawBlock(
+          client,
           "DefenseClaw refused an OpenCode action because later plugin argument mutations are not observable.",
         );
       }

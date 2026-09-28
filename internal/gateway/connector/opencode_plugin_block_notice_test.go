@@ -94,8 +94,14 @@ func TestOpenCodePluginBlockAndConfirmAreVisible(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[2], "toasts:")), &toasts); err != nil {
 		t.Fatalf("toasts %q: %v", lines[2], err)
 	}
-	if len(toasts) != 1 || toasts[0].Variant != "warning" ||
-		!strings.HasPrefix(toasts[0].Message, "DefenseClaw flagged this tool call for review (HIGH): matched: REVIEW-MARKER.") {
+	// The block is also shown as an error notice: some OpenCode versions show
+	// a failed tool with no text.
+	if len(toasts) != 2 || toasts[0].Variant != "error" ||
+		toasts[0].Message != strings.TrimPrefix(lines[0], "block:") {
+		t.Fatalf("block notice = %+v", toasts)
+	}
+	if toasts[1].Variant != "warning" ||
+		!strings.HasPrefix(toasts[1].Message, "DefenseClaw flagged this tool call for review (HIGH): matched: REVIEW-MARKER.") {
 		t.Fatalf("confirm notice = %+v", toasts)
 	}
 }
@@ -105,7 +111,8 @@ func TestOpenCodePluginBlockAndConfirmAreVisible(t *testing.T) {
 func TestOpenCodePluginKeepsDefenseClawReasons(t *testing.T) {
 	server := openCodeStubGateway(t, `{"action":"block","mode":"action","hook_output":{"decision":"deny","reason":"DefenseClaw blocked the command under policy."}}`)
 	lines := runOpenCodePluginHarness(t, openCodePluginTestData(t, server), 1)
-	if len(lines) != 2 || lines[0] != "block:DefenseClaw blocked the command under policy." || lines[1] != "toasts:[]" {
+	if len(lines) != 2 || lines[0] != "block:DefenseClaw blocked the command under policy." ||
+		lines[1] != `toasts:[{"message":"DefenseClaw blocked the command under policy.","variant":"error"}]` {
 		t.Fatalf("harness output = %q", lines)
 	}
 }

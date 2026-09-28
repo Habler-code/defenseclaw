@@ -6379,7 +6379,7 @@ function Assert-OpenCodePluginContract {
     foreach ($marker in @(
         '"tool.execute.before": async',
         'const verdict = await defenseclawPost(',
-        'if (verdict && verdict.reason) throw new Error(verdict.reason);',
+        'if (verdict && verdict.reason) throw defenseclawBlock(client, verdict.reason);',
         'verdict.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE',
         '"tool.execute.after": async'
     )) {

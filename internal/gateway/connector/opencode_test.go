@@ -478,7 +478,7 @@ func TestOpenCodeBridgeDistinguishesBlockingAndObserveOnlyHooks(t *testing.T) {
 	text := renderOpenCodePluginTemplate(t, templateData{APIAddr: "127.0.0.1:18970", FailMode: "closed"})
 	beforeStart := strings.Index(text, `"tool.execute.before": async`)
 	beforeAwait := strings.Index(text, `const verdict = await defenseclawPost(`)
-	beforeThrow := strings.Index(text, `if (verdict && verdict.reason) throw defenseclawBlockError(verdict.reason);`)
+	beforeThrow := strings.Index(text, `if (verdict && verdict.reason) throw defenseclawBlock(client, verdict.reason);`)
 	if beforeStart < 0 || beforeAwait < beforeStart || beforeThrow < beforeAwait {
 		t.Fatal("tool.execute.before must await the gateway verdict and throw synchronously on block")
 	}

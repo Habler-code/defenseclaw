@@ -120,4 +120,10 @@ func TestOpenCodeManagedPluginBlockAndConfirmAreVisible(t *testing.T) {
 		!strings.Contains(lines[2], "DefenseClaw flagged this tool call for review (HIGH): matched: REVIEW-MARKER.") {
 		t.Fatalf("confirm notice = %q", lines[2])
 	}
+	// The block is also shown as an error notice with the same text: some
+	// OpenCode versions show a failed tool with no text.
+	blockNotice := `{"message":"` + strings.TrimPrefix(lines[0], "block:") + `","variant":"error"}`
+	if !strings.Contains(lines[2], blockNotice) {
+		t.Fatalf("block notice missing from %q", lines[2])
+	}
 }

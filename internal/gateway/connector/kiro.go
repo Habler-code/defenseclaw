@@ -92,24 +92,28 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := removeStaleKiroDefaultOverlay(command); err != nil {
 		return fmt.Errorf("kiro remove stale kiro_default overlay: %w", err)
 	}
+	var reclaimErr error
 	if kiroManaged(opts) {
 		// Before the setting below names the defenseclaw agent, while it can
-		// still name the user's own default agent.
+		// still name the user's own default agent. A failure is reported
+		// after the switch: the reclaim may already have removed the hooks
+		// from the user's own agent, and stopping here would leave that
+		// unhooked agent as the default until the next repair.
 		if err := c.reclaimEarlierKiroFootprint(opts, command); err != nil {
-			return fmt.Errorf("kiro reclaim earlier per-user footprint: %w", err)
+			reclaimErr = fmt.Errorf("kiro reclaim earlier per-user footprint: %w", err)
 		}
 	}
 	settingsPath := kiroSettingsPath()
 	if err := captureManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath); err != nil {
-		return fmt.Errorf("kiro capture settings backup: %w", err)
+		return errors.Join(reclaimErr, fmt.Errorf("kiro capture settings backup: %w", err))
 	}
 	if err := patchKiroDefaultAgentSetting(settingsPath, kiroManaged(opts)); err != nil {
-		return fmt.Errorf("kiro default agent setting: %w", err)
+		return errors.Join(reclaimErr, fmt.Errorf("kiro default agent setting: %w", err))
 	}
 	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath); err != nil {
-		return fmt.Errorf("kiro record settings backup: %w", err)
+		return errors.Join(reclaimErr, fmt.Errorf("kiro record settings backup: %w", err))
 	}
-	return nil
+	return reclaimErr
 }
 
 func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {

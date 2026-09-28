@@ -296,14 +296,15 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 }
 
 // openCodePluginBlockThrow is the rendered statement that fails a blocked
-// tool call: the plain block error (defenseclawBlockError) in per-user and
-// standalone renders, and the reason alone in the Secure Client render. A
-// plugin rendered before the block error existed is repaired.
+// tool call: the plain block error, also shown as an error notice
+// (defenseclawBlock), in per-user and standalone renders, and the reason
+// alone in the Secure Client render. A plugin rendered before the block
+// notice existed is repaired.
 func openCodePluginBlockThrow(opts SetupOpts, reason, condition string) []byte {
 	if pluginSecureClientProfile(opts) {
 		return []byte("if (" + condition + ") throw new Error(" + reason + ");")
 	}
-	return []byte("if (" + condition + ") throw defenseclawBlockError(" + reason + ");")
+	return []byte("if (" + condition + ") throw defenseclawBlock(client, " + reason + ");")
 }
 
 // validateOpenCodeManagedPluginProtection checks the plugin's custody. A
