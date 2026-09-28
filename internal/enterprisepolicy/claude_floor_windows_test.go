@@ -72,6 +72,9 @@ func TestWindowsClaudeVersionFloorPublishWithdrawAndRemove(t *testing.T) {
 	base := filepath.Join(opts.WindowsProgramFiles, "ClaudeCode", "managed-settings.json")
 	admin := `{"requiredMinimumVersion": "2.1.300"}`
 	writeFile(t, base, admin)
+	// An administrator-deployed file is owned by Administrators, whatever
+	// the test account's default owner is.
+	ownAs(t, base, wellKnownSID(t, windows.WinBuiltinAdministratorsSid))
 	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err != nil {
 		t.Fatal(err)
 	}

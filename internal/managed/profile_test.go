@@ -11,6 +11,7 @@
 package managed
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -102,6 +103,11 @@ func TestRuntimeDescriptorRoundTrip(t *testing.T) {
 		MachinePolicyConnectors: []string{"cursor", "codex", "claudecode"},
 		DisableSelfUpdate:       true,
 		InstalledAt:             "2026-09-26T00:00:00Z",
+	}
+	if runtime.GOOS == "windows" {
+		// Only Linux and macOS have a hook socket, and this path is not
+		// absolute on Windows.
+		d.HookSocket = ""
 	}
 	data, err := MarshalRuntimeDescriptor(d)
 	if err != nil {

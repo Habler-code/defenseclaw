@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -84,6 +85,9 @@ func TestEnterprisePolicyCommandsRequireStandaloneProfile(t *testing.T) {
 }
 
 func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this publishes the Linux machine-policy tree, which only Linux and macOS write")
+	}
 	ctx := withEnterprisePolicyTree(t)
 	if _, err := enterprisepolicy.Publish(ctx.opts, ctx.connectors); err != nil {
 		t.Fatal(err)
