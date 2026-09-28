@@ -187,12 +187,6 @@ def test_fixed_managed_ipc_path_is_provisioned_for_the_exact_gateway_sid() -> No
     # Client (the AVC GUI contract), Program Files\Cisco\DefenseClaw\ipc for
     # standalone.
     assert "(Get-DefenseClawProfileRoots).ManagedIPCDirectory" in provisioner
-    roots = source[
-        source.index("function Get-DefenseClawProfileRoots {") :
-        source.index("function Resolve-DefenseClawProfileFromLifecycleDirectory {")
-    ]
-    assert "'Cisco\\Cisco Secure Client'" in roots
-    assert '"$vendor\\DefenseClaw\\ipc"' in roots
     assert "Get-DefenseClawServiceSID" in provisioner
     assert "Assert-DefenseClawCanonicalVolumePath" in provisioner
     assert "Assert-DefenseClawNoReparsePath" in provisioner

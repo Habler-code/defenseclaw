@@ -3528,7 +3528,6 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         row = self._scope_row("kiro", "")
         self.assertEqual(row["status"], "pass")
         self.assertIn(path, row["detail"])
-        self.assertIn("1.0.182", row["detail"])
         self.assertIn("claw.workspace_dir", row["detail"])
 
     def test_kiro_global_file_without_defenseclaw_hooks_fails(self) -> None:

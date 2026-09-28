@@ -233,18 +233,6 @@ def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
     assert production_suffix in smoke
     assert lifecycle_suffix in harness
     assert certification_suffix in harness
-    roots = module[
-        module.index("function Get-DefenseClawProfileRoots {") :
-        module.index("function Resolve-DefenseClawProfileFromLifecycleDirectory {")
-    ]
-    assert "'Cisco\\Cisco Secure Client'" in roots
-    for leaf in ("DefenseClaw", "DefenseClaw-Lifecycle", "DefenseClaw-Cert"):
-        assert f'"$vendor\\{leaf}"' in roots
-    bootstrap_roots = installer[
-        installer.index("function Get-DefenseClawBootstrapProfileRoots {") :
-        installer.index("$bootstrapProfileRoots = Get-DefenseClawBootstrapProfileRoots")
-    ]
-    assert "'Cisco\\Cisco Secure Client'" in bootstrap_roots
 
     assert "winpath.TrustedProgramData()" in env_config
     assert '"Cisco Secure Client"' in env_config

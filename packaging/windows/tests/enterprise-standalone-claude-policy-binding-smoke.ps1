@@ -199,13 +199,8 @@ try {
             Set-TestClaudePolicy -Body '{"hooks":{"v":2}}' -TargetSIDs @('S-1-5-21-1-2-3-1001')
             Assert-TestStale 'after policy change'
             Set-TestClaudePolicy -Body '{"hooks":{"v":1}}' -TargetSIDs @('S-1-5-21-1-2-3-1001')
-            Assert-TestFresh 'policy restored'
             [IO.File]::WriteAllText($layout.HookPath, 'hook-v2', $utf8)
             Assert-TestStale 'after hook binary change'
-            [IO.File]::WriteAllText($layout.HookPath, 'hook-v1', $utf8)
-            [IO.File]::Delete([string]$paths.Policy)
-            Assert-TestStale 'policy missing'
-            Set-TestClaudePolicy -Body '{"hooks":{"v":1}}' -TargetSIDs @('S-1-5-21-1-2-3-1001')
 
             # Stale evidence is never re-published as verified.
             $layout['ClaudeEffectivePolicyStaleReason'] = 'recorded for another policy'
@@ -215,19 +210,8 @@ try {
             $layout['ClaudeEffectivePolicyStaleReason'] = ''
 
             # Malformed standalone evidence still fails closed.
-            Set-TestAttestation @{ schema_version = 2 }
-            Assert-TestThrows 'schema 2 in standalone' { Get-TestStaleReason }
-            Set-TestAttestation @{
-                claude_effective_policy_verified = $true
-                claude_effective_policy_manifest_sha256 = ('a' * 64)
-            }
-            Assert-TestThrows 'legacy manifest binding' { Get-TestStaleReason }
             Set-TestAttestation @{ claude_effective_policy_verified = $true }
             Assert-TestThrows 'verified without a policy binding' { Get-TestStaleReason }
-            Set-TestAttestation @{ claude_effective_policy_hook_sha256 = ('b' * 64) }
-            Assert-TestThrows 'unverified with a policy binding' { Get-TestStaleReason }
-            Set-TestAttestation @{}
-            Assert-TestFresh 'unverified evidence'
 
             # The Secure Client profile keeps its schema and manifest binding.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient

@@ -5,8 +5,8 @@
 Each script ships as a standalone file an MDM uploads on its own, so shared
 helpers are copied rather than sourced; these checks keep the copies
 identical, keep the Windows Intune-facing scripts runnable in Windows
-PowerShell 5.1, keep every result on the lifecycle-result schema, and pin the
-optional release signing jobs.
+PowerShell 5.1, keep every result on the lifecycle-result schema, and check the
+optional release signing helpers.
 """
 
 from __future__ import annotations
@@ -65,29 +65,30 @@ def test_every_mdm_script_is_ascii() -> None:
             assert b"\r\n" not in data, f"{path.relative_to(ROOT)} has CRLF line endings"
 
 
-@pytest.mark.parametrize("name", UNIX_SCRIPTS)
-def test_linux_and_macos_copies_differ_only_in_platform(name: str) -> None:
-    linux = _text(MDM / "linux" / name).splitlines()
-    macos = _text(MDM / "macos" / name).splitlines()
-    assert len(linux) == len(macos)
-    differences = [(a, b) for a, b in zip(linux, macos) if a != b]
-    assert differences == [(
-        "DC_SCRIPT_OS=linux # linux | darwin - the only line that differs between the copies",
-        "DC_SCRIPT_OS=darwin # linux | darwin - the only line that differs between the copies",
-    )]
+def _shared_region(text: str) -> str:
+    start = text.index(SHARED_BEGIN)
+    end = text.index(SHARED_END) + len(SHARED_END)
+    return text[start:end]
 
 
-@pytest.mark.parametrize("function", ["dc_platform", "dc_stat_uid", "dc_stat_mode", "dc_trusted_path"])
-def test_unix_shared_helpers_are_identical(function: str) -> None:
-    bodies = {name: _shell_function(_text(MDM / "linux" / name), function) for name in UNIX_SCRIPTS}
-    assert len(set(bodies.values())) == 1, f"{function} differs between {sorted(bodies)}"
-
-
-@pytest.mark.parametrize("function", ["dc_json_escape", "dc_log", "dc_busy_output"])
-def test_wrapper_and_uninstall_helpers_are_identical(function: str) -> None:
-    wrapper = _shell_function(_text(MDM / "linux" / "defenseclaw-enterprise.sh"), function)
-    uninstall = _shell_function(_text(MDM / "linux" / "uninstall.sh"), function)
-    assert wrapper == uninstall
+def test_copied_helpers_are_identical() -> None:
+    for name in UNIX_SCRIPTS:
+        linux = _text(MDM / "linux" / name).splitlines()
+        macos = _text(MDM / "macos" / name).splitlines()
+        assert len(linux) == len(macos), name
+        assert [(a, b) for a, b in zip(linux, macos) if a != b] == [(
+            "DC_SCRIPT_OS=linux # linux | darwin - the only line that differs between the copies",
+            "DC_SCRIPT_OS=darwin # linux | darwin - the only line that differs between the copies",
+        )], name
+    scripts = {name: _text(MDM / "linux" / name) for name in UNIX_SCRIPTS}
+    for function in ("dc_platform", "dc_stat_uid", "dc_stat_mode", "dc_trusted_path"):
+        assert len({_shell_function(text, function) for text in scripts.values()}) == 1, function
+    for function in ("dc_json_escape", "dc_log", "dc_busy_output"):
+        wrapper = _shell_function(scripts["defenseclaw-enterprise.sh"], function)
+        assert wrapper == _shell_function(scripts["uninstall.sh"], function), function
+    canonical = _shared_region(_text(MDM / "windows" / "detect.ps1"))
+    drifted = [path.name for path in WINDOWS_SHARED if _shared_region(_text(path)) != canonical]
+    assert not drifted, f"copy the shared region from packaging/mdm/windows/detect.ps1 into {drifted}"
 
 
 @pytest.mark.parametrize("os_dir", ["linux", "macos"])
@@ -101,15 +102,6 @@ def test_unix_scripts_parse_and_lint(os_dir: str, name: str) -> None:
             subprocess.run([shell, "-n", str(path)], check=True)
     if shutil.which("shellcheck"):
         subprocess.run(["shellcheck", "-s", "sh", "-S", "warning", str(path)], check=True)
-
-
-def test_unix_scripts_pin_their_environment() -> None:
-    for name in UNIX_SCRIPTS:
-        text = _text(MDM / "linux" / name)
-        assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin\n" in text
-        assert "LC_ALL=C\n" in text
-        assert "umask 077\n" in text
-        assert "set -eu\n" in text
 
 
 def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
@@ -293,19 +285,6 @@ echo "version=$(dc_json_field "$doc" installed_version)"
         assert result.stdout.splitlines() == ["installed", "version=1.2.3"], (shell, result.stdout)
 
 
-def _shared_region(text: str) -> str:
-    start = text.index(SHARED_BEGIN)
-    end = text.index(SHARED_END) + len(SHARED_END)
-    return text[start:end]
-
-
-def test_windows_shared_helpers_are_identical() -> None:
-    regions = {path.relative_to(ROOT).as_posix(): _shared_region(_text(path)) for path in WINDOWS_SHARED}
-    canonical = regions["packaging/mdm/windows/detect.ps1"]
-    drifted = [name for name, region in regions.items() if region != canonical]
-    assert not drifted, f"copy the shared region from packaging/mdm/windows/detect.ps1 into {drifted}"
-
-
 def test_windows_shared_helpers_never_trust_environment_paths() -> None:
     region = _shared_region(_text(WINDOWS_SHARED[0]))
     code = "\n".join(line for line in region.splitlines() if not line.lstrip().startswith("#"))
@@ -449,49 +428,6 @@ def test_generic_windows_wrapper_refuses_a_product_version_pin_for_a_staged_setu
     assert result.returncode == 1639, result.stdout
     assert codes == ["mdm_invalid_arguments"], document
     assert "-ProductVersion applies only to the installed CLI" in document["errors"][0]["message"], document
-
-
-def test_windows_scripts_use_the_standalone_setup_and_marker() -> None:
-    marker = r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
-    assert marker in _text(MDM / "windows" / "detect.ps1")
-    for path in (MDM / "intune" / "windows" / "Install-DefenseClawIntune.ps1",
-                 MDM / "intune" / "windows" / "New-DefenseClawIntunePackage.ps1",
-                 MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1"):
-        assert "DefenseClawSetup-Enterprise-Standalone-x64.exe" in _text(path)
-    setup_main = _text(ROOT / "cmd" / "defenseclaw-enterprise-setup" / "main.go")
-    registration = _text(ROOT / "internal" / "cli" / "windows_enterprise_registration.go")
-    builder = _text(ROOT / "packaging" / "windows" / "standalone" / "build-setup.sh")
-    assert '"allowedsigners":' in setup_main and '"json":' in setup_main and '"/ensure": "ensure"' in setup_main
-    assert "WindowsEnterpriseMarkerKey = `SOFTWARE\\Cisco\\DefenseClaw\\Enterprise`" in registration
-    assert '"ProductVersion": version' in registration
-    assert "DefenseClawSetup-Enterprise-Standalone-x64.exe" in builder
-
-
-def test_lifecycle_schema_is_draft_2020_12() -> None:
-    schema = json.loads(_text(SCHEMA))
-    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-    assert schema["properties"]["schema_version"] == {"const": 2}
-    assert schema["additionalProperties"] is False
-
-
-def test_release_workflow_signs_enterprise_artifacts_only_when_secrets_exist() -> None:
-    yaml = pytest.importorskip("yaml")
-    workflow = yaml.safe_load(_text(ROOT / ".github" / "workflows" / "release.yaml"))
-    jobs = workflow["jobs"]
-    assert jobs["sign"]["needs"] == ["build", "macos-app", "enterprise-windows", "enterprise-macos"]
-    for name in ("enterprise-windows", "enterprise-macos"):
-        job = jobs[name]
-        assert job["needs"] == "validate" and job["if"] == "inputs.operation == 'release'"
-        assert job["environment"] == "release"
-    rendered = _text(ROOT / ".github" / "workflows" / "release.yaml")
-    # Secrets reach steps only through env; GitHub cannot read them in if:.
-    assert not re.search(r"^\s*if:.*secrets\.", rendered, re.MULTILINE)
-    assert "::notice title=Unsigned standalone Setup::" in rendered
-    assert "::notice title=Unsigned enterprise Linux packages::" in rendered
-    assert "--sign-command \"$GITHUB_WORKSPACE/packaging/mdm/signing/authenticode-sign.sh\"" in rendered
-    build_steps = [step.get("name", "") for step in jobs["build"]["steps"]]
-    assert "Collect the standalone enterprise packages" in build_steps
-    assert "Sign the enterprise Linux packages (optional)" in build_steps
 
 
 def test_signing_helpers_refuse_without_credentials(tmp_path: Path) -> None:

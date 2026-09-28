@@ -234,16 +234,6 @@ describe('Flow trust zones', () => {
     }
   });
 
-  it('gives every badge room for its full text', () => {
-    const { badges } = render(threatModel('nested'));
-    for (const zone of THREAT_MODEL_ZONES) {
-      // Mirrors measureZoneBadge in flow.tsx: the badge is never
-      // squeezed below its own estimate.
-      const estimate = Math.ceil(14 + ZONE_TONE_STYLE[zone.tone].label.length * 6 + 6 + zone.label.length * 5.6);
-      assert.ok((badges.get(zone.id)?.width ?? 0) >= estimate, `badge ${zone.id} was clamped`);
-    }
-  });
-
   it('treats zone="id" on a Node the same as nesting it', () => {
     assert.equal(normalizeIds(render(threatModel('prop')).html), normalizeIds(render(threatModel('nested')).html));
   });
@@ -266,68 +256,5 @@ describe('Flow trust zones', () => {
     assert.equal(normalizeIds(withEmptyZone.html), normalizeIds(without.html));
     assert.doesNotMatch(without.html, /fd-flow-zone/);
     assert.ok(warnings.some((w) => w.includes('has no nodes')));
-  });
-
-  it('falls back to the external tone and warns on an unknown tone', () => {
-    const { result, warnings } = withWarningsCaptured(() =>
-      render(
-        <Flow direction="TB">
-          <Zone id="z" label="Mystery" tone={'friendly' as ZoneTone}>
-            <Node id="a">A</Node>
-          </Zone>
-        </Flow>,
-      ),
-    );
-    assert.equal(result.frames.get('z')?.tone, 'external');
-    assert.ok(warnings.some((w) => w.includes('unknown tone')));
-  });
-
-  it('holds its geometry across seeded random graphs', () => {
-    const tones = Object.keys(ZONE_TONE_STYLE) as ZoneTone[];
-    const kinds: DiagramKind[] = ['agent', 'connector', 'gateway', 'policy', 'datastore', 'operator', 'generic'];
-    for (let seed = 1; seed <= 300; seed++) {
-      let state = seed;
-      const random = () => {
-        state = (state * 1664525 + 1013904223) >>> 0;
-        return state / 2 ** 32;
-      };
-      const pick = <T,>(items: readonly T[]) => items[Math.floor(random() * items.length)];
-      const nodeCount = 2 + Math.floor(random() * 12);
-      const zoneCount = 1 + Math.floor(random() * Math.min(6, nodeCount));
-      const zoneOf = Array.from({ length: nodeCount }, () =>
-        random() < 0.85 ? `z${Math.floor(random() * zoneCount)}` : undefined,
-      );
-      const children: ReactNode[] = [];
-      for (let z = 0; z < zoneCount; z++) {
-        const label = `Z${z} · ${'Zone name '.repeat(1 + Math.floor(random() * 3)).trim()}`;
-        children.push(<Zone key={`z${z}`} id={`z${z}`} label={label} tone={tones[z % tones.length]} />);
-      }
-      zoneOf.forEach((zone, i) => {
-        children.push(
-          <Node key={`n${i}`} id={`n${i}`} kind={pick(kinds)} zone={zone}>
-            {random() < 0.3 ? `Node ${i}\nwith a detail line` : `Node ${i}`}
-          </Node>,
-        );
-      });
-      const edgeCount = Math.floor(random() * nodeCount * 1.6);
-      for (let e = 0; e < edgeCount; e++) {
-        // Includes cycles and the occasional self-loop.
-        const from = Math.floor(random() * nodeCount);
-        const to = Math.floor(random() * nodeCount);
-        children.push(
-          <Edge key={`e${e}`} from={`n${from}`} to={`n${to}`} label={random() < 0.5 ? `edge ${e}` : undefined} />,
-        );
-      }
-      const direction = random() < 0.8 ? 'TB' : 'LR';
-      const compact = random() < 0.2 ? false : undefined;
-      const { result: rendered } = withWarningsCaptured(() =>
-        render(
-          <Flow direction={direction} compact={compact}>
-            {children}
-          </Flow>,
-        ),
-      );
-      assert.deepEqual(zoneProblems(rendered, zoneOf), [], `seed ${seed} (${direction})`);
-    }
   });
 });

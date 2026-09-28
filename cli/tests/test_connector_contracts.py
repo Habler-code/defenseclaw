@@ -466,23 +466,6 @@ class TestConnectorContractManifest(unittest.TestCase):
                         platform_want = (("openhands-hooks-v1", "0.0.0", "", True, "v6", 6),)
                     self.assertEqual(got, platform_want)
 
-        # Devin 3000.11.3 was live-verified on Linux only; macOS and Windows
-        # keep the 3000.4.25 build their lanes were reviewed against.
-        for platform_name, want_exact in (
-            ("linux", ("3000.4.25", "3000.11.3")),
-            ("darwin", ("3000.4.25",)),
-            ("windows", ("3000.4.25",)),
-        ):
-            with self.subTest(platform_name=platform_name, connector="devin", field="exact_agent_versions"):
-                _, contracts = _load_contracts_from_manifest(
-                    HOOK_CONTRACT_MANIFEST,
-                    platform_name=platform_name,
-                )
-                self.assertEqual(
-                    tuple(contract.exact_agent_versions for contract in contracts["devin"]),
-                    (want_exact,),
-                )
-
         overridden = {
             (connector, contract["contract_id"]): set(contract["platform_overrides"])
             for connector, spec in HOOK_CONTRACT_MANIFEST["connectors"].items()

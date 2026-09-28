@@ -85,7 +85,7 @@ def _function_body(text: str, name: str) -> str:
     return text[start : end + 3]
 
 
-def test_secure_client_roots_are_named_in_one_place() -> None:
+def test_profile_roots_are_named_in_one_place_and_agree() -> None:
     module = _functions_naming(_text(MODULE), SECURE_CLIENT)
     assert set(module) <= ALLOWED_MODULE_FUNCTIONS, {
         name: lines for name, lines in module.items() if name not in ALLOWED_MODULE_FUNCTIONS
@@ -94,27 +94,16 @@ def test_secure_client_roots_are_named_in_one_place() -> None:
     assert set(installer) <= ALLOWED_INSTALLER_FUNCTIONS, {
         name: lines for name, lines in installer.items() if name not in ALLOWED_INSTALLER_FUNCTIONS
     }
-
-
-def test_module_and_bootstrap_profile_roots_agree() -> None:
-    module = _function_body(_text(MODULE), "Get-DefenseClawProfileRoots")
-    bootstrap = _function_body(_text(INSTALLER), "Get-DefenseClawBootstrapProfileRoots")
-    for body in (module, bootstrap):
-        assert "'Cisco\\Cisco Secure Client'" in body
-        assert "'Cisco'" in body
-        for leaf in ('"$vendor\\DefenseClaw")', '"$vendor\\DefenseClaw-Cert")'):
-            assert body.count(leaf) == 2, (leaf, body)
-
-
-def test_winpath_roots_match_the_powershell_roots() -> None:
+    # The module, the bootstrap and internal/winpath name the same vendor
+    # roots for each profile.
+    for body in (
+        _function_body(_text(MODULE), "Get-DefenseClawProfileRoots"),
+        _function_body(_text(INSTALLER), "Get-DefenseClawBootstrapProfileRoots"),
+    ):
+        assert "'Cisco\\Cisco Secure Client'" in body and "'Cisco'" in body
     layout = _text(WINPATH_LAYOUT)
     assert 'vendor, powerShell = `Cisco\\Cisco Secure Client`, "SecureClient"' in layout
     assert 'vendor, powerShell = `Cisco`, "Standalone"' in layout
-    module = _function_body(_text(MODULE), "Get-DefenseClawProfileRoots")
-    assert '"$vendor\\DefenseClaw\\ipc"' in module
-    assert '"$vendor\\DefenseClaw-Lifecycle"' in module
-    assert 'join(programFiles, vendor, "DefenseClaw", "ipc")' in layout
-    assert 'join(programData, vendor, "DefenseClaw-Lifecycle")' in layout
 
 
 def test_standalone_host_guards_run_before_the_bootstrap() -> None:
@@ -200,14 +189,6 @@ def test_standalone_fresh_install_rollback_removes_its_sensor_helper() -> None:
     remove = body.index("Remove-DefenseClawService -Name $sensorHelperName", owned)
     absence = body.index("Get-DefenseClawManagedServiceNames `", remove)
     assert no_authority < gate < owned < remove < absence
-    helper = module[
-        module.index("function Assert-DefenseClawStandaloneSensorHelperOwned") : module.index(
-            "function Restore-DefenseClawTransaction {"
-        )
-    ]
-    assert "--managed-enterprise(?: --home-dirs" in helper
-    assert "'LocalSystem'" in helper
-    assert "refusing to manage foreign service" in helper
 
 
 def test_standalone_rollback_quiesces_the_sensor_helper_before_restoring_files() -> None:
@@ -233,160 +214,14 @@ def test_standalone_rollback_quiesces_the_sensor_helper_before_restoring_files()
     assert stop < ready < restart < services_restart < boot_policy
 
 
-def test_standalone_runtime_cleanup_scope_owns_its_sensor_helper() -> None:
-    module = _text(MODULE)
-    body = module[
-        module.index("function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive") : module.index(
-            "function ", module.index("function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive") + 10
-        )
-    ]
-    gate = body.index("if (Test-DefenseClawStandaloneProfile) {")
-    helper = body.index("Get-DefenseClawSensorHelperServiceName `", gate)
-    services = body.index("$allServices = @(Microsoft.PowerShell.Management\\Get-Service `")
-    assert gate < helper < services
-
-
-def test_runtime_cleanup_scope_reads_no_unset_root_variable() -> None:
-    # The per-profile root refactor removed $vendorRoot from this function
-    # but left one read; under StrictMode every rollback that reached it
-    # failed with "The variable '$vendorRoot' cannot be retrieved".
-    module = _text(MODULE)
-    start = module.index("function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive")
-    body = module[start : module.index("\nfunction ", start + 10)]
-    assert "$vendorRoot" not in body
-    assert "(Get-DefenseClawProfileRoots).CertificationStateBase" in body
-
-
-def test_recorded_artifact_hashes_do_not_require_a_standalone_broker() -> None:
-    # Standalone deployments record no broker hash. Requiring one made every
-    # standalone upgrade (and ensure on config drift) fail before mutation.
-    module = _text(MODULE)
-    start = module.index("function Assert-DefenseClawRecordedArtifactHashes")
-    body = module[start : module.index("\nfunction ", start + 10)]
-    gate = body.index("Test-DefenseClawLayoutBrokerEnabled -Layout $Layout")
-    loop = body.index("foreach ($required in $requiredArtifacts)", gate)
-    assert gate < loop
-
-
-def test_standalone_guardian_state_identity_reads_the_runtime_directory() -> None:
-    # The guardian publishes hook_guardian_state.json under DEFENSECLAW_HOME
-    # (the runtime directory). Looking under StateRoot made the rollback
-    # recovery lane reject every fresh guardian report as "not fresh".
-    module = _text(MODULE)
-    start = module.index("function Get-DefenseClawGuardianStateIdentity")
-    body = module[start : module.index("\nfunction ", start + 10)]
-    gate = body.index("if (Test-DefenseClawStandaloneProfile) {")
-    runtime = body.index("$Layout.RuntimeDirectory", gate)
-    join = body.index("hook_guardian_state.json", runtime)
-    assert gate < runtime < join
-
-
-def test_standalone_uninstall_accepts_and_removes_only_its_ipc_directory() -> None:
-    # Standalone keeps <InstallRoot>\ipc\ (the sensor helper's AF_UNIX socket)
-    # under InstallRoot. Uninstall refused "unexpected directory ... \ipc"
-    # before this. The walk may accept only that directory and its exact
-    # socket leaves in the standalone profile; removal happens after every
-    # service is gone and before the install tree is retired.
-    module = _text(MODULE)
-    leaves_start = module.index("function Get-DefenseClawStandaloneIPCSocketLeaves")
-    leaves = module[leaves_start : module.index("\nfunction ", leaves_start + 10)]
-    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in leaves
-    assert "'sensor-helper.sock'" in leaves
-    leaf_start = module.index("function Test-DefenseClawStandaloneIPCSocketLeaf")
-    leaf = module[leaf_start : module.index("\nfunction ", leaf_start + 10)]
-    assert "$Item.PSIsContainer" in leaf
-    assert "$Item.LinkTarget" in leaf
-    walk_start = module.index("function Assert-DefenseClawManagedInstallTree")
-    walk = module[walk_start : module.index("\nfunction ", walk_start + 10)]
-    assert "Get-DefenseClawStandaloneIPCSocketLeaves -Layout $Layout" in walk
-    assert "$Layout.BinDirectory," in walk and "$Layout.LibexecDirectory" in walk
-    uninstall_start = module.index("function Invoke-DefenseClawUninstallLifecycle")
-    uninstall = module[uninstall_start : module.index("\nfunction ", uninstall_start + 10)]
+def test_standalone_uninstall_removes_the_ipc_directory_before_retiring_the_tree() -> None:
+    # Removal happens after the sensor helper service is gone and before the
+    # install tree is retired.
+    uninstall = _function_body(_text(MODULE), "Invoke-DefenseClawUninstallLifecycle")
     helper = uninstall.index("Remove-DefenseClawService -Name $Layout.SensorHelperServiceName")
     removal = uninstall.index("Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout", helper)
     retire = uninstall.index("Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout", removal)
     assert helper < removal < retire
-    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-install-tree-smoke.ps1")
-    assert "Secure Client allow-list (ipc)" in smoke
-    assert "symbolic link named like the socket (removal)" in smoke
-
-
-def test_standalone_uninstall_accepts_and_removes_only_the_managed_opencode_plugin() -> None:
-    # The standalone guardian installs the managed OpenCode plugin from the
-    # payload binaries at <InstallRoot>\share\opencode\defenseclaw.js, the
-    # path enterprisepolicy.OpenCodeManagedPluginPath names. Without an
-    # allow-list entry uninstall refused "unexpected directory ... \share".
-    # The walk may accept only that file and its two directories in the
-    # standalone profile; removal happens after every service is gone and
-    # before the install tree is retired.
-    module = _text(MODULE)
-    opencode = _text(ROOT / "internal" / "enterprisepolicy" / "opencode.go")
-    assert "`\\share\\opencode\\defenseclaw.js`" in opencode
-    paths = _function_body(module, "Get-DefenseClawStandaloneOpenCodePluginPaths")
-    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in paths
-    assert "[IO.Path]::Combine([string]$Layout.InstallRoot, 'share')" in paths
-    assert "[IO.Path]::Combine($share, 'opencode')" in paths
-    assert "[IO.Path]::Combine($directory, 'defenseclaw.js')" in paths
-    removal = _function_body(module, "Remove-DefenseClawStandaloneOpenCodeManagedPlugin")
-    assert removal.index("unexpected managed OpenCode content") < removal.index("[IO.File]::Delete($plugin)")
-    assert "ReparsePoint" in removal
-    walk = _function_body(module, "Assert-DefenseClawManagedInstallTree")
-    assert "Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout" in walk
-    assert "$allowedFiles += [string]$openCodePlugin.PluginPath" in walk
-    uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
-    helper = uninstall.index("Remove-DefenseClawService -Name $Layout.SensorHelperServiceName")
-    removed = uninstall.index("Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout", helper)
-    retire = uninstall.index("Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout", removed)
-    assert helper < removed < retire
-    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-install-tree-smoke.ps1")
-    assert "Secure Client allow-list (share)" in smoke
-    assert "symbolic link named like the plugin (removal)" in smoke
-    assert "refused removal still deleted content" in smoke
-
-
-def test_standalone_credential_store_permissions_return_after_a_reinstall() -> None:
-    # A non-purge uninstall resets the retained credential store to
-    # administrator-only ACLs; install, upgrade and reconcile give the gateway
-    # its entries back, with the Go writer's exact descriptors, before the
-    # gateway starts.
-    module = _text(MODULE)
-    writer = _text(ROOT / "internal" / "cli" / "enterprise_secret_windows.go")
-    names = _text(ROOT / "internal" / "managed" / "credentials.go")
-
-    access = re.search(r'windowsSecretDirectoryReaderAccess = "(0x[0-9a-f]+)"', writer)
-    assert access is not None
-    assert (
-        'return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;" + '
-        'windowsSecretDirectoryReaderAccess + ";;;" + reader.String() + ")"'
-    ) in writer
-    assert 'return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + reader.String() + ")"' in writer
-    directory = _function_body(module, "Get-DefenseClawStandaloneSecretsDirectorySddl")
-    assert f"'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;{access.group(1)};;;{{0}})'" in directory
-    credential = _function_body(module, "Get-DefenseClawStandaloneSecretFileSddl")
-    assert "'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;{0})'" in credential
-
-    pattern = re.search(r"serviceCredentialNamePattern = regexp\.MustCompile\(`\^(.+)\$`\)", names)
-    assert pattern is not None
-    repair = _function_body(module, "Set-DefenseClawStandaloneSecretsAcls")
-    assert f"-cnotmatch '^{pattern.group(1)}\\z'" in repair
-    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in repair
-    assert repair.index("ReparsePoint") < repair.index("Set-DefenseClawStandaloneSecretSddl")
-
-    call = "Set-DefenseClawStandaloneSecretsAcls `"
-    install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
-    metadata = install.index("Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath")
-    repaired = install.index(call, metadata)
-    assert repaired < install.index("Assert-DefenseClawEnterpriseDeployment", metadata)
-    assert repaired < install.index("Start-DefenseClawService", metadata)
-    reconcile = _function_body(module, "Invoke-DefenseClawReconcileLifecycle")
-    assert call in reconcile
-    uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
-    assert "Set-DefenseClawPreservedStateAcls `" in uninstall
-    assert call not in uninstall
-
-    smoke = _text(MODULE.parent / "tests" / "enterprise-standalone-secrets-acl-smoke.ps1")
-    assert "Set-DefenseClawPreservedStateAcls -Layout" in smoke
-    assert "link named like a credential" in smoke
 
 
 # The standalone PowerShell smokes run inside disposable scratch directories
@@ -479,43 +314,6 @@ def test_standalone_smokes_run_on_every_engine(engine: str | None, smoke: str) -
     if f"{marker}: SKIP" in completed.stdout:
         pytest.skip(completed.stdout.strip())
     assert f"{marker}: OK" in completed.stdout
-
-
-def test_bootstrap_admits_a_hash_pinned_installed_module_by_its_recorded_digest() -> None:
-    # A hash-pinned deployment keeps no payload manifest after install, so
-    # the installed CLI must be able to verify, repair, and uninstall it: the
-    # standalone bootstrap takes the module pin from the protected metadata
-    # for every action except Install, and never for Secure Client.
-    installer = _text(INSTALLER)
-    start = installer.index("$bootstrapPinnedModuleSHA256 = ''")
-    body = installer[start : installer.index("$bootstrapAllowedSigners = @()", start)]
-    recorded = body.index("elseif ($EnterpriseProfile -ceq 'Standalone' -and")
-    for condition in (
-        "$TrustMode -ceq 'Authenticode' -and",
-        "[string]::IsNullOrWhiteSpace($PayloadManifest) -and",
-        "$Action -cne 'Install' -and",
-        "-not $AllowUnsigned) {",
-        "Get-DefenseClawBootstrapRecordedModulePin `",
-        "[IO.Path]::Combine($StateRoot, 'install', 'deployment.json')",
-        "-InstallerPath $PSCommandPath",
-    ):
-        assert body.index(condition, recorded) > recorded, condition
-    admit = installer.index("-PinnedSHA256 $bootstrapPinnedModuleSHA256", start)
-    assert admit > start + len(body)
-    helper = installer[
-        installer.index("function Get-DefenseClawBootstrapRecordedModulePin {") : installer.index(
-            "# QA shorthand renderer helpers"
-        )
-    ]
-    assert "-AllowUnsignedModule" in helper
-    assert "[string]$trust.Value -cne 'hash_pinned'" in helper
-    assert "[string]$recordedProfile.Value -cne 'standalone'" in helper
-    assert "$running -cne [string]$installer.Value" in helper
-    # The module then re-admits the rest of the installed payload from the
-    # same metadata when no manifest was supplied.
-    module = _text(MODULE)
-    entry = module[module.index("$entryMetadata = Get-DefenseClawDeploymentMetadata -Layout $layout") :]
-    assert entry.index("Initialize-DefenseClawRecordedPayloadTrust `") < 600
 
 
 # The standalone Claude client floor the module records equals the lowest

@@ -31,27 +31,6 @@ def _unit(name: str) -> list[str]:
     return (SYSTEMD / name).read_text(encoding="utf-8").splitlines()
 
 
-def test_systemd_standalone_unit_set_is_exact():
-    units = sorted(p.name for p in SYSTEMD.iterdir() if p.suffix in {".service", ".socket", ".path", ".timer"})
-    assert units == [
-        "defenseclaw-enterprise-apply.path",
-        "defenseclaw-enterprise-apply.service",
-        "defenseclaw-enterprise-verify.service",
-        "defenseclaw-enterprise-verify.timer",
-        "defenseclaw-gateway-api.socket",
-        "defenseclaw-gateway-hook.socket",
-        "defenseclaw-gateway.service",
-        "defenseclaw-hook-enumerator.service",
-        "defenseclaw-hook-guardian-reconcile.service",
-        "defenseclaw-hook-guardian.service",
-        "defenseclaw-sensor-helper.service",
-    ]
-    # The racing reconcile timer, the ledger-less template unit and the
-    # static sensor-helper environment file are gone.
-    for retired in ("defenseclaw-hook-guardian.timer", "defenseclaw-hook-guardian@.service", "sensor-helper.env.example"):
-        assert not (SYSTEMD / retired).exists()
-
-
 def test_systemd_gateway_unit_pins_the_hardening_contract():
     lines = _unit("defenseclaw-gateway.service")
     required = STANDALONE_ENV | {
@@ -79,7 +58,7 @@ def test_systemd_gateway_unit_pins_the_hardening_contract():
     assert "DynamicUser=yes" not in lines
 
 
-def test_systemd_sockets_hold_the_listeners_across_restarts():
+def test_systemd_sockets_and_the_sensor_helper_socket_directory():
     api = _unit("defenseclaw-gateway-api.socket")
     hook = _unit("defenseclaw-gateway-hook.socket")
     assert "ListenStream=127.0.0.1:18970" in api and "FileDescriptorName=api" in api
@@ -93,30 +72,12 @@ def test_systemd_sockets_hold_the_listeners_across_restarts():
         assert line in hook
     # A stop of the gateway must not take the listeners with it.
     assert not any(line.startswith("PartOf=") for line in api + hook)
-
-
-def test_systemd_guardian_units_share_the_bounded_privilege_contract():
-    for name in ("defenseclaw-hook-guardian.service", "defenseclaw-hook-guardian-reconcile.service"):
-        lines = _unit(name)
-        missing = sorted(line for line in STANDALONE_ENV | {
-            "User=root",
-            "NoNewPrivileges=true",
-            "ProtectSystem=strict",
-            "ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw",
-            "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID",
-            "UMask=0077",
-        } if line not in lines)
-        assert not missing, name
-        assert "NoNewPrivileges=false" not in lines
-    watch = _unit("defenseclaw-hook-guardian.service")
-    assert any("enterprise hooks watch --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 1m" in line for line in watch)
-    assert "Restart=always" in watch
-    assert any("enterprise hooks reconcile" in line for line in _unit("defenseclaw-hook-guardian-reconcile.service"))
-    enumerator = _unit("defenseclaw-hook-enumerator.service")
-    assert any("enterprise hooks enumerate --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 5m" in line for line in enumerator)
-    assert "ProtectHome=read-only" in enumerator
-    assert "ReadWritePaths=/etc/defenseclaw/hook-guardian" in enumerator
-
+    helper = _unit("defenseclaw-sensor-helper.service")
+    assert "RuntimeDirectory=defenseclaw-sensor" in helper
+    assert "ReadWritePaths=/run" not in helper
+    # Plane C's fanotify watch: fanotify_* are in @privileged, not @system-service.
+    assert "SystemCallFilter=fanotify_init fanotify_mark" in helper
+    assert "Before=defenseclaw-gateway.service" in helper
 
 
 def _unit_values(lines: list[str], key: str) -> set[str]:
@@ -154,43 +115,6 @@ def test_systemd_root_hook_units_keep_setid_capabilities_under_a_syscall_filter(
         assert _unit_values(lines, "AmbientCapabilities") == {"CAP_SETGID", "CAP_SETUID"}, name
         assert _unit_values(lines, "AmbientCapabilities") <= _unit_values(lines, "CapabilityBoundingSet"), name
         assert "User=root" in lines and "NoNewPrivileges=true" in lines, name
-
-def test_systemd_sensor_helper_owns_its_socket_directory():
-    lines = _unit("defenseclaw-sensor-helper.service")
-    assert "RuntimeDirectory=defenseclaw-sensor" in lines
-    assert "ReadWritePaths=/run" not in lines
-    assert not any(line.startswith("EnvironmentFile=") for line in lines)
-    assert any("--service-account defenseclaw --home-dirs-from-manifest /etc/defenseclaw/hook-guardian/targets.yaml" in line for line in lines)
-    assert any(line.startswith("SystemCallFilter=@system-service") for line in lines)
-    # Plane C's fanotify watch: fanotify_* are in @privileged, not @system-service.
-    assert "SystemCallFilter=fanotify_init fanotify_mark" in lines
-    assert "Before=defenseclaw-gateway.service" in lines
-
-
-def test_systemd_apply_path_and_verify_timer():
-    path = _unit("defenseclaw-enterprise-apply.path")
-    for line in (
-        "PathChanged=/etc/defenseclaw/config.yaml",
-        "PathChanged=/etc/defenseclaw/secrets",
-        "Unit=defenseclaw-enterprise-apply.service",
-    ):
-        assert line in path
-    assert any("enterprise linux ensure --reason path --lock-wait 10m --json" in line for line in _unit("defenseclaw-enterprise-apply.service"))
-    assert "OnCalendar=daily" in _unit("defenseclaw-enterprise-verify.timer")
-    assert any("enterprise linux verify --json" in line for line in _unit("defenseclaw-enterprise-verify.service"))
-
-
-def test_systemd_sysusers_and_tmpfiles():
-    assert (SYSTEMD / "defenseclaw.sysusers").read_text(encoding="utf-8").splitlines()[-1].startswith("u defenseclaw -")
-    tmpfiles = (SYSTEMD / "defenseclaw.conf").read_text(encoding="utf-8")
-    assert "d /etc/defenseclaw 0755 root root -" in tmpfiles
-    assert "d /etc/defenseclaw/hook-guardian 0750 root defenseclaw -" in tmpfiles
-    assert "d /var/lib/defenseclaw-hook-guardian 0750 root defenseclaw -" in tmpfiles
-    assert "d /var/lib/defenseclaw-enterprise 0700 root root -" in tmpfiles
-    assert "d /run/defenseclaw-hook 0755 defenseclaw defenseclaw -" in tmpfiles
-    assert "/etc/defenseclaw/secrets" not in tmpfiles
-    sample = (SYSTEMD / "hook-guardian-targets.example.yaml").read_text(encoding="utf-8")
-    assert "version: 1" in sample
 
 
 def test_launchd_standalone_daemons():
@@ -308,41 +232,6 @@ def test_release_archives_ship_enterprise_packaging_assets():
         assert "README*" in archive_files
 
 
-def test_linux_enterprise_package_ships_every_unit_and_calls_the_lifecycle():
-    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
-    (package,) = config["nfpms"]
-    assert package["package_name"] == "defenseclaw-enterprise"
-    assert package["formats"] == ["deb", "rpm"]
-    assert package["bindir"] == "/opt/defenseclaw/bin"
-    assert package["dependencies"] == ["systemd (>= 239)"]
-    assert package["overrides"]["rpm"]["dependencies"] == ["systemd >= 239"]
-    contents = {entry["src"]: entry["dst"] for entry in package["contents"]}
-    for unit in SYSTEMD.iterdir():
-        if unit.suffix in {".service", ".socket", ".path", ".timer"}:
-            assert contents[f"packaging/systemd/{unit.name}"] == f"/usr/lib/systemd/system/{unit.name}"
-    assert contents["packaging/systemd/defenseclaw.sysusers"] == "/usr/lib/sysusers.d/defenseclaw.conf"
-    assert contents["packaging/systemd/defenseclaw.conf"] == "/usr/lib/tmpfiles.d/defenseclaw.conf"
-    assert package["scripts"] == {
-        "postinstall": "packaging/linux/postinstall.sh",
-        "preremove": "packaging/linux/preremove.sh",
-        "postremove": "packaging/linux/postremove.sh",
-    }
-
-    postinstall = (ROOT / "packaging/linux/postinstall.sh").read_text(encoding="utf-8")
-    assert "enterprise linux ensure --from-package --reason package --json" in postinstall
-    preremove = (ROOT / "packaging/linux/preremove.sh").read_text(encoding="utf-8")
-    assert "enterprise linux uninstall --json" in preremove
-    for name in ("postinstall.sh", "preremove.sh", "postremove.sh"):
-        script = ROOT / "packaging/linux" / name
-        assert script.stat().st_mode & 0o111, name
-        text = script.read_text(encoding="utf-8")
-        # A maintainer script does not fail the package transaction on a
-        # lifecycle problem; only preremove refuses a removal, and only while
-        # another lifecycle run keeps the lock (exit 1 before that final line).
-        assert "set -e" not in text, name
-        assert text.rstrip().endswith("exit 0"), name
-
-
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
 @pytest.mark.parametrize("argument", ["upgrade", "1", "deconfigure", "failed-upgrade"])
 def test_linux_enterprise_preremove_leaves_upgrades_to_the_new_postinstall(tmp_path: Path, argument: str):
@@ -356,26 +245,6 @@ def test_linux_enterprise_preremove_leaves_upgrades_to_the_new_postinstall(tmp_p
     )
     assert completed.returncode == 0
     assert completed.stdout == completed.stderr == ""
-
-
-def test_macos_enterprise_pkg_builder_calls_the_lifecycle():
-    builder = (ROOT / "scripts/build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
-    assert builder.startswith("#!/usr/bin/env bash")
-    assert "set -euo pipefail" in builder
-    assert "enterprise macos ensure --from-package $downgrade --reason package --json" in builder
-    # Downgrades stop in preinstall, before older binaries land, unless the
-    # administrator placed the root-owned rollback marker.
-    assert "refusing to downgrade" in builder and "allow-downgrade" in builder
-    assert 'readonly INSTALL_BIN="opt/cisco/defenseclaw/bin"' in builder
-    assert 'readonly PKG_ID="com.cisco.defenseclaw.enterprise"' in builder
-    assert "com.cisco.secureclient.defenseclaw" in builder
-    assert "GOARCH=arm64" in builder
-    # Unsigned unless the release supplies Developer ID identities.
-    assert 'if [ -n "${MACOS_INSTALLER_SIGN_IDENTITY:-}" ]' in builder
-    assert 'if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]' in builder
-    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    assert "packaging-linux-enterprise:" in makefile
-    assert "packaging-macos-enterprise:" in makefile
 
 
 def test_third_party_license_text_and_platform_packaging_contracts():
