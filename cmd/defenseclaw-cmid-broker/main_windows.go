@@ -187,13 +187,23 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 			return validateBrokerPath(path, "CMID library", false)
 		},
 		Construct: func(path string) (cmidbroker.Provider, error) {
-			built, buildErr := cloudreg.New(cloudreg.Config{LibPath: path})
+			built, signer, buildErr := constructVerifiedCMIDProvider(
+				ctx,
+				path,
+				func(candidate string) (trustedCMIDLibrary, error) {
+					return cmidbroker.OpenTrustedLibrary(candidate, func(value string) error {
+						return validateBrokerPath(value, "CMID library", false)
+					})
+				},
+				func(candidate string) (cmidbroker.Provider, error) {
+					return cloudreg.New(cloudreg.Config{LibPath: candidate})
+				},
+			)
 			if buildErr != nil {
+				logger.Printf("stage=provider-library-trust success=false error=%q", buildErr.Error())
 				return nil, buildErr
 			}
-			if built == nil {
-				return nil, errors.New("managed CMID provider construction failed")
-			}
+			logger.Printf("stage=provider-library-trust success=true signer=%q signer_sha256=%s", signer.CommonName, signer.CertificateSHA256)
 			return built, nil
 		},
 		OnResolved: func(path string) {
