@@ -67,67 +67,6 @@ func TestKiroManagedSetupWritesOnlyTheUsersGlobalHooks(t *testing.T) {
 	}
 }
 
-// A managed install from an earlier build wrote the workspace copy too;
-// teardown still reclaims it.
-func TestKiroManagedTeardownReclaimsAnEarlierWorkspaceCopy(t *testing.T) {
-	home := t.TempDir()
-	workspace := t.TempDir()
-	dataDir := t.TempDir()
-	t.Cleanup(func() { KiroHomeOverride = "" })
-	KiroHomeOverride = home
-
-	perUser := SetupOpts{
-		DataDir:      dataDir,
-		APIAddr:      "127.0.0.1:18970",
-		APIToken:     "tok-test",
-		WorkspaceDir: workspace,
-		HookFailMode: "closed",
-	}
-	conn := NewKiroConnector()
-	// The earlier managed footprint is the per-user one: it included the
-	// workspace copy.
-	if err := conn.Setup(context.Background(), perUser); err != nil {
-		t.Fatalf("earlier Setup: %v", err)
-	}
-	workspaceCopy := filepath.Join(workspace, ".kiro", "hooks", kiroManagedHooksName)
-	if _, err := os.Stat(workspaceCopy); err != nil {
-		t.Fatalf("earlier Setup did not write the workspace copy: %v", err)
-	}
-	managed := perUser
-	managed.ManagedEnterprise = true
-	if err := conn.Teardown(context.Background(), managed); err != nil {
-		t.Fatalf("managed Teardown: %v", err)
-	}
-	if err := conn.VerifyClean(managed); err != nil {
-		t.Fatalf("managed VerifyClean: %v", err)
-	}
-	if _, err := os.Stat(workspaceCopy); !os.IsNotExist(err) {
-		t.Fatalf("workspace copy left after teardown (err=%v)", err)
-	}
-}
-
-// A per-user install keeps its footprint: the workspace copy and the
-// workspace scope it has always reported.
-func TestKiroPerUserFootprintIsUnchanged(t *testing.T) {
-	home := t.TempDir()
-	workspace := t.TempDir()
-	t.Cleanup(func() { KiroHomeOverride = "" })
-	KiroHomeOverride = home
-	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: workspace}
-	conn := NewKiroConnector()
-	want := []string{
-		filepath.Join(home, "hooks", kiroManagedHooksName),
-		filepath.Join(workspace, ".kiro", "hooks", kiroManagedHooksName),
-	}
-	got := conn.hookConfigPaths(opts)
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("per-user hook paths = %v, want %v", got, want)
-	}
-	if scope := conn.HookCapabilities(opts).Scope; scope != "workspace" {
-		t.Fatalf("per-user scope = %q, want workspace", scope)
-	}
-}
-
 // A managed install never edits the user's own agents. With a custom
 // chat.defaultAgent, it leaves that agent byte for byte and makes the
 // defenseclaw agent the default instead, so bare kiro-cli still runs a
@@ -242,6 +181,14 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 	if _, err := os.Stat(workspaceCopy); err != nil {
 		t.Fatalf("per-user Setup did not write the workspace copy: %v", err)
 	}
+	// The per-user footprint itself is unchanged: the workspace copy and
+	// the workspace scope it has always reported.
+	if got := conn.hookConfigPaths(perUser); len(got) != 2 || got[0] != filepath.Join(home, "hooks", kiroManagedHooksName) || got[1] != workspaceCopy {
+		t.Fatalf("per-user hook paths = %v", got)
+	}
+	if scope := conn.HookCapabilities(perUser).Scope; scope != "workspace" {
+		t.Fatalf("per-user scope = %q, want workspace", scope)
+	}
 
 	managed := perUser
 	managed.ManagedEnterprise = true
@@ -274,6 +221,25 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(custom); string(after) != string(customBefore) {
 		t.Fatalf("teardown left DefenseClaw in the user's agent:\n%s", after)
+	}
+
+	// On another home, a managed teardown alone (no managed Setup since the
+	// per-user one) also reclaims the earlier workspace copy.
+	KiroHomeOverride = t.TempDir()
+	earlier := SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: t.TempDir(), HookFailMode: "closed"}
+	if err := conn.Setup(context.Background(), earlier); err != nil {
+		t.Fatalf("earlier per-user Setup: %v", err)
+	}
+	earlierCopy := filepath.Join(earlier.WorkspaceDir, ".kiro", "hooks", kiroManagedHooksName)
+	earlier.ManagedEnterprise = true
+	if err := conn.Teardown(context.Background(), earlier); err != nil {
+		t.Fatalf("managed Teardown: %v", err)
+	}
+	if err := conn.VerifyClean(earlier); err != nil {
+		t.Fatalf("managed VerifyClean: %v", err)
+	}
+	if _, err := os.Stat(earlierCopy); !os.IsNotExist(err) {
+		t.Fatalf("workspace copy left after teardown (err=%v)", err)
 	}
 }
 

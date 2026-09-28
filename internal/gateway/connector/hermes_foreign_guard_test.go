@@ -13,8 +13,6 @@ package connector
 import (
 	"bytes"
 	"context"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -168,34 +166,12 @@ func TestHookForeignGuardDriftedFollowsTheRenderedGuard(t *testing.T) {
 // tool call reach the gateway as before; only tool calls and session starts
 // run the guard, with the agent's own HOME.
 func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the standalone hook socket is unix-only")
-	}
 	curlPath, err := exec.LookPath("curl")
 	if err != nil {
 		t.Skip("curl is required to run shell hooks")
 	}
-	root, err := os.MkdirTemp("/tmp", "dchg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	runDir := filepath.Join(root, "run")
-	if err := os.Mkdir(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	socketPath := filepath.Join(runDir, "hook.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gateway := &recordingHookSocketGateway{}
-	server := &http.Server{Handler: gateway}
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close() })
+	f := newHookSocketFixture(t, "dchg", nil)
+	root, socketPath, gateway := f.root, f.socket, f.gateway
 
 	// The stand-in records what the hook passed and prints the answer file.
 	stub := filepath.Join(root, "stub")
@@ -249,9 +225,8 @@ func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) 
 	}
 	var runPayload func(string) (int, string, string, string)
 	requests := func() int {
-		gateway.mu.Lock()
-		defer gateway.mu.Unlock()
-		return gateway.requests
+		paths, _, _ := gateway.recorded()
+		return len(paths)
 	}
 	run := func(event string) (int, string, string, string) {
 		t.Helper()

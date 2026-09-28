@@ -49,36 +49,6 @@ func TestManagedPluginListenerProofOnlyForManagedTCPPlugins(t *testing.T) {
 	}
 }
 
-// Both in-agent plugins render the switch, and an unmanaged or Secure Client
-// render leaves it empty.
-func TestPluginTemplatesRenderTheListenerProof(t *testing.T) {
-	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
-		tmpl, err := hookFS.ReadFile("hooks/" + asset)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, value := range []string{"1", ""} {
-			rendered, err := renderTemplate(string(tmpl), templateData{
-				APIAddr:         "127.0.0.1:18970",
-				TokenFileJS:     javaScriptStringContent(filepath.Join(t.TempDir(), "token")),
-				ListenerProofJS: value,
-				FailMode:        "closed",
-				Managed:         true,
-			})
-			if err != nil {
-				t.Fatalf("render %s: %v", asset, err)
-			}
-			want := `const DC_LISTENER_PROOF = "` + value + `";` + "\n"
-			if asset == "amp-plugin.ts" {
-				want = `const DC_LISTENER_PROOF: string = "` + value + `"` + "\n"
-			}
-			if !strings.Contains(rendered, want) {
-				t.Fatalf("%s rendered without %q", asset, want)
-			}
-		}
-	}
-}
-
 // listenerProofRequest is one request a test listener received.
 type listenerProofRequest struct {
 	method        string
@@ -321,93 +291,79 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 	}
 }
 
-// A managed Amp plugin that must prove the listener fails verification when
-// it was rendered before the proof existed, so the guardian repairs it; the
-// same file with the proof on verifies. A plugin that needs no proof is
-// unaffected.
-func TestAMPManagedPluginVerificationRequiresTheListenerProof(t *testing.T) {
-	root := testenv.PrivateTempDir(t)
-	pluginPath := filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")
-	previous := AMPPluginPathOverride
-	AMPPluginPathOverride = pluginPath
-	t.Cleanup(func() { AMPPluginPathOverride = previous })
-
-	conn := NewAMPConnector()
-	opts := prepareAmpSetupOptsForTest(t, SetupOpts{
-		DataDir:  filepath.Join(root, "defenseclaw"),
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "amp-scoped-token",
-	})
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-	data, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const off, on = `const DC_LISTENER_PROOF: string = ""` + "\n", `const DC_LISTENER_PROOF: string = "1"` + "\n"
-	if !strings.Contains(string(data), off) {
-		t.Fatal("a per-user render must leave the listener proof off")
-	}
-	if present, err := conn.ownedHookContractPresent(opts); err != nil || !present {
-		t.Fatalf("a per-user plugin verifies without the proof: %v %v", present, err)
-	}
-	proving := opts
-	proving.ManagedEnterprise = true
-	proving.ManagedListenerProof = true
-	if present, err := conn.ownedHookContractPresent(proving); err != nil || present {
-		t.Fatalf("a plugin without the listener proof must fail verification: %v %v", present, err)
-	}
-	if err := os.WriteFile(pluginPath, []byte(strings.Replace(string(data), off, on, 1)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if present, err := conn.ownedHookContractPresent(proving); err != nil || !present {
-		t.Fatalf("a plugin carrying the listener proof verifies: %v %v", present, err)
-	}
-}
-
-// The OpenCode plugin's verification likewise refuses a plugin rendered
-// without the listener proof when the proof is required, and accepts the
-// plugin the managed setup renders with it.
-func TestOpenCodeManagedPluginVerificationRequiresTheListenerProof(t *testing.T) {
-	for _, proof := range []bool{false, true} {
-		dir := testenv.PrivateTempDir(t)
-		pluginPath := filepath.Join(dir, ".config", "opencode", "plugins", "defenseclaw.js")
-		previous := OpenCodePluginPathOverride
-		OpenCodePluginPathOverride = pluginPath
-		conn := NewOpenCodeConnector()
-		opts := prepareOpenCodeSetupOptsForTest(t, SetupOpts{
-			DataDir:  filepath.Join(dir, "dc"),
-			APIAddr:  "127.0.0.1:18970",
-			APIToken: "tok-opencode-listener-proof",
+// A managed plugin rendered without a safeguard its install requires (the
+// Amp foreign-hook guard, the Amp and OpenCode listener proof) fails
+// verification, so the guardian repairs it; the render that carries it
+// verifies, and the per-user render verifies without it.
+func TestManagedPluginVerificationRequiresEachRenderedSafeguard(t *testing.T) {
+	guard := testForeignHookGuardBinary()
+	for _, tc := range []struct {
+		name, connector string
+		require         func(*SetupOpts)
+		off, on         string
+		// patch turns the safeguard on in the per-user file; otherwise
+		// Setup renders the file again with the required options.
+		patch bool
+	}{
+		{"amp foreign-hook guard", "amp", func(o *SetupOpts) { o.ForeignHookGuardBinary = guard },
+			`const DC_FOREIGN_GUARD: string = ""` + "\n", `const DC_FOREIGN_GUARD: string = "` + javaScriptStringContent(guard) + `"` + "\n", true},
+		{"amp listener proof", "amp", func(o *SetupOpts) { o.ManagedListenerProof = true },
+			`const DC_LISTENER_PROOF: string = ""` + "\n", `const DC_LISTENER_PROOF: string = "1"` + "\n", true},
+		{"opencode listener proof", "opencode", func(o *SetupOpts) { o.ManagedListenerProof = true },
+			`const DC_LISTENER_PROOF = "";` + "\n", `const DC_LISTENER_PROOF = "1";` + "\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			base := SetupOpts{DataDir: filepath.Join(root, "defenseclaw"), APIAddr: "127.0.0.1:18970", APIToken: "tok-" + tc.connector}
+			var conn Connector
+			var pluginPath string
+			var opts SetupOpts
+			if tc.connector == "amp" {
+				pluginPath = filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")
+				previous := AMPPluginPathOverride
+				AMPPluginPathOverride = pluginPath
+				t.Cleanup(func() { AMPPluginPathOverride = previous })
+				conn, opts = NewAMPConnector(), prepareAmpSetupOptsForTest(t, base)
+			} else {
+				pluginPath = filepath.Join(root, ".config", "opencode", "plugins", "defenseclaw.js")
+				previous := OpenCodePluginPathOverride
+				OpenCodePluginPathOverride = pluginPath
+				t.Cleanup(func() { OpenCodePluginPathOverride = previous })
+				conn, opts = NewOpenCodeConnector(), prepareOpenCodeSetupOptsForTest(t, base)
+			}
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			data, err := os.ReadFile(pluginPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), tc.off) {
+				t.Fatalf("a per-user render must leave the safeguard off (%q)", tc.off)
+			}
+			if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+				t.Fatalf("the per-user plugin verifies without the safeguard: %v %v", present, err)
+			}
+			required := opts
+			required.ManagedEnterprise = true
+			tc.require(&required)
+			if present, err := OwnedHooksPresent(conn, required); err != nil || present {
+				t.Fatalf("a plugin without the safeguard must fail verification: %v %v", present, err)
+			}
+			if tc.patch {
+				err = os.WriteFile(pluginPath, []byte(strings.Replace(string(data), tc.off, tc.on, 1)), 0o600)
+			} else {
+				err = conn.Setup(context.Background(), required)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if data, _ := os.ReadFile(pluginPath); !strings.Contains(string(data), tc.on) {
+				t.Fatalf("the plugin does not carry %q", tc.on)
+			}
+			if present, err := OwnedHooksPresent(conn, required); err != nil || !present {
+				t.Fatalf("a plugin carrying the safeguard verifies: %v %v", present, err)
+			}
 		})
-		proving := opts
-		proving.ManagedEnterprise = true
-		proving.ManagedListenerProof = true
-		rendered := opts
-		if proof {
-			rendered = proving
-		}
-		if err := conn.Setup(context.Background(), rendered); err != nil {
-			OpenCodePluginPathOverride = previous
-			t.Fatalf("Setup (proof %v): %v", proof, err)
-		}
-		data, err := os.ReadFile(pluginPath)
-		if err != nil {
-			OpenCodePluginPathOverride = previous
-			t.Fatal(err)
-		}
-		want := `const DC_LISTENER_PROOF = "";` + "\n"
-		if proof {
-			want = `const DC_LISTENER_PROOF = "1";` + "\n"
-		}
-		present, verifyErr := OwnedHooksPresent(conn, proving)
-		OpenCodePluginPathOverride = previous
-		if !strings.Contains(string(data), want) {
-			t.Fatalf("proof %v: plugin rendered without %q", proof, want)
-		}
-		if verifyErr != nil || present != proof {
-			t.Fatalf("proof %v: verification requiring the proof = %v, %v; want %v", proof, present, verifyErr, proof)
-		}
 	}
 }

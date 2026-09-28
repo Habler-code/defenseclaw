@@ -19,6 +19,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -2460,5 +2461,24 @@ func TestForeignHookBlockNamesTheFileInEveryConnectorsResponse(t *testing.T) {
 		if strings.Contains(r.stderr, "gateway unreachable") {
 			t.Fatalf("%s: a policy block is not a gateway outage: %q", tc.connector, r.stderr)
 		}
+	}
+}
+
+// A managed Copilot hook that cannot get a decision denies in Copilot's own
+// shape (permissionRequest answers with behavior), while sessionStart, which
+// cannot block, keeps the fail-open result.
+func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
+	sp := specs["copilot"]
+	var stdout, stderr bytes.Buffer
+	opts := Options{Connector: "copilot", Event: "permissionRequest", ManagedEnterprise: true, Stdout: &stdout, Stderr: &stderr}
+	var body map[string]string
+	if code := failUnreachable(opts, sp, "closed", "enterprise_managed_sid_unregistered"); code != 0 ||
+		json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &body) != nil || body["behavior"] != "deny" {
+		t.Fatalf("permissionRequest = %d %q", code, stdout.String())
+	}
+	stdout.Reset()
+	opts.Event = "sessionStart"
+	if code := failUnreachable(opts, sp, "closed", "x"); code != 0 || stdout.Len() != 0 {
+		t.Fatalf("sessionStart = %d %q", code, stdout.String())
 	}
 }

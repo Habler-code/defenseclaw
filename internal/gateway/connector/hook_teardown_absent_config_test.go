@@ -22,7 +22,8 @@ import (
 // create an agent's hooks file for a user who never had one. The JSON and
 // YAML readers read a missing file as an empty document, and teardown
 // wrote that document back, so an uninstall left "{}" in ~/.cursor/hooks.json,
-// ~/.openhands/hooks.json and ~/.gemini/config/hooks.json for every user.
+// ~/.openhands/hooks.json and ~/.copilot/hooks/defenseclaw.json for every
+// user.
 func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 	overrides := map[string]*string{
 		"cursor":      &CursorHooksPathOverride,
@@ -69,6 +70,32 @@ func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 			absent(t, path)
 		})
 	}
+
+	// Copilot loads every *.json in its hooks folder, so an empty document an
+	// earlier teardown left in DefenseClaw's own file is removed.
+	t.Run("copilot leftover", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "hooks", "defenseclaw.json")
+		prev := CopilotHooksPathOverride
+		CopilotHooksPathOverride = path
+		t.Cleanup(func() { CopilotHooksPathOverride = prev })
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		opts := SetupOpts{DataDir: filepath.Join(t.TempDir(), ".defenseclaw"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: t.TempDir()}
+		if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := NewCopilotConnector().Teardown(context.Background(), opts); err != nil {
+			t.Fatalf("teardown: %v", err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			body, _ := os.ReadFile(path)
+			t.Fatalf("teardown left %s (%v): %q", path, err, body)
+		}
+	})
 
 	// Hermes keeps its YAML config under its own custody; the removal step
 	// itself must not create the file either.

@@ -76,9 +76,11 @@ func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.
 	}
 }
 
+// recordingHookSocketGateway records each request and answers with response
+// (by default an allow that names the hook socket).
 type recordingHookSocketGateway struct {
+	response      any
 	mu            sync.Mutex
-	requests      int
 	authorization []string
 	paths         []string
 	bodies        []string
@@ -87,16 +89,107 @@ type recordingHookSocketGateway struct {
 func (g *recordingHookSocketGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	g.mu.Lock()
-	g.requests++
 	g.authorization = append(g.authorization, r.Header.Get("Authorization"))
 	g.paths = append(g.paths, r.URL.Path)
 	g.bodies = append(g.bodies, string(body))
 	g.mu.Unlock()
+	response := g.response
+	if response == nil {
+		response = map[string]interface{}{
+			"action":      "allow",
+			"hook_output": map[string]string{"decision": "allow", "transport_marker": "hook-socket"},
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"action":      "allow",
-		"hook_output": map[string]string{"decision": "allow", "transport_marker": "hook-socket"},
-	})
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// recorded returns copies of the request paths, Authorization headers and
+// bodies the gateway received.
+func (g *recordingHookSocketGateway) recorded() (paths, authorization, bodies []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.paths...), append([]string(nil), g.authorization...), append([]string(nil), g.bodies...)
+}
+
+// hookSocketFixture is a recording gateway on a unix hook socket whose
+// directory only this account can write, plus a listener on a TCP port that
+// stands for another local user holding the API port: a standalone bridge
+// must reach the gateway only through the socket and never connect to it.
+type hookSocketFixture struct {
+	root, runDir, socket string
+	gateway              *recordingHookSocketGateway
+	held                 net.Listener
+	tcpConnections       atomic.Int32
+}
+
+func newHookSocketFixture(t *testing.T, prefix string, response any) *hookSocketFixture {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the standalone hook socket is unix-only")
+	}
+	// Unix socket paths are length-limited; keep the directory short.
+	root, err := os.MkdirTemp("/tmp", prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	f := &hookSocketFixture{root: root, runDir: filepath.Join(root, "run"), gateway: &recordingHookSocketGateway{response: response}}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(f.runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f.runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.socket = filepath.Join(f.runDir, "hook.sock")
+	listener, err := net.Listen("unix", f.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: f.gateway}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	if f.held, err = net.Listen("tcp4", "127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.held.Close() })
+	go func() {
+		for {
+			conn, err := f.held.Accept()
+			if err != nil {
+				return
+			}
+			f.tcpConnections.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	return f
+}
+
+// untrustSocketDir makes the socket directory writable by anyone: it then
+// proves nothing about who listens on the socket.
+func (f *hookSocketFixture) untrustSocketDir(t *testing.T) {
+	t.Helper()
+	if err := os.Chmod(f.runDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireOnlyTheTrustedRequest fails unless the gateway received exactly one
+// bearer-free request for path over the socket and nothing reached the TCP
+// port.
+func (f *hookSocketFixture) requireOnlyTheTrustedRequest(t *testing.T, path string) {
+	t.Helper()
+	paths, authorization, _ := f.gateway.recorded()
+	if len(paths) != 1 || paths[0] != path || authorization[0] != "" {
+		t.Fatalf("hook socket requests = %v (authorization %q), want one bearer-free request for %s", paths, authorization, path)
+	}
+	if n := f.tcpConnections.Load(); n != 0 {
+		t.Fatalf("the standalone bridge connected to the TCP API port %d times", n)
+	}
 }
 
 // TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket runs a real
@@ -106,71 +199,28 @@ func (g *recordingHookSocketGateway) ServeHTTP(w http.ResponseWriter, r *http.Re
 // anything when the socket directory could have been written by someone
 // else.
 func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the standalone hook socket is unix-only")
-	}
-	if _, err := exec.LookPath("curl"); err != nil {
+	curlPath, err := exec.LookPath("curl")
+	if err != nil {
 		t.Skip("curl is required to run shell hooks")
 	}
-	root, err := os.MkdirTemp("/tmp", "dcsh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	runDir := filepath.Join(root, "run")
-	if err := os.Mkdir(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	socketPath := filepath.Join(runDir, "hook.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gateway := &recordingHookSocketGateway{}
-	server := &http.Server{Handler: gateway}
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close() })
-
-	// A listener on the TCP API address stands for another user holding the
-	// port. The hook must never connect to it.
-	held, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = held.Close() })
-	var tcpConnections atomic.Int32
-	go func() {
-		for {
-			conn, err := held.Accept()
-			if err != nil {
-				return
-			}
-			tcpConnections.Add(1)
-			_ = conn.Close()
-		}
-	}()
-
-	dataDir := filepath.Join(root, "home", ".defenseclaw")
+	f := newHookSocketFixture(t, "dcsh", nil)
+	dataDir := filepath.Join(f.root, "home", ".defenseclaw")
 	hookDir := filepath.Join(dataDir, "hooks")
 	opts := SetupOpts{
 		DataDir:            dataDir,
-		APIAddr:            held.Addr().String(),
+		APIAddr:            f.held.Addr().String(),
 		APIToken:           "connector-scoped-token-shared-by-every-user",
 		HookAPIToken:       "connector-scoped-token-shared-by-every-user",
 		HookAPITokenScoped: true,
 		ManagedEnterprise:  true,
 		HookFailMode:       "closed",
-		ManagedHookSocket:  socketPath,
+		ManagedHookSocket:  f.socket,
 		ManagedServiceUID:  os.Getuid(),
 	}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewOpenHandsConnector()); err != nil {
 		t.Fatal(err)
 	}
 	hookPath := filepath.Join(hookDir, "openhands-hook.sh")
-	curlPath, _ := exec.LookPath("curl")
 	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 
 	run := func() (int, string, string) {
@@ -178,7 +228,7 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "bash", hookPath)
-		cmd.Env = append(os.Environ(), "HOME="+filepath.Join(root, "home"))
+		cmd.Env = append(os.Environ(), "HOME="+filepath.Join(f.root, "home"))
 		cmd.Stdin = strings.NewReader(`{"event_type":"PreToolUse","tool_name":"execute_bash","tool_input":{"command":"echo marker"}}`)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -192,37 +242,14 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 		return code, stdout.String(), stderr.String()
 	}
 
-	code, stdout, stderr := run()
-	if code != 0 || !strings.Contains(stdout, "hook-socket") {
+	if code, stdout, stderr := run(); code != 0 || !strings.Contains(stdout, "hook-socket") {
 		t.Fatalf("hook over the verified socket: exit %d stdout=%q stderr=%q", code, stdout, stderr)
 	}
-	gateway.mu.Lock()
-	requests, authorization, paths := gateway.requests, append([]string(nil), gateway.authorization...), append([]string(nil), gateway.paths...)
-	gateway.mu.Unlock()
-	if requests != 1 || paths[0] != "/api/v1/openhands/hook" {
-		t.Fatalf("hook socket requests = %d %v, want one openhands hook request", requests, paths)
-	}
-	if authorization[0] != "" {
-		t.Fatalf("the hook sent a bearer over the hook socket: %q", authorization[0])
-	}
-
-	// A socket directory anyone could write proves nothing about who listens.
-	if err := os.Chmod(runDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	code, stdout, stderr = run()
-	if code != 2 || !strings.Contains(stderr, "hook socket") {
+	f.untrustSocketDir(t)
+	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "hook socket") {
 		t.Fatalf("untrusted socket directory: exit %d stdout=%q stderr=%q, want a closed failure", code, stdout, stderr)
 	}
-	gateway.mu.Lock()
-	requests = gateway.requests
-	gateway.mu.Unlock()
-	if requests != 1 {
-		t.Fatalf("the hook sent a request through an unverified socket (%d requests)", requests)
-	}
-	if n := tcpConnections.Load(); n != 0 {
-		t.Fatalf("the standalone hook connected to the TCP API port %d times", n)
-	}
+	f.requireOnlyTheTrustedRequest(t, "/api/v1/openhands/hook")
 }
 
 // TestManagedStandaloneCodexNotifyBridgeUsesOnlyTheVerifiedHookSocket runs
@@ -232,53 +259,12 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 // drop the event without sending anything when the socket directory could
 // have been written by someone else. Without a socket it keeps TCP.
 func TestManagedStandaloneCodexNotifyBridgeUsesOnlyTheVerifiedHookSocket(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the Bash notify bridge is not installed on Windows")
-	}
 	curlPath, err := exec.LookPath("curl")
 	if err != nil {
 		t.Skip("curl is required to run the notify bridge")
 	}
-	root, err := os.MkdirTemp("/tmp", "dcnb")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	runDir := filepath.Join(root, "run")
-	if err := os.Mkdir(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	socketPath := filepath.Join(runDir, "hook.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gateway := &recordingHookSocketGateway{}
-	server := &http.Server{Handler: gateway}
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close() })
-	held, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = held.Close() })
-	var tcpConnections atomic.Int32
-	go func() {
-		for {
-			conn, err := held.Accept()
-			if err != nil {
-				return
-			}
-			tcpConnections.Add(1)
-			_ = conn.Close()
-		}
-	}()
-
-	const sharedToken = "codex-token-shared-by-every-user"
-	dataDir := filepath.Join(root, "home", ".defenseclaw")
+	f := newHookSocketFixture(t, "dcnb", nil)
+	dataDir := filepath.Join(f.root, "home", ".defenseclaw")
 	tokenPath, err := HookAPITokenFilePath(dataDir, "codex")
 	if err != nil {
 		t.Fatal(err)
@@ -286,14 +272,14 @@ func TestManagedStandaloneCodexNotifyBridgeUsesOnlyTheVerifiedHookSocket(t *test
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(tokenPath, []byte(sharedToken+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(tokenPath, []byte("codex-token-shared-by-every-user\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	opts := SetupOpts{
 		DataDir:           dataDir,
-		APIAddr:           held.Addr().String(),
+		APIAddr:           f.held.Addr().String(),
 		ManagedEnterprise: true,
-		ManagedHookSocket: socketPath,
+		ManagedHookSocket: f.socket,
 		ManagedServiceUID: os.Getuid(),
 	}
 	if err := writeCodexNotifyBridge(opts); err != nil {
@@ -321,32 +307,12 @@ func TestManagedStandaloneCodexNotifyBridgeUsesOnlyTheVerifiedHookSocket(t *test
 		}
 	}
 	run()
-	gateway.mu.Lock()
-	requests := gateway.requests
-	paths := append([]string(nil), gateway.paths...)
-	authorization := append([]string(nil), gateway.authorization...)
-	bodies := append([]string(nil), gateway.bodies...)
-	gateway.mu.Unlock()
-	if requests != 1 || paths[0] != "/api/v1/codex/notify" || bodies[0] != payload {
-		t.Fatalf("hook socket requests = %d %v %q, want the one notify turn", requests, paths, bodies)
+	if _, _, bodies := f.gateway.recorded(); len(bodies) != 1 || bodies[0] != payload {
+		t.Fatalf("notify bodies = %q, want the one turn", bodies)
 	}
-	if authorization[0] != "" {
-		t.Fatalf("the notify bridge sent a bearer over the hook socket: %q", authorization[0])
-	}
-
-	if err := os.Chmod(runDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
+	f.untrustSocketDir(t)
 	run()
-	gateway.mu.Lock()
-	requests = gateway.requests
-	gateway.mu.Unlock()
-	if requests != 1 {
-		t.Fatalf("the notify bridge sent a turn through an unverified socket (%d requests)", requests)
-	}
-	if n := tcpConnections.Load(); n != 0 {
-		t.Fatalf("the standalone notify bridge connected to the TCP API port %d times", n)
-	}
+	f.requireOnlyTheTrustedRequest(t, "/api/v1/codex/notify")
 
 	opts.ManagedHookSocket = ""
 	if err := writeCodexNotifyBridge(opts); err != nil {

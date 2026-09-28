@@ -4,66 +4,10 @@
 package connector
 
 import (
-	"context"
 	"encoding/json"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
-
-// openCodePluginHarness loads a rendered OpenCode plugin with a stub TUI
-// client, applies its config hook, runs tool.execute.before `calls` times and
-// prints one verdict per call, then the toasts it showed.
-const openCodePluginHarness = `
-import { pathToFileURL } from "node:url";
-const toasts = [];
-const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
-const href = pathToFileURL(process.argv[1]).href;
-const loaded = await import(href);
-const plugin = await loaded.DefenseClaw({ directory: "", client });
-await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
-for (let i = 0; i < Number(process.argv[2]); i++) {
-  try {
-    await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" + i }, { args: { command: "echo marker" } });
-    console.log("allow");
-  } catch (error) {
-    console.log("block:" + String(error && error.message || error));
-  }
-}
-await new Promise((resolve) => setTimeout(resolve, 50));
-console.log("toasts:" + JSON.stringify(toasts));
-`
-
-func runOpenCodePluginHarness(t *testing.T, data templateData, calls int) []string {
-	t.Helper()
-	return runOpenCodePluginAssetHarness(t, "opencode-plugin.js", data, calls)
-}
-
-func runOpenCodePluginAssetHarness(t *testing.T, asset string, data templateData, calls int) []string {
-	t.Helper()
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required for the OpenCode plugin test")
-	}
-	rendered := renderPluginAssetForTest(t, asset, data)
-	path := filepath.Join(testenv.PrivateTempDir(t), "defenseclaw.mjs")
-	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, node, "--input-type=module", "-e", openCodePluginHarness, path, strconv.Itoa(calls)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("node: %v\n%s", err, out)
-	}
-	return strings.Split(strings.TrimSpace(string(out)), "\n")
-}
 
 const (
 	openCodeGatewayBlock   = `{"action":"block","mode":"action","severity":"CRITICAL","reason":"matched: CERT-MARKER","hook_output":{"decision":"deny","reason":"matched: CERT-MARKER"}}`

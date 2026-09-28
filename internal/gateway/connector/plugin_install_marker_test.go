@@ -35,42 +35,12 @@ func TestManagedPluginInstallMarkerRequiresAManagedAbsolutePath(t *testing.T) {
 	}
 }
 
-// Both in-agent plugins carry the rendered marker, and an unmanaged render
-// leaves it empty so their fail mode stays unconditional.
-func TestPluginTemplatesRenderTheInstallMarker(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "Cisco", "DefenseClaw-HookRuntime")
-	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
-		tmpl, err := hookFS.ReadFile("hooks/" + asset)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, value := range []string{marker, ""} {
-			rendered, err := renderTemplate(string(tmpl), templateData{
-				APIAddr:         "127.0.0.1:18970",
-				TokenFileJS:     javaScriptStringContent(filepath.Join(t.TempDir(), "token")),
-				InstallMarkerJS: javaScriptStringContent(value),
-				FailMode:        "closed",
-				Managed:         true,
-			})
-			if err != nil {
-				t.Fatalf("render %s: %v", asset, err)
-			}
-			want := `DC_INSTALL_MARKER = "` + javaScriptStringContent(value) + `"`
-			if asset == "amp-plugin.ts" {
-				want = `DC_INSTALL_MARKER: string = "` + javaScriptStringContent(value) + `"`
-			}
-			if !strings.Contains(rendered, want) {
-				t.Fatalf("%s rendered without %s", asset, want)
-			}
-		}
-	}
-}
-
 // After an uninstall the OpenCode plugin stays in a signed-out user's profile
 // with a closed fail mode. Once the gateway is unreachable or the credential
 // is gone AND the administrator-owned install marker is gone, it must allow
-// instead of blocking every tool call; while the marker exists it still fails
-// closed, and a render without a marker never relaxes.
+// instead of blocking every tool call, at the gateway call and at the
+// foreign-hook guard; while the marker exists it still fails closed, and a
+// render without a marker never relaxes.
 func TestOpenCodePluginStopsFailingClosedOnceTheDeploymentIsRemoved(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -206,5 +176,28 @@ for await (const line of lines) {
 	}
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("OpenCode marker process: %v; stderr=%s", err, stderr.String())
+	}
+
+	// The foreign-hook guard's binary is removed with the marker: a guard
+	// that cannot run blocks while the marker exists or none was rendered,
+	// and allows once the deployment is gone.
+	writeToken()
+	missingGuard := filepath.Join(root, "bin", "defenseclaw-hook")
+	for _, tc := range []struct{ name, marker, want string }{
+		{"installed", marker, "block:DefenseClaw could not check for unapproved plugins"},
+		{"uninstalled", filepath.Join(root, "removed-HookRuntime"), "allow"},
+		{"no marker rendered", "", "block:DefenseClaw could not check for unapproved plugins"},
+	} {
+		lines := runOpenCodePluginHarness(t, templateData{
+			APIAddr:            unreachable,
+			TokenFileJS:        javaScriptStringContent(tokenPath),
+			ForeignHookGuardJS: javaScriptStringContent(missingGuard),
+			InstallMarkerJS:    javaScriptStringContent(tc.marker),
+			FailMode:           "closed",
+			Managed:            true,
+		}, 1)
+		if !strings.HasPrefix(lines[0], tc.want) {
+			t.Fatalf("guard, %s deployment = %q, want %q", tc.name, lines[0], tc.want)
+		}
 	}
 }

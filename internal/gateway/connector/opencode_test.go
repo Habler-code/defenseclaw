@@ -1095,43 +1095,51 @@ func openCodeTestPathContains(paths []string, want string) bool {
 	return false
 }
 
-// Only a standalone managed install renders the foreign-hook guard binary,
-// and verification then requires it, so a plugin rendered before the guard
-// existed is repaired on upgrade. Per-user installs render it empty.
-func TestPluginForeignHookGuardRendersOnlyForManagedInstalls(t *testing.T) {
-	if got := managedPluginForeignHookGuard(SetupOpts{ForeignHookGuardBinary: "/opt/defenseclaw/bin/defenseclaw-hook"}); got != "" {
-		t.Fatalf("a per-user install must not run the guard: %q", got)
-	}
-	if got := managedPluginForeignHookGuard(SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: "relative/defenseclaw-hook"}); got != "" {
-		t.Fatalf("a relative guard binary must be refused: %q", got)
-	}
+// Both in-agent plugins render each managed-only safeguard as given (the
+// foreign-hook guard binary, the listener proof switch and the install
+// marker), and a per-user render leaves it empty. Only a standalone managed
+// install selects the guard binary, and only as an absolute path; the marker
+// verification requires is the rendered declaration.
+func TestPluginTemplatesRenderTheManagedOnlySafeguards(t *testing.T) {
 	guard := testForeignHookGuardBinary()
-	opts := SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}
-	if got := managedPluginForeignHookGuard(opts); got != guard {
-		t.Fatalf("managed guard binary = %q", got)
+	marker := filepath.Join(t.TempDir(), "Cisco", "DefenseClaw-HookRuntime")
+	for _, tc := range []struct {
+		variable, value string
+		set             func(*templateData, string)
+	}{
+		{"DC_FOREIGN_GUARD", javaScriptStringContent(guard), func(d *templateData, v string) { d.ForeignHookGuardJS = v }},
+		{"DC_LISTENER_PROOF", "1", func(d *templateData, v string) { d.ListenerProofJS = v }},
+		{"DC_INSTALL_MARKER", javaScriptStringContent(marker), func(d *templateData, v string) { d.InstallMarkerJS = v }},
+	} {
+		for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
+			declaration, terminator := "const "+tc.variable+" = ", ";\n"
+			if asset == "amp-plugin.ts" {
+				declaration, terminator = "const "+tc.variable+": string = ", "\n"
+			}
+			for _, value := range []string{tc.value, ""} {
+				data := templateData{APIAddr: "127.0.0.1:18970", TokenFileJS: javaScriptStringContent(filepath.Join(t.TempDir(), "token")), FailMode: "closed", Managed: true}
+				tc.set(&data, value)
+				if want := declaration + `"` + value + `"` + terminator; !strings.Contains(renderPluginAssetForTest(t, asset, data), want) {
+					t.Fatalf("%s rendered without %q", asset, want)
+				}
+			}
+			if tc.variable == "DC_FOREIGN_GUARD" {
+				opts := SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}
+				if got, want := string(managedPluginForeignHookGuardMarker(opts, declaration, terminator)), declaration+`"`+tc.value+`"`+terminator; got != want {
+					t.Fatalf("%s: verification marker %q, want the rendered %q", asset, got, want)
+				}
+			}
+		}
 	}
-	for _, name := range []string{"hooks/opencode-plugin.js", "hooks/amp-plugin.ts"} {
-		body, err := hookFS.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
+	for _, opts := range []SetupOpts{
+		{ForeignHookGuardBinary: guard},
+		{ManagedEnterprise: true, ForeignHookGuardBinary: "relative/defenseclaw-hook"},
+	} {
+		if got := managedPluginForeignHookGuard(opts); got != "" {
+			t.Fatalf("guard binary for %+v = %q, want none", opts, got)
 		}
-		declaration, terminator := "const DC_FOREIGN_GUARD: string = ", "\n"
-		if strings.HasSuffix(name, ".js") {
-			declaration, terminator = "const DC_FOREIGN_GUARD = ", ";\n"
-		}
-		rendered, err := renderTemplate(string(body), templateData{ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts))})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(rendered, string(managedPluginForeignHookGuardMarker(opts, declaration, terminator))) {
-			t.Fatalf("%s: the managed render must carry the guard marker", name)
-		}
-		perUser, err := renderTemplate(string(body), templateData{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(perUser, string(managedPluginForeignHookGuardMarker(opts, declaration, terminator))) {
-			t.Fatalf("%s: a per-user render must not carry the guard", name)
-		}
+	}
+	if got := managedPluginForeignHookGuard(SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}); got != guard {
+		t.Fatalf("managed guard binary = %q", got)
 	}
 }

@@ -18,52 +18,52 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 	const notSetUp = "DefenseClaw is not set up correctly on this computer. Contact your administrator."
 	for _, tc := range []struct {
 		name    string
-		failure managedStandaloneFailure
-		ev      managedStandaloneEvent
+		failure sessionStopCause
+		ev      sessionStopEvent
 		want    string
 		body    bool
 	}{
 		{
 			name:    "claude prompt, gateway unreachable",
-			failure: managedStandaloneFailures[2],
-			ev:      managedStandaloneEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`},
+			failure: sessionStopCauses[2],
+			ev:      sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`},
 			want:    "DefenseClaw blocked this prompt: " + unavailable + " (gateway unreachable)",
 		},
 		{
 			name:    "claude prompt, socket not verified",
-			failure: managedStandaloneFailures[1],
-			ev:      managedStandaloneEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`},
+			failure: sessionStopCauses[1],
+			ev:      sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`},
 			want:    "DefenseClaw blocked this prompt: " + unavailable + " (enterprise_managed_gateway_peer_unverified)",
 		},
 		{
 			name:    "claude tool call, hook socket missing",
-			failure: managedStandaloneFailures[0],
-			ev:      managedStandaloneEvent{connector: "claudecode", payload: `{"hook_event_name":"PreToolUse"}`},
+			failure: sessionStopCauses[0],
+			ev:      sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"PreToolUse"}`},
 			want:    "DefenseClaw blocked this tool call: " + notSetUp + " (enterprise_managed_hook_socket_missing)",
 		},
 		{
 			name:    "codex prompt, gateway unreachable",
-			failure: managedStandaloneFailures[2],
-			ev:      managedStandaloneEvent{connector: "codex", event: "UserPromptSubmit"},
+			failure: sessionStopCauses[2],
+			ev:      sessionStopEvent{connector: "codex", event: "UserPromptSubmit"},
 			want:    "DefenseClaw blocked this prompt: " + unavailable + " (gateway unreachable)",
 			body:    true,
 		},
 		{
 			name:    "devin tool call, unusable response",
-			failure: managedStandaloneFailures[3],
-			ev:      managedStandaloneEvent{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`},
+			failure: sessionStopCauses[3],
+			ev:      sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`},
 			want:    "DefenseClaw blocked this tool call: the DefenseClaw gateway returned an answer DefenseClaw could not use. Try again; if this continues, contact your administrator. (invalid JSON response)",
 			body:    true,
 		},
 		{
 			name:    "cursor prompt, hook socket missing",
-			failure: managedStandaloneFailures[0],
-			ev:      managedStandaloneEvent{connector: "cursor", payload: `{"hook_event_name":"beforeSubmitPrompt"}`},
+			failure: sessionStopCauses[0],
+			ev:      sessionStopEvent{connector: "cursor", payload: `{"hook_event_name":"beforeSubmitPrompt"}`},
 			want:    "DefenseClaw blocked this prompt: " + notSetUp + " (enterprise_managed_hook_socket_missing)",
 			body:    true,
 		},
 	} {
-		r, _ := managedStandaloneRun(t, tc.failure, tc.ev, true)
+		r, _ := runSessionStop(t, tc.failure, tc.ev, true)
 		if got := strings.TrimSpace(r.stderr); got != tc.want {
 			t.Fatalf("%s: stderr\n got %q\nwant %q", tc.name, got, tc.want)
 		}
@@ -79,13 +79,13 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 // Outside the standalone profile (Secure Client and every other managed
 // hook) the fail-closed text is unchanged.
 func TestManagedFailClosedTextOutsideStandaloneIsUnchanged(t *testing.T) {
-	r, _ := managedStandaloneRun(t, managedStandaloneFailures[0],
-		managedStandaloneEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`}, false)
+	r, _ := runSessionStop(t, sessionStopCauses[0],
+		sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`}, false)
 	if want := "defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): enterprise_managed_hook_socket_missing"; strings.TrimSpace(r.stderr) != want {
 		t.Fatalf("stderr = %q, want %q", r.stderr, want)
 	}
-	r, _ = managedStandaloneRun(t, managedStandaloneFailures[0],
-		managedStandaloneEvent{connector: "codex", event: "UserPromptSubmit"}, false)
+	r, _ = runSessionStop(t, sessionStopCauses[0],
+		sessionStopEvent{connector: "codex", event: "UserPromptSubmit"}, false)
 	if want := `{"decision":"block","reason":"DefenseClaw hook failed closed"}`; strings.TrimSpace(r.stdout) != want {
 		t.Fatalf("stdout = %q, want %q", r.stdout, want)
 	}

@@ -172,14 +172,6 @@ func TestStandaloneHookSocketImpostorGetsZeroBytes(t *testing.T) {
 	}
 }
 
-func TestStandaloneHookSocketMissingFailsClosed(t *testing.T) {
-	dir := shortSocketDir(t)
-	result := standaloneRun(t, filepath.Join(dir, "absent.sock"), os.Getuid())
-	if result.code == 0 {
-		t.Fatalf("missing socket must fail closed; stderr=%q", result.stderr)
-	}
-}
-
 func TestValidateStandaloneHookSocketPath(t *testing.T) {
 	dir := shortSocketDir(t)
 	regular := filepath.Join(dir, "file")
@@ -268,6 +260,10 @@ func TestStandaloneWithoutHookSocketNeverUsesTCP(t *testing.T) {
 	}
 	if n := sentBytes(); n != 0 {
 		t.Fatalf("hook wrote %d bytes to the loopback TCP port", n)
+	}
+	// A configured socket path that names no socket fails closed too.
+	if result := standaloneRun(t, filepath.Join(shortSocketDir(t), "absent.sock"), os.Getuid()); result.code == 0 {
+		t.Fatalf("a missing socket must fail closed; stderr=%q", result.stderr)
 	}
 }
 

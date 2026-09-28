@@ -13,16 +13,12 @@ package connector
 import (
 	"encoding/base64"
 	"encoding/json"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 )
 
@@ -32,68 +28,18 @@ import (
 // local user may hold), and denies without sending anything when the socket
 // directory could have been written by someone else.
 func TestOmnigentPolicyBridgeUsesOnlyTheVerifiedHookSocket(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the standalone hook socket is unix-only")
-	}
+	f := newHookSocketFixture(t, "dcog", map[string]string{"action": "block", "reason": "verdict from the hook socket"})
 	python := omnigentTestPython(t)
 	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := os.MkdirTemp("/tmp", "dcog")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	runDir := filepath.Join(root, "run")
-	if err := os.Mkdir(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	socketPath := filepath.Join(runDir, "hook.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mu sync.Mutex
-	var requests int
-	var authorization, path string
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		requests++
-		authorization, path = r.Header.Get("Authorization"), r.URL.Path
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"action":"block","reason":"verdict from the hook socket"}`))
-	})}
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close() })
-
-	held, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = held.Close() })
-	var tcpConnections atomic.Int32
-	go func() {
-		for {
-			conn, err := held.Accept()
-			if err != nil {
-				return
-			}
-			tcpConnections.Add(1)
-			_ = conn.Close()
-		}
-	}()
-
-	tokenPath := filepath.Join(root, ".hook-omnigent.token")
+	tokenPath := filepath.Join(f.root, ".hook-omnigent.token")
 	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("d", 64)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	modulePath := filepath.Join(root, "defenseclaw_omnigent_policy.py")
-	rendered := renderOmnigentPolicyWithTransport(string(templateBytes), held.Addr().String(), tokenPath, "open", socketPath, os.Getuid())
+	modulePath := filepath.Join(f.root, "defenseclaw_omnigent_policy.py")
+	rendered := renderOmnigentPolicyWithTransport(string(templateBytes), f.held.Addr().String(), tokenPath, "open", f.socket, os.Getuid())
 	if err := os.WriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -120,30 +66,13 @@ print(json.dumps(module.defenseclaw_policy({"type": "tool_call", "target": "shel
 	if verdict := evaluate(); verdict["result"] != "DENY" || verdict["reason"] != "verdict from the hook socket" {
 		t.Fatalf("verdict over the hook socket = %v", verdict)
 	}
-	mu.Lock()
-	if requests != 1 || path != "/api/v1/omnigent/hook" || authorization != "" {
-		mu.Unlock()
-		t.Fatalf("hook socket request: count=%d path=%q authorization=%q, want one bearer-free omnigent hook request", requests, path, authorization)
-	}
-	mu.Unlock()
-
 	// Even with the operator's fail-open transport mode, an unverified socket
 	// denies instead of allowing.
-	if err := os.Chmod(runDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
+	f.untrustSocketDir(t)
 	if verdict := evaluate(); verdict["result"] != "DENY" || !strings.Contains(verdict["reason"], "hook socket") {
 		t.Fatalf("verdict with an untrusted socket directory = %v, want a hook socket denial", verdict)
 	}
-	mu.Lock()
-	count := requests
-	mu.Unlock()
-	if count != 1 {
-		t.Fatalf("the bridge sent a request through an unverified socket (%d requests)", count)
-	}
-	if n := tcpConnections.Load(); n != 0 {
-		t.Fatalf("the standalone bridge connected to the TCP API address %d times", n)
-	}
+	f.requireOnlyTheTrustedRequest(t, "/api/v1/omnigent/hook")
 }
 
 // TestOmnigentSetupRendersTheHookSocketOnlyForManagedStandalone pins the
