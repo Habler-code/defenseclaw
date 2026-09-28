@@ -110,7 +110,8 @@ func hookSocketRoundTrip(socket string) error {
 // restarts. The hook socket must come up and stay up anyway, the API must
 // report the failed bind, and the gateway must take the port once it is
 // released instead of returning (which exits the sidecar and takes the
-// socket down for every user).
+// socket down for every user). A bind retry still pending when the gateway
+// stops must not take the port afterwards.
 func TestStandaloneHookSocketServesWhileTheAPIPortIsHeld(t *testing.T) {
 	holder, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -173,18 +174,14 @@ func TestStandaloneHookSocketServesWhileTheAPIPortIsHeld(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
-}
 
-// TestStandaloneHeldAPIPortReleasedAfterShutdown: a bind retry still pending
-// when the gateway stops must not take the port afterwards.
-func TestStandaloneHeldAPIPortReleasedAfterShutdown(t *testing.T) {
-	holder, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
+	// A bind retry still pending when the gateway stops must not take the
+	// port afterwards.
+	if holder, err = net.Listen("tcp4", addr); err != nil {
 		t.Fatal(err)
 	}
-	addr := holder.Addr().String()
-	socket, _, runErr, cancel := runHookSocketTestServer(t, true, addr)
-	deadline := time.Now().Add(10 * time.Second)
+	socket, _, runErr, cancel = runHookSocketTestServer(t, true, addr)
+	deadline = time.Now().Add(10 * time.Second)
 	for hookSocketRoundTrip(socket) != nil {
 		if time.Now().After(deadline) {
 			_ = holder.Close()

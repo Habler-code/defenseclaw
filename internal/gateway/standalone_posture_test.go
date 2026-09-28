@@ -251,7 +251,7 @@ func TestStandaloneHookLaneBlocksOnTheLocalEngine(t *testing.T) {
 		"ai defense no verdict": &stubAIDInspector{verdict: nil},
 	} {
 		a := hookServer(t, profilePostures[0], inspector)
-		if ManagedEnterpriseActive() {
+		if ManagedEnterpriseActive() || a.managedAIDOnly() {
 			t.Fatalf("standalone, %s: boot published the Secure Client AI Defense-only posture", name)
 		}
 		if verdict := a.inspectToolPolicy(blockedTool()); verdict == nil || verdict.Action != "block" {
@@ -264,7 +264,7 @@ func TestStandaloneHookLaneBlocksOnTheLocalEngine(t *testing.T) {
 
 	aid := &stubAIDInspector{verdict: nil}
 	a := hookServer(t, profilePostures[1], aid)
-	if !ManagedEnterpriseActive() {
+	if !ManagedEnterpriseActive() || !a.managedAIDOnly() {
 		t.Fatal("Secure Client boot did not publish the AI Defense-only posture")
 	}
 	if verdict := a.inspectToolPolicy(blockedTool()); verdict == nil || verdict.Action != "allow" {

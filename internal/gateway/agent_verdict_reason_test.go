@@ -75,14 +75,11 @@ func TestAgentVerdictReasonNamesDefenseClawPolicyAndTheRule(t *testing.T) {
 			t.Fatalf("non-rule reason %q rewritten to %q", reason, got)
 		}
 	}
-}
 
-// A local rule merged with an AI Defense or judge verdict: the merged
-// reason names the other lane's reason too, so the rule-only wording would
-// drop the reason that decided (and could blame an alert-only rule). Such a
-// reason keeps its display text.
-func TestAgentVerdictReasonKeepsAMergedLaneReason(t *testing.T) {
-	useAgentVerdictProfile(t, true, false)
+	// A local rule merged with an AI Defense or judge verdict: the merged
+	// reason names the other lane's reason too, so the rule-only wording
+	// would drop the reason that decided (and could blame an alert-only
+	// rule). Such a reason keeps its display text.
 	for _, source := range []string{
 		certMarkerReason + "; Cisco AI Defense: prompt injection detected",
 		certMarkerReason + "; judge-injection: instruction override",
@@ -95,8 +92,7 @@ func TestAgentVerdictReasonKeepsAMergedLaneReason(t *testing.T) {
 	}
 	// The approval fallback's note is not another verdict: the rule decided.
 	source := certMarkerReason + "; " + approvalUnsupportedNote
-	display := agentDisplayReason(source, redaction.SinkPolicyDefault)
-	if got := agentVerdictReason("block", source, display, redaction.SinkPolicyDefault); got != orgBlockWording {
+	if got := agentVerdictReason("block", source, agentDisplayReason(source, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault); got != orgBlockWording {
 		t.Fatalf("approval fallback reason = %q, want %q", got, orgBlockWording)
 	}
 }

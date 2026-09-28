@@ -37,7 +37,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -727,23 +726,6 @@ func TestDiffConfigsMarksACPChangedHotReloadable(t *testing.T) {
 	}
 }
 
-func standaloneDiffTestConfig() *config.Config {
-	cfg := config.DefaultConfig()
-	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
-	cfg.Enterprise = config.EnterpriseConfig{
-		Profile: managed.ProfileStandalone,
-		Inspection: config.EnterpriseInspectionConfig{AIDefense: config.EnterpriseAIDefenseConfig{
-			Enabled: true, Credential: "ai-defense-api-key",
-		}},
-		Enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"svc-release"}},
-		MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{
-			"codex": {AllowedHooks: []string{}},
-		}},
-		Network: config.EnterpriseNetworkConfig{HTTPSProxy: "http://proxy.corp:3128"},
-	}
-	return cfg
-}
-
 // TestDiffConfigsSplitsStandaloneEnterpriseChanges: an edit that only
 // touches enterprise.* must never reload as "no change". AI Defense settings
 // rebuild the client in place (hot); the egress proxy and enrollment are
@@ -773,19 +755,6 @@ func TestDiffConfigsSplitsStandaloneEnterpriseChanges(t *testing.T) {
 				t.Fatalf("restart_required = %v, want %s restart=%t", diff.RestartRequired, tc.wantChanged, tc.wantRestart)
 			}
 		})
-	}
-}
-
-func TestDiffConfigsSeesNoEnterpriseChangeAcrossAClone(t *testing.T) {
-	oldCfg := standaloneDiffTestConfig()
-	if diff := diffConfigs(oldCfg, cloneConfig(oldCfg)); len(diff.Changed) != 0 {
-		t.Fatalf("an unchanged enterprise block diffed as changed: %v", diff.Changed)
-	}
-	secureClient := config.DefaultConfig()
-	secureClient.DeploymentMode = managed.DeploymentModeManagedEnterprise
-	secureClient.Enterprise.Profile = managed.ProfileSecureClient
-	if diff := diffConfigs(secureClient, cloneConfig(secureClient)); len(diff.Changed) != 0 || len(diff.RestartRequired) != 0 {
-		t.Fatalf("an unchanged Secure Client config diffed as %+v", diff)
 	}
 }
 

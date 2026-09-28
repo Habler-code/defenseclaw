@@ -61,8 +61,7 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 		return peercred.Credentials{UID: 7101, GID: 7101, PID: 301}, nil
 	}
 	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
-	socket, _, store := startTestHookSocketServerWithLedger(t,
-		`{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`)
+	socket, _, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`})
 	client := hookSocketClient(socket, 10*time.Second)
 	post := func(path, connectorName string, body any) int {
 		t.Helper()
@@ -112,6 +111,57 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 		!strings.Contains(auditStringValue(refusal.Structured["defenseclaw.admin.target_ref"]), "/api/v1/cursor/hook") ||
 		refusal.Connector != "cursor" {
 		t.Fatalf("refusal row connector=%q structured=%v", refusal.Connector, refusal.Structured)
+	}
+
+	// A foreign-hook guard denial recorded by the session exchange.
+	exchange := map[string]any{
+		"key":           map[string]any{"connector": "claudecode", "session": "audit-session", "process": "audit-process"},
+		"session_start": true,
+		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: project hook",
+			"findings": []map[string]any{{"connector": "claudecode", "scope": "project", "path": "/repo/.claude/settings.json", "digest": "abcd"}}},
+	}
+	if status := post("/api/v1/foreign-hook-session/claudecode", "", exchange); status != http.StatusOK {
+		t.Fatalf("session exchange = %d", status)
+	}
+	denial := waitForAuditRow(t, store, "foreign-hook denial", func(event audit.Event) bool {
+		return event.Action == string(audit.ActionConnectorHook) && event.Structured["event"] == "foreign_hook_session" && hasCaller(event)
+	})
+	extra, _ := denial.Structured["extra"].(map[string]any)
+	if denial.Connector != "claudecode" || denial.Structured["action"] != "block" ||
+		extra["file"] != "/repo/.claude/settings.json" || extra["session_block"] != "session_recorded" ||
+		!strings.Contains(auditStringValue(denial.Structured["reason"]), "enterprise_foreign_hook_blocked") {
+		t.Fatalf("denial row connector=%q structured=%v", denial.Connector, denial.Structured)
+	}
+
+	// The caller sends the finding fields: an oversized request still
+	// writes a bounded row.
+	huge := strings.Repeat("x", 40<<10)
+	flood := map[string]any{
+		"key":           map[string]any{"connector": "claudecode", "session": "flood-session", "process": "flood-process"},
+		"session_start": true,
+		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: " + huge,
+			"findings": []map[string]any{{"connector": "claudecode", "scope": huge, "path": "/repo/" + huge, "digest": huge, "reason": huge}}},
+	}
+	if status := post("/api/v1/foreign-hook-session/claudecode", "", flood); status != http.StatusOK {
+		t.Fatalf("oversized session exchange = %d", status)
+	}
+	row := waitForAuditRow(t, store, "oversized foreign-hook denial", func(event audit.Event) bool {
+		extra, _ := event.Structured["extra"].(map[string]any)
+		file, _ := extra["file"].(string)
+		return event.Structured["event"] == "foreign_hook_session" && strings.HasPrefix(file, "/repo/x")
+	})
+	rowExtra, _ := row.Structured["extra"].(map[string]any)
+	for _, key := range []string{"file", "scope", "digest", "finding_reason"} {
+		value, _ := rowExtra[key].(string)
+		if value == "" || len(value) > foreignHookAuditFieldLimit {
+			t.Fatalf("audit field %s has %d bytes, want 1..%d", key, len(value), foreignHookAuditFieldLimit)
+		}
+	}
+	if reason := auditStringValue(row.Structured["reason"]); len(reason) > foreignHookAuditReasonLimit {
+		t.Fatalf("audit reason has %d bytes, want at most %d", len(reason), foreignHookAuditReasonLimit)
+	}
+	if data, _ := json.Marshal(row.Structured); len(data) > 8<<10 {
+		t.Fatalf("oversized request wrote a %d-byte audit row", len(data))
 	}
 }
 

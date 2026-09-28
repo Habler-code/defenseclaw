@@ -74,6 +74,37 @@ func TestDiffConfigsSeesStandaloneEnterpriseChanges(t *testing.T) {
 	}
 }
 
+func standaloneDiffTestConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	cfg.Enterprise = config.EnterpriseConfig{
+		Profile: managed.ProfileStandalone,
+		Inspection: config.EnterpriseInspectionConfig{AIDefense: config.EnterpriseAIDefenseConfig{
+			Enabled: true, Credential: "ai-defense-api-key",
+		}},
+		Enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"svc-release"}},
+		MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{
+			"codex": {AllowedHooks: []string{}},
+		}},
+		Network: config.EnterpriseNetworkConfig{HTTPSProxy: "http://proxy.corp:3128"},
+	}
+	return cfg
+}
+
+// A clone of a config with a full enterprise block diffs as unchanged.
+func TestDiffConfigsSeesNoEnterpriseChangeAcrossAClone(t *testing.T) {
+	oldCfg := standaloneDiffTestConfig()
+	if diff := diffConfigs(oldCfg, cloneConfig(oldCfg)); len(diff.Changed) != 0 {
+		t.Fatalf("an unchanged enterprise block diffed as changed: %v", diff.Changed)
+	}
+	secureClient := config.DefaultConfig()
+	secureClient.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	secureClient.Enterprise.Profile = managed.ProfileSecureClient
+	if diff := diffConfigs(secureClient, cloneConfig(secureClient)); len(diff.Changed) != 0 || len(diff.RestartRequired) != 0 {
+		t.Fatalf("an unchanged Secure Client config diffed as %+v", diff)
+	}
+}
+
 func TestDiffConfigsLeavesSecureClientEnterpriseUntouched(t *testing.T) {
 	// A Secure Client deployment carries no enterprise block; nothing about
 	// its diff, restart set or inspector rebuild may change.

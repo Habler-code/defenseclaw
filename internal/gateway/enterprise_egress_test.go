@@ -164,66 +164,12 @@ func TestStandaloneWebhookClientReachesItsEndpointThroughTheEnterpriseProxy(t *t
 	}
 }
 
-func TestStandalonePassthroughClientReachesTheUpstreamThroughTheEnterpriseProxy(t *testing.T) {
-	backend, port := egressBackend(t, echoHost)
-	proxy := netguardtest.NewRecordingProxy(t, map[string]string{"llm.example.test:" + port: backend.Listener.Addr().String()})
-	useEnterpriseEgress(t, proxy.URL, "")
-	useSecureDialNames(t, egressNames{"llm.example.test": "127.0.0.1"})
-	providerHTTPClient.CloseIdleConnections()
-	t.Cleanup(providerHTTPClient.CloseIdleConnections)
-
-	response, err := providerHTTPClient.Get("http://llm.example.test:" + port + "/v1/models")
-	if got := readReached(t, response, err); got != "reached llm.example.test:"+port {
-		t.Fatalf("passthrough through the proxy = %q", got)
-	}
-	if got := proxy.Targets(); len(got) != 1 || got[0] != "llm.example.test:"+port {
-		t.Fatalf("proxy CONNECT targets = %v", got)
-	}
-}
-
-func TestStandaloneRemoteModelRouterReachesTheRouterThroughTheEnterpriseProxy(t *testing.T) {
-	backend, port := egressBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
-			http.NotFound(w, r)
-		}
-	})
-	proxy := netguardtest.NewRecordingProxy(t, map[string]string{"router.example.test:" + port: backend.Listener.Addr().String()})
-	useEnterpriseEgress(t, proxy.URL, "")
-	router := newRemoteRouterClient("http://router.example.test:"+port, 1000, nil, "")
-	if !router.Healthy(context.Background()) {
-		t.Fatal("the remote router must be reachable through the enterprise proxy")
-	}
-	if got := proxy.Targets(); len(got) != 1 || got[0] != "router.example.test:"+port {
-		t.Fatalf("proxy CONNECT targets = %v", got)
-	}
-}
-
-func TestStandaloneTelemetryDialerConnectsThroughTheEnterpriseProxy(t *testing.T) {
-	backend, port := egressBackend(t, echoHost)
-	proxy := netguardtest.NewRecordingProxy(t, map[string]string{"collector.example.test:" + port: backend.Listener.Addr().String()})
-	useEnterpriseEgress(t, proxy.URL, "")
-	// The dialer the observability factory receives, below the exporters'
-	// own destination check.
-	dial := netguard.V8SafeDialContext(netguard.V8NetworkSafetyPolicy{AllowPrivateNetworks: true},
-		enterpriseEgressDialer{direct: &net.Dialer{}}, egressNames{"collector.example.test": "127.0.0.1"})
-	client := &http.Client{Transport: &http.Transport{DialContext: dial}, Timeout: 10 * time.Second}
-	response, err := client.Get("http://collector.example.test:" + port + "/v1/logs")
-	if got := readReached(t, response, err); got != "reached collector.example.test:"+port {
-		t.Fatalf("telemetry through the proxy = %q", got)
-	}
-	if got := proxy.Targets(); len(got) != 1 || got[0] != "collector.example.test:"+port {
-		t.Fatalf("proxy CONNECT targets = %v", got)
-	}
-	// Without a route the same dialer connects directly.
-	enterpriseEgress.Store(nil)
-	response, err = client.Get(backend.URL)
-	if got := readReached(t, response, err); !strings.HasPrefix(got, "reached 127.0.0.1:") {
-		t.Fatalf("direct telemetry = %q", got)
-	}
-}
-
-func TestStandaloneBifrostJudgeCallsTheProviderThroughTheEnterpriseProxy(t *testing.T) {
-	backend, port := egressBackend(t, func(w http.ResponseWriter, r *http.Request) {
+// Every other standalone egress client reaches its destination through
+// enterprise.network.https_proxy: the LLM passthrough, the remote model
+// router, the telemetry dialer (which connects directly without a route) and
+// a Bifrost judge provider.
+func TestStandaloneEgressClientsGoThroughTheEnterpriseProxy(t *testing.T) {
+	judge := func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
 			http.NotFound(w, r)
 			return
@@ -232,27 +178,72 @@ func TestStandaloneBifrostJudgeCallsTheProviderThroughTheEnterpriseProxy(t *test
 		_, _ = io.WriteString(w, `{"id":"chatcmpl-egress","object":"chat.completion","created":1,"model":"gpt-4o-mini",`+
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"verdict: allow"},"finish_reason":"stop"}],`+
 			`"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)
-	})
-	proxy := netguardtest.NewRecordingProxy(t, map[string]string{"judge.example.test:" + port: backend.Listener.Addr().String()})
-	useEnterpriseEgress(t, proxy.URL, "")
-	provider, err := NewProviderWithBase("openai/gpt-4o-mini", "sk-egress-test", "http://judge.example.test:"+port)
-	if err != nil {
-		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	response, err := provider.ChatCompletion(ctx, &ChatRequest{
-		Model:    "gpt-4o-mini",
-		Messages: []ChatMessage{{Role: "user", Content: "classify this"}},
-	})
-	if err != nil {
-		t.Fatalf("judge call through the proxy: %v", err)
+	routerHealth := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+		}
 	}
-	if len(response.Choices) != 1 || response.ID != "chatcmpl-egress" {
-		t.Fatalf("judge response = %+v", response)
-	}
-	if got := proxy.Targets(); len(got) == 0 || got[0] != "judge.example.test:"+port {
-		t.Fatalf("proxy CONNECT targets = %v", got)
+	for _, tc := range []struct {
+		name, host string
+		handler    http.HandlerFunc
+		call       func(t *testing.T, host, port string)
+	}{
+		{"passthrough", "llm.example.test", echoHost, func(t *testing.T, host, port string) {
+			useSecureDialNames(t, egressNames{host: "127.0.0.1"})
+			providerHTTPClient.CloseIdleConnections()
+			t.Cleanup(providerHTTPClient.CloseIdleConnections)
+			response, err := providerHTTPClient.Get("http://" + host + ":" + port + "/v1/models")
+			if got := readReached(t, response, err); got != "reached "+host+":"+port {
+				t.Fatalf("passthrough through the proxy = %q", got)
+			}
+		}},
+		{"remote model router", "router.example.test", routerHealth, func(t *testing.T, host, port string) {
+			if !newRemoteRouterClient("http://"+host+":"+port, 1000, nil, "").Healthy(context.Background()) {
+				t.Fatal("the remote router must be reachable through the enterprise proxy")
+			}
+		}},
+		{"telemetry dialer", "collector.example.test", echoHost, func(t *testing.T, host, port string) {
+			// The dialer the observability factory receives, below the
+			// exporters' own destination check.
+			dial := netguard.V8SafeDialContext(netguard.V8NetworkSafetyPolicy{AllowPrivateNetworks: true},
+				enterpriseEgressDialer{direct: &net.Dialer{}}, egressNames{host: "127.0.0.1"})
+			client := &http.Client{Transport: &http.Transport{DialContext: dial, DisableKeepAlives: true}, Timeout: 10 * time.Second}
+			response, err := client.Get("http://" + host + ":" + port + "/v1/logs")
+			if got := readReached(t, response, err); got != "reached "+host+":"+port {
+				t.Fatalf("telemetry through the proxy = %q", got)
+			}
+			enterpriseEgress.Store(nil)
+			response, err = client.Get("http://127.0.0.1:" + port)
+			if got := readReached(t, response, err); !strings.HasPrefix(got, "reached 127.0.0.1:") {
+				t.Fatalf("telemetry without a route = %q, want a direct connection", got)
+			}
+		}},
+		{"bifrost judge", "judge.example.test", judge, func(t *testing.T, host, port string) {
+			provider, err := NewProviderWithBase("openai/gpt-4o-mini", "sk-egress-test", "http://"+host+":"+port)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			response, err := provider.ChatCompletion(ctx, &ChatRequest{
+				Model:    "gpt-4o-mini",
+				Messages: []ChatMessage{{Role: "user", Content: "classify this"}},
+			})
+			if err != nil || len(response.Choices) != 1 || response.ID != "chatcmpl-egress" {
+				t.Fatalf("judge call through the proxy: %+v %v", response, err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, port := egressBackend(t, tc.handler)
+			proxy := netguardtest.NewRecordingProxy(t, map[string]string{tc.host + ":" + port: backend.Listener.Addr().String()})
+			useEnterpriseEgress(t, proxy.URL, "")
+			tc.call(t, tc.host, port)
+			if got := proxy.Targets(); len(got) == 0 || got[0] != tc.host+":"+port {
+				t.Fatalf("proxy CONNECT targets = %v", got)
+			}
+		})
 	}
 }
 

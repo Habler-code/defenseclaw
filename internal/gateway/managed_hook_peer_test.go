@@ -30,6 +30,7 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{User: "alice", Connector: "claudecode", OK: true},
 		{UID: uidPtr(2001), Connector: "cursor", OK: true},
 		{User: "carol", Connector: "hermes", OK: false},
+		{User: "dave", UID: uidPtr(4001), Connector: "claudecode", OK: true},
 	}}
 	load := func() (managedHookLedger, error) { return ledger, nil }
 	alice := managedHookPeer{UID: 1001, Name: "alice"}
@@ -51,6 +52,7 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{name: "per-user connector requires enrollment", peer: carol, connector: "claudecode", reason: managedHookReasonUIDUnregistered},
 		{name: "enrolled by name", peer: alice, connector: "ClaudeCode", allow: true},
 		{name: "enrolled by uid", peer: bob, connector: "cursor", allow: true},
+		{name: "uid row ignores a name reused by another uid", peer: managedHookPeer{UID: 4002, Name: "dave"}, connector: "claudecode", reason: managedHookReasonUIDUnregistered},
 		{name: "enrollment is per connector", peer: alice, connector: "cursor", reason: managedHookReasonUIDUnregistered},
 		{name: "failed rows do not enroll", peer: carol, connector: "hermes", reason: managedHookReasonUIDUnregistered},
 		{name: "strict machine policy requires any enrollment", enrollment: config.EnterpriseEnrollmentConfig{UnenrolledUsers: "deny"}, peer: carol, connector: "codex", reason: managedHookReasonUIDUnregistered},

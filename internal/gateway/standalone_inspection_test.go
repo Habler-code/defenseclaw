@@ -39,17 +39,6 @@ func standaloneConfig(t *testing.T) *config.Config {
 	}
 }
 
-func TestStandaloneHookLaneKeepsLocalDetectors(t *testing.T) {
-	standalone := &APIServer{scannerCfg: standaloneConfig(t)}
-	if standalone.managedAIDOnly() {
-		t.Fatal("standalone managed deployments must keep the local engine; managedAIDOnly returned true")
-	}
-	secureClient := &APIServer{scannerCfg: &config.Config{DeploymentMode: string(config.DeploymentModeManagedEnterprise)}}
-	if !secureClient.managedAIDOnly() {
-		t.Fatal("a Secure Client managed deployment must keep the AID-only posture")
-	}
-}
-
 func TestStandaloneInspectorWithoutAIDefenseIsLocalOnly(t *testing.T) {
 	s := &Sidecar{cfg: standaloneConfig(t), health: NewSidecarHealth()}
 	if inspector := s.pickInspector(context.Background()); inspector != nil {
@@ -57,23 +46,6 @@ func TestStandaloneInspectorWithoutAIDefenseIsLocalOnly(t *testing.T) {
 	}
 	if available, detail := s.inspectionAvailability(); !available || detail != "" {
 		t.Fatalf("local-only standalone inspection must be available: available=%v detail=%q", available, detail)
-	}
-}
-
-func TestStandaloneInspectorMissingCredentialDegrades(t *testing.T) {
-	cfg := standaloneConfig(t)
-	cfg.Enterprise.Inspection.AIDefense = config.EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}
-	cfg.CiscoAIDefense.APIKeyEnv = "CISCO_AI_DEFENSE_API_KEY"
-	t.Setenv("CISCO_AI_DEFENSE_API_KEY", "must-not-be-used")
-	if _, err := newStandaloneCiscoInspectClient(cfg); !errors.Is(err, managed.ErrNoServiceCredential) {
-		t.Fatalf("missing protected credential error = %v, want ErrNoServiceCredential (the env key must never be used)", err)
-	}
-	s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
-	if inspector := s.pickInspector(context.Background()); inspector != nil {
-		t.Fatalf("missing credential must not yield an inspector, got %T", inspector)
-	}
-	if available, _ := s.inspectionAvailability(); available {
-		t.Fatal("a configured but missing AI Defense credential must be reported")
 	}
 }
 
@@ -158,11 +130,19 @@ func waitForGuardrailDetail(t *testing.T, s *Sidecar) map[string]interface{} {
 func TestStandaloneHealthReportsAMissingAIDefenseCredential(t *testing.T) {
 	cfg := standaloneConfig(t)
 	cfg.Enterprise.Inspection.AIDefense = config.EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}
+	cfg.CiscoAIDefense.APIKeyEnv = "CISCO_AI_DEFENSE_API_KEY"
+	t.Setenv("CISCO_AI_DEFENSE_API_KEY", "must-not-be-used")
+	if _, err := newStandaloneCiscoInspectClient(cfg); !errors.Is(err, managed.ErrNoServiceCredential) {
+		t.Fatalf("missing protected credential error = %v, want ErrNoServiceCredential (the env key must never be used)", err)
+	}
 	s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
 	// Boot builds the inspector before the guardrail publishes health; the
 	// protected credential does not exist, so AI Defense is degraded.
 	if inspector := s.pickInspector(context.Background()); inspector != nil {
 		t.Fatalf("missing credential must not yield an inspector, got %T", inspector)
+	}
+	if available, _ := s.inspectionAvailability(); available {
+		t.Fatal("a configured but missing AI Defense credential must be reported")
 	}
 	detail := waitForGuardrailDetail(t, s)
 	if available, _ := detail["inspection_available"].(bool); !available {
