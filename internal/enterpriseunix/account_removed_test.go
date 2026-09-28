@@ -23,7 +23,7 @@ import (
 )
 
 // UBU-F34, MAC-F42: after an enrolled account was deleted, verify failed
-// ("openhands for user dcl-new1 is not protected: target account ... does
+// ("openhands for user bob is not protected: target account ... does
 // not exist: no such account") until the enumerator revoked the target, so
 // MDM detection reported the host non-compliant. The account is gone; the
 // target is reported as a warning until it is revoked.
@@ -42,7 +42,7 @@ func TestDeletedAccountTargetDoesNotFailTheHost(t *testing.T) {
 			}
 			state, _ := json.Marshal(map[string]any{"results": []map[string]any{
 				{"user": "alice", "connector": "codex", "ok": true},
-				{"user": "dcl-new1", "connector": "openhands", "ok": false, "error": `enterprise hooks: target account "dcl-new1" does not exist: no such account`},
+				{"user": "bob", "connector": "openhands", "ok": false, "error": `enterprise hooks: target account "bob" does not exist: no such account`},
 			}})
 			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 				t.Fatal(err)
@@ -51,7 +51,7 @@ func TestDeletedAccountTargetDoesNotFailTheHost(t *testing.T) {
 			if hasWarning(status, codeGuardianTargetFailed) {
 				t.Fatalf("a deleted account is reported as a protection failure: %+v", status.Warnings)
 			}
-			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "openhands for user dcl-new1: the account no longer exists") || !strings.Contains(got, "after 3 consecutive definitive misses") {
+			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "openhands for user bob: the account no longer exists") || !strings.Contains(got, "after 3 consecutive definitive misses") {
 				t.Fatalf("status does not report the deleted account's target: %+v", status.Warnings)
 			}
 			if !status.SecurityComplete {

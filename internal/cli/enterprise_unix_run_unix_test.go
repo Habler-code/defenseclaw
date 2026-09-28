@@ -72,7 +72,7 @@ func TestEnterpriseSecretStatusAsStandardUserNamesAdministratorRights(t *testing
 // failed: ..." line. Each problem is printed once, with its specific code,
 // and the headline of a result with warnings is not a green check.
 func TestLifecycleOutputPrintsEachProblemOnce(t *testing.T) {
-	target := "devin 3000.11.3 for user dcm-std1 has no verified DefenseClaw hook contract, so it runs without DefenseClaw hooks"
+	target := "devin 3000.11.3 for user alice has no verified DefenseClaw hook contract, so it runs without DefenseClaw hooks"
 	other := "com.cisco.defenseclaw.hook-enumerator is not active"
 	result := enterprisestatus.New("verify", "standalone", "darwin", "1.0.0")
 	result.AddWarning("hook_contract_unverified", target)

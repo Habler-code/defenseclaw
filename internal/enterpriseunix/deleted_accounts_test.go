@@ -59,7 +59,7 @@ func TestRepairRemovesTheTargetsOfDeletedAccounts(t *testing.T) {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			runner := &revokeGoneRunner{fakeRunner: h.runner, services: h.services, units: units,
-				answer: `{"rows":1,"revoked":["dcm-f1/amp"],"kept":["bob: account not found, but the directory could not be confirmed reachable, so its targets stay"],"manifest":"x","changed":true}` + "\n"}
+				answer: `{"rows":1,"revoked":["carol/amp"],"kept":["bob: account not found, but the directory could not be confirmed reachable, so its targets stay"],"manifest":"x","changed":true}` + "\n"}
 			h.env.Runner = runner
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			requireOK(t, h.run(Options{Action: ActionEnsure}))
@@ -83,7 +83,7 @@ func TestRepairRemovesTheTargetsOfDeletedAccounts(t *testing.T) {
 					kept += w.Message
 				}
 			}
-			if !strings.Contains(removed, "no longer exist: dcm-f1/amp") || !strings.HasPrefix(kept, "bob: account not found") {
+			if !strings.Contains(removed, "no longer exist: carol/amp") || !strings.HasPrefix(kept, "bob: account not found") {
 				t.Fatalf("repair warnings = %+v", repair.Warnings)
 			}
 			for _, unit := range units {

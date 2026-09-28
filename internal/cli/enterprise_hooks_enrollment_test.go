@@ -102,9 +102,9 @@ func writeHealthyGuardianRecords(t *testing.T, rows []enterpriseHookReconcileRow
 // text and JSON, instead of only counts (RHEL-F07).
 func TestEnterpriseHooksStatusListsEnrollmentPerUserAndConnector(t *testing.T) {
 	rows := []enterpriseHookReconcileRow{
-		{User: "dcr-std2", UserHome: "/home/dcr-std2", UID: 1002, Connector: "codex", OK: true},
-		{User: "dcr-std1", UserHome: "/home/dcr-std1", UID: 1001, Connector: "codex", OK: true},
-		{User: "dcr-std1", UserHome: "/home/dcr-std1", UID: 1001, Connector: "claudecode", OK: true},
+		{User: "bob", UserHome: "/home/bob", UID: 1002, Connector: "codex", OK: true},
+		{User: "alice", UserHome: "/home/alice", UID: 1001, Connector: "codex", OK: true},
+		{User: "alice", UserHome: "/home/alice", UID: 1001, Connector: "claudecode", OK: true},
 	}
 	writeHealthyGuardianRecords(t, rows)
 
@@ -119,8 +119,8 @@ func TestEnterpriseHooksStatusListsEnrollmentPerUserAndConnector(t *testing.T) {
 	text := stdout.String()
 	for _, want := range []string{
 		"Enrollment (last guardian reconcile ",
-		"    dcr-std1 (/home/dcr-std1, uid 1001): claudecode enrolled, codex enrolled\n",
-		"    dcr-std2 (/home/dcr-std2, uid 1002): codex enrolled\n",
+		"    alice (/home/alice, uid 1001): claudecode enrolled, codex enrolled\n",
+		"    bob (/home/bob, uid 1002): codex enrolled\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text status does not contain %q:\n%s", want, text)
@@ -145,10 +145,10 @@ func TestEnterpriseHooksStatusListsEnrollmentPerUserAndConnector(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatalf("decode: %v\n%s", err, stdout.String())
 	}
-	if len(report.Enrollment) != 2 || report.Enrollment[0].User != "dcr-std1" || report.Enrollment[0].UID != 1001 ||
+	if len(report.Enrollment) != 2 || report.Enrollment[0].User != "alice" || report.Enrollment[0].UID != 1001 ||
 		len(report.Enrollment[0].Connectors) != 2 || report.Enrollment[0].Connectors[0].Connector != "claudecode" ||
-		report.Enrollment[0].Connectors[0].State != "enrolled" || report.Enrollment[1].User != "dcr-std2" {
-		t.Fatalf("JSON enrollment = %+v, want dcr-std1 {claudecode, codex} and dcr-std2 {codex}", report.Enrollment)
+		report.Enrollment[0].Connectors[0].State != "enrolled" || report.Enrollment[1].User != "bob" {
+		t.Fatalf("JSON enrollment = %+v, want alice {claudecode, codex} and bob {codex}", report.Enrollment)
 	}
 }
 
