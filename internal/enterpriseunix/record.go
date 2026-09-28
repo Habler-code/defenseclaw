@@ -72,6 +72,9 @@ type Deployment struct {
 	// last transaction left in place in vendor machine policy; the runtime
 	// descriptor records exactly this set.
 	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
+	// RulePacks are the rule packs the applied config resolved to, keyed by
+	// setting (validatedConfig.RulePacks).
+	RulePacks map[string]string `json:"rule_packs,omitempty"`
 }
 
 // Pending is the intent record of an in-flight transaction.

@@ -395,7 +395,10 @@ def _read_plugin_manifest(manifest: str) -> dict | None:
 def scan_plugin_connectors(plugin_dir: str) -> tuple[set[str], bool]:
     """Return ``(declared names, whether any manifest is loadable)``.
 
-    Raises :class:`OSError` when *plugin_dir* exists but cannot be listed.
+    A manifest is loadable when it sets ``entry`` and ``sha256`` and its
+    ``entry`` is a regular file in the plugin's directory, on an OS where the
+    gateway loads Go plugins (not Windows). Raises :class:`OSError` when
+    *plugin_dir* exists but cannot be listed.
     """
     names: set[str] = set()
     loadable = False
@@ -415,8 +418,21 @@ def scan_plugin_connectors(plugin_dir: str) -> tuple[set[str], bool]:
         if isinstance(doc.get("name"), str):
             names.add(doc["name"].strip().lower())
         if all(isinstance(doc.get(key), str) and doc[key].strip() for key in ("entry", "sha256")):
-            loadable = True
+            loadable = loadable or _plugin_entry_loadable(entry.path, doc["entry"].strip())
     return names, loadable
+
+
+def _plugin_entry_loadable(directory: str, entry: str) -> bool:
+    """Report whether the gateway could open plugin *entry* of *directory*:
+    Go plugins never load on Windows, and the loader opens
+    ``<directory>/<entry>`` only when it is a regular file."""
+    if sys.platform == "win32":
+        return False
+    try:
+        info = os.lstat(os.path.join(directory, entry))
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode)
 
 
 def declared_plugin_connectors(plugin_dir: str) -> set[str]:
@@ -439,8 +455,9 @@ def plugin_dir_may_provide_any_connector(plugin_dir: str) -> bool:
     The gateway registers a plugin connector under the name its code reports
     (``Name()``), which need not match the plugin's directory or manifest
     name. So while *plugin_dir* holds a manifest the gateway would try to
-    load (``entry`` and ``sha256`` set), no connector name can be ruled out
-    offline. Raises :class:`OSError` like :func:`declared_plugin_connectors`.
+    load (``entry`` and ``sha256`` set and the entry file present, not on
+    Windows), no connector name can be ruled out offline. Raises
+    :class:`OSError` like :func:`declared_plugin_connectors`.
     """
     return scan_plugin_connectors(plugin_dir)[1]
 

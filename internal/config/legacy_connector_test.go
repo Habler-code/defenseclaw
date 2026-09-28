@@ -176,6 +176,44 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 		}
 	})
 
+	t.Run("asset_policy rule connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+retired+"\n"+
+			"asset_policy:\n  enabled: true\n  mode: action\n  mcp:\n    default: allow\n"+
+			"    denied:\n      - name: marker-server\n        connector: "+retired+"\n"+
+			"    registry:\n      - name: approved-server\n        connector: "+retired+"\n"+
+			"  skill:\n    allowed:\n      - name: marker-skill\n        connector: codex\n")
+		if got := cfg.AssetPolicy.MCP.Denied[0].Connector; got != replacement {
+			t.Fatalf("denied rule connector = %q, want %q", got, replacement)
+		}
+		if got := cfg.AssetPolicy.MCP.Registry[0].Connector; got != replacement {
+			t.Fatalf("registry entry connector = %q, want %q", got, replacement)
+		}
+		if got := cfg.AssetPolicy.Skill.Allowed[0].Connector; got != "codex" {
+			t.Fatalf("another connector's rule changed to %q", got)
+		}
+		decision := cfg.EvaluateAssetPolicy(AssetPolicyInput{TargetType: "mcp", Name: "marker-server", Connector: replacement})
+		if decision.Action != "block" {
+			t.Fatalf("a denied rule written for the retired ID no longer blocks %s: %+v", replacement, decision)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 ||
+			!strings.Contains(cfg.LegacyConnectorNotices[0], "asset_policy.mcp.registry, asset_policy.mcp.denied") ||
+			strings.Contains(cfg.LegacyConnectorNotices[0], "asset_policy.skill") {
+			t.Fatalf("notices = %v, want one naming the moved rule lists", cfg.LegacyConnectorNotices)
+		}
+	})
+
+	t.Run("observability route selector connectors", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+			"observability:\n  destinations:\n    - name: console\n      kind: console\n      routes:\n"+
+			"        - name: codex-only\n          signals: [logs]\n          selector:\n            connectors: [codex]\n"+
+			"        - name: desktop\n          signals: [logs]\n          selector:\n            connectors: ["+retired+"]\n")
+		if len(cfg.LegacyConnectorNotices) != 1 ||
+			!strings.Contains(cfg.LegacyConnectorNotices[0], "observability.destinations[0].routes[1].selector.connectors") ||
+			strings.Contains(cfg.LegacyConnectorNotices[0], "routes[0]") {
+			t.Fatalf("notices = %v, want one naming the second route's selector", cfg.LegacyConnectorNotices)
+		}
+	})
+
 	t.Run("unaffected config has no notice", func(t *testing.T) {
 		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: cursor\n")
 		if cfg.Guardrail.Connector != "cursor" || len(cfg.LegacyConnectorNotices) != 0 {

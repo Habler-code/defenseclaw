@@ -38,6 +38,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -2756,8 +2757,10 @@ def _persist_retired_desktop_connector(ctx: MigrationContext) -> None:
 def _rewrite_retired_desktop_connector_text(text: str) -> str:
     """Rename the retired ID in ``claw.mode``, ``guardrail.connector``, the
     per-connector map keys (``legacy_connector.CONNECTOR_MAP_BLOCKS`` and
-    ``TOP_LEVEL_CONNECTOR_MAPS``) and the connector name lists
-    (``legacy_connector.CONNECTOR_NAME_LISTS``), keeping every other byte."""
+    ``TOP_LEVEL_CONNECTOR_MAPS``), the connector name lists
+    (``legacy_connector.CONNECTOR_NAME_LISTS``), asset_policy rule
+    connectors and observability route selectors, keeping every other
+    byte."""
     retired = re.escape(legacy_connector.RETIRED_DESKTOP_ID)
     replacement = legacy_connector.REPLACEMENT
     for block_key, field_name in (("claw", "mode"), ("guardrail", "connector")):
@@ -2773,7 +2776,33 @@ def _rewrite_retired_desktop_connector_text(text: str) -> str:
         text = _edit_top_level_map_keys(text, map_key, plan)
     for path in legacy_connector.CONNECTOR_NAME_LISTS:
         text = _replace_connector_list_text(text, path, retired, replacement)
+    # asset_policy rule entries (``connector: <id>``) and observability route
+    # selectors (``connectors: [...]`` lists under ``observability``).
+    text = _replace_nested_scalar_text(text, "asset_policy", "connector", retired, replacement)
+    text = _replace_connector_list_text(text, ("observability", "connectors"), retired, replacement)
     return text
+
+
+def _replace_nested_scalar_text(text: str, block_key: str, field_name: str, value_re: str, new_value: str) -> str:
+    """Replace every ``<field_name>: <value>`` line (a mapping row or a block
+    list item's first row) inside the column-0 block *block_key* whose scalar
+    matches *value_re* (case-insensitive, optionally quoted), keeping quotes,
+    inline comments and every other byte. Flow-style mappings are left alone;
+    callers compare the result with the migrated document."""
+    block = _find_top_level_block(text, block_key)
+    if not block:
+        return text
+    pattern = re.compile(
+        r"(?P<prefix>^[ \t]+(?:-[ \t]+)?" + re.escape(field_name) + r":[ \t]*)(?P<quote>[\"']?)"
+        + value_re
+        + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\n]*)?(?:\r?\n|$))",
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    body = pattern.sub(
+        lambda m: f"{m.group('prefix')}{m.group('quote')}{new_value}{m.group('quote')}{m.group('suffix')}",
+        block.group("body"),
+    )
+    return text[: block.start("body")] + body + text[block.end("body") :]
 
 
 def _replace_block_scalar_text(text: str, block_key: str, field_name: str, value_re: str, new_value: str) -> str:
@@ -3048,16 +3077,55 @@ def _configured_connector_fields(raw: dict) -> tuple[dict, dict, str, str]:
     return guardrail, connectors, primary, mode
 
 
-def _unshipped_predicate(raw: dict, data_dir: str) -> Callable[[object], bool]:
+# ``defenseclaw-gateway connector verify`` exits 2, naming "unknown
+# connector", for a name its registry (built-in and loaded plugins) cannot
+# resolve and no plugin directory declares.
+_GATEWAY_UNKNOWN_CONNECTOR_EXIT = 2
+
+
+def _gateway_reports_unknown_connector(gateway_binary: str, name: str, data_dir: str) -> bool:
+    """Ask *gateway_binary* whether it can resolve connector *name*. Only an
+    explicit "unknown connector" verdict returns True; any other outcome
+    (a launch failure, a time-out, residue, a config it cannot read) keeps
+    the name, as when no gateway is given."""
+    try:
+        proc = subprocess.run(
+            [gateway_binary, "connector", "verify", "--connector", name, "--data-dir", data_dir],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == _GATEWAY_UNKNOWN_CONNECTOR_EXIT and "unknown connector" in (proc.stderr or "")
+
+
+def _unshipped_predicate(raw: dict, data_dir: str, gateway_binary: str | None = None) -> Callable[[object], bool]:
     """Return a test for connector names this release does not ship. Raises
-    RuntimeError when the plugin directory cannot be read."""
+    RuntimeError when the plugin directory cannot be read.
+
+    While ``plugin_dir`` holds a plugin the gateway could load, a name no
+    built-in connector or plugin directory declares may still be the name
+    that plugin registers. Offline such a name is kept; with *gateway_binary*
+    (the staged gateway the installer passes to ``migrate --check``) the
+    gateway is asked, and a name it reports unknown is unshipped."""
     from defenseclaw.connector_contracts import normalize_connector
 
     shipped, open_ended = _shipped_connector_names(raw, data_dir)
+    verdicts: dict[str, bool] = {}
 
     def unshipped(name: object) -> bool:
         value = normalize_connector(str(name or ""))
-        return bool(value) and not open_ended and value not in shipped and not legacy_connector.is_retired(value)
+        if not value or value in shipped or legacy_connector.is_retired(value):
+            return False
+        if not open_ended:
+            return True
+        if not gateway_binary:
+            return False
+        if value not in verdicts:
+            verdicts[value] = _gateway_reports_unknown_connector(gateway_binary, value, data_dir)
+        return verdicts[value]
 
     return unshipped
 
@@ -3071,13 +3139,15 @@ def _unshipped_connector_names(raw: object, data_dir: str) -> list[str]:
     return sorted({*(str(key) for key in connectors if unshipped(key)), *(n.strip() for n in (primary, mode) if unshipped(n))})
 
 
-def _unshipped_roster(raw: dict, data_dir: str) -> tuple[list[str], list[str], list[str]]:
+def _unshipped_roster(
+    raw: dict, data_dir: str, gateway_binary: str | None = None
+) -> tuple[list[str], list[str], list[str]]:
     """``(unshipped names, remaining shipped names, removable names)`` for a
     parsed config. *removable* are the unshipped names ``setup remove``
     accepts (``guardrail.connectors`` keys, or the primary when that map is
     empty). Raises RuntimeError when the plugin directory cannot be read."""
     _guardrail, connectors, primary, mode = _configured_connector_fields(raw)
-    unshipped = _unshipped_predicate(raw, data_dir)
+    unshipped = _unshipped_predicate(raw, data_dir, gateway_binary)
     names = sorted(
         {*(str(key) for key in connectors if unshipped(key)), *(n.strip() for n in (primary, mode) if unshipped(n))}
     )
@@ -3091,8 +3161,24 @@ def _unshipped_roster(raw: dict, data_dir: str) -> tuple[list[str], list[str], l
     return names, remaining, removable
 
 
-def _remove_or_replace_hint(removable: list[str], *, force: bool) -> str:
+# ``defenseclaw setup remove`` first shipped in 0.7.0.
+_SETUP_REMOVE_SINCE = (0, 7, 0)
+
+
+def _version_before(version: str, floor: tuple[int, ...]) -> bool:
+    """Report whether *version* (``X.Y.Z``, an optional ``v`` and suffix) is
+    older than *floor*; an unknown or unparsable version is not."""
+    match = re.match(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?", version or "")
+    if not match:
+        return False
+    parsed = tuple(int(part or 0) for part in match.groups())
+    return parsed < floor
+
+
+def _remove_or_replace_hint(removable: list[str], *, force: bool, can_remove: bool = True) -> str:
     setup = "`defenseclaw setup <connector>`"
+    if not can_remove:
+        return f"set up a supported connector ({setup}) or edit config.yaml so it names one"
     if not removable:
         return f"set up a supported connector ({setup})"
     flags = " --yes --force" if force else " --yes"
@@ -3100,7 +3186,14 @@ def _remove_or_replace_hint(removable: list[str], *, force: bool) -> str:
     return f"remove it ({remove}) or set up another connector ({setup})"
 
 
-def _check_connector_roster(config_path: str, data_dir: str, version: str) -> None:
+def _check_connector_roster(
+    config_path: str,
+    data_dir: str,
+    version: str,
+    *,
+    gateway_binary: str | None = None,
+    from_version: str = "",
+) -> None:
     """Fail ``migrate --check`` when no configured connector would remain.
 
     The installer runs the check before it swaps anything. Upgrading anyway
@@ -3108,7 +3201,10 @@ def _check_connector_roster(config_path: str, data_dir: str, version: str) -> No
     load, so the new gateway would not start (and the installer would roll
     back a running install). The fix has to happen on the installed release,
     so the message gives commands that release accepts: ``setup remove``
-    refuses the last connector there without ``--force``.
+    refuses the last connector there without ``--force``, and releases
+    before 0.7.0 (*from_version*) have no ``setup remove``. With
+    *gateway_binary* the staged gateway settles names a loadable plugin
+    might register.
     """
     text = _read_config_text(config_path) if os.path.isfile(config_path) else None
     if text is None:
@@ -3122,16 +3218,19 @@ def _check_connector_roster(config_path: str, data_dir: str, version: str) -> No
     # The roster step renames the retired Desktop ID before it drops names.
     raw, _notices = legacy_connector.migrated_copy(raw)
     try:
-        names, remaining, removable = _unshipped_roster(raw, data_dir)
+        names, remaining, removable = _unshipped_roster(raw, data_dir, gateway_binary)
     except RuntimeError:
         return
     if not names or remaining:
         return
     listed = ", ".join(repr(n) for n in names)
+    hint = _remove_or_replace_hint(
+        removable, force=True, can_remove=not _version_before(from_version, _SETUP_REMOVE_SINCE)
+    )
     raise MigrationError(
         f"connector {listed} is not shipped by DefenseClaw {version} and no other connector is configured, "
         f"so the gateway could not start after the upgrade; nothing was changed. With the DefenseClaw you have "
-        f"now, {_remove_or_replace_hint(removable, force=True)}, then upgrade again; {_REMOVED_CONNECTORS_DOC}"
+        f"now, {hint}, then upgrade again; {_REMOVED_CONNECTORS_DOC}"
     )
 
 
@@ -3348,7 +3447,9 @@ def migrate(
     steps = _pending_migration_steps(version, from_version, data_dir, config_path, CURRENT_CONFIG_VERSION)
     names = [name for name, _step in steps]
     if check:
-        _check_connector_roster(config_path, data_dir, __version__)
+        _check_connector_roster(
+            config_path, data_dir, __version__, gateway_binary=gateway_binary, from_version=from_version or ""
+        )
         # The v8 conversion reads the config as it is now, so the preflight is
         # only meaningful when no earlier 0.x step would change it first; the
         # real migration still validates and the installer rolls back on failure.

@@ -240,6 +240,9 @@ type Config struct {
 	// guardrail.rule_pack_dir, so the standalone implicit rule pack default
 	// never rewrites an explicit value. Set only by the loader.
 	rulePackDirDeclared bool
+	// legacyConnectorRouteSelectors names the observability route selectors
+	// that list a retired connector ID, for the migration notice.
+	legacyConnectorRouteSelectors []string
 	// LegacyConnectorNotices records connector IDs this load moved to their
 	// replacement (see internal/legacyconnector). The gateway logs them once
 	// per boot and finishes the host-side cleanup. Never serialized.
@@ -2678,6 +2681,16 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("policy_dir") {
 		candidate.PolicyDir = filepath.Join(dataDir, "policies")
+		if candidate.StandaloneEnterprise() {
+			if layout, ok := standaloneUnixLayoutForConfig(candidate.ConfigFilePath); ok {
+				// The gateway service can write data_dir, and the gateway
+				// loads its Rego policies from policy_dir. On the Linux and
+				// macOS layout an omitted policy_dir is the root-owned
+				// vendor policy folder, as in the lifecycle's built-in
+				// config, never a folder inside data_dir.
+				candidate.PolicyDir = layout.VendorPolicyDir
+			}
+		}
 	}
 	if !has("scanners", "codeguard") {
 		candidate.Scanners.CodeGuard = filepath.Join(dataDir, "codeguard-rules")
@@ -2852,6 +2865,7 @@ func loadConfigSource(
 	}
 	cfg.ConfigFilePath = configFile
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)

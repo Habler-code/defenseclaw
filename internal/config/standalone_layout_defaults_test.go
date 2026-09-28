@@ -63,9 +63,13 @@ guardrail:
 			if want := layout.VendorPolicyDir + "/guardrail/default"; cfg.EffectiveRulePackDirForConnector("codex") != want {
 				t.Fatalf("codex rule pack = %q, want %q", cfg.EffectiveRulePackDirForConnector("codex"), want)
 			}
+			// The gateway loads its Rego from policy_dir: it stays out of
+			// the service-writable data_dir.
+			if cfg.PolicyDir != layout.VendorPolicyDir {
+				t.Fatalf("policy_dir = %q, want the vendor policy folder %q", cfg.PolicyDir, layout.VendorPolicyDir)
+			}
 			for label, value := range map[string]string{
 				"audit_db":                cfg.AuditDB,
-				"policy_dir":              cfg.PolicyDir,
 				"plugin_dir":              cfg.PluginDir,
 				"gateway.device_key_file": cfg.Gateway.DeviceKeyFile,
 			} {

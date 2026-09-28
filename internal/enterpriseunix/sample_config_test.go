@@ -197,3 +197,70 @@ guardrail:
 		})
 	}
 }
+
+// An unset rule_pack_dir follows <policy_dir>/guardrail/default once the
+// administrator creates that folder. The config bytes do not change, so the
+// record keeps the resolved pack: the next ensure applies the new pack and
+// restarts the gateway instead of reporting up_to_date while the gateway
+// keeps the vendor pack.
+func TestEnsureAppliesANewlyCreatedImplicitRulePack(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireNoHostInstall(t, h.env.Layout)
+			// A policy_dir this test can create a pack in: the loader looks at
+			// the host path, the lifecycle at the path under its root.
+			policyDir := t.TempDir()
+			raw := fmt.Sprintf("config_version: 8\ndeployment_mode: managed_enterprise\ndata_dir: %s\npolicy_dir: %s\n"+
+				"enterprise:\n  profile: standalone\nguardrail:\n  enabled: true\n  mode: observe\n  connectors:\n    codex: {}\n",
+				h.env.Layout.DataDir, policyDir)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+			vendor := path.Join(h.env.Layout.VendorPolicyDir, "guardrail", "default")
+			record, err := h.env.loadDeployment()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := record.RulePacks["guardrail.rule_pack_dir"]; got != vendor {
+				t.Fatalf("recorded rule pack = %q, want the vendor pack %q", got, vendor)
+			}
+			if r := h.run(Options{Action: ActionEnsure}); !r.Noop {
+				t.Fatalf("premise: an unchanged deployment is up to date: %+v", r)
+			}
+
+			pack := filepath.Join(policyDir, "guardrail", "default")
+			for _, dir := range []string{pack, h.env.P(pack)} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gateway := unitGateway
+			if goos == "darwin" {
+				gateway = labelGateway
+			}
+			before := len(h.services.calls)
+			r := h.run(Options{Action: ActionEnsure})
+			requireOK(t, r)
+			if r.Noop {
+				t.Fatal("ensure reported up to date after the implicit rule pack changed")
+			}
+			restarted := false
+			for _, call := range h.services.calls[before:] {
+				if call == "stop "+gateway {
+					restarted = true
+				}
+			}
+			if !restarted {
+				t.Fatalf("the gateway was not restarted to load the new pack: %v", h.services.calls[before:])
+			}
+			if record, err = h.env.loadDeployment(); err != nil {
+				t.Fatal(err)
+			}
+			if got := record.RulePacks["guardrail.rule_pack_dir"]; got != pack {
+				t.Fatalf("recorded rule pack = %q, want the administrator pack %q", got, pack)
+			}
+			if r := h.run(Options{Action: ActionEnsure}); !r.Noop {
+				t.Fatalf("ensure did not converge after applying the pack: %+v", r)
+			}
+		})
+	}
+}

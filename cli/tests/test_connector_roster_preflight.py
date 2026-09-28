@@ -25,6 +25,8 @@ The connector names are made up on purpose.
 from __future__ import annotations
 
 import os
+import stat
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -116,6 +118,20 @@ class MigrateCheckStrandedConnectorTests(_DataDirCase):
         self.assertNotIn("<name>", ctx.changes[0])
 
 
+class MigrateCheckOlderReleaseHintTests(_DataDirCase):
+    def test_check_suggests_setup_remove_only_where_the_installed_release_has_it(self):
+        self.config(f"guardrail:\n  connector: {UNSHIPPED}\n")
+        for from_version, has_remove in (("0.6.6", False), ("0.5.0", False), ("0.7.0", True), ("0.8.10", True), ("", True)):
+            with self.subTest(from_version=from_version):
+                with self.assertRaises(migrations.MigrationError) as raised:
+                    migrations.migrate(self.data_dir, check=True, from_version=from_version or None)
+                message = str(raised.exception)
+                self.assertEqual("defenseclaw setup remove" in message, has_remove, msg=message)
+                self.assertIn("`defenseclaw setup <connector>`", message)
+                if not has_remove:
+                    self.assertIn("edit config.yaml", message)
+
+
 class NonUTF8PluginManifestTests(_DataDirCase):
     LATIN1 = "name: Acm\xe9\n".encode("latin-1")
 
@@ -169,8 +185,22 @@ class NonUTF8PluginManifestSetupRemoveTests(unittest.TestCase):
         self.assertNotIn("not a connector this DefenseClaw build ships", result.output)
 
 
+@unittest.skipIf(sys.platform == "win32", "the gateway loads Go plugins only on Linux and macOS")
 class LoadablePluginNameTests(_DataDirCase):
     MANIFEST = f"name: Acme Connector\nentry: acme.so\nsha256: {SHA256}\n".encode()
+
+    def plugin(self, directory: str, manifest: bytes, *, entry: bool = True) -> None:
+        super().plugin(directory, manifest)
+        if entry:
+            _write(os.path.join(self.data_dir, "plugins", directory, "acme.so"), b"\x7fELF")
+
+    def fake_gateway(self, exit_code: int, stderr: str) -> str:
+        """A staged gateway whose ``connector verify`` answers *exit_code*."""
+        path = os.path.join(self.data_dir, "staged-gateway")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\necho '{stderr}' >&2\nexit {exit_code}\n")
+        os.chmod(path, stat.S_IRWXU)
+        return path
 
     def test_migrate_keeps_a_name_a_loadable_plugin_may_register(self):
         # The gateway registers this plugin as "acme" (the name its code
@@ -191,6 +221,28 @@ class LoadablePluginNameTests(_DataDirCase):
         self.plugin("acme-connector", self.MANIFEST)
         self.config(f"guardrail:\n  connector: {PLUGIN}\n")
         self.assertEqual(migrations.migrate(self.data_dir, check=True).applied, [])
+
+    def test_a_manifest_whose_entry_file_is_missing_does_not_load(self):
+        # An unrelated manifest the gateway cannot open must not turn off the
+        # preflight stop.
+        self.plugin("acme-connector", self.MANIFEST, entry=False)
+        self.assertFalse(plugin_dir_may_provide_any_connector(os.path.join(self.data_dir, "plugins")))
+        self.config(f"guardrail:\n  connector: {UNSHIPPED}\n")
+        result = CliRunner().invoke(migrate_cmd, ["--check", "--data-dir", self.data_dir])
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn(repr(UNSHIPPED), result.output)
+
+    def test_check_asks_the_staged_gateway_about_a_name_a_plugin_may_provide(self):
+        self.plugin("acme-connector", self.MANIFEST)
+        self.config(f"guardrail:\n  connector: {UNSHIPPED}\n")
+        unknown = self.fake_gateway(2, f'connector verify: unknown connector "{UNSHIPPED}" (known: codex)')
+        with self.assertRaises(migrations.MigrationError) as raised:
+            migrations.migrate(self.data_dir, check=True, gateway_binary=unknown)
+        self.assertIn(repr(UNSHIPPED), str(raised.exception))
+        # A gateway that resolves the name (or cannot tell) keeps it.
+        for exit_code, stderr in ((0, "clean"), (1, "a plugin may provide it")):
+            known = self.fake_gateway(exit_code, stderr)
+            self.assertEqual(migrations.migrate(self.data_dir, check=True, gateway_binary=known).applied, [])
 
     def test_a_manifest_without_entry_and_sha256_does_not_load(self):
         self.plugin("acme-connector", b"name: Acme Connector\n")

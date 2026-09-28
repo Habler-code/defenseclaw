@@ -901,6 +901,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		ServiceUser: account.Name, ServiceUID: account.UID, ServiceGID: account.GID,
 		ConfigSHA256: p.config.SHA, SecretsSHA256: p.secretsSHA, Files: map[string]string{},
 		MachinePolicyConnectors: append([]string{}, p.machinePolicy...),
+		RulePacks:               copyStringMap(p.config.RulePacks),
 	}
 	if record != nil {
 		newRecord.CreatedServiceAccount = record.CreatedServiceAccount
@@ -1352,6 +1353,11 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if l.opts.NoStart != record.NoStart {
 		return false, ""
 	}
+	// The same config can resolve to another rule pack (an unset
+	// rule_pack_dir follows <policy_dir>/guardrail/default once it exists).
+	if !sameStringMap(p.config.RulePacks, record.RulePacks) {
+		return false, ""
+	}
 	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
 		if record.Files[file.Path] != file.SHA {
 			return false, ""
@@ -1563,4 +1569,28 @@ func mergeUnique(values ...[]string) []string {
 		}
 	}
 	return sortedKeys(set)
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+// sameStringMap compares two maps, treating nil and empty as equal.
+func sameStringMap(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if other, ok := b[key]; !ok || other != value {
+			return false
+		}
+	}
+	return true
 }

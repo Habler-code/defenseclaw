@@ -17,6 +17,7 @@
 package config
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -27,9 +28,11 @@ import (
 // everywhere a connector is named: guardrail.connector, claw.mode, the keys of
 // every per-connector settings map (guardrail.connectors,
 // asset_policy.connectors, application_protection.connectors,
-// observability.connectors and connector_hooks) and the connector name lists
+// observability.connectors and connector_hooks), the connector name lists
 // (guardrail.judge.hook_connectors and
-// application_protection.include_connectors / exclude_connectors). An
+// application_protection.include_connectors / exclude_connectors), the
+// connector of asset_policy.{mcp,skill,plugin}.{registry,allowed,denied}
+// rules and the connectors of observability route selectors. An
 // explicit replacement entry wins; a list keeps one entry. It must run right
 // after decoding and before normalizeConnectorKey or the duplicate-key check,
 // so a config holding both the retired and the replacement key loads with the
@@ -96,6 +99,31 @@ func migrateLegacyConnectorIDs(cfg *Config) {
 			updated = append(updated, list.path)
 		}
 	}
+	// Asset-policy rules scoped to a connector: a denied rule for the retired
+	// ID would otherwise stop matching the replacement, and a registry entry
+	// written for it would leave the item unregistered.
+	for _, rules := range []struct {
+		path  string
+		rules []AssetPolicyRule
+	}{
+		{"asset_policy.mcp.registry", cfg.AssetPolicy.MCP.Registry},
+		{"asset_policy.mcp.allowed", cfg.AssetPolicy.MCP.Allowed},
+		{"asset_policy.mcp.denied", cfg.AssetPolicy.MCP.Denied},
+		{"asset_policy.skill.registry", cfg.AssetPolicy.Skill.Registry},
+		{"asset_policy.skill.allowed", cfg.AssetPolicy.Skill.Allowed},
+		{"asset_policy.skill.denied", cfg.AssetPolicy.Skill.Denied},
+		{"asset_policy.plugin.registry", cfg.AssetPolicy.Plugin.Registry},
+		{"asset_policy.plugin.allowed", cfg.AssetPolicy.Plugin.Allowed},
+		{"asset_policy.plugin.denied", cfg.AssetPolicy.Plugin.Denied},
+	} {
+		if migrateLegacyAssetRuleConnectors(rules.rules) {
+			updated = append(updated, rules.path)
+		}
+	}
+	// Observability route selectors are compiled from the file by
+	// ParseCompileObservabilityV8, which applies the same rename; the loader
+	// names them in its notice.
+	updated = append(updated, cfg.legacyConnectorRouteSelectors...)
 	if len(updated) > 0 {
 		cfg.LegacyConnectorNotices = append(cfg.LegacyConnectorNotices, legacyConnectorNotice(cfg.ConfigFilePath, updated, dropped))
 	}
@@ -170,4 +198,68 @@ func migrateLegacyConnectorList(values *[]string) bool {
 		*values = out
 	}
 	return changed
+}
+
+// migrateLegacyAssetRuleConnectors replaces a retired connector ID in the
+// connector field of each rule, in place, and reports whether any changed.
+func migrateLegacyAssetRuleConnectors(rules []AssetPolicyRule) bool {
+	changed := false
+	for index := range rules {
+		if legacyconnector.IsRetired(rules[index].Connector) {
+			rules[index].Connector = legacyconnector.Replacement
+			changed = true
+		}
+	}
+	return changed
+}
+
+// legacyConnectorRouteSelectorPaths names each observability route selector
+// whose connectors list holds a retired connector ID, as
+// "observability.destinations[D].routes[R].selector.connectors", from the
+// decoded observability.destinations value.
+func legacyConnectorRouteSelectorPaths(destinations any) []string {
+	list, _ := destinations.([]any)
+	var paths []string
+	for d, destination := range list {
+		routes, _ := stringKeyedValue(destination, "routes").([]any)
+		for r, route := range routes {
+			connectors, _ := stringKeyedValue(stringKeyedValue(route, "selector"), "connectors").([]any)
+			for _, value := range connectors {
+				if name, ok := value.(string); ok && legacyconnector.IsRetired(name) {
+					paths = append(paths, fmt.Sprintf("observability.destinations[%d].routes[%d].selector.connectors", d, r))
+					break
+				}
+			}
+		}
+	}
+	return paths
+}
+
+// stringKeyedValue returns node[key] for a decoded YAML mapping of either
+// key type, or nil.
+func stringKeyedValue(node any, key string) any {
+	switch m := node.(type) {
+	case map[string]any:
+		return m[key]
+	case map[any]any:
+		return m[key]
+	}
+	return nil
+}
+
+// migrateObservabilityV8LegacyConnectors applies the rename to the typed v8
+// observability source: the keys of observability.connectors and the
+// connectors of every route selector.
+func migrateObservabilityV8LegacyConnectors(source *ObservabilityV8Source) {
+	if source == nil {
+		return
+	}
+	migrateLegacyConnectorMap(source.Connectors)
+	for d := range source.Destinations {
+		for r := range source.Destinations[d].Routes {
+			if selector := source.Destinations[d].Routes[r].Selector; selector != nil {
+				migrateLegacyConnectorList(&selector.Connectors)
+			}
+		}
+	}
 }

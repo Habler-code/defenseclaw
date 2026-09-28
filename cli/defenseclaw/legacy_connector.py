@@ -64,6 +64,15 @@ CONNECTOR_NAME_LISTS: tuple[tuple[str, ...], ...] = (
     ("application_protection", "exclude_connectors"),
 )
 
+# asset_policy rule lists whose entries may name one connector
+# (``asset_policy.<type>.<list>[].connector``). A denied rule or a registry
+# entry written for the retired ID must keep applying to its replacement.
+ASSET_POLICY_RULE_LISTS: tuple[tuple[str, str], ...] = tuple(
+    (asset_type, rule_list)
+    for asset_type in ("mcp", "skill", "plugin")
+    for rule_list in ("registry", "allowed", "denied")
+)
+
 
 def _fold(name: Any) -> str:
     return "".join(str(name or "").split()).lower()
@@ -172,8 +181,10 @@ def migrate_raw_config(raw: Any, config_path: str = "") -> list[str]:
 
     Touches ``guardrail.connector``, ``claw.mode``, the keys of every
     per-connector map in :data:`CONNECTOR_MAP_BLOCKS` and
-    :data:`TOP_LEVEL_CONNECTOR_MAPS`, and the name lists in
-    :data:`CONNECTOR_NAME_LISTS`. Must run before connector keys are
+    :data:`TOP_LEVEL_CONNECTOR_MAPS`, the name lists in
+    :data:`CONNECTOR_NAME_LISTS`, the ``connector`` of the rules in
+    :data:`ASSET_POLICY_RULE_LISTS` and the ``connectors`` of every
+    observability route selector. Must run before connector keys are
     normalized or checked for duplicates. Returns the notices (empty when
     nothing changed); the notice names every setting that moved and every
     retired key that was dropped.
@@ -222,10 +233,42 @@ def migrate_raw_config(raw: Any, config_path: str = "") -> list[str]:
         if moved:
             parent[path[-1]] = values
             updated.append(".".join(path))
+    asset_policy = raw.get("asset_policy")
+    for asset_type, rule_list in ASSET_POLICY_RULE_LISTS if isinstance(asset_policy, dict) else ():
+        policy = asset_policy.get(asset_type)
+        rules = policy.get(rule_list) if isinstance(policy, dict) else None
+        moved = False
+        for rule in rules if isinstance(rules, list) else ():
+            if isinstance(rule, dict) and isinstance(rule.get("connector"), str) and is_retired(rule["connector"]):
+                rule["connector"] = REPLACEMENT
+                moved = True
+        if moved:
+            updated.append(f"asset_policy.{asset_type}.{rule_list}")
+    updated.extend(_migrate_route_selectors(raw.get("observability")))
     return [notice(config_path, dropped, _in_go_order(updated))] if updated else []
 
 
-# The order the Go loader lists moved settings in its notice.
+def _migrate_route_selectors(observability: Any) -> list[str]:
+    """Apply the list rule to ``selector.connectors`` of every observability
+    route, in place, and return the moved paths
+    (``observability.destinations[D].routes[R].selector.connectors``)."""
+    destinations = observability.get("destinations") if isinstance(observability, dict) else None
+    moved_paths: list[str] = []
+    for d_index, destination in enumerate(destinations if isinstance(destinations, list) else ()):
+        routes = destination.get("routes") if isinstance(destination, dict) else None
+        for r_index, route in enumerate(routes if isinstance(routes, list) else ()):
+            selector = route.get("selector") if isinstance(route, dict) else None
+            if not isinstance(selector, dict):
+                continue
+            values, moved = migrate_connector_list(selector.get("connectors"))
+            if moved:
+                selector["connectors"] = values
+                moved_paths.append(f"observability.destinations[{d_index}].routes[{r_index}].selector.connectors")
+    return moved_paths
+
+
+# The order the Go loader lists moved settings in its notice; route
+# selectors follow, in document order.
 _NOTICE_ORDER: tuple[str, ...] = (
     "guardrail.connector",
     "guardrail.connectors",
@@ -233,11 +276,13 @@ _NOTICE_ORDER: tuple[str, ...] = (
     *(f"{block}.connectors" for block in CONNECTOR_MAP_BLOCKS if block != "guardrail"),
     *TOP_LEVEL_CONNECTOR_MAPS,
     *(".".join(path) for path in CONNECTOR_NAME_LISTS),
+    *(f"asset_policy.{asset_type}.{rule_list}" for asset_type, rule_list in ASSET_POLICY_RULE_LISTS),
 )
 
 
 def _in_go_order(updated: list[str]) -> list[str]:
-    return sorted(updated, key=_NOTICE_ORDER.index)
+    # sorted() is stable, so the route selectors keep their document order.
+    return sorted(updated, key=lambda path: _NOTICE_ORDER.index(path) if path in _NOTICE_ORDER else len(_NOTICE_ORDER))
 
 
 def migrated_copy(raw: Any, config_path: str = "") -> tuple[Any, list[str]]:

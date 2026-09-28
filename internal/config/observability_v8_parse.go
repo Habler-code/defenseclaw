@@ -73,6 +73,10 @@ func ParseCompileObservabilityV8(
 	if envelope.Observability != nil {
 		source = *envelope.Observability
 	}
+	// The same retired-connector rename the config loader applies
+	// (migrateLegacyConnectorIDs), so a route selector or connector block
+	// written for the retired ID keeps applying to its replacement.
+	migrateObservabilityV8LegacyConnectors(&source)
 	if source.Local.Path == "" {
 		source.Local.Path = filepath.Join(dataDir, DefaultAuditDBName)
 		source.localPathDefaulted = true

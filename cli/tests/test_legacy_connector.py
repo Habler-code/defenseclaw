@@ -105,6 +105,48 @@ class MigrateRawConfigTests(unittest.TestCase):
             notices[0],
         )
 
+    def test_asset_policy_rule_connectors_are_renamed(self):
+        raw = {
+            "guardrail": {"connector": "codex"},
+            "asset_policy": {
+                "mcp": {
+                    "registry": [{"name": "approved-server", "connector": RETIRED}],
+                    "denied": [{"name": "marker-server", "connector": f" {RETIRED.upper()} "}, {"name": "other"}],
+                },
+                "skill": {"allowed": [{"name": "marker-skill", "connector": "codex"}]},
+            },
+        }
+        notices = legacy_connector.migrate_raw_config(raw, "config.yaml")
+        self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["connector"], DEVIN)
+        self.assertEqual(raw["asset_policy"]["mcp"]["denied"][0]["connector"], DEVIN)
+        self.assertNotIn("connector", raw["asset_policy"]["mcp"]["denied"][1])
+        self.assertEqual(raw["asset_policy"]["skill"]["allowed"][0]["connector"], "codex")
+        self.assertIn("in asset_policy.mcp.registry, asset_policy.mcp.denied of config.yaml", notices[0])
+
+    def test_observability_route_selectors_are_renamed(self):
+        raw = {
+            "observability": {
+                "destinations": [
+                    {
+                        "name": "console",
+                        "routes": [
+                            {"name": "codex-only", "selector": {"connectors": ["codex"]}},
+                            {"name": "desktop", "selector": {"connectors": ["codex", RETIRED, DEVIN]}},
+                        ],
+                    }
+                ]
+            },
+            "guardrail": {"connector": RETIRED},
+        }
+        notices = legacy_connector.migrate_raw_config(raw, "config.yaml")
+        routes = raw["observability"]["destinations"][0]["routes"]
+        self.assertEqual(routes[0]["selector"]["connectors"], ["codex"])
+        self.assertEqual(routes[1]["selector"]["connectors"], ["codex", DEVIN])
+        self.assertIn(
+            "in guardrail.connector, observability.destinations[0].routes[1].selector.connectors of config.yaml",
+            notices[0],
+        )
+
     def test_unaffected_config_is_untouched(self):
         raw = {"claw": {"mode": "cursor"}, "guardrail": {"connector": "cursor", "connectors": {"cursor": {}}}}
         before = yaml.safe_dump(raw)
@@ -248,6 +290,29 @@ class UpgradeMigrationTests(unittest.TestCase):
         self.assertEqual(doc["connector_hooks"], {DEVIN: {"enabled": True, "mode": "action"}})
         self.assertEqual(doc["application_protection"]["include_connectors"], ["cursor", DEVIN])
         self.assertEqual(doc["application_protection"]["exclude_connectors"], [DEVIN])
+
+    def test_migration_renames_asset_rules_and_route_selectors_in_place(self):
+        body = (
+            "# operator comment kept\n"
+            "guardrail:\n  connector: codex\n"
+            "asset_policy:\n  enabled: true\n  mcp:\n    denied:\n"
+            f"      - name: marker-server\n        connector: {RETIRED}  # rule comment kept\n"
+            f"    registry:\n      - connector: '{RETIRED}'\n        name: approved-server\n"
+            "observability:\n  destinations:\n    - name: console\n      kind: console\n      routes:\n"
+            "        - name: desktop\n          signals: [logs]\n          selector:\n"
+            f"            connectors: [codex, {RETIRED}]\n"
+        )
+        text, changes = self._run(body)
+        self.assertEqual(len(changes), 1)
+        self.assertIn("asset_policy.mcp.registry, asset_policy.mcp.denied", changes[0])
+        self.assertIn("observability.destinations[0].routes[0].selector.connectors", changes[0])
+        self.assertIn("# operator comment kept", text)
+        self.assertIn("# rule comment kept", text)
+        self.assertNotIn(RETIRED, text)
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["asset_policy"]["mcp"]["denied"][0]["connector"], DEVIN)
+        self.assertEqual(doc["asset_policy"]["mcp"]["registry"][0]["connector"], DEVIN)
+        self.assertEqual(doc["observability"]["destinations"][0]["routes"][0]["selector"]["connectors"], ["codex", DEVIN])
 
     def test_migration_deduplicates_a_list_that_already_names_devin(self):
         body = f"guardrail:\n  connector: codex\n  judge:\n    hook_connectors:\n      - {DEVIN}\n      - {RETIRED}\n"

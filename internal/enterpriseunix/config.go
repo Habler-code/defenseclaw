@@ -63,6 +63,12 @@ type validatedConfig struct {
 	NoProxy                string
 	SelfUpdateDisabled     bool
 	MachinePolicyOwnership map[string]string
+	// RulePacks maps each rule-pack setting (guardrail.rule_pack_dir and
+	// every connector's) to the pack the config resolves it to. An unset
+	// rule_pack_dir follows <policy_dir>/guardrail/default once that folder
+	// exists, which changes no config byte, so the record keeps the resolved
+	// packs and ensure applies (and restarts the gateway) when they change.
+	RulePacks map[string]string
 	// Loaded is the runtime config the checks loaded; machine policy is
 	// published from it.
 	Loaded *config.Config
@@ -194,6 +200,12 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 		MachinePolicyOwnership: map[string]string{},
 		Loaded:                 cfg,
 	}
+	v.RulePacks = map[string]string{}
+	for label, dir := range effectiveRulePackDirs(cfg) {
+		if dir = strings.TrimSpace(dir); dir != "" {
+			v.RulePacks[label] = filepath.Clean(dir)
+		}
+	}
 	for name := range cfg.Guardrail.Connectors {
 		connector := strings.ToLower(strings.TrimSpace(name))
 		if connector == "" || !cfg.Guardrail.EffectiveEnabled(name) {
@@ -212,10 +224,7 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 // rewrite itself: every effective rule pack must be outside data_dir and
 // either ship with the vendor policies or already exist.
 func (e *Env) checkRulePackDirs(cfg *config.Config) error {
-	dirs := map[string]string{"guardrail.rule_pack_dir": cfg.Guardrail.RulePackDir}
-	for name := range cfg.Guardrail.Connectors {
-		dirs["guardrail.connectors."+name+".rule_pack_dir"] = cfg.EffectiveRulePackDirForConnector(name)
-	}
+	dirs := effectiveRulePackDirs(cfg)
 	vendor, err := policyassets.Files()
 	if err != nil {
 		return fmt.Errorf("embedded vendor policies: %w", err)
@@ -240,6 +249,16 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 		}
 	}
 	return nil
+}
+
+// effectiveRulePackDirs maps each rule-pack setting of cfg to the pack the
+// gateway loads for it.
+func effectiveRulePackDirs(cfg *config.Config) map[string]string {
+	dirs := map[string]string{"guardrail.rule_pack_dir": cfg.Guardrail.RulePackDir}
+	for name := range cfg.Guardrail.Connectors {
+		dirs["guardrail.connectors."+name+".rule_pack_dir"] = cfg.EffectiveRulePackDirForConnector(name)
+	}
+	return dirs
 }
 
 func vendorPolicyDirExists(files []policyassets.File, rel string) bool {
