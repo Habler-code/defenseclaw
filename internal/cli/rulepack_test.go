@@ -162,7 +162,7 @@ func shippedRulePackForCLITest(t *testing.T, profile string) string {
 }
 
 // The validator is the rule-pack check enterprise hosts have (they ship no
-// defenseclaw CLI), so it is listed in help (MAC-F31, RHEL-F27, UBU-F27).
+// defenseclaw CLI), so it is listed in help.
 func TestRulePackValidateIsAVisibleCommand(t *testing.T) {
 	command, _, err := rootCmd.Find([]string{"rulepack", "validate"})
 	if err != nil || command != rulePackValidateCmd {

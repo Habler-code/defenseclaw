@@ -30,7 +30,7 @@ func writeGuardianState(h *testHost, at time.Time, results []map[string]any) err
 	return os.Rename(tmp, path)
 }
 
-// MAC-F32: switching guardrail.mode to action with `ensure --config` left
+// Switching guardrail.mode to action with `ensure --config` left
 // devin for one user without DefenseClaw hooks (no verified contract for its
 // version in that mode), but ensure printed a bare "done": its result was
 // described before the restarted guardian reported. The result now waits

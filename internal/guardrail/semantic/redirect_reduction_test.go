@@ -26,7 +26,7 @@ func TestRedirectReductionSafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const marker = `f.commands.exists(c, c.argv.exists(a, a == "dccert-block-marker"))`
+	const marker = `f.commands.exists(c, c.argv.exists(a, a == "dc-block-marker"))`
 	tests := []struct {
 		name       string
 		expression string

@@ -488,7 +488,7 @@ func TestFetchConnectorModesNormalizesWildcardBind(t *testing.T) {
 
 // A connector the config disables is not shown as enforced: status used to
 // list OmniGent with "Policy mode: action / Hook enforcement: yes" although
-// guardrail.connectors.omnigent.enabled was false (RHEL-F31).
+// guardrail.connectors.omnigent.enabled was false.
 func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"connector_modes":[`+

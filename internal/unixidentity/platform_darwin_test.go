@@ -53,7 +53,7 @@ func TestDarwinDefaultResolverFindsCurrentUser(t *testing.T) {
 
 // DirectoryConfigured was hard-coded true on macOS, so on an unbound Mac a
 // deleted local account whose source was not recorded as local was kept
-// for good (MAC-F42). It now follows this Mac's search policy.
+// for good. It now follows this Mac's search policy.
 func TestDarwinDirectoryConfiguredFollowsTheSearchPolicy(t *testing.T) {
 	output, err := exec.Command(darwinDSCL, "-plist", "/Search", "-read", "/", "SearchPath", "CSPSearchPath", "NSPSearchPath").Output()
 	if err != nil {

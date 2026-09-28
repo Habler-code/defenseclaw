@@ -919,7 +919,7 @@ func TestEnumerateUnixExcludeAndExemptAcceptUIDs(t *testing.T) {
 	}
 }
 
-// MAC-F42: after `dscl . -delete` a long-running enumerator on macOS kept
+// After `dscl . -delete` a long-running enumerator on macOS kept
 // resolving the deleted account from its directory cache while the local
 // node no longer listed it. The account stayed a candidate (no miss was
 // counted) and was reclassified as a directory account, so after the
@@ -1008,7 +1008,7 @@ func TestEnumerateUnixKeepsADirectoryAccountAbsentFromTheLocalDatabase(t *testin
 	}
 }
 
-// MAC-F42: `enterprise macos repair` said done but kept the target of a
+// `enterprise macos repair` said done but kept the target of a
 // deleted account, which failed verify and reconcile until the enumerator
 // revoked it. Repair revokes a definitively deleted account at once and
 // keeps any account a directory outage could explain.

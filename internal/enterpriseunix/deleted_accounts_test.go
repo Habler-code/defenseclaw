@@ -47,7 +47,7 @@ func (r *revokeGoneRunner) Run(ctx context.Context, name string, args ...string)
 	return r.fakeRunner.Run(ctx, name, args...)
 }
 
-// MAC-F42: `enterprise macos repair` said done but kept the target of a
+// `enterprise macos repair` said done but kept the target of a
 // deleted account, so verify and reconcile kept failing for the whole host
 // until the enumerator's third miss. Repair now removes such targets while
 // the guardian and the enumerator are stopped, and reports what it did.

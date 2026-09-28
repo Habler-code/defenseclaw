@@ -21,7 +21,7 @@ import (
 
 // Kiro CLI for macOS installs as Kiro CLI.app with kiro-cli in
 // Contents/MacOS and no link in a bin directory until the user runs the
-// app's shell setup (the macOS test host has exactly that layout). Discovery
+// app's shell setup (a fresh install has exactly that layout). Discovery
 // looked only in bin directories, so the macOS guardian never enrolled Kiro.
 func TestDiscoverUnixAgentVersionFindsTheKiroCLIAppBundle(t *testing.T) {
 	origPrefixes, origGOOS := machinePrefixes, unixAgentAppBundleGOOS

@@ -31,8 +31,8 @@ import (
 // refuses to install below the floor, and it follows an agent upgrade at or
 // above it (a not-gated connector has no known contract to follow).
 //
-// Kiro: kiro-cli 2.24.1 is the build installed on the Windows, RHEL and
-// macOS test hosts (checked 2026-09-27). Its `kiro-cli chat --help` lists
+// Kiro: kiro-cli 2.24.1 is the lowest build verified on Windows, Linux and
+// macOS. Its `kiro-cli chat --help` lists
 // --v3 and --agent-engine v1|v2|v3, the engine that reads the user's global
 // ~/.kiro/hooks file and vetoes UserPromptSubmit. kiro.dev documents --v3
 // from 2.21.4; builds between 2.21.4 and 2.24.1 are not certified here.

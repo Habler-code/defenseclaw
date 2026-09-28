@@ -13,7 +13,7 @@ import (
 
 // liveAntigravityRunCommandArgs is the argument shape the Antigravity CLI
 // sent on a live Windows session, with a harmless marker command.
-const liveAntigravityRunCommandArgs = `{"CommandLine":"echo dc-marker-g9","Cwd":"C:\\Users\\alice\\proj\\dc-smoke","WaitMsBeforeAsync":5000,"toolAction":"Running echo command","toolSummary":"Echo marker"}`
+const liveAntigravityRunCommandArgs = `{"CommandLine":"echo dc-marker","Cwd":"C:\\Users\\alice\\proj\\dc-smoke","WaitMsBeforeAsync":5000,"toolAction":"Running echo command","toolSummary":"Echo marker"}`
 
 func antigravityCommandFactsStatus(t *testing.T, args json.RawMessage) actionfacts.ParseStatus {
 	t.Helper()
@@ -41,8 +41,8 @@ func TestAgentHookTrustedActionArgsLeavesOtherShapesUnchanged(t *testing.T) {
 		name, connector, tool, args string
 	}{
 		{"other connector", "codex", "run_command", liveAntigravityRunCommandArgs},
-		{"unknown key", "antigravity", "run_command", `{"CommandLine":"echo dc-marker-g9","toolAction":"a","Extra":"b"}`},
-		{"metadata of the wrong type", "antigravity", "run_command", `{"CommandLine":"echo dc-marker-g9","WaitMsBeforeAsync":"soon"}`},
+		{"unknown key", "antigravity", "run_command", `{"CommandLine":"echo dc-marker","toolAction":"a","Extra":"b"}`},
+		{"metadata of the wrong type", "antigravity", "run_command", `{"CommandLine":"echo dc-marker","WaitMsBeforeAsync":"soon"}`},
 	} {
 		got := agentHookTrustedActionArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
 		if string(got) != tc.args {
@@ -51,7 +51,7 @@ func TestAgentHookTrustedActionArgsLeavesOtherShapesUnchanged(t *testing.T) {
 	}
 	// An unknown key keeps the conservative partial parse.
 	unknown := agentHookTrustedActionArgs("antigravity", "run_command",
-		json.RawMessage(`{"CommandLine":"echo dc-marker-g9","toolAction":"a","Extra":"b"}`))
+		json.RawMessage(`{"CommandLine":"echo dc-marker","toolAction":"a","Extra":"b"}`))
 	if status := antigravityCommandFactsStatus(t, unknown); status == actionfacts.StatusComplete {
 		t.Fatal("an unreviewed argument must not acquire complete command facts")
 	}

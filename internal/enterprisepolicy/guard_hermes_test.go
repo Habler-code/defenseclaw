@@ -45,7 +45,7 @@ func hermesConfig(script string, extra ...string) string {
 
 const hermesRewriteEntry = "        - command: /usr/local/bin/rewrite-tool-input.sh\n          matcher: .*\n          timeout: 10\n"
 
-// RHEL-F37: a user's own Hermes pre_tool_call hook placed after
+// A user's own Hermes pre_tool_call hook placed after
 // DefenseClaw's could rewrite the tool call after DefenseClaw checked it,
 // and nothing noticed it. The guard now reads the Hermes config.yaml: such
 // an entry denies with the file, the digest and the allowlist key, while

@@ -686,7 +686,7 @@ def _linux_scriptlet(host: _Host, name: str) -> str:
     )
 
 
-# RHEL-F12: the postinstall's own systemd-tmpfiles and daemon-reload started
+# The postinstall's own systemd-tmpfiles and daemon-reload started
 # the config-apply path unit, whose ensure won the lifecycle lock and did the
 # upgrade, while the scriptlet's ensure (default 5 s wait) exited 75 and every
 # upgrade reported "the lifecycle reported a problem".
@@ -714,7 +714,7 @@ def test_linux_postinstall_reports_a_lifecycle_problem_and_restores_the_trigger(
     assert host.calls()[-1] == f"systemctl start {APPLY_PATH}"
 
 
-# unix-lifecycle-3: preremove ran uninstall with the 5 s default and exited 0
+# Preremove ran uninstall with the 5 s default and exited 0
 # on busy (75), so dpkg/rpm deleted the binaries and units while machine
 # policy, per-user hooks and the running gateway still named them.
 @pytest.mark.parametrize(("rc", "exit_code"), [(0, 0), (1, 0), (75, 1)])
@@ -810,7 +810,7 @@ def _noop_ensure_result(platform: str, version: str, warnings: bool) -> dict:
     return document
 
 
-# MAC-F18: the wrapper's one result document reported the no-op ensure that
+# The wrapper's one result document reported the no-op ensure that
 # followed the package step ("action": "ensure", "noop": true) after the
 # package's postinstall had upgraded 0.8.11 to 0.8.12.
 @pytest.mark.parametrize(

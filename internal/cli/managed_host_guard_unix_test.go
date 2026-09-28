@@ -153,7 +153,7 @@ func TestStopRefusesOnAManagedHostAndStopsALeftoverWatchdog(t *testing.T) {
 }
 
 // The bare daemon refuses before loading config or opening the audit
-// store, so a standard user's ~/.defenseclaw gets no audit.db (RHEL-F18).
+// store, so a standard user's ~/.defenseclaw gets no audit.db.
 func TestBareDaemonRefusesBeforeCreatingTheAuditStore(t *testing.T) {
 	unixStandaloneLayoutForTest(t)
 	withUnixManagedHostDescriptor(t)
@@ -227,7 +227,7 @@ func TestLifecycleGuardHonorsThePinOnlyForTheServiceAccount(t *testing.T) {
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 		t.Fatalf("an unknown service identity must keep honoring the pin: %v", err)
 	}
-	// The per-user refusal the Secure Client golden pins is unchanged.
+	// The Secure Client per-user refusal is unchanged.
 	if err := refusePerUserGatewayOnManagedHost(); err != nil {
 		t.Fatalf("the pinned per-user guard changed: %v", err)
 	}
@@ -275,7 +275,7 @@ func clearManagedStandaloneAdminEnv(t *testing.T) {
 
 // An administrator's status, audit and enterprise hooks commands read the
 // standalone deployment without extra environment variables; root used to
-// read /root/.defenseclaw/config.yaml (MAC-F10, RHEL-F06, UBU-F03).
+// read /root/.defenseclaw/config.yaml.
 func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing.T) {
 	layout := withManagedStandaloneDeployment(t, 991)
 	want := map[string]string{
@@ -325,7 +325,7 @@ func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing
 // The guardian manifest and authorization directory come from this OS's
 // layout for a standalone config; `enterprise hooks status` on macOS used
 // to default to the Linux manifest and a data-dir-derived authorization
-// directory and reported a healthy host as unhealthy (MAC-F10).
+// directory and reported a healthy host as unhealthy.
 func TestStandaloneHookGuardianDefaultsUseTheLayout(t *testing.T) {
 	layout, err := managed.StandaloneLayoutFor("darwin")
 	if err != nil {
@@ -380,8 +380,8 @@ func TestStandaloneHookGuardianDefaultsUseTheLayout(t *testing.T) {
 
 // A standard user's `enterprise hooks status` on a managed host explains
 // that an administrator runs it, instead of a raw per-user config-load
-// error (RHEL-F16, UBU-F15). Administrators, the service account, callers
-// that name a config and the per-user worker keep the ordinary path.
+// error. Administrators, the service account, callers that name a config
+// and the per-user worker keep the ordinary path.
 func TestEnterpriseHooksTellAStandardUserThatAnAdministratorRunsThem(t *testing.T) {
 	layout := withManagedStandaloneDeployment(t, 991)
 	previousConfig := cfg

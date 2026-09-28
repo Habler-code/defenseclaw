@@ -94,7 +94,7 @@ func runAuditExportForTest(t *testing.T, path string, limit int, newest bool, si
 
 // --limit keeps the oldest rows; --newest keeps the most recent ones, still
 // written oldest first. An administrator asking for recent events used to
-// get rows from hours earlier (MAC-F29).
+// get rows from hours earlier.
 func TestRunAuditExportNewestKeepsTheMostRecentRows(t *testing.T) {
 	path := auditWindowTestDatabase(t,
 		"2026-09-27T15:53:00Z", "2026-09-27T18:40:00Z", "2026-09-27T16:10:00Z",

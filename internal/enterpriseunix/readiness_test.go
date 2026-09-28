@@ -135,7 +135,7 @@ func (r lsofRunner) Run(ctx context.Context, name string, args ...string) (Comma
 // while another process holds the API port.
 const retryingAPIHealth = `{"api":{"state":"error","last_error":"listen tcp 127.0.0.1:18970: bind: address already in use","details":{"addr":"127.0.0.1:18970","tcp_bind_retrying":true}},"inspection":{"local":"active","ai_defense":"disabled"}}`
 
-// MAC-F24 on Linux: the gateway unit runs and serves its hook socket, but
+// On Linux the gateway unit runs and serves its hook socket, but
 // another account holds 127.0.0.1:18970 and the gateway reports its API
 // listener as retrying. Status reported the gateway ready (a 200 was taken
 // as readiness) and did not name the holder.
@@ -178,7 +178,7 @@ func TestGatewayWithoutItsAPIPortIsNotReadyAndNamesTheHolder(t *testing.T) {
 		}
 	})
 
-	// RHEL-F21, UBU-F19: with the socket units stopped another account bound
+	// With the socket units stopped another account bound
 	// 127.0.0.1:18970. Repair failed with systemd's "Job failed. See journalctl
 	// -xe" and status reported "gateway health: ... EOF" (the probe reached the
 	// other process); neither named it.
@@ -211,7 +211,7 @@ func TestGatewayWithoutItsAPIPortIsNotReadyAndNamesTheHolder(t *testing.T) {
 		}
 	})
 
-	// MAC-F24: while another account held 127.0.0.1:18970 across a gateway
+	// While another account held 127.0.0.1:18970 across a gateway
 	// restart, status said only "gateway health returned HTTP 503" (the other
 	// listener's answer) and nothing about the gateway serving the hook socket.
 	// Readiness now comes from the gateway's own report on its hook socket; the

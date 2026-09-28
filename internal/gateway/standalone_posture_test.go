@@ -204,8 +204,8 @@ func TestStandaloneHookLaneBlocksOnTheLocalEngine(t *testing.T) {
 	t.Setenv("DEFENSECLAW_RUN_ID", "standalone-local-engine-test")
 
 	const (
-		markerTool    = "dcx_marker_tool"
-		markerPattern = "dcx_marker_standalone_4f2a91"
+		markerTool    = "dc_marker_tool"
+		markerPattern = "dc_marker_standalone_4f2a91"
 		markerRule    = "STANDALONE-MARKER"
 	)
 	hookServer := func(t *testing.T, posture profilePosture, inspector Inspector) *APIServer {

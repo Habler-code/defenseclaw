@@ -23,10 +23,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-const redirectReductionMarker = "dccert-block-marker"
+const redirectReductionMarker = "dc-block-marker"
 
 // installRedirectReductionRules publishes a connector generation with
-// certification-style command rules: CRITICAL expressions over argv.
+// marker command rules: CRITICAL expressions over argv.
 func installRedirectReductionRules(t *testing.T, connector string, rules ...PatternRule) {
 	t.Helper()
 	ruleCategoriesMu.Lock()
@@ -63,7 +63,7 @@ func redirectReductionRule(id, pattern, expression string) PatternRule {
 		Pattern:      regexp.MustCompile(pattern),
 		Expression:   expression,
 		ToolCallOnly: true,
-		Title:        "Certification marker (" + id + ")",
+		Title:        "Test marker (" + id + ")",
 		Severity:     "CRITICAL",
 		Confidence:   1,
 	}
@@ -73,11 +73,11 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 	const connector = "redirect-reduction-test"
 	argvMarker := `f.commands.exists(c, c.argv.exists(a, a == "` + redirectReductionMarker + `"))`
 	installRedirectReductionRules(t, connector,
-		// The certification rule: an argv expression with a regex fallback.
-		redirectReductionRule("CERT-MARKER-BLOCK", redirectReductionMarker, argvMarker),
+		// The marker rule: an argv expression with a regex fallback.
+		redirectReductionRule("TEST-MARKER-BLOCK", redirectReductionMarker, argvMarker),
 		// A match that more redirects could undo must not count on the view.
 		redirectReductionRule(
-			"CERT-MARKER-NO-STDOUT-REDIRECT",
+			"TEST-MARKER-NO-STDOUT-REDIRECT",
 			redirectReductionMarker,
 			argvMarker+` && !f.commands.exists(c, c.redirects.exists(r, r.fd == 1))`,
 		),
@@ -95,25 +95,25 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 	}{
 		{
 			name:    "tilde target",
-			command: "echo " + redirectReductionMarker + " > ~/dccert-x.txt",
-			want:    map[string]string{"CERT-MARKER-BLOCK": blocks, "CERT-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
+			command: "echo " + redirectReductionMarker + " > ~/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
 		},
 		{
 			name:    "no redirect",
 			command: "echo " + redirectReductionMarker,
-			want:    map[string]string{"CERT-MARKER-BLOCK": blocks, "CERT-MARKER-NO-STDOUT-REDIRECT": blocks},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks},
 		},
 		{
 			// An expanding argument is not reduced: the argv is not static.
 			name:    "expanding argument",
-			command: "echo " + redirectReductionMarker + " $SUFFIX > ~/dccert-x.txt",
-			want:    map[string]string{"CERT-MARKER-BLOCK": detectionOnly, "CERT-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
+			command: "echo " + redirectReductionMarker + " $SUFFIX > ~/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
 		},
 		{
 			// A chained command might not run, so it is not reduced either.
 			name:    "chained command",
-			command: "cd /tmp && echo " + redirectReductionMarker + " > ~/dccert-x.txt",
-			want:    map[string]string{"CERT-MARKER-BLOCK": detectionOnly, "CERT-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
+			command: "cd /tmp && echo " + redirectReductionMarker + " > ~/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
 		},
 	}
 	for _, test := range tests {
@@ -149,7 +149,7 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			}
 			verdict := buildVerdict(findings, "tool_call")
 			wantAction := guardrailActionAllow
-			if test.want["CERT-MARKER-BLOCK"] == blocks {
+			if test.want["TEST-MARKER-BLOCK"] == blocks {
 				wantAction = guardrailActionBlock
 			}
 			if verdict.Action != wantAction {

@@ -84,7 +84,7 @@ const standaloneOwnedHookConfigName = "defenseclaw.json"
 // config is a DefenseClaw-owned file, the missing directories above that
 // file inside the home, as the user and owner-only. Without them a first
 // install failed with "hook config parent missing" for every account that
-// had not created the folder itself (MAC-F12: ~/.kiro/hooks). It returns
+// had not created the folder itself (for example ~/.kiro/hooks). It returns
 // the hook config files that may still be missing: Setup writes them. An
 // existing element that is a link, not a directory, owned by someone else
 // or writable by group or others is refused, and nothing is created below
@@ -160,9 +160,9 @@ const standaloneHookRuntimeRecordMaxBytes = 4 << 20
 // hook runtime when it no longer matches: every hook runtime file Install
 // recorded in the contract lock (the connector's own hook script, the
 // shared inspect scripts and _hardening.sh, a managed plugin) is still there
-// with the recorded bytes (UBU-F20: a deleted hermes-hook.sh stayed missing
+// with the recorded bytes (a deleted hermes-hook.sh stayed missing
 // and every check stayed green); the hooks were rendered for the fail mode
-// and guardrail mode the configuration selects now (UBU-F31: an
+// and guardrail mode the configuration selects now (an
 // observe-to-action change never reached ~/.defenseclaw/hooks); and the
 // runtime records the hook scripts read (.hookcfg and .hookcfg.<connector>)
 // carry that fail mode. The worker runs as the user and reads only the

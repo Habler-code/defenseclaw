@@ -22,7 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// UBU-F34, MAC-F42: after an enrolled account was deleted, verify failed
+// After an enrolled account was deleted, verify failed
 // ("openhands for user bob is not protected: target account ... does
 // not exist: no such account") until the enumerator revoked the target, so
 // MDM detection reported the host non-compliant. The account is gone; the

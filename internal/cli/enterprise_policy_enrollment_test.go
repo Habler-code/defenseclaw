@@ -24,7 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// MAC-F43: `enterprise policy show --user ec2-user`, an account listed in
+// `enterprise policy show --user svc-sync`, an account listed in
 // enterprise.enrollment.exclude_users, printed the same connector table as
 // for an enrolled account and never said the account is excluded.
 func TestEnterprisePolicyShowSaysWhyTheUserIsNotEnrolled(t *testing.T) {
@@ -89,8 +89,8 @@ func TestEnterprisePolicyShowSaysWhyTheUserIsNotEnrolled(t *testing.T) {
 
 func TestUnixEnrollmentExclusion(t *testing.T) {
 	enrollment := config.EnterpriseEnrollmentConfig{
-		ExcludeUsers: []string{" ec2-user ", "1234401103"},
-		ExemptUsers:  []string{"svc-release", "ec2-user"},
+		ExcludeUsers: []string{" svc-sync ", "1234401103"},
+		ExemptUsers:  []string{"svc-release", "svc-sync"},
 		Root:         config.EnterpriseRootDeny,
 	}
 	for _, tc := range []struct {
@@ -98,7 +98,7 @@ func TestUnixEnrollmentExclusion(t *testing.T) {
 		uid  int
 		want string
 	}{
-		{"ec2-user", 501, "excluded by enterprise.enrollment.exclude_users"},
+		{"svc-sync", 501, "excluded by enterprise.enrollment.exclude_users"},
 		{"CORP\\jdoe", 1234401103, "excluded by enterprise.enrollment.exclude_users"},
 		{"svc-release", 502, "exempt by enterprise.enrollment.exempt_users"},
 		{"root", 0, "enterprise.enrollment.root (deny)"},

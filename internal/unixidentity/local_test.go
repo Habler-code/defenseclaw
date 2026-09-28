@@ -42,7 +42,7 @@ func TestParseLocalPasswdAndDSCL(t *testing.T) {
 
 // macOS: the enumerator assumed every Mac may be bound to a directory, so a
 // deleted local account whose source was not recorded as local was never
-// revoked on an unbound Mac (MAC-F42). The search policy decides it.
+// revoked on an unbound Mac. The search policy decides it.
 func TestParseDSCLSearchPolicyDirectoryConfigured(t *testing.T) {
 	plist := func(entries string) []byte {
 		return []byte(`<?xml version="1.0" encoding="UTF-8"?>

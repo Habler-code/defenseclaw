@@ -128,7 +128,7 @@ func (r rpmOwnedRunner) Run(ctx context.Context, name string, args ...string) (C
 	return r.Runner.Run(ctx, name, args...)
 }
 
-// RHEL-F17, UBU-F14: after a lifecycle uninstall of a package install the
+// After a lifecycle uninstall of a package install the
 // rpm/deb stays installed, and status warned "unmanaged_leftovers ...
 // /opt/defenseclaw/bin/defenseclaw-gateway" with no next step. The warning
 // now says how to remove the package or activate the deployment again.

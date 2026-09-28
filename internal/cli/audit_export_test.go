@@ -332,8 +332,7 @@ func managedAuditTestDatabase(t *testing.T) string {
 
 // On a standalone host the audit commands open the gateway service's store
 // read-only after its ownership check, instead of refusing it as an
-// untrusted owner or migrating it beside the running gateway (MAC-F10,
-// RHEL-F06, UBU-F03).
+// untrusted owner or migrating it beside the running gateway.
 func TestManagedAuditStoreOpensReadOnly(t *testing.T) {
 	path := managedAuditTestDatabase(t)
 	before, err := os.ReadFile(path)

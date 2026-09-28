@@ -191,7 +191,7 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 	}
 }
 
-// MAC-F42: repair runs `enterprise hooks revoke-gone`, which removes the
+// Repair runs `enterprise hooks revoke-gone`, which removes the
 // targets of a deleted local account at once (and forgets its miss count
 // and source), keeps a directory account a lookup outage could explain,
 // and leaves an administrator-published manifest alone.

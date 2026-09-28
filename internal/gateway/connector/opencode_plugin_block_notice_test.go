@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	openCodeGatewayBlock   = `{"action":"block","mode":"action","severity":"CRITICAL","reason":"matched: CERT-MARKER","hook_output":{"decision":"deny","reason":"matched: CERT-MARKER"}}`
+	openCodeGatewayBlock   = `{"action":"block","mode":"action","severity":"CRITICAL","reason":"matched: TEST-MARKER","hook_output":{"decision":"deny","reason":"matched: TEST-MARKER"}}`
 	openCodeGatewayConfirm = `{"action":"alert","raw_action":"confirm","mode":"action","severity":"HIGH","reason":"matched: REVIEW-MARKER"}`
 )
 
@@ -25,7 +25,7 @@ func TestOpenCodePluginBlockAndConfirmAreVisible(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("harness output = %q", lines)
 	}
-	if want := "block:DefenseClaw blocked this tool call under policy, so it did not run: matched: CERT-MARKER"; lines[0] != want {
+	if want := "block:DefenseClaw blocked this tool call under policy, so it did not run: matched: TEST-MARKER"; lines[0] != want {
 		t.Fatalf("block = %q, want %q", lines[0], want)
 	}
 	if lines[1] != "allow" {
@@ -67,7 +67,7 @@ func TestOpenCodePluginSecureClientRenderKeepsItsText(t *testing.T) {
 	data := openCodePluginTestData(t, server)
 	data.Managed = true
 	lines := runOpenCodePluginAssetHarness(t, secureClientPluginAssets["opencode-plugin.js"], data, 2)
-	if len(lines) != 3 || lines[0] != "block:matched: CERT-MARKER" || lines[1] != "allow" || lines[2] != "toasts:[]" {
+	if len(lines) != 3 || lines[0] != "block:matched: TEST-MARKER" || lines[1] != "allow" || lines[2] != "toasts:[]" {
 		t.Fatalf("harness output = %q", lines)
 	}
 }

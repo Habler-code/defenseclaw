@@ -256,7 +256,7 @@ func TestApplyOverlay_DeduplicatesDomains(t *testing.T) {
 // The overlay lives in the DefenseClaw data dir. A managed service (or a
 // per-user install relocated with DEFENSECLAW_HOME) used to read the
 // caller's ~/.defenseclaw instead, which the Python CLI never writes when
-// DEFENSECLAW_HOME is set (MAC-F15).
+// DEFENSECLAW_HOME is set.
 func TestCustomProvidersPathHonorsTheDataDir(t *testing.T) {
 	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
 	dataDir := t.TempDir()
@@ -292,8 +292,7 @@ func captureStderr(t *testing.T, fn func()) string {
 
 // A missing overlay, or one this account may not read, prints nothing: an
 // administrator's `audit export` used to print "custom-providers overlay
-// open error: ... permission denied" for another account's data dir
-// (MAC-F15).
+// open error: ... permission denied" for another account's data dir.
 func TestLoadProvidersIsQuietForAMissingOrUnreadableOverlay(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "custom-providers.json")
 	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", missing)

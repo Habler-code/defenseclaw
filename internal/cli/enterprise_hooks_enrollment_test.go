@@ -99,7 +99,7 @@ func writeHealthyGuardianRecords(t *testing.T, rows []enterpriseHookReconcileRow
 }
 
 // `enterprise hooks status` lists who is enrolled for which connector, in
-// text and JSON, instead of only counts (RHEL-F07).
+// text and JSON, instead of only counts.
 func TestEnterpriseHooksStatusListsEnrollmentPerUserAndConnector(t *testing.T) {
 	rows := []enterpriseHookReconcileRow{
 		{User: "bob", UserHome: "/home/bob", UID: 1002, Connector: "codex", OK: true},
