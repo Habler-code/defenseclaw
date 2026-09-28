@@ -124,6 +124,14 @@ func (l *lifecycle) restoreNewerConfig(record *Deployment, newer []byte) {
 	owner := fileOwner{UID: 0, GID: record.ServiceGID}
 	if err := env.writeFileAtomic(env.P(env.Layout.ConfigPath), newer, 0o640, owner); err != nil {
 		r.AddWarning(codeConfigReverted, "the config.yaml written during this run could not be put back ("+err.Error()+"); the last applied config is in place, push the newer config.yaml again")
+		return
+	}
+	// The newer file supersedes the kept rejection (rejectionSuperseded),
+	// also when it lands in the same file-time tick as the revert.
+	current, err := os.Stat(env.P(env.Layout.ConfigPath))
+	if kept, keptErr := os.Stat(env.rejectedConfigPath()); err == nil && keptErr == nil && kept.ModTime().Equal(current.ModTime()) {
+		earlier := current.ModTime().Add(-time.Second)
+		_ = os.Chtimes(env.rejectedConfigPath(), earlier, earlier)
 	}
 }
 
