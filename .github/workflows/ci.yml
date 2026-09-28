@@ -934,12 +934,20 @@ jobs:
         with:
           name: enterprise-install-windows
           path: ${{ runner.temp }}/enterprise-install
-      - name: Give the runner Windows log folder its usual owner
-        # Hosted Windows runner images leave C:\Windows\Logs owned by the
-        # built-in Administrator account, and the lifecycle log refuses a
-        # parent folder with an untrusted owner.
+      - name: Give the runner Windows log folder its usual owner and access
+        # Hosted Windows runner images leave C:\Windows\Logs owned by, and
+        # writable for, the built-in Administrator account. The lifecycle log
+        # refuses a parent folder another account owns or can write.
         shell: pwsh
-        run: icacls "$env:windir\Logs" /setowner "*S-1-5-32-544" | Out-Null
+        run: |
+          $logs = Join-Path $env:windir 'Logs'
+          $account = (Get-LocalUser | Where-Object { $_.SID.Value -like 'S-1-5-21-*-500' }).SID.Value
+          icacls $logs /setowner '*S-1-5-32-544' | Out-Null
+          if ($account) {
+            icacls $logs /inheritance:d | Out-Null
+            icacls $logs /remove:g "*$account" | Out-Null
+          }
+          icacls $logs
       - name: Install, converge, verify and remove the standalone services
         shell: pwsh
         run: >-
