@@ -123,6 +123,25 @@ try {
                 $failures.Add("${name}: threw $($_.Exception.Message)")
             }
         }
+        $realHook = [IO.Path]::Combine($Root, 'hook-real.exe')
+        $hardLink = [IO.Path]::Combine($Root, 'hook-link.exe')
+        $copyHook = [IO.Path]::Combine($Root, 'hook-copy.exe')
+        [IO.File]::WriteAllBytes($realHook, [byte[]]@(0x4d, 0x5a))
+        [void](Microsoft.PowerShell.Management\New-Item -ItemType HardLink -Path $hardLink -Value $realHook)
+        [IO.File]::Copy($realHook, $copyHook)
+        if (-not (Test-DefenseClawSamePathIdentity -Left $realHook -Right $hardLink)) {
+            $failures.Add('the hook hard link did not match by file identity')
+        }
+        if (Test-DefenseClawSamePathIdentity -Left $realHook -Right $copyHook) {
+            $failures.Add('a copied hook matched by file identity')
+        }
+        $missing = [IO.Path]::Combine($Root, 'missing-hook.exe')
+        if (-not (Test-DefenseClawSamePathIdentity -Left $missing -Right $missing.ToUpperInvariant())) {
+            $failures.Add('two spellings of the same missing hook did not match')
+        }
+        if (Test-DefenseClawSamePathIdentity -Left $realHook -Right $missing) {
+            $failures.Add('an existing and a missing hook matched')
+        }
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $policyPath -Force
         $settings = ConvertFrom-DefenseClawStrictJson -Text $cases['carries the installed matrix'].json
         if (Test-DefenseClawClaudeHKLMCarriesInstalledHooks -Settings $settings -Layout $layout) {

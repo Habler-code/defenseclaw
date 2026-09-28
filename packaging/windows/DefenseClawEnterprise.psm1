@@ -17067,12 +17067,59 @@ function Test-DefenseClawClaudeHookPathSame {
         [string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
         return $false
     }
+    return Test-DefenseClawSamePathIdentity -Left $Left -Right $Right
+}
+
+function Get-DefenseClawPathIdentityForComparison {
+    param(
+        [Parameter(Mandatory)][Type]$NativeSecurityType,
+        [Parameter(Mandatory)][string]$Path
+    )
     try {
-        return [bool]([IO.Path]::GetFullPath($Left) -ieq [IO.Path]::GetFullPath($Right))
+        return ([string]$NativeSecurityType::GetFileIdentity($Path)).ToLowerInvariant()
     }
     catch {
+        $exception = $_.Exception
+        while ($null -ne $exception -and
+            $exception -isnot [ComponentModel.Win32Exception]) {
+            $exception = $exception.InnerException
+        }
+        if ($null -ne $exception -and [int]$exception.NativeErrorCode -in @(2, 3, 53)) {
+            return ''
+        }
+        return $null
+    }
+}
+
+function Test-DefenseClawSamePathIdentity {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Left,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Right
+    )
+    $paths = [Collections.Generic.List[string]]::new()
+    foreach ($value in @($Left, $Right)) {
+        try {
+            $full = [IO.Path]::GetFullPath($value)
+            $root = [IO.Path]::GetPathRoot($full)
+        }
+        catch {
+            return $false
+        }
+        if ($null -ne $root -and $full.Length -gt $root.Length) {
+            $full = $full.TrimEnd('\')
+        }
+        $paths.Add($full)
+    }
+    $nativeSecurityType = Initialize-DefenseClawNativeSecurity
+    $leftIdentity = Get-DefenseClawPathIdentityForComparison -NativeSecurityType $nativeSecurityType -Path $paths[0]
+    $rightIdentity = Get-DefenseClawPathIdentityForComparison -NativeSecurityType $nativeSecurityType -Path $paths[1]
+    if ($null -eq $leftIdentity -or $null -eq $rightIdentity) {
         return $false
     }
+    if ($leftIdentity.Length -eq 0 -and $rightIdentity.Length -eq 0) {
+        return [string]::Equals($paths[0], $paths[1], [StringComparison]::OrdinalIgnoreCase)
+    }
+    return [bool]($leftIdentity.Length -ne 0 -and $leftIdentity -ceq $rightIdentity)
 }
 
 function Test-DefenseClawClaudeHandlerTargetsHook {
