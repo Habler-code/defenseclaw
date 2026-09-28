@@ -137,6 +137,20 @@ After every successful mutation the lifecycle writes:
 
 These are for detection only. Enforcement and `verify` never trust them.
 
+Any account can write Application-log entries under any source name,
+including `DefenseClaw Enterprise`. Each DefenseClaw event therefore ends
+with `record <id>`, and the matching line of `enterprise-lifecycle.log`, which
+only administrators and LocalSystem can write, holds the same id under
+`event.record` with the event ID and the SHA-256 of the exact message. Treat
+an entry without a record, or one whose record is not in the lifecycle log,
+as not written by DefenseClaw:
+
+```powershell title="Check the newest DefenseClaw event"
+$event = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'DefenseClaw Enterprise' } -MaxEvents 1
+$record = [regex]::Match($event.Message, 'record ([0-9a-f]{32})\s*$').Groups[1].Value
+Select-String -Path "$env:WINDIR\Logs\DefenseClaw\enterprise-lifecycle.log*" -SimpleMatch "`"record`":`"$record`""
+```
+
 ## Verify, repair, remove
 
 ```powershell
