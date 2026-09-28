@@ -5043,25 +5043,6 @@
       "since": "0.8.0"
     },
     {
-      "name": "DEFENSECLAW_UPDATE_SECURE_CLIENT_GOLDEN",
-      "category": "test_fixture",
-      "purpose": "Regenerate the Secure Client golden fixtures under testdata/secure_client_golden instead of comparing against them. Set only when a Secure Client behavior change is intended and has been reviewed; see testdata/secure_client_golden/README.md.",
-      "default": "unset (Go Secure Client goldens compare against the committed fixtures)",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "internal/testenv/golden.go",
-          "description": "CompareSecureClientGolden* helpers rewrite the fixture instead of failing on drift; test-only, never read by a shipped binary"
-        }
-      ],
-      "since": "1.0.0"
-    },
-    {
       "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
       "category": "security_opt_out",
       "purpose": "Retired 0.x upgrade override with no effect in 1.x. Still refused from .env files so an old dotenv cannot carry it forward.",
