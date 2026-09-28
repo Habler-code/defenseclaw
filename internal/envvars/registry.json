@@ -205,6 +205,19 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_IPC_PEERAUTH_HELPER_SOCKET",
+      "category": "test_fixture",
+      "purpose": "Passes the disposable AF_UNIX socket path to the Windows IPC peer-auth subprocess test helper.",
+      "default": "unset",
+      "accepted_values": ["absolute path to the test socket", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/ipc/peerauth_windows_test.go", "description": "Connects the subprocess to the isolated test listener"}
+      ],
+      "since": "0.8.6"
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_TEST_MODE",
       "category": "test_fixture",
       "purpose": "Explicitly enables the loopback-only unpublished release endpoint used by upgrade protocol release-candidate tests.",
