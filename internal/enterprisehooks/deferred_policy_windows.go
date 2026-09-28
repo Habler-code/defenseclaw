@@ -109,6 +109,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 		return errors.Join(append([]error{cause}, rollbackErrs...)...)
 	}
 	existingClaude := make(map[string]struct{})
+	claudeAllowUnmanagedHooks := false
 	if windowsDeferredPoliciesContainConnector(validated, "claudecode") {
 		targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
 		if err != nil {
@@ -120,6 +121,11 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 				apiAddr,
 				gatewayServiceName,
 			); err != nil {
+				return err
+			}
+			// Staging a SID must not change the machine-wide lock state.
+			claudeAllowUnmanagedHooks, err = currentWindowsClaudeManagedPolicyAllowsUnmanagedHooks()
+			if err != nil {
 				return err
 			}
 		}
@@ -163,6 +169,8 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			HookExecutable:    hookExecutable,
 			DataDir:           target.dataDir,
 			AgentVersion:      strings.TrimSpace(target.manifest.AgentVersion),
+
+			ClaudeCodeAllowUnmanagedHooks: claudeAllowUnmanagedHooks,
 		}
 		switch name {
 		case "claudecode":

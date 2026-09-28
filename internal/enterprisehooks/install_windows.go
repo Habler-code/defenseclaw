@@ -225,6 +225,8 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
 		HookExecutable:     hookExecutable,
+
+		ClaudeCodeAllowUnmanagedHooks: opts.ClaudeCodeAllowUnmanagedHooks,
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setupOpts); err != nil {
 		return InstallResult{}, err
@@ -289,6 +291,12 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err := provider.VerifyManagedHookPolicy(policySnapshot.data, setupOpts); err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: verify Claude Code managed policy: %w", err)
 	}
+	if err := inspectWindowsClaudeFilePolicyCompatibility(
+		policyPath,
+		!setupOpts.ClaudeCodeAllowUnmanagedHooks,
+	); err != nil {
+		return InstallResult{}, err
+	}
 
 	lock, err := verifyWindowsClaudeUserRuntimeReadOnly(home, dataDir, policyPath, targetSID, setupOpts, conn)
 	if err != nil {
@@ -330,6 +338,8 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		HookScripts:     sortedUnique(hookScripts),
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
+
+		ClaudeManagedHooksOnly: ClaudeManagedHooksOnlyState(setupOpts.ClaudeCodeAllowUnmanagedHooks),
 	}, nil
 }
 
@@ -418,6 +428,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
 		HookExecutable:     hookExecutable,
+
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setup); err != nil {
 		return windowsGenericManagedTarget{}, err

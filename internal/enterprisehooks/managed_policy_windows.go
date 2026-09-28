@@ -1392,7 +1392,7 @@ func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.Setup
 	if err != nil {
 		return "", nil, err
 	}
-	if err := inspectWindowsClaudeFilePolicyCompatibility(path); err != nil {
+	if err := inspectWindowsClaudeFilePolicyCompatibility(path, !opts.ClaudeCodeAllowUnmanagedHooks); err != nil {
 		return "", nil, err
 	}
 	statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
@@ -1779,7 +1779,7 @@ func canonicalWindowsClaudeTargetSIDs(values []string) ([]string, error) {
 	return result, nil
 }
 
-func inspectWindowsClaudeFilePolicyCompatibility(policyPath string) error {
+func inspectWindowsClaudeFilePolicyCompatibility(policyPath string, enforceManagedHooksOnly bool) error {
 	root := filepath.Dir(filepath.Dir(policyPath))
 	rootExists, err := validateExistingWindowsManagedPolicyDirectory(root)
 	if err != nil {
@@ -1833,6 +1833,11 @@ func inspectWindowsClaudeFilePolicyCompatibility(policyPath string) error {
 		}
 		if raw, exists := settings["policyHelper"]; exists && raw != nil {
 			policyHelper = true
+		}
+		if enforceManagedHooksOnly {
+			if err := windowsClaudeManagedHooksOnlyConflict(path, settings); err != nil {
+				return err
+			}
 		}
 	}
 	if policyHelper {
