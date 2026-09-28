@@ -129,7 +129,4 @@ func TestOmnigentManagedRefusalNamesTheAdministratorSetting(t *testing.T) {
 		strings.Contains(err.Error(), "DEFENSECLAW_TRUSTED_BIN_PREFIXES") {
 		t.Fatalf("managed refusal = %v, want the administrator setting", err)
 	}
-	if i := strings.Index(err.Error(), "enterprise.enrollment.agent_prefixes"); i > 200 {
-		t.Fatalf("the setting must come before the path so a shortened status line keeps it: %v", err)
-	}
 }

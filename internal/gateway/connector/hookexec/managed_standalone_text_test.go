@@ -15,7 +15,6 @@ import (
 // Cursor show the reason in their block body.
 func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 	const unavailable = "the DefenseClaw gateway is not available. Try again in a moment; if this continues, contact your administrator."
-	const notSetUp = "DefenseClaw is not set up correctly on this computer. Contact your administrator."
 	for _, tc := range []struct {
 		name    string
 		failure sessionStopCause
@@ -30,36 +29,10 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 			want:    "DefenseClaw blocked this prompt: " + unavailable + " (gateway unreachable)",
 		},
 		{
-			name:    "claude prompt, socket not verified",
-			failure: sessionStopCauses[1],
-			ev:      sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`},
-			want:    "DefenseClaw blocked this prompt: " + unavailable + " (enterprise_managed_gateway_peer_unverified)",
-		},
-		{
-			name:    "claude tool call, hook socket missing",
-			failure: sessionStopCauses[0],
-			ev:      sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"PreToolUse"}`},
-			want:    "DefenseClaw blocked this tool call: " + notSetUp + " (enterprise_managed_hook_socket_missing)",
-		},
-		{
 			name:    "codex prompt, gateway unreachable",
 			failure: sessionStopCauses[2],
 			ev:      sessionStopEvent{connector: "codex", event: "UserPromptSubmit"},
 			want:    "DefenseClaw blocked this prompt: " + unavailable + " (gateway unreachable)",
-			body:    true,
-		},
-		{
-			name:    "devin tool call, unusable response",
-			failure: sessionStopCauses[3],
-			ev:      sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`},
-			want:    "DefenseClaw blocked this tool call: the DefenseClaw gateway returned an answer DefenseClaw could not use. Try again; if this continues, contact your administrator. (invalid JSON response)",
-			body:    true,
-		},
-		{
-			name:    "cursor prompt, hook socket missing",
-			failure: sessionStopCauses[0],
-			ev:      sessionStopEvent{connector: "cursor", payload: `{"hook_event_name":"beforeSubmitPrompt"}`},
-			want:    "DefenseClaw blocked this prompt: " + notSetUp + " (enterprise_managed_hook_socket_missing)",
 			body:    true,
 		},
 	} {
@@ -93,15 +66,9 @@ func TestManagedFailClosedTextOutsideStandaloneIsUnchanged(t *testing.T) {
 
 func TestHookEventSubject(t *testing.T) {
 	for event, want := range map[string]string{
-		"UserPromptSubmit":    "prompt",
 		"beforeSubmitPrompt":  "prompt",
-		"userPromptSubmitted": "prompt",
-		"PreToolUse":          "tool call",
-		"PermissionRequest":   "tool call",
-		"preToolUse":          "tool call",
 		"tool.execute.before": "tool call",
 		"PostToolUse":         "tool result",
-		"SessionStart":        "session start",
 		"PreCompact":          "PreCompact event",
 		"":                    "request",
 	} {

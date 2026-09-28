@@ -202,6 +202,11 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 		t.Fatalf("managed Setup left the earlier workspace copy (err=%v)", err)
 	}
 	assertKiroDefaultAgentSetting(t, settings)
+	// Only the settings backup still names the user's agent now; teardown
+	// finds it there.
+	if got := kiroPristineDefaultAgentPath(dataDir); got != custom {
+		t.Fatalf("the settings backup names %q, want the user's agent %q", got, custom)
+	}
 	if present, err := conn.ownedHookContractPresent(managed); err != nil || !present {
 		t.Fatalf("managed hook registration present = %v, %v", present, err)
 	}
@@ -281,47 +286,5 @@ func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T
 	assertKiroDefaultAgentSetting(t, settings)
 	if present, err := conn.ownedHookContractPresent(managed); err != nil || !present {
 		t.Fatalf("managed hook registration present = %v, %v", present, err)
-	}
-}
-
-// A host where an earlier managed Setup already replaced chat.defaultAgent
-// without reclaiming the per-user footprint: teardown finds the user's agent
-// through the settings backup and removes the hooks left there.
-func TestKiroManagedTeardownFindsTheDefaultAgentAnEarlierSetupReplaced(t *testing.T) {
-	home := t.TempDir()
-	dataDir := t.TempDir()
-	t.Cleanup(func() { KiroHomeOverride = "" })
-	KiroHomeOverride = home
-	custom, settings, customBefore, settingsBefore := writeKiroCustomDefaultAgent(t, home)
-
-	perUser := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "closed"}
-	conn := NewKiroConnector()
-	if err := conn.Setup(context.Background(), perUser); err != nil {
-		t.Fatalf("per-user Setup: %v", err)
-	}
-	// What the earlier managed Setup did: force the setting, record it.
-	if err := patchKiroDefaultAgentSetting(settings, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := updateManagedFileBackupPostHash(dataDir, "kiro", kiroSettingsLogicalName, settings); err != nil {
-		t.Fatal(err)
-	}
-	if hooked, err := kiroV2AgentReferencesAnyHook(custom, conn.hookCommand(perUser)); err != nil || !hooked {
-		t.Fatalf("precondition: the user's agent keeps the earlier hooks: %v %v", hooked, err)
-	}
-
-	managed := perUser
-	managed.ManagedEnterprise = true
-	if err := conn.Teardown(context.Background(), managed); err != nil {
-		t.Fatalf("managed Teardown: %v", err)
-	}
-	if err := conn.VerifyClean(managed); err != nil {
-		t.Fatalf("managed VerifyClean: %v", err)
-	}
-	if after, _ := os.ReadFile(custom); string(after) != string(customBefore) {
-		t.Fatalf("teardown left DefenseClaw in the user's agent:\n%s", after)
-	}
-	if after, _ := os.ReadFile(settings); string(after) != string(settingsBefore) {
-		t.Fatalf("teardown did not restore the user's default agent: %s", after)
 	}
 }

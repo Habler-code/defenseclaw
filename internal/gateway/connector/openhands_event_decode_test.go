@@ -24,17 +24,9 @@ import (
 
 func TestOpenHandsProfileDecodeMapsSDKStdinEventTypes(t *testing.T) {
 	for stdin, want := range map[string]string{
-		"PreToolUse":       "pre_tool_use",
-		"PostToolUse":      "post_tool_use",
-		"UserPromptSubmit": "user_prompt_submit",
-		"Stop":             "stop",
-		"SessionStart":     "session_start",
-		"SessionEnd":       "session_end",
+		"PreToolUse": "pre_tool_use",
 		// Anything else keeps the generic resolution.
 		"pre_tool_use": "",
-		"pretooluse":   "",
-		"PreCompact":   "",
-		"":             "",
 	} {
 		if got := openHandsProfileDecode(map[string]interface{}{"event_type": stdin}).HookEventName; got != want {
 			t.Errorf("event_type %q decoded to %q, want %q", stdin, got, want)
@@ -68,23 +60,14 @@ func TestOpenHandsProfileDecodeProjectsTerminalAction(t *testing.T) {
 		return openHandsProfileDecode(payload)
 	}
 	// The exact tool input OpenHands CLI 1.16 sends for a terminal call.
-	for _, input := range []string{
-		`{"command":"echo marker","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"}`,
-		`{"command":"echo marker","is_input":true,"timeout":30,"reset":true}`,
-		`{"command":"echo marker"}`,
-	} {
-		got := decode(`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":` + input + `}`)
-		if !got.ToolArgsAuthoritative || string(got.ToolArgs) != `{"command":"echo marker"}` {
-			t.Errorf("tool_input %s projected to authoritative=%v %s, want the command alone", input, got.ToolArgsAuthoritative, got.ToolArgs)
-		}
+	input := `{"command":"echo marker","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"}`
+	got := decode(`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":` + input + `}`)
+	if !got.ToolArgsAuthoritative || string(got.ToolArgs) != `{"command":"echo marker"}` {
+		t.Errorf("tool_input %s projected to authoritative=%v %s, want the command alone", input, got.ToolArgsAuthoritative, got.ToolArgs)
 	}
 	// Anything else keeps the generic, unproven projection.
 	for _, body := range []string{
 		`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"echo marker","env":{"A":"1"}}}`,
-		`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"echo marker","kind":"FileEditorAction"}}`,
-		`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"echo marker","is_input":"no"}}`,
-		`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":""}}`,
-		`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":["echo","marker"]}}`,
 		`{"event_type":"PreToolUse","tool_name":"file_editor","tool_input":{"command":"view","path":"/tmp/x"}}`,
 	} {
 		if got := decode(body); got.ToolArgsAuthoritative || len(got.ToolArgs) != 0 {

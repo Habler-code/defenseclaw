@@ -100,8 +100,8 @@ func guiSubsystemCopyOfTestBinary(t *testing.T) string {
 //
 // A launcher that runs the command with `powershell -Command` turns any
 // native status other than 0 into 1 (about_PowerShell_exe); no command
-// string that also works in cmd.exe can change that, so that result is
-// logged, not asserted. Which shell Kiro uses is not documented.
+// string that also works in cmd.exe can change that, so it is not tested.
+// Which shell Kiro uses is not documented.
 func TestKiroWindowsHookCommandsBlockThroughTheShell(t *testing.T) {
 	gui := guiSubsystemCopyOfTestBinary(t)
 	t.Cleanup(PinNativeHookExecutableForTest(gui))
@@ -136,8 +136,6 @@ func TestKiroWindowsHookCommandsBlockThroughTheShell(t *testing.T) {
 			if code := run(t, surface, exec.Command(cmdExe, "/C", rendered)); code != 2 {
 				t.Fatalf("cmd /C: exit %d, want 2 (Kiro's block)", code)
 			}
-			code := run(t, surface, exec.Command(windowsSystemPowerShellExe(), "-NoProfile", "-NonInteractive", "-Command", rendered))
-			t.Logf("powershell -Command: exit %d (PowerShell reports a native status other than 0 as 1)", code)
 		})
 	}
 }

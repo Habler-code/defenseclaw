@@ -42,10 +42,7 @@ func TestManagedPluginInstallMarkerRequiresAManagedAbsolutePath(t *testing.T) {
 // foreign-hook guard; while the marker exists it still fails closed, and a
 // render without a marker never relaxes.
 func TestOpenCodePluginStopsFailingClosedOnceTheDeploymentIsRemoved(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required for the OpenCode plugin marker test")
-	}
+	node := nodeForTest(t)
 	root := testenv.PrivateTempDir(t)
 	marker := filepath.Join(root, "DefenseClaw-HookRuntime")
 	if err := os.MkdirAll(marker, 0o700); err != nil {

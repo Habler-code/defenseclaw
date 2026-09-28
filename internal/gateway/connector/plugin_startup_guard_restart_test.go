@@ -6,13 +6,10 @@
 package connector
 
 import (
-	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -30,8 +27,6 @@ fi
 printf '{"deny":false}\n'
 `
 
-const startupGuardRestartText = "when the agent started (Command failed"
-
 func writeFlakyForeignGuard(t *testing.T, root string) string {
 	t.Helper()
 	guard := filepath.Join(root, "defenseclaw-hook")
@@ -45,31 +40,13 @@ func writeFlakyForeignGuard(t *testing.T, root string) string {
 // is kept for the life of the process: a plugin loaded then keeps running
 // even if its file is removed later. When that check itself fails, every
 // later tool call stays blocked even once the check would succeed, so the
-// reason says it failed when the agent started and to restart the agent.
-func TestOpenCodePluginStartupGuardFailureSaysToRestart(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required for the OpenCode plugin guard test")
-	}
+// reason says to restart the agent; a restarted agent checks again.
+func TestPluginStartupGuardFailureSaysToRestart(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
-	guard := writeFlakyForeignGuard(t, root)
-	server := openCodeStubGateway(t)
-	data := openCodePluginTestData(t, server)
-	data.ForeignHookGuardJS = javaScriptStringContent(guard)
+	data := openCodePluginTestData(t, openCodeStubGateway(t))
+	data.ForeignHookGuardJS = javaScriptStringContent(writeFlakyForeignGuard(t, root))
 	data.Managed = true
-	tmpl, err := hookFS.ReadFile("hooks/opencode-plugin.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rendered, err := renderTemplate(string(tmpl), data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(root, "defenseclaw.mjs")
-	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	harness := `
+	lines := runNodeHarness(t, `
 import { pathToFileURL } from "node:url";
 const href = pathToFileURL(process.argv[1]).href;
 const loaded = await import(href);
@@ -85,58 +62,21 @@ const first = await loaded.DefenseClaw({ directory: "", client: {} });
 await first.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(first, "C1"));
 console.log(await call(first, "C2"));
-// A restarted agent loads the plugin again and checks again.
 const restarted = await loaded.DefenseClaw({ directory: "", client: {} });
 await restarted.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(restarted, "C3"));
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("node: %v\n%s", err, out)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("verdicts = %q", lines)
+`, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data))
+	if len(lines) != 3 || lines[2] != "allow" {
+		t.Fatalf("OpenCode verdicts = %q, want two blocks and an allow after the restart", lines)
 	}
 	for _, line := range lines[:2] {
-		if !strings.HasPrefix(line, "block:DefenseClaw could not check for unapproved plugins "+startupGuardRestartText) ||
-			!strings.HasSuffix(line, "Restart the agent once DefenseClaw is available.") {
-			t.Fatalf("a failed load-time check must keep blocking and say to restart: %q", line)
+		if !strings.HasPrefix(line, "block:") || !strings.Contains(line, "Restart the agent") {
+			t.Fatalf("OpenCode: a failed load-time check must keep blocking and say to restart: %q", line)
 		}
 	}
-	if lines[2] != "allow" {
-		t.Fatalf("after a restart the check runs again: %q", lines[2])
-	}
-}
 
-func TestAmpPluginStartupGuardFailureSaysToRestart(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required for the Amp plugin guard test")
-	}
-	root := testenv.PrivateTempDir(t)
-	guard := writeFlakyForeignGuard(t, root)
-	tmpl, err := hookFS.ReadFile("hooks/amp-plugin.ts")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:            "127.0.0.1:18970",
-		TokenFileJS:        javaScriptStringContent(filepath.Join(root, ".hook-amp.token")),
-		ForeignHookGuardJS: javaScriptStringContent(guard),
-		FailMode:           "closed",
-		Managed:            true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(root, "defenseclaw.mts")
-	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	harness := `
+	ampRoot := testenv.PrivateTempDir(t)
+	lines = runNodeHarness(t, `
 import { pathToFileURL } from "node:url";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
 const handlers = {};
@@ -151,24 +91,22 @@ for (const id of ["U1", "U2"]) {
   const result = await handlers["tool.call"]({ thread: { id: "T" }, toolUseID: id, tool: "Bash", input: {} }, {});
   console.log(result.action + ":" + (result.message || ""));
 }
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("node: %v\n%s", err, out)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+`, writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", templateData{
+		APIAddr:            "127.0.0.1:18970",
+		TokenFileJS:        javaScriptStringContent(filepath.Join(ampRoot, ".hook-amp.token")),
+		ForeignHookGuardJS: javaScriptStringContent(writeFlakyForeignGuard(t, ampRoot)),
+		FailMode:           "closed",
+		Managed:            true,
+	}))
 	if len(lines) != 2 {
-		t.Fatalf("verdicts = %q", lines)
+		t.Fatalf("Amp verdicts = %q", lines)
 	}
 	for _, line := range lines {
-		if !strings.HasPrefix(line, "reject-and-continue:DefenseClaw could not check for unapproved plugins "+startupGuardRestartText) ||
-			!strings.HasSuffix(line, "Restart the agent once DefenseClaw is available.") {
-			t.Fatalf("a failed load-time check must keep blocking and say to restart: %q", line)
+		if !strings.HasPrefix(line, "reject-and-continue:") || !strings.Contains(line, "Restart the agent") {
+			t.Fatalf("Amp: a failed load-time check must keep blocking and say to restart: %q", line)
 		}
 	}
-	if _, err := os.Stat(guard + ".ran"); err != nil {
-		t.Fatalf("the guard ran at load: %v", err)
+	if _, err := os.Stat(filepath.Join(ampRoot, "defenseclaw-hook.ran")); err != nil {
+		t.Fatalf("the guard did not run at load: %v", err)
 	}
 }

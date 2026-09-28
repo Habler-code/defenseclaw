@@ -3,18 +3,15 @@
 package connector
 
 import (
-	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // TestOpenCodeBridgeUsesVerifiedManagedHookSocket pins the standalone managed
@@ -108,10 +105,7 @@ func fakeForeignHookGuard(t *testing.T, answers ...string) (string, string) {
 // per call) aborts the tool before any gateway contact, a denial at load
 // holds for the process, and a guard that cannot run fails closed.
 func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required for the executable OpenCode plugin contract")
-	}
+	nodeForTest(t)
 	var mu sync.Mutex
 	requests := 0
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -133,32 +127,21 @@ func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
 	}
 	run := func(guard string) string {
 		t.Helper()
-		text := renderOpenCodePluginTemplate(t, templateData{
+		plugin := writeRenderedPlugin(t, "opencode-plugin.js", "plugin.mjs", templateData{
 			APIAddr:            listener.Addr().String(),
 			TokenFileJS:        javaScriptStringContent(tokenPath),
 			FailMode:           "closed",
 			ForeignHookGuardJS: javaScriptStringContent(guard),
 			Managed:            true,
 		})
-		plugin := filepath.Join(t.TempDir(), "plugin.mjs")
-		if err := os.WriteFile(plugin, []byte(text), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		script := `const m = await import(process.argv[1]);
+		return strings.Join(runNodeHarness(t, `const m = await import(process.argv[1]);
 const hooks = await m.DefenseClaw({ directory: "/work/repo", worktree: "/work/repo" });
 for (const call of ["c1", "c2"]) {
   try {
     await hooks["tool.execute.before"]({ tool: "bash", sessionID: "s", callID: call }, { args: { command: "echo hi" } });
     console.log("ALLOWED");
   } catch (e) { console.log("THREW:" + e.message); }
-}`
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, node, "--input-type=module", "-e", script, plugin).CombinedOutput()
-		if err != nil {
-			t.Fatalf("node harness: %v\n%s", err, out)
-		}
-		return strings.TrimSpace(string(out))
+}`, plugin), "\n")
 	}
 
 	deny, dir := fakeForeignHookGuard(t, `{"deny":true,"reason":"enterprise_foreign_hook_blocked: The project file /work/repo/.opencode/plugins/x.js adds a plugin"}`)

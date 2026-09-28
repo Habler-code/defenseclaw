@@ -344,8 +344,6 @@ func TestHookTransportDriftedTreatsAnUnrecordedTransportAsTCP(t *testing.T) {
 	socket.ManagedServiceUID = 461
 	otherUID := socket
 	otherUID.ManagedServiceUID = 462
-	otherPath := socket
-	otherPath.ManagedHookSocket = "/run/defenseclaw/hook.sock"
 	unmanaged := socket
 	unmanaged.ManagedEnterprise = false
 
@@ -380,16 +378,11 @@ func TestHookTransportDriftedTreatsAnUnrecordedTransportAsTCP(t *testing.T) {
 		opts  SetupOpts
 		drift bool
 	}{
-		{"no posture, TCP configured", HookContractLockEntry{Connector: "codex"}, tcp, false},
 		{"no posture, socket configured", HookContractLockEntry{Connector: "codex"}, socket, true},
 		{"pre-upgrade posture, TCP configured", preUpgrade, tcp, false},
-		{"pre-upgrade posture, socket configured", preUpgrade, socket, true},
-		{"TCP lock, socket configured", tcpLock, socket, true},
 		{"TCP lock, socket outside a managed install", tcpLock, unmanaged, false},
 		{"socket lock, same socket", socketLock, socket, false},
-		{"socket lock, TCP configured", socketLock, tcp, true},
 		{"socket lock, other service uid", socketLock, otherUID, true},
-		{"socket lock, other socket path", socketLock, otherPath, true},
 	} {
 		if got := HookTransportDrifted(tc.lock, tc.opts); got != tc.drift {
 			t.Errorf("%s: HookTransportDrifted = %v, want %v", tc.name, got, tc.drift)

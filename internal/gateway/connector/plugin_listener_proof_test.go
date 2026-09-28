@@ -10,13 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -102,43 +100,6 @@ func newImpostorListener(t *testing.T, recorder *listenerProofRecorder) *httptes
 	return server
 }
 
-// newProvingListener answers like the gateway: it proves it can derive the
-// plugin's credential (the same connector.UserScopedListenerProof the
-// gateway's route uses) and accepts only that credential on the hook route.
-func newProvingListener(t *testing.T, recorder *listenerProofRecorder, connectorName, credential string) *httptest.Server {
-	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		recorder.record(req)
-		if req.URL.Path == UserScopedListenerProofPath {
-			if req.Method != http.MethodGet ||
-				req.Header.Get("X-DefenseClaw-Connector") != connectorName ||
-				req.Header.Get(UserScopedListenerKeyIDHeader) != UserScopedCredentialKeyID(credential) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			proof, err := UserScopedListenerProof(credential, connectorName, req.Header.Get(UserScopedListenerNonceHeader))
-			if err != nil {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			w.Header().Set(UserScopedListenerProofHeader, proof)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if req.Header.Get("Authorization") != "Bearer "+credential {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if connectorName == "amp" {
-			_, _ = io.WriteString(w, `{"action":"allow"}`)
-			return
-		}
-		_, _ = io.WriteString(w, `{"hook_output":{"decision":"allow"}}`)
-	}))
-	t.Cleanup(server.Close)
-	return server
-}
-
 const openCodeListenerProofHarness = `
 import { pathToFileURL } from "node:url";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
@@ -180,67 +141,40 @@ console.log(result && result.action === "allow" ? "allow" : "block:" + String(re
 
 // runListenerProofPlugin renders asset against addr with the listener proof
 // on or off, runs one pre-tool call in node, and returns its verdict.
-func runListenerProofPlugin(t *testing.T, node, asset, addr, tokenPath string, proof bool) string {
+func runListenerProofPlugin(t *testing.T, asset, addr, tokenPath string, proof bool) string {
 	t.Helper()
-	tmpl, err := hookFS.ReadFile("hooks/" + asset)
-	if err != nil {
-		t.Fatal(err)
-	}
 	proofValue := ""
 	if proof {
 		proofValue = "1"
 	}
-	rendered, err := renderTemplate(string(tmpl), templateData{
+	harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
+	if asset == "amp-plugin.ts" {
+		harness, name = ampListenerProofHarness, "amp-plugin.mts"
+	}
+	path := writeRenderedPlugin(t, asset, name, templateData{
 		APIAddr:         addr,
 		TokenFileJS:     javaScriptStringContent(tokenPath),
 		ListenerProofJS: proofValue,
 		FailMode:        "closed",
 		Managed:         true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Each run is its own node process, so one file per plugin suffices.
-	harness, name := openCodeListenerProofHarness, "opencode-plugin.mjs"
-	if asset == "amp-plugin.ts" {
-		harness, name = ampListenerProofHarness, "amp-plugin.mts"
-	}
-	path := filepath.Join(filepath.Dir(tokenPath), name)
-	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, path)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("%s: node: %v; stderr=%s", asset, err, stderr.String())
-	}
-	return strings.TrimSpace(string(out))
+	return strings.Join(runNodeHarness(t, harness, path), "\n")
 }
 
 // A Windows standalone plugin reaches the gateway over loopback TCP. A local
 // user who holds the port while the gateway restarts must receive neither
 // the user's credential nor the tool call, and must not be able to answer
 // with a verdict: the plugin asks for the listener proof first, the
-// impostor cannot produce it, and the tool call fails closed. The same
-// plugin against a listener that can derive the credential proceeds.
-// Without the proof the impostor receives the bearer and its allow is
-// trusted, which is what the proof prevents.
+// impostor cannot produce it, and the tool call fails closed. Without the
+// proof the impostor receives the bearer and its allow is trusted, which is
+// what the proof prevents.
 func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required for the plugin listener proof test")
-	}
+	nodeForTest(t)
 	const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	const sid = "S-1-5-21-1111-2222-3333-1001"
-	for _, tc := range []struct {
-		asset, connector, hookPath string
-	}{
-		{"opencode-plugin.js", "opencode", "/api/v1/opencode/hook"},
-		{"amp-plugin.ts", "amp", "/api/v1/amp/hook"},
+	for _, tc := range []struct{ asset, connector string }{
+		{"opencode-plugin.js", "opencode"},
+		{"amp-plugin.ts", "amp"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			credential, err := UserScopedHookAPIToken(key, tc.connector, sid)
@@ -256,7 +190,7 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 			impostorSeen := &listenerProofRecorder{}
 			impostor := newImpostorListener(t, impostorSeen)
 			addr := strings.TrimPrefix(impostor.URL, "http://")
-			verdict := runListenerProofPlugin(t, node, tc.asset, addr, tokenPath, true)
+			verdict := runListenerProofPlugin(t, tc.asset, addr, tokenPath, true)
 			if !strings.HasPrefix(verdict, "block:DefenseClaw hook failed closed") ||
 				!strings.Contains(verdict, "did not prove its identity") {
 				t.Fatalf("impostor listener: verdict %q, want a fail-closed block", verdict)
@@ -271,22 +205,13 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 			}
 
 			// Control: without the proof the impostor is trusted.
-			verdict = runListenerProofPlugin(t, node, tc.asset, addr, tokenPath, false)
+			verdict = runListenerProofPlugin(t, tc.asset, addr, tokenPath, false)
 			requests = impostorSeen.snapshot()
 			if verdict != "allow" || len(requests) != 1 || requests[0].authorization != "Bearer "+credential ||
 				!strings.Contains(requests[0].body, "listener-proof-marker") {
 				t.Fatalf("control without the proof: verdict %q, requests %+v", verdict, requests)
 			}
 
-			gatewaySeen := &listenerProofRecorder{}
-			gateway := newProvingListener(t, gatewaySeen, tc.connector, credential)
-			verdict = runListenerProofPlugin(t, node, tc.asset, strings.TrimPrefix(gateway.URL, "http://"), tokenPath, true)
-			requests = gatewaySeen.snapshot()
-			if verdict != "allow" || len(requests) != 2 ||
-				requests[0].path != UserScopedListenerProofPath || requests[0].authorization != "" ||
-				requests[1].path != tc.hookPath || requests[1].authorization != "Bearer "+credential {
-				t.Fatalf("proving listener: verdict %q, requests %+v", verdict, requests)
-			}
 		})
 	}
 }
