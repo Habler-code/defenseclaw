@@ -117,3 +117,36 @@ func TestAQueuedApplyRunFromAnOlderBinaryStandsDown(t *testing.T) {
 		t.Fatal("a development build stood down")
 	}
 }
+
+// The stand-down is for a run that waited while a newer binary was
+// installed. When the binaries on disk are older than the record (a
+// package downgrade whose own ensure was refused), the running binary is
+// the installed one: its apply runs must report the mismatch, not stand
+// down with exit 0 and skip every config change.
+func TestAnApplyRunOfTheInstalledOlderBinaryDoesNotStandDown(t *testing.T) {
+	h := newTestHost(t, "linux")
+	h.env.ProductVersion = "2.0.0"
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("2.0.0")}))
+	older := h.payload("1.0.0")
+	for _, name := range []string{binGateway, binHook, binSensorHelper, binACP} {
+		data, err := os.ReadFile(filepath.Join(older, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.BinDir, name)), data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.env.ProductVersion = "1.0.0"
+	edited := strings.Replace(h.read(h.env.Layout.ConfigPath), "mode: observe", "mode: action", 1)
+	if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), []byte(edited), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	if r.NoopReason == "superseded" || (r.OK && r.Noop) {
+		t.Fatalf("the installed older binary's apply run stood down: ok=%v noop=%v reason=%q", r.OK, r.Noop, r.NoopReason)
+	}
+	if r.OK || len(r.Errors) == 0 {
+		t.Fatalf("the binary mismatch is not reported: %+v", r)
+	}
+}

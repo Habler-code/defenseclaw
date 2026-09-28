@@ -11,6 +11,14 @@
 # `defenseclaw-gateway enterprise linux verify` reports any problem.
 
 set -u
+# dpkg runs "postinst abort-remove" after preremove refused a removal because
+# another lifecycle run kept the lock: nothing was removed, so there is
+# nothing to apply, and a second 10-minute wait on the same busy lock would
+# only stall apt.
+case "${1:-}" in
+    abort-remove) exit 0 ;;
+esac
+
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
 state=/var/lib/defenseclaw-enterprise
 

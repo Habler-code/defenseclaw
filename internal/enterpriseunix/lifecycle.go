@@ -135,8 +135,27 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 		result: enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion),
 	}
 	failure := l.run(ctx)
+	// A run can describe the deployment more than once (after a follow-up
+	// transaction, or a refused one), and each pass reports the same
+	// standing warnings; the result names each problem once.
+	l.result.Warnings = uniqueMessages(l.result.Warnings)
 	l.result.Finish(env.GOOS, failure)
 	return l.result
+}
+
+// uniqueMessages drops repeats of an identical code and message, keeping
+// the first occurrence's position.
+func uniqueMessages(messages []enterprisestatus.Message) []enterprisestatus.Message {
+	seen := make(map[enterprisestatus.Message]bool, len(messages))
+	out := messages[:0:0]
+	for _, message := range messages {
+		if seen[message] {
+			continue
+		}
+		seen[message] = true
+		out = append(out, message)
+	}
+	return out
 }
 
 // run returns the specific failure exit code (0 for the generic one).
@@ -281,8 +300,17 @@ const codeSuperseded = "lifecycle_superseded"
 // binary is an older release than the recorded deployment.
 func (l *lifecycle) supersededApplyRun(record *Deployment) bool {
 	running := strings.TrimPrefix(l.env.ProductVersion, "v")
-	return record != nil && l.opts.Action == ActionEnsure && l.opts.Reason == "path" && !l.opts.AllowDowngrade &&
-		running != "dev" && versionPattern.MatchString(running) && compareProductVersions(running, record.ProductVersion) < 0
+	if record == nil || l.opts.Action != ActionEnsure || l.opts.Reason != "path" || l.opts.AllowDowngrade ||
+		running == "dev" || !versionPattern.MatchString(running) || compareProductVersions(running, record.ProductVersion) >= 0 {
+		return false
+	}
+	// Stand down only while the newer binary the record describes is the
+	// one installed. Older binaries on disk (for example a package
+	// downgrade whose own ensure was refused) are this run's binary: it
+	// reports the mismatch instead of silently skipping every change.
+	installed := filepath.Join(l.env.Layout.BinDir, binGateway)
+	digest, err := sha256File(l.env.P(installed))
+	return err == nil && record.Files[installed] != "" && digest == record.Files[installed]
 }
 
 func (l *lifecycle) validateOptions() int {
@@ -711,7 +739,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		code := errorCode(err, codeApply)
 		r.AddError(code, err.Error())
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
-			l.revertRejectedConfig(record, committedConfig)
+			l.revertRejectedConfig(record, committedConfig, nil)
 		}
 		if record != nil {
 			// Refused before any change: the running deployment is untouched,
@@ -808,13 +836,17 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			}
 		}
 		var revertConfig func()
+		var newerConfig []byte
 		if committedConfig != nil {
 			// The snapshot of an in-place edit holds the edited bytes; the
 			// previous deployment's config is the last applied copy. It goes
 			// back before the services restart.
-			revertConfig = func() { l.revertRejectedConfig(record, committedConfig) }
+			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw) }
 		}
 		restored, err := l.rollback(ctx, snap, pending, false, revertConfig)
+		if newerConfig != nil {
+			l.restoreNewerConfig(record, newerConfig)
+		}
 		if err != nil {
 			r.AddError(codeRollbackFailed, err.Error())
 		} else {

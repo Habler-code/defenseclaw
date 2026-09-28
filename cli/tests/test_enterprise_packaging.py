@@ -336,7 +336,9 @@ def test_linux_enterprise_package_ships_every_unit_and_calls_the_lifecycle():
         script = ROOT / "packaging/linux" / name
         assert script.stat().st_mode & 0o111, name
         text = script.read_text(encoding="utf-8")
-        # A maintainer script never fails the package transaction.
+        # A maintainer script does not fail the package transaction on a
+        # lifecycle problem; only preremove refuses a removal, and only while
+        # another lifecycle run keeps the lock (exit 1 before that final line).
         assert "set -e" not in text, name
         assert text.rstrip().endswith("exit 0"), name
 

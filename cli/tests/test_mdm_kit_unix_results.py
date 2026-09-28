@@ -136,6 +136,15 @@ def test_linux_preremove_waits_for_the_lock_and_refuses_the_removal_when_busy(tm
         assert "uninstall reported a problem" in result.stderr
 
 
+# After preremove refuses a removal (busy lock), dpkg runs "postinst
+# abort-remove": the postinstall must not wait on the same lock again.
+def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path) -> None:
+    host = _Host(tmp_path, gateway_rc=75, apply_path_active=True)
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "abort-remove")
+    assert result.returncode == 0, result.stderr
+    assert host.calls() == []
+
+
 def _macos_pkg_postinstall(host: _Host) -> str:
     builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
     match = re.search(r"cat >\"\$SCRIPTS/postinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)

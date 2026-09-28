@@ -44,13 +44,23 @@ func (l *lifecycle) inputsChanged() bool {
 	if _, secretsSHA, err := env.listSecrets(); err == nil && secretsSHA != planned.secretsSHA {
 		return true
 	}
-	if len(r.Errors) > 0 && (!planned.configFromInstalled || hasMessageCode(r.Warnings, codeConfigReverted)) {
-		// A failed --config run put the previous config.yaml back, and a
-		// rejected in-place edit was reverted on purpose.
+	if len(r.Errors) > 0 && !planned.configFromInstalled {
+		// A failed --config run put the previous config.yaml back.
 		return false
 	}
 	current, err := sha256File(env.P(env.Layout.ConfigPath))
-	return err == nil && current != planned.configSHA
+	if err != nil {
+		return false
+	}
+	if len(r.Errors) > 0 && hasMessageCode(r.Warnings, codeConfigReverted) {
+		// A rejected in-place edit was reverted on purpose; only a
+		// config.yaml that is neither the rejected edit nor the restored last
+		// applied config is a newer push to apply (revertRejectedConfig puts
+		// one written during the run back).
+		committed, err := readBounded(env.committedConfigPath(), maxInputBytes)
+		return err == nil && current != planned.configSHA && current != sha256Bytes(committed)
+	}
+	return current != planned.configSHA
 }
 
 // settleInputChanges applies input changes made while a transaction ran;

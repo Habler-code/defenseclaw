@@ -77,23 +77,54 @@ func (l *lifecycle) inPlaceConfigEdit(record *Deployment) []byte {
 
 // revertRejectedConfig puts the last applied config back in place of a
 // rejected in-place edit and keeps the rejected bytes for the
-// administrator.
-func (l *lifecycle) revertRejectedConfig(record *Deployment, committed []byte) {
+// administrator. planned are the bytes this run applied, when it got as far
+// as planning. When config.yaml holds other bytes by now, configuration
+// management wrote a newer file during the run: the kept file is the planned
+// edit, not the newer one nobody checked, and the newer bytes are returned
+// so the caller puts them back once the rollback restart is done and the
+// apply trigger applies them in their own transaction.
+func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned []byte) (newer []byte) {
 	env, r := l.env, l.result
+	rejected := planned
 	if current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
-		if err := env.writeFileAtomic(env.rejectedConfigPath(), current, 0o600, rootOwner()); err != nil {
+		if planned == nil {
+			rejected = current
+		} else if sha256Bytes(current) != sha256Bytes(planned) {
+			newer = current
+		}
+	}
+	if rejected != nil {
+		if err := env.writeFileAtomic(env.rejectedConfigPath(), rejected, 0o600, rootOwner()); err != nil {
 			r.AddWarning(codeConfigReverted, "could not keep a copy of the rejected config: "+err.Error())
 		}
 	}
 	owner := fileOwner{UID: 0, GID: record.ServiceGID}
 	if err := env.writeFileAtomic(env.P(env.Layout.ConfigPath), committed, 0o640, owner); err != nil {
 		r.AddWarning(codeConfigReverted, "the rejected config.yaml is still in place; restoring the last applied config failed: "+err.Error())
-		return
+		return nil
 	}
 	if reverted, err := os.Stat(env.P(env.Layout.ConfigPath)); err == nil {
 		_ = os.Chtimes(env.rejectedConfigPath(), reverted.ModTime(), reverted.ModTime())
 	}
-	r.AddWarning(codeConfigReverted, "config.yaml was not applied; the last applied config is back in place and the rejected file is kept at "+filepath.Join(env.Layout.LifecycleDir, rejectedConfigName))
+	kept := filepath.Join(env.Layout.LifecycleDir, rejectedConfigName)
+	if newer != nil {
+		r.AddWarning(codeConfigReverted, "the config.yaml edit this run applied was not applied and is kept at "+kept+"; config.yaml was written again during the run, and that newer file is put back after the rollback to be applied next")
+		return newer
+	}
+	r.AddWarning(codeConfigReverted, "config.yaml was not applied; the last applied config is back in place and the rejected file is kept at "+kept)
+	return nil
+}
+
+// restoreNewerConfig puts back a config.yaml written during a run whose
+// in-place edit was rejected and reverted (revertRejectedConfig), after the
+// rollback restarted the previous deployment. inputsChanged then sees it and
+// the apply trigger runs ensure for it once this run ends.
+func (l *lifecycle) restoreNewerConfig(record *Deployment, newer []byte) {
+	env, r := l.env, l.result
+	owner := fileOwner{UID: 0, GID: record.ServiceGID}
+	if err := env.writeFileAtomic(env.P(env.Layout.ConfigPath), newer, 0o640, owner); err != nil {
+		r.AddWarning(codeConfigReverted, "the config.yaml written during this run could not be put back ("+err.Error()+"); the last applied config is in place, push the newer config.yaml again")
+	}
 }
 
 // rejectedConfigProblem describes a rejected in-place edit that is still
