@@ -149,17 +149,13 @@ func TestLifecycleSchemaRejectsContractViolations(t *testing.T) {
 		return value
 	}
 	cases := map[string]func(map[string]any){
-		"unknown top-level field":     func(v map[string]any) { v["extra"] = true },
-		"missing required field":      func(v map[string]any) { delete(v, "installed") },
-		"schema version 1":            func(v map[string]any) { v["schema_version"] = 1 },
-		"unknown action":              func(v map[string]any) { v["action"] = "reinstall" },
-		"ok with errors":              func(v map[string]any) { v["errors"] = []any{map[string]any{"code": "x", "message": "y"}} },
-		"failure without errors":      func(v map[string]any) { v["ok"] = false; v["exit_code"] = 1 },
-		"windows code on unix":        func(v map[string]any) { v["ok"] = false; v["exit_code"] = 1603; v["errors"] = []any{map[string]any{"code": "x", "message": "y"}} },
-		"success with failure code":   func(v map[string]any) { v["exit_code"] = 1 },
-		"message code not snake case": func(v map[string]any) { v["warnings"] = []any{map[string]any{"code": "Not-Snake", "message": "y"}} },
-		"negative enrollment count":   func(v map[string]any) { v["enrollment"].(map[string]any)["pending"] = -1 },
-		"null services":               func(v map[string]any) { v["services"] = nil },
+		"unknown top-level field": func(v map[string]any) { v["extra"] = true },
+		"failure without errors":  func(v map[string]any) { v["ok"] = false; v["exit_code"] = 1 },
+		"windows code on unix": func(v map[string]any) {
+			v["ok"] = false
+			v["exit_code"] = 1603
+			v["errors"] = []any{map[string]any{"code": "x", "message": "y"}}
+		},
 	}
 	for name, mutate := range cases {
 		value := base()

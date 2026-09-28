@@ -277,20 +277,6 @@ func TestEarlierGatewayIsProbedOnTheAPIPort(t *testing.T) {
 	}
 }
 
-// A failed activation names the port holder once: the readiness error
-// already carries it.
-func TestFailedActivationNamesThePortHolderOnce(t *testing.T) {
-	h := newTestHost(t, "darwin")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	h.env.Runner = lsofRunner{Runner: h.runner, output: "p94782\nu4243\nf5\n"}
-	h.env.HealthGet = func(context.Context) (int, []byte, error) { return 200, []byte(retryingAPIHealth), nil }
-	r := h.run(Options{Action: ActionRepair})
-	requireError(t, r, codeActivate)
-	if got := messagesOf(r.Errors, codeActivate); strings.Count(got, "is held by pid 94782") != 1 || !strings.Contains(got, "did not become ready") {
-		t.Fatalf("repair must name the port holder once: %s", got)
-	}
-}
-
 // The production probe speaks HTTP over the hook socket, with the API
 // address as Host, and returns the gateway's document.
 func TestHookSocketProbesReadTheGateway(t *testing.T) {

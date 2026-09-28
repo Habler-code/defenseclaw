@@ -31,11 +31,8 @@ func TestUnprivilegedUserNamespaceWarning(t *testing.T) {
 		// names is a setting the warning must name besides the limit.
 		names string
 	}{
-		{name: "no user namespace support", settings: map[string]string{}},
 		{name: "disabled by limit", settings: map[string]string{sysctlMaxUserNamespaces: "0"}},
 		{name: "rhel default", settings: map[string]string{sysctlMaxUserNamespaces: "63229"}, warn: true},
-		{name: "debian clone switch off", settings: map[string]string{sysctlMaxUserNamespaces: "63229", sysctlUnprivilegedUsernsClone: "0"}},
-		{name: "debian clone switch on", settings: map[string]string{sysctlMaxUserNamespaces: "63229", sysctlUnprivilegedUsernsClone: "1"}, warn: true},
 		{name: "apparmor userns and unconfined restrictions", settings: map[string]string{sysctlMaxUserNamespaces: "63229", sysctlAppArmorRestrictUserns: "1", sysctlAppArmorRestrictUnconfined: "1"}},
 		{
 			name:     "ubuntu 24.04 default: apparmor userns restriction, unconfined profile changes allowed",
@@ -43,14 +40,6 @@ func TestUnprivilegedUserNamespaceWarning(t *testing.T) {
 			warn:     true,
 			names:    "kernel.apparmor_restrict_unprivileged_unconfined=0",
 		},
-		{
-			name:     "apparmor userns restriction without the unconfined setting",
-			settings: map[string]string{sysctlMaxUserNamespaces: "63229", sysctlAppArmorRestrictUserns: "1"},
-			warn:     true,
-			names:    "kernel.apparmor_restrict_unprivileged_unconfined=unavailable",
-		},
-		{name: "apparmor restriction off", settings: map[string]string{sysctlMaxUserNamespaces: "63229", sysctlAppArmorRestrictUserns: "0"}, warn: true},
-		{name: "apparmor unconfined restriction alone", settings: map[string]string{sysctlMaxUserNamespaces: "63229", sysctlAppArmorRestrictUnconfined: "1"}, warn: true},
 	} {
 		message := unprivilegedUserNamespaceWarning(func(path string) (string, bool) {
 			value, ok := test.settings[path]

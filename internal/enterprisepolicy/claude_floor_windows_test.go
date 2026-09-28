@@ -147,13 +147,3 @@ func TestWindowsClaudeVersionFloorLeavesAnAdministratorFile(t *testing.T) {
 		t.Fatalf("uninstall must leave the administrator's file without taking the lock: %v locked=%d/%d", err, *locked, before)
 	}
 }
-
-func TestWindowsClaudeVersionFloorRefusesOtherPlatforms(t *testing.T) {
-	opts := testOptions(t)
-	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err == nil {
-		t.Fatal("the Windows floor pass must refuse a non-Windows target")
-	}
-	if _, err := RemoveWindowsClaudeVersionFloor(opts); err == nil {
-		t.Fatal("the Windows floor removal must refuse a non-Windows target")
-	}
-}

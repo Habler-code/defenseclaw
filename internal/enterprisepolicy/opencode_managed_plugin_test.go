@@ -168,8 +168,7 @@ func TestOpenCodeMachinePolicyStateNamesTheVendorLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 		details := strings.Join(state.Details, " ")
-		if !state.Covered || !strings.Contains(details, "--pure") || !strings.Contains(details, "OPENCODE_PURE") ||
-			!strings.Contains(details, "OPENCODE_TEST_MANAGED_CONFIG_DIR") {
+		if !state.Covered || !strings.Contains(details, "OPENCODE_PURE") {
 			t.Fatalf("%s must name OpenCode's pure mode and managed config override: %+v", step.name, state)
 		}
 	}

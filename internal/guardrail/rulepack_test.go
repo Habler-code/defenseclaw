@@ -837,39 +837,10 @@ func leftPad(value int) string {
 	return fmt.Sprintf("%04d", value)
 }
 
-// An over-cost expression is refused with the limit and a way under it; an
-// author used to see only "rule 0 expression is invalid" (MAC-F31,
-// RHEL-F27, UBU-F27).
+// An over-cost expression is refused with the limit it exceeds (the semantic
+// compiler's), per rule and for the whole catalog; an author used to see only
+// "rule 0 expression is invalid".
 func TestLoadRulePackExplainsTheSemanticCostLimits(t *testing.T) {
-	dir := t.TempDir()
-	body := strings.Replace(validRulesYAML("custom", "R-1"), "    title:",
-		"    tool_call_only: true\n    expression: 'f.commands.exists(c, c.argv.exists(a, a.contains(\"x\")))'\n    title:", 1)
-	writeRulePackFile(t, dir, "rules/custom.yaml", body)
-	_, err := LoadRulePack(dir)
-	packErr := requireRulePackError(t, err, "semantic_static_cost")
-	for _, want := range []string{"rule 0 expression", "per-rule limit of 6000000", "nested", "split the check"} {
-		if !strings.Contains(packErr.Reason, want) {
-			t.Errorf("reason = %q, want %q", packErr.Reason, want)
-		}
-	}
-
-	var rules strings.Builder
-	rules.WriteString("version: 1\ncategory: custom\nrules:\n")
-	for index := 0; index < 200; index++ {
-		fmt.Fprintf(&rules, "  - id: R-%d\n    tool_call_only: true\n    expression: 'f.commands.exists(c, c.argv.exists(a, a == \"x\"))'\n"+
-			"    pattern: 'a+'\n    title: valid\n    severity: HIGH\n    confidence: 0.5\n    tags: [test]\n", index)
-	}
-	catalog := t.TempDir()
-	writeRulePackFile(t, catalog, "rules/custom.yaml", rules.String())
-	_, err = LoadRulePack(catalog)
-	packErr = requireRulePackError(t, err, "semantic_catalog_cost_limit")
-	if !strings.Contains(packErr.Reason, fmt.Sprintf("catalog cost limit of %d", semantic.MaxEnabledCatalogStaticCost)) {
-		t.Errorf("catalog reason = %q, want the limit", packErr.Reason)
-	}
-}
-
-// The quoted per-rule limit is the semantic compiler's.
-func TestSemanticRuleStaticCostLimitMatchesTheCompiler(t *testing.T) {
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot resolve the test source path")
@@ -882,11 +853,31 @@ func TestSemanticRuleStaticCostLimitMatchesTheCompiler(t *testing.T) {
 	if match == nil {
 		t.Fatal("maxRuleStaticCost is not declared in internal/guardrail/semantic/limits.go")
 	}
-	want, err := strconv.ParseUint(strings.ReplaceAll(string(match[1]), "_", ""), 10, 64)
-	if err != nil {
-		t.Fatal(err)
+	if want, err := strconv.ParseUint(strings.ReplaceAll(string(match[1]), "_", ""), 10, 64); err != nil || semanticRuleStaticCostLimit != want {
+		t.Fatalf("semanticRuleStaticCostLimit = %d, the compiler enforces %s (%v)", semanticRuleStaticCostLimit, match[1], err)
 	}
-	if semanticRuleStaticCostLimit != want {
-		t.Fatalf("semanticRuleStaticCostLimit = %d, the compiler enforces %d", semanticRuleStaticCostLimit, want)
+
+	dir := t.TempDir()
+	body := strings.Replace(validRulesYAML("custom", "R-1"), "    title:",
+		"    tool_call_only: true\n    expression: 'f.commands.exists(c, c.argv.exists(a, a.contains(\"x\")))'\n    title:", 1)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	_, err = LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "semantic_static_cost")
+	if !strings.Contains(packErr.Reason, strconv.FormatUint(semanticRuleStaticCostLimit, 10)) {
+		t.Errorf("reason = %q, want the per-rule limit", packErr.Reason)
+	}
+
+	var rules strings.Builder
+	rules.WriteString("version: 1\ncategory: custom\nrules:\n")
+	for index := 0; index < 200; index++ {
+		fmt.Fprintf(&rules, "  - id: R-%d\n    tool_call_only: true\n    expression: 'f.commands.exists(c, c.argv.exists(a, a == \"x\"))'\n"+
+			"    pattern: 'a+'\n    title: valid\n    severity: HIGH\n    confidence: 0.5\n    tags: [test]\n", index)
+	}
+	catalog := t.TempDir()
+	writeRulePackFile(t, catalog, "rules/custom.yaml", rules.String())
+	_, err = LoadRulePack(catalog)
+	packErr = requireRulePackError(t, err, "semantic_catalog_cost_limit")
+	if !strings.Contains(packErr.Reason, fmt.Sprintf("%d", semantic.MaxEnabledCatalogStaticCost)) {
+		t.Errorf("catalog reason = %q, want the limit", packErr.Reason)
 	}
 }

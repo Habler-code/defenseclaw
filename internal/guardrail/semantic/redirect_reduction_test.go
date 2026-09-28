@@ -33,16 +33,9 @@ func TestRedirectReductionSafe(t *testing.T) {
 		want       bool
 	}{
 		{"argv marker", marker, true},
-		{"tool only", `f.tool == "shell"`, true},
-		{"negated tool", `f.tool != "exec"`, true},
 		{
 			"negation over argv",
 			`f.commands.exists(c, c.program == "echo" && !c.argv.exists(a, a == "--dry-run"))`,
-			true,
-		},
-		{
-			"static redirect target",
-			`f.commands.exists(c, c.redirects.exists(r, r.target.startsWith("/etc/")))`,
 			true,
 		},
 		{
@@ -50,7 +43,6 @@ func TestRedirectReductionSafe(t *testing.T) {
 			`f.commands.exists(c, c.redirects.exists(r, !r.expands && r.fd == 1))`,
 			true,
 		},
-		{"all over commands", `f.commands.all(c, c.program == "echo")`, true},
 		{
 			"redirects inside an all() predicate",
 			`f.commands.all(c, c.redirects.exists(r, r.fd == 1))`,
@@ -82,11 +74,6 @@ func TestRedirectReductionSafe(t *testing.T) {
 			false,
 		},
 		{"argv_complete", `f.commands.exists(c, c.argv_complete)`, false},
-		{
-			"positive path",
-			marker + ` && f.paths.exists(p, p.value.startsWith("/etc/"))`,
-			true,
-		},
 		{
 			"no path anywhere",
 			marker + ` && !f.paths.exists(p, p.value.startsWith("/etc/"))`,

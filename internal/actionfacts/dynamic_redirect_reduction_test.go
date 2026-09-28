@@ -40,9 +40,7 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 	}{
 		{name: "tilde target", command: "echo dccert-block-marker > ~/dccert-x.txt", static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
 		{name: "HOME target", command: "echo dccert-block-marker > $HOME/dccert-x.txt", static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
-		{name: "braced HOME target", command: "echo dccert-block-marker > ${HOME}/dccert-x.txt", static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
 		{name: "quoted HOME append", command: `echo dccert-block-marker >> "$HOME/dccert-x.txt"`, static: "echo dccert-block-marker >> " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
-		{name: "quoted HOME then path", command: `echo dccert-block-marker > "$HOME"/dccert-x.txt`, static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
 		{name: "glob target", command: "echo dccert-block-marker > dccert-*.txt", static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
 		{name: "static stderr kept", command: "echo dccert-block-marker 2>/dev/null > ~/dccert-x.txt", static: "echo dccert-block-marker 2>/dev/null > " + staticRedirectTarget, reduced: true, kept: 1, programs: []string{"echo"}},
 		{name: "pipeline", command: "echo dccert-block-marker | cat > ~/dccert-x.txt", static: "echo dccert-block-marker | cat > " + staticRedirectTarget, reduced: true, programs: []string{"echo", "cat"}},

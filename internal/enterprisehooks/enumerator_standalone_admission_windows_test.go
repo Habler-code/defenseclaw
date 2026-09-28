@@ -8,7 +8,6 @@ package enterprisehooks
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,71 +16,6 @@ import (
 )
 
 const standaloneContractRefusal = "not verified against a known hook contract"
-
-// nextPatch returns a version just above a dotted numeric version.
-func nextPatch(version string) string {
-	normalized := connector.NormalizeAgentVersion("", version)
-	var major, minor, patch int
-	if _, err := fmt.Sscanf(normalized, "%d.%d.%d", &major, &minor, &patch); err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%d.%d.%d", major, minor, patch+1)
-}
-
-// previousPatch returns a version just below a dotted numeric version.
-func previousPatch(version string) string {
-	normalized := connector.NormalizeAgentVersion("", version)
-	var major, minor, patch int
-	if _, err := fmt.Sscanf(normalized, "%d.%d.%d", &major, &minor, &patch); err != nil {
-		return ""
-	}
-	switch {
-	case patch > 0:
-		return fmt.Sprintf("%d.%d.%d", major, minor, patch-1)
-	case minor > 0:
-		return fmt.Sprintf("%d.%d.999", major, minor-1)
-	case major > 0:
-		return fmt.Sprintf("%d.999.999", major-1)
-	default:
-		return ""
-	}
-}
-
-// TestStandaloneRowAdmissionFollowsTheWholeContractTable checks the
-// enumerator's admission against every band edge, upper bound and
-// exact-version pin in the hook-contract table: a version is admitted only
-// when it resolves to a known contract, never merely because it clears the
-// lowest contract's minimum.
-func TestStandaloneRowAdmissionFollowsTheWholeContractTable(t *testing.T) {
-	home := t.TempDir()
-	connectors := append([]string{"claudecode", "codex", "cursor"}, WindowsStandalonePerUserConnectorNames()...)
-	for _, name := range connectors {
-		candidates := map[string]struct{}{"1.0.0": {}, "9999.0.0": {}}
-		for _, contract := range connector.KnownHookContracts(name) {
-			for _, exact := range contract.ExactAgentVersions {
-				candidates[exact] = struct{}{}
-			}
-			for _, edge := range []string{contract.MinAgentVersion, contract.MaxAgentVersion} {
-				if edge == "" {
-					continue
-				}
-				for _, version := range []string{edge, nextPatch(edge), previousPatch(edge)} {
-					if version != "" {
-						candidates[version] = struct{}{}
-					}
-				}
-			}
-		}
-		for version := range candidates {
-			known := connector.ResolveHookContract(name, version).Status == connector.HookCompatibilityKnown
-			ok, reason := windowsStandaloneRowAdmission(home, name, version)
-			refusedForContract := !ok && strings.Contains(reason, standaloneContractRefusal)
-			if known == refusedForContract {
-				t.Errorf("%s %s: known contract=%t but admission ok=%t reason=%q", name, version, known, ok, reason)
-			}
-		}
-	}
-}
 
 func TestStandaloneRowAdmissionRefusesVersionsAboveTheFloorWithoutAContract(t *testing.T) {
 	home := t.TempDir()

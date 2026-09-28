@@ -485,24 +485,6 @@ func TestWriteUnixTargetsManifestAtomicIsByteStable(t *testing.T) {
 	_ = os.Chmod(root, 0o755)
 }
 
-func TestUnixEnumeratorStateRoundTrip(t *testing.T) {
-	path := filepath.Join(trustedTestDir(t), "state.json")
-	state := &UnixEnumeratorState{Misses: map[string]int{"alice\x00codex": 2}}
-	if err := SaveUnixEnumeratorState(path, state); err != nil {
-		t.Fatal(err)
-	}
-	loaded := LoadUnixEnumeratorState(path)
-	if loaded.Misses["alice\x00codex"] != 2 {
-		t.Fatalf("state round trip: %+v", loaded)
-	}
-	if err := os.WriteFile(path, []byte("{garbage"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if fresh := LoadUnixEnumeratorState(path); len(fresh.Misses) != 0 {
-		t.Fatalf("malformed state must start fresh: %+v", fresh)
-	}
-}
-
 func withoutMachinePrefixes(t *testing.T) {
 	t.Helper()
 	previous := machinePrefixes

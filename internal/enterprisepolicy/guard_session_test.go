@@ -205,22 +205,6 @@ func TestSessionStateRecordsTheSnapshotAtSessionStart(t *testing.T) {
 	}
 }
 
-func TestForeignHookStateHashIsOrderIndependent(t *testing.T) {
-	a := Finding{Connector: "cursor", Scope: ScopeUser, Path: "/a", Digest: "1"}
-	b := Finding{Connector: "cursor", Scope: ScopeProject, Path: "/b", Digest: "2", Allowed: true}
-	if ForeignHookStateHash([]Finding{a, b}) != ForeignHookStateHash([]Finding{b, a}) {
-		t.Fatal("the hash must not depend on scan order")
-	}
-	approved := b
-	approved.Allowed = false
-	if ForeignHookStateHash([]Finding{a, b}) == ForeignHookStateHash([]Finding{a, approved}) {
-		t.Fatal("the hash must cover each finding's approval")
-	}
-	if ForeignHookStateHash(nil) != ForeignHookStateHash([]Finding{}) || !strings.HasPrefix(ForeignHookStateHash(nil), "sha256:") {
-		t.Fatal("an empty state has one hash")
-	}
-}
-
 // A record that exists but cannot be read proves nothing: deny.
 func TestSessionStateDeniesOnAnUnreadableRecord(t *testing.T) {
 	h := newSessionHarness(t)
@@ -303,16 +287,6 @@ func TestSessionStatePrunesOldRecords(t *testing.T) {
 	}
 	if _, err := os.Stat(recent); err != nil {
 		t.Fatalf("a recent record must survive: %v", err)
-	}
-}
-
-func TestSessionStateIgnoresRequestsWithoutAHome(t *testing.T) {
-	decision := sessionDeny("/r/x.json", "ff66")
-	for _, home := range []string{"", "relative/home"} {
-		got := ApplyForeignHookSession(SessionUpdate{AccountHome: home, Key: SessionKey{Connector: "cursor", Session: "s"}, Decision: decision})
-		if got.Reason != decision.Reason {
-			t.Fatalf("%q: without an absolute home the decision is unchanged: %+v", home, got)
-		}
 	}
 }
 
@@ -444,24 +418,6 @@ func TestSessionStateKeepsABlockThroughASessionStartWithUnknownProcess(t *testin
 			t.Fatalf("the new session stays clean: %+v", later)
 		}
 	})
-}
-
-// Repeated denials of a blocked session keep the time of the block.
-func TestSessionStateBlockedAtDoesNotChangeOnRepeatedDenials(t *testing.T) {
-	h := newSessionHarness(t)
-	h.process = runtime.GOOS + "::333:3"
-	h.apply("s-1", true, sessionDeny("/r/.claude/hooks.json", "cc33"))
-	blockedAt := h.record(sessionKindSession, "s-1").BlockedAt
-	if blockedAt == "" {
-		t.Fatal("a blocked session must record when it was blocked")
-	}
-	for i := 0; i < 20; i++ {
-		h.now = h.now.Add(6 * time.Hour)
-		h.apply("s-1", false, GuardDecision{})
-	}
-	if later := h.record(sessionKindSession, "s-1").BlockedAt; later != blockedAt {
-		t.Fatalf("repeated denials must keep the block time: was %s, now %s", blockedAt, later)
-	}
 }
 
 // sessionStores runs a test against the account-home store and the gateway

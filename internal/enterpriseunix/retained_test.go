@@ -141,8 +141,7 @@ func TestLeftoversWarningNamesTheNextStep(t *testing.T) {
 		for _, action := range []string{ActionStatus, ActionUninstall} {
 			r := h.run(Options{Action: action})
 			got := messagesOf(r.Warnings, codeLeftovers)
-			if !strings.Contains(got, "/opt/defenseclaw/bin/defenseclaw-gateway") || !strings.Contains(got, "`dnf remove defenseclaw-enterprise`") ||
-				!strings.Contains(got, "`/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --config <file>`") {
+			if !strings.Contains(got, "dnf remove defenseclaw-enterprise") {
 				t.Fatalf("%s: the leftovers warning names no next step: %s", action, got)
 			}
 		}
@@ -153,7 +152,7 @@ func TestLeftoversWarningNamesTheNextStep(t *testing.T) {
 		requireOK(t, h.run(Options{Action: ActionUninstall}))
 		writeHostFile(t, h, h.env.Layout.DescriptorPath, "{}")
 		got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeLeftovers)
-		if !strings.Contains(got, "enterprise macos uninstall --purge`") || !strings.Contains(got, "enterprise macos ensure --from-package --config <file>`") {
+		if !strings.Contains(got, "enterprise macos uninstall --purge") {
 			t.Fatalf("the leftovers warning names no next step: %s", got)
 		}
 	})

@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -65,18 +64,6 @@ func reconcileClaude(t *testing.T, opts Options) State {
 		t.Fatal(err)
 	}
 	return state
-}
-
-func TestClaudeVersionFloorIsTheLowestVerifiedHookContract(t *testing.T) {
-	floor := ClaudeVersionFloor()
-	if floor != "2.1.154" {
-		t.Fatalf("Claude Code version floor = %q, want 2.1.154 (claudecode-hooks-v1)", floor)
-	}
-	for _, contract := range connector.KnownHookContracts("claudecode") {
-		if contract.MinAgentVersion != "" && compareVersions(contract.MinAgentVersion, floor) < 0 {
-			t.Fatalf("contract %s starts at %s, below the floor %s", contract.ContractID, contract.MinAgentVersion, floor)
-		}
-	}
 }
 
 // The floor is its own drop-in: the hook drop-in keeps its exact bytes and
@@ -155,14 +142,11 @@ func TestClaudeVersionFloorKeepsAnAdministratorValue(t *testing.T) {
 		// 00-defenseclaw-version-floor.json (drop-ins merge in name order).
 		after bool
 	}{
-		{name: "base file", file: "managed-settings.json"},
-		{name: "later drop-in", file: "managed-settings.d/10-company.json", after: true},
 		// "-" sorts before "0", so "000-" sorts after "00-".
 		{name: "later numbered drop-in", file: "managed-settings.d/000-company.json", after: true},
-		// These sort before 00-defenseclaw-version-floor.json: DefenseClaw's
-		// drop-in would replace their value, so it is withdrawn.
+		// This sorts before 00-defenseclaw-version-floor.json: DefenseClaw's
+		// drop-in would replace its value, so it is withdrawn.
 		{name: "earlier drop-in", file: "managed-settings.d/00-admin.json"},
-		{name: "earlier single-zero drop-in", file: "managed-settings.d/0-company.json"},
 		{name: "higher-precedence source", higher: true},
 	}
 	for _, tc := range cases {

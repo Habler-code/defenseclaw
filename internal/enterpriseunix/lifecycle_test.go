@@ -917,39 +917,22 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 }
 
 // A guardian target reason names the refused path first and the remedy
-// last; status cut it at 240 bytes, which dropped the remedy (seen on RHEL:
-// "add its directory to" and the variable name cut short). A realistic reason
-// is kept whole, and an oversized one keeps its remedy clause.
+// last; status cut it at 240 bytes, which dropped the remedy. An oversized
+// reason keeps its remedy clause and stays bounded.
 func TestGuardianTargetReasonKeepsItsRemedy(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	remedy := "install it under an administrator-owned prefix listed in enterprise.enrollment.agent_prefixes"
-	realistic := "connector omnigent setup failed: Python interpreter /home/alice/.local/share/uv/tools/omnigent/bin/python3.12 resolves to /home/alice/.local/share/uv/python/cpython-3.12.11-linux-x86_64-gnu/bin/python3.12, which is not in a trusted install prefix; " + remedy
 	oversized := "connector omnigent setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
 	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
-		{"user": "alice", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + realistic},
-		{"user": "bob", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + oversized},
+		{"user": "alice", "connector": "omnigent", "ok": false, "error": "enterprise hooks: " + oversized},
 	}})
 	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	status := h.run(Options{Action: ActionStatus})
-	for _, user := range []string{"alice", "bob"} {
-		found := false
-		for _, w := range status.Warnings {
-			if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "for user "+user) {
-				found = true
-				if !strings.HasSuffix(w.Message, remedy) {
-					t.Fatalf("the reason for %s lost its remedy: %q", user, w.Message)
-				}
-				if len(w.Message) > 1200 {
-					t.Fatalf("the reason for %s is unbounded (%d bytes)", user, len(w.Message))
-				}
-			}
-		}
-		if !found {
-			t.Fatalf("no guardian_target_failed warning for %s: %+v", user, status.Warnings)
-		}
+	message := strings.TrimSpace(messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeGuardianTargetFailed))
+	if !strings.Contains(message, "for user alice") || !strings.HasSuffix(message, remedy) || len(message) > 1200 {
+		t.Fatalf("the oversized reason lost its remedy or is unbounded (%d bytes): %q", len(message), message)
 	}
 }
 

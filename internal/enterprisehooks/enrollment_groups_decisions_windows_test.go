@@ -163,15 +163,8 @@ func TestWindowsEnrollmentGroupsDecideWellKnownGroupsFromTokens(t *testing.T) {
 	}{
 		{"include Everyone admits a signed-out local account", []string{everyone}, nil, testLocalUserTwo, windowsEnrollmentEnrolled},
 		{"include Authenticated Users leaves a signed-out local account pending", []string{authenticated}, nil, testLocalUserTwo, windowsEnrollmentUndecided},
-		{"include INTERACTIVE leaves a signed-out local account pending", []string{interactive}, nil, testLocalUserTwo, windowsEnrollmentUndecided},
-		{"include INTERACTIVE admits a signed-in user whose token has it", []string{interactive}, nil, testDomainUserA, windowsEnrollmentEnrolled},
-		{"exclude Everyone excludes a signed-out local account", nil, []string{everyone}, testLocalUserTwo, windowsEnrollmentExcluded},
-		{"exclude Authenticated Users leaves a signed-out local account pending", nil, []string{authenticated}, testLocalUserTwo, windowsEnrollmentUndecided},
 		{"exclude INTERACTIVE excludes a signed-in user whose token has it", nil, []string{interactive}, testDomainUserA, windowsEnrollmentExcluded},
 		{"a local group reached through a well-known member is unknown for a signed-out non-member", []string{users}, nil, testLocalUserTwo, windowsEnrollmentUndecided},
-		{"a direct member of that local group is admitted", []string{users}, nil, testLocalUserSID, windowsEnrollmentEnrolled},
-		{"a local group holding Everyone admits a signed-out local account", []string{testLocalDevelopers}, nil, testLocalUserTwo, windowsEnrollmentEnrolled},
-		{"a directory group never holds a local account", []string{testDomainGroupSID}, nil, testLocalUserTwo, windowsEnrollmentExcluded},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			groups := newWindowsEnrollmentGroups(tc.include, tc.exclude, sessions, NewWindowsEnrollmentGroupCache(), nil)

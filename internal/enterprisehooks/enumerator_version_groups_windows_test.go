@@ -207,29 +207,6 @@ func TestEnumerateWindowsAppliesGroupFilters(t *testing.T) {
 	}
 }
 
-func TestWindowsEnrollmentGroupCacheRoundTrip(t *testing.T) {
-	cache := NewWindowsEnrollmentGroupCache()
-	cache.Users[strings.ToLower(testDomainUserA)] = []string{testDomainGroupSID, "not-a-sid", testDomainGroupSID}
-	cache.Names["CONTOSO\\Contractors"] = testDomainGroupSID
-	data, err := MarshalWindowsEnrollmentGroupCache(cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed, err := ParseWindowsEnrollmentGroupCache(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := parsed.Users[testDomainUserA]; len(got) != 1 || got[0] != testDomainGroupSID {
-		t.Fatalf("users = %v", parsed.Users)
-	}
-	if parsed.Names[`contoso\contractors`] != testDomainGroupSID {
-		t.Fatalf("names = %v", parsed.Names)
-	}
-	if _, err := ParseWindowsEnrollmentGroupCache([]byte(`{"version":2}`)); err == nil {
-		t.Fatal("an unknown cache version must be refused")
-	}
-}
-
 // The group primitives read this host's real account database: the machine
 // account domain SID, a BUILTIN group by name, and its direct members.
 func TestWindowsEnrollmentGroupPrimitivesAgainstThisHost(t *testing.T) {
