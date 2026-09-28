@@ -719,18 +719,49 @@ if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
   done
 fi
 
+# launchd_bootout_until_gone label
+#
+# Bootout the given system-domain launchd label and verify it's actually
+# gone before returning. Some Cisco Secure Client components re-bootstrap
+# DefenseClaw's plist on disk shortly after we tear it down (the plist
+# file is still present at this point — we haven't rewritten it yet),
+# and a back-to-back reinstall can race an external supervisor into
+# reappearing the label ~1 s after our initial bootout returned success.
+# Retry a few times with short sleeps so the caller can rely on the
+# post-condition "label is unloaded".
+#
+# Prints one log line per retry. Never dies; the caller checks return.
+# Returns 0 if the label is gone after the retry budget, non-zero if it
+# is still loaded (indicating something is actively re-registering it).
+launchd_bootout_until_gone() {
+  local _label="$1" _tries=0 _max=6
+  while (( _tries < _max )); do
+    if ! launchctl print "system/${_label}" >/dev/null 2>&1; then
+      return 0
+    fi
+    if (( _tries > 0 )); then
+      log "  re-bootout attempt ${_tries} for ${_label} (something re-registered it after quiesce)"
+    fi
+    launchctl bootout "system/${_label}" >/dev/null 2>&1 || true
+    (( _tries++ ))
+    sleep 0.5
+  done
+  # Final probe with the retry budget exhausted.
+  launchctl print "system/${_label}" >/dev/null 2>&1 && return 1 || return 0
+}
+
 # Unload current-generation launchd jobs BEFORE writing plists and
 # binaries. Without this the later `launchctl bootstrap system` races
 # an already-loaded job, and even in the racing-doesn't-lose case the
 # running daemon holds an open file descriptor on the old binary —
 # unloading now guarantees the atomic-replace hits a quiescent target.
-# Best-effort; a failed bootout still lets bootstrap surface a real
-# failure loudly below.
+# The retry helper handles a supervisor re-bootstrapping the plist
+# behind our back on a back-to-back reinstall.
 for _label in "${_current_launchd_labels[@]}"; do
   if launchctl print "system/${_label}" >/dev/null 2>&1; then
     log "unloading current launchd job for reinstall: ${_label}"
-    launchctl bootout "system/${_label}" >/dev/null 2>&1 \
-      || warn "launchctl bootout system/${_label} failed; bootstrap below may still succeed"
+    launchd_bootout_until_gone "${_label}" \
+      || warn "launchctl bootout system/${_label} failed after retries; bootstrap below may still surface a real failure"
   fi
 done
 
@@ -741,8 +772,8 @@ done
 for _label in "${_legacy_launchd_labels[@]}"; do
   if launchctl print "system/${_label}" >/dev/null 2>&1; then
     log "unloading legacy launchd job: ${_label}"
-    launchctl bootout "system/${_label}" >/dev/null 2>&1 \
-      || warn "launchctl bootout system/${_label} failed; legacy plist will be superseded below"
+    launchd_bootout_until_gone "${_label}" \
+      || warn "launchctl bootout system/${_label} failed after retries; legacy plist will be superseded below"
   fi
 done
 
@@ -781,12 +812,21 @@ if [[ "${SKIP_BUILD}" != "true" && ! -x "${BINARY_SRC}" ]]; then
 fi
 [[ -x "${BINARY_SRC}" ]] || die "binary not found or not executable: ${BINARY_SRC}"
 
-# Repeat the launchd/path boundary immediately before mutation. In a
-# reconcile reinstall the current-generation labels were booted out just
-# above, so a label loaded here belongs to a concurrent installer and its
-# plist file must be preserved untouched. In a fresh install, both the
-# label and any of its plist files reappearing means a concurrent
-# installer raced us during the local build.
+# Repeat the launchd/path boundary immediately before mutation.
+#
+# Under reconcile the current-generation labels were booted out just
+# above, and this second check catches an external supervisor
+# (typically Cisco Secure Client's watchdog) that re-bootstrapped the
+# plist behind our back during the local build / binary resolution
+# window. We ATTEMPT re-bootout here rather than dying immediately —
+# back-to-back reinstalls are a supported flow and dying breaks it —
+# but if the label survives the retry budget, something is actively
+# re-registering it and we cannot bootstrap on top; die with an
+# actionable message so the operator can find the supervisor.
+#
+# Under fresh-install both the label and any of its plist files
+# reappearing means a concurrent installer raced us during the local
+# build — still fatal.
 for _lbl_plist in \
   "${LAUNCHD_LABEL}:${PLIST_DST}" \
   "${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}" \
@@ -796,7 +836,13 @@ for _lbl_plist in \
   _lbl="${_lbl_plist%%:*}"
   _plist="${_lbl_plist#*:}"
   if launchctl print "system/${_lbl}" >/dev/null 2>&1; then
-    die "DefenseClaw launchd job appeared after quiesce and was preserved: ${_lbl}"
+    if [[ "${_RECONCILE_REINSTALL}" == "true" ]]; then
+      log "  ${_lbl} reappeared after quiesce; re-bootout before mutation"
+      launchd_bootout_until_gone "${_lbl}" \
+        || die "DefenseClaw launchd job ${_lbl} keeps re-registering after quiesce; a supervisor (e.g. Cisco Secure Client watchdog) is holding it. Stop that supervisor, remove the on-disk plist at ${_plist}, or run the install again after a short pause."
+    else
+      die "DefenseClaw launchd job appeared after quiesce and was preserved: ${_lbl}"
+    fi
   fi
   if [[ "${_RECONCILE_REINSTALL}" != "true" ]]; then
     [[ ! -e "${_plist}" && ! -L "${_plist}" ]] \

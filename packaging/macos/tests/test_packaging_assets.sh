@@ -705,6 +705,18 @@ t_install_reconciles_existing_state() {
   assert_contains "${body}" '"${_RECONCILE_REINSTALL}" != "true"' \
     "managed bundle gates fresh-install refusals on _RECONCILE_REINSTALL"
 
+  # Retry-with-quiesce contract: back-to-back reinstalls must not die when
+  # a supervisor (Cisco Secure Client watchdog, etc.) re-registers the
+  # DefenseClaw plist between our initial bootout and the pre-mutation
+  # boundary. The helper attempts re-bootout with a bounded retry budget
+  # before failing loud with an actionable message.
+  assert_contains "${body}" "launchd_bootout_until_gone" \
+    "managed bundle exposes a bootout-and-verify helper for reconcile reinstall"
+  assert_contains "${body}" "re-bootout before mutation" \
+    "managed bundle re-boots out a reappeared current-gen label under reconcile instead of dying"
+  assert_contains "${body}" "keeps re-registering after quiesce" \
+    "managed bundle surfaces the supervisor-loop failure mode with an actionable message"
+
   local reconcile_line build_line mutation_line
   reconcile_line="$(grep -n "reconciling existing DefenseClaw installation in place" \
     "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
