@@ -200,7 +200,7 @@ func Run(ctx context.Context, opts Options) int {
 		if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
 			return failForeignHookBlocked(opts, sp, reason)
 		}
-		if opts.ExplainUnenrolledAccount && reason == managedSIDUnregisteredReason {
+		if opts.ExplainUnenrolledAccount && reason == managedSIDUnregisteredReason && !sp.failOpenOnly {
 			return failUnenrolled(opts, sp, reason)
 		}
 		return failUnreachable(
