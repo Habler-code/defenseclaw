@@ -4764,7 +4764,7 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 }
 
 func readYAMLObject(path string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(path)
+	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]interface{}{}, nil
@@ -4785,7 +4785,7 @@ func readYAMLObject(path string) (map[string]interface{}, error) {
 }
 
 func readJSONObject(path string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(path)
+	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]interface{}{}, nil

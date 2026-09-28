@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -282,6 +284,44 @@ func TestStandaloneVerifyFollowsAnObserveToActionChangeForOpenHands(t *testing.T
 	requireFailMode("closed")
 	if _, err := Verify(context.Background(), action); err != nil {
 		t.Fatalf("verify after repairing the runtime record: %v", err)
+	}
+}
+
+// A named pipe in place of ~/.openhands/hooks.json stalled the per-user
+// worker until its deadline, and the admin saw only "worker for uid N timed
+// out" for every connector of that user. Verify and repair now fail at once
+// and name the file.
+func TestStandaloneVerifyNamesAPipeInPlaceOfTheHooksFile(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := standaloneOpenHandsHome(t)
+	opts := openHandsStandaloneOptions(home, "action")
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	path := filepath.Join(home, ".openhands", "hooks.json")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan [2]error, 1)
+	go func() {
+		_, verifyErr := Verify(context.Background(), opts)
+		_, installErr := Install(context.Background(), opts)
+		errs <- [2]error{verifyErr, installErr}
+	}()
+	select {
+	case got := <-errs:
+		for i, err := range got {
+			if err == nil || !strings.Contains(err.Error(), path+" is a named pipe") {
+				t.Fatalf("step %d = %v, want an error naming the pipe %s", i, err, path)
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("verify or repair blocked on the named pipe")
 	}
 }
 

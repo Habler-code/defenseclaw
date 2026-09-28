@@ -253,3 +253,20 @@ func agentMatchedRules(reason string) string {
 	}
 	return "rules " + strings.Join(items, ", ")
 }
+
+// agentConfirmUnavailableReason words the block the standalone enterprise
+// profile makes of a confirmation the agent cannot ask for
+// (confirmWithoutAskAgent), so the user learns that the rule wanted their
+// approval instead of reading an ordinary block. It names the rules where
+// agentVerdictReason would, and keeps the display reason otherwise.
+func agentConfirmUnavailableReason(agent, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
+	detail := displayReason
+	if agentVerdictReason("confirm", sourceReason, displayReason, policy) != displayReason {
+		detail = agentMatchedRules(sourceReason)
+	}
+	if detail != "" {
+		detail = " (" + detail + ")"
+	}
+	return "DefenseClaw blocked this action: your organization's policy needs your confirmation for it" + detail +
+		", and " + agent + " cannot ask for it. Contact your administrator if you need it allowed."
+}

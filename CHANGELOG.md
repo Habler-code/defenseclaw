@@ -167,6 +167,10 @@ rest also reach per-user installs.
   and macOS guardian refused every repair after a kiro-cli update. It now
   follows updates at or above 2.24.1, the certified minimum, and in action
   mode refuses to enroll a new user below it.
+- **A named pipe in place of an agent's hook config no longer hangs.**
+  Setup, verify and the enterprise guardian's per-user worker waited for a
+  writer (`worker for uid N timed out`). The read now fails at once with
+  `<path> is a named pipe, not a regular file`.
 
 ### Added
 
