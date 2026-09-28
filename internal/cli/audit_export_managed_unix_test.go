@@ -19,8 +19,7 @@ import (
 // Export has its own config-only initializer, so it applies the managed
 // audit database check itself: an administrator's export on a unix
 // standalone host refuses a service-owned database that fails it, and every
-// other caller reads its own database without the check (MAC-F10, RHEL-F06,
-// UBU-F03 with WIN-F31).
+// other caller reads its own database without the check.
 func TestAuditExportChecksTheManagedDatabaseForAnAdministrator(t *testing.T) {
 	layout := withManagedStandaloneDeployment(t, 991)
 	previousConfig, previousCheck := cfg, managedAuditStoreTrustCheck

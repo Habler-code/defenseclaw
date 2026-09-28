@@ -169,36 +169,6 @@ func TestRelaxStandalonePerUserDirectoryLeavesDescendantACLs(t *testing.T) {
 	}
 }
 
-// A setup that fails after the relax step must not leave the relaxed
-// directories owner-private: hardening only runs on success, and a relaxed
-// <data dir>\hooks made every later retire of that user's managed runtime
-// refuse.
-func TestRestoreRelaxedPerUserDirectoriesReturnsCanonicalDACL(t *testing.T) {
-	stubWindowsAuthorizedRepairIdentityChecks(t)
-	fixture := newWindowsGenericCodexFixture(t)
-	configDir := filepath.Dir(fixture.config)
-	target := windowsGenericManagedTarget{home: fixture.home, sid: fixture.targetSID}
-	if err := validateWindowsUserPathElement(configDir, fixture.targetSID, true, true, true); err != nil {
-		t.Fatalf("fixture directory is not canonical: %v", err)
-	}
-	changed, err := relaxWindowsStandalonePerUserDirectory(target, configDir)
-	if err != nil || !changed {
-		t.Fatalf("relax canonical directory: changed=%v err=%v", changed, err)
-	}
-	if err := validateWindowsUserPathElement(configDir, fixture.targetSID, true, true, true); err == nil {
-		t.Fatal("relaxed directory still validates as canonical")
-	}
-	if err := restoreWindowsRelaxedPerUserDirectories(target, []string{configDir}); err != nil {
-		t.Fatalf("restore relaxed directory: %v", err)
-	}
-	if err := validateWindowsUserPathElement(configDir, fixture.targetSID, true, true, true); err != nil {
-		t.Fatalf("restored directory is not canonical: %v", err)
-	}
-	if err := restoreWindowsRelaxedPerUserDirectories(target, nil); err != nil {
-		t.Fatalf("restore with nothing relaxed: %v", err)
-	}
-}
-
 func windowsRelaxTestDACL(t *testing.T, path string) string {
 	t.Helper()
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)

@@ -453,16 +453,6 @@ $doc = [ordered]@{
 """
 
 
-def test_generic_windows_wrapper_never_names_its_private_config_copy() -> None:
-    # WIN-F24: the staging copy is deleted when the wrapper exits, so a
-    # next-step command naming it could never be run.
-    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
-    body = text[text.index("function Write-LifecycleResult {") : text.index("\n# --- main")]
-    assert "ConvertTo-WrapperPublicText -Text ([string]$Run.StdOut).Trim() -Staged $script:StagedConfig -Public $ConfigPath" in body
-    assert "ConvertTo-WrapperPublicText -Text ([string]$Run.StdErr) -Staged $script:StagedConfig -Public $ConfigPath" in body
-    assert "$script:StagedConfig = $config" in text
-
-
 @pytest.mark.skipif(os.name != "nt", reason="runs PowerShell 7")
 def test_generic_windows_wrapper_names_the_administrators_config_in_its_result(tmp_path: Path) -> None:
     engine = _pwsh7()

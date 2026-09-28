@@ -20,7 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// WIN-F32: a Windows standalone gateway whose API port another process holds
+// A Windows standalone gateway whose API port another process holds
 // keeps retrying the bind, reports the API as failed meanwhile, and binds
 // the port once it is released, instead of ending the API after 30 s while
 // the service stays Running.
@@ -96,7 +96,7 @@ func TestStandaloneHeldAPIPortKeepsRetryingWithoutAHookSocket(t *testing.T) {
 	}
 }
 
-// WIN-F32: when another account holds the API port on the wildcard address,
+// When another account holds the API port on the wildcard address,
 // Windows fails the gateway's 127.0.0.1 bind with WSAEACCES, not "address in
 // use". A Windows standalone gateway keeps retrying that bind too, reports
 // the API as failed meanwhile, and binds the port once it is released.

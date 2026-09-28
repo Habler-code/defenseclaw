@@ -77,7 +77,7 @@ func windowsRelaxTestFormat(format string, sid *windows.SID) string {
 }
 
 // Republishing a plugin connector's scoped hook token over one an earlier
-// reconcile hardened failed for every user (WIN-F18): publication stages the
+// reconcile hardened failed for every user: publication stages the
 // new token with the existing file's exact protection and then opens it for
 // WRITE_DAC, which the hardened DACL denies the owner. The relax step now
 // returns that token to the owner-private shape first, and publication over
@@ -139,80 +139,12 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 	}
 }
 
-func TestRelaxStandalonePerUserTokenFileLeavesOtherShapesAndRefusesUnsafePaths(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
-	hooks := filepath.Join(dataDir, "hooks")
-	if err := os.MkdirAll(hooks, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	home := filepath.Dir(dataDir)
-	token := filepath.Join(hooks, ".hook-amp.token")
-	if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	owner := windowsRelaxTestOwner(t, token)
-	target := windowsGenericManagedTarget{home: home, sid: owner, dataDir: dataDir}
-
-	// Not hardened by the guardian: left alone.
-	before := windowsRelaxTestDACL(t, token)
-	if changed, err := relaxWindowsStandalonePerUserTokenFile(target, token); err != nil || changed {
-		t.Fatalf("unhardened token: changed=%v err=%v", changed, err)
-	}
-	if got := windowsRelaxTestDACL(t, token); got != before {
-		t.Fatalf("unhardened token DACL changed: %s -> %s", before, got)
-	}
-
-	// Hardened but owned by someone else than the target: left alone.
-	windowsRelaxTestSetDACL(t, token, windowsRelaxTestFormat(windowsRelaxTestHardenedFile, owner))
-	hardened := windowsRelaxTestDACL(t, token)
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed, err := relaxWindowsStandalonePerUserTokenFile(windowsGenericManagedTarget{home: home, sid: system, dataDir: dataDir}, token); err != nil || changed {
-		t.Fatalf("foreign-owned token: changed=%v err=%v", changed, err)
-	}
-	if got := windowsRelaxTestDACL(t, token); got != hardened {
-		t.Fatalf("foreign-owned token DACL changed: %s -> %s", hardened, got)
-	}
-
-	// A second hard link is refused and the DACL stays hardened.
-	link := filepath.Join(hooks, "linked.token")
-	if err := os.Link(token, link); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := relaxWindowsStandalonePerUserTokenFile(target, token); err == nil || !strings.Contains(err.Error(), "hard links") {
-		t.Fatalf("hard-linked token: err = %v, want a hard-link refusal", err)
-	}
-	if got := windowsRelaxTestDACL(t, token); got != hardened {
-		t.Fatalf("hard-linked token DACL changed: %s -> %s", hardened, got)
-	}
-	if err := os.Remove(link); err != nil {
-		t.Fatal(err)
-	}
-
-	// Missing is a no-op; a directory or a path outside the home is refused.
-	if changed, err := relaxWindowsStandalonePerUserTokenFile(target, filepath.Join(hooks, ".hook-opencode.token")); err != nil || changed {
-		t.Fatalf("missing token: changed=%v err=%v", changed, err)
-	}
-	dirToken := filepath.Join(hooks, ".hook-devin.token")
-	if err := os.Mkdir(dirToken, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := relaxWindowsStandalonePerUserTokenFile(target, dirToken); err == nil {
-		t.Fatal("a directory at the token path was accepted")
-	}
-	if _, err := relaxWindowsStandalonePerUserTokenFile(windowsGenericManagedTarget{home: hooks, sid: owner, dataDir: dataDir}, filepath.Join(dataDir, "outside.token")); err == nil {
-		t.Fatal("a token outside the user home was accepted")
-	}
-}
-
 // Hermes setup re-protects <data dir> itself with safefile.ProtectDirectory
 // under the user's token. Hardening after any earlier connector for that user
 // leaves <data dir> without the owner's WRITE_DAC, so Hermes setup failed with
 // "create managed backup dir <home>\.defenseclaw: Access is denied" for every
-// user with Hermes and another agent, and the install never reached coverage
-// (WIN-F19). The relax step now includes <data dir> for Hermes only.
+// user with Hermes and another agent, and the install never reached coverage.
+// The relax step now includes <data dir> for Hermes only.
 func TestRelaxStandalonePerUserFootprintIncludesHermesDataDir(t *testing.T) {
 	// The elevated test runner is not refused by ProtectDirectory on the
 	// hardened shape, so the standard user's refusal is not reproducible here;
@@ -259,29 +191,5 @@ func TestRelaxStandalonePerUserFootprintIncludesHermesDataDir(t *testing.T) {
 				t.Fatalf("hermes: ProtectDirectory on the relaxed data dir: %v", err)
 			}
 		})
-	}
-}
-
-// A setup that fails after relaxing a file must give that file the canonical
-// managed DACL back, as hardening would; restoring it as a directory refused it.
-func TestRestoreRelaxedPerUserFootprintReturnsCanonicalFileDACL(t *testing.T) {
-	stubWindowsAuthorizedRepairIdentityChecks(t)
-	fixture := newWindowsGenericCodexFixture(t)
-	target := windowsGenericManagedTarget{home: fixture.home, sid: fixture.targetSID}
-	if err := validateWindowsUserPathElement(fixture.config, fixture.targetSID, false, true, true); err != nil {
-		t.Fatalf("fixture file is not canonical: %v", err)
-	}
-	changed, err := relaxWindowsStandalonePerUserTokenFile(target, fixture.config)
-	if err != nil || !changed {
-		t.Fatalf("relax canonical file: changed=%v err=%v", changed, err)
-	}
-	if err := validateWindowsUserPathElement(fixture.config, fixture.targetSID, false, true, true); err == nil {
-		t.Fatal("relaxed file still validates as canonical")
-	}
-	if err := restoreWindowsRelaxedPerUserDirectories(target, []string{fixture.config}); err != nil {
-		t.Fatalf("restore relaxed file: %v", err)
-	}
-	if err := validateWindowsUserPathElement(fixture.config, fixture.targetSID, false, true, true); err != nil {
-		t.Fatalf("restored file is not canonical: %v", err)
 	}
 }

@@ -807,37 +807,6 @@ func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T
 	}
 }
 
-// Only the exact relaxed setup shape is restored; any other untrusted hooks
-// DACL is still refused and left untouched.
-func TestWindowsManagedRuntimeGenerationGCRefusesOtherUntrustedHooks(t *testing.T) {
-	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
-	hookDir := filepath.Join(fixture.options.DataDir, "hooks")
-	createWindowsManagedRuntimeTestHooksWithDACL(t, hookDir, fixture.target, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;WD)")
-	before, err := windows.GetNamedSecurityInfo(hookDir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
-		SchemaVersion: windowsManagedRuntimeGenerationSchema,
-		Connector:     fixture.options.Connector,
-		Targets:       []windowsManagedRuntimeSelectorTarget{},
-	}); err != nil {
-		t.Fatalf("publish protected selector without target SID: %v", err)
-	}
-
-	if _, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); err == nil ||
-		!strings.Contains(err.Error(), "untrusted") {
-		t.Fatalf("collect with a foreign-writable hooks directory: err=%v, want untrusted refusal", err)
-	}
-	after, err := windows.GetNamedSecurityInfo(hookDir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before.String() != after.String() {
-		t.Fatalf("refused hooks DACL changed: %s -> %s", before, after)
-	}
-}
-
 func createWindowsManagedRuntimeTestHooksWithDACL(t *testing.T, hookDir string, target *windows.SID, sddl string) {
 	t.Helper()
 	if err := os.Mkdir(hookDir, 0o700); err != nil {

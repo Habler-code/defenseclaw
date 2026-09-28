@@ -60,8 +60,8 @@ func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
 		t.Fatalf("a second publish must be a no-op: changed=%v err=%v", again.Changed, err)
 	}
 	// OpenCode's runtime opens a module with FILE_WRITE_ATTRIBUTES, so a
-	// standard account loads the plugin only when Users hold that right
-	// (WIN-F43). A copy with read and execute only, as 1.0.52 wrote it, is
+	// standard account loads the plugin only when Users hold that right.
+	// A copy with read and execute only, as 1.0.52 wrote it, is
 	// rewritten by the next publish.
 	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || !loadable {
 		t.Fatalf("the installed plugin must be loadable by Users: %v %v", loadable, err)

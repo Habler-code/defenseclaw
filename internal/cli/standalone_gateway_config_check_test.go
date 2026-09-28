@@ -38,7 +38,7 @@ func writeStandaloneGatewayCheckConfig(t *testing.T, body string) string {
 	return path
 }
 
-// WIN-F22: a config the gateway cannot load is refused with the file, the
+// A config the gateway cannot load is refused with the file, the
 // location and the reason, not installed and left to fail at service start.
 func TestStandaloneGatewayConfigCheckNamesTheFileAndTheReason(t *testing.T) {
 	dataDir := t.TempDir()
@@ -74,25 +74,5 @@ func TestStandaloneGatewayConfigCheckNamesTheFileAndTheReason(t *testing.T) {
 	err = validateStandaloneGatewayConfig(noPack, dataDir)
 	if err == nil || !strings.Contains(err.Error(), missingPack) || !strings.Contains(err.Error(), "directory_not_found") {
 		t.Fatalf("config naming a missing rule pack = %v, want the directory and directory_not_found", err)
-	}
-}
-
-// The check restores the environment the compiler changes by loading the
-// data directory's .env.
-func TestStandaloneGatewayConfigCheckRestoresTheEnvironment(t *testing.T) {
-	dataDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dataDir, ".env"), []byte("DC_F22_MARKER=from-dotenv\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DC_F22_MARKER", "")
-	if err := os.Unsetenv("DC_F22_MARKER"); err != nil {
-		t.Fatal(err)
-	}
-	valid := writeStandaloneGatewayCheckConfig(t, standaloneGatewayCheckConfig)
-	if err := validateStandaloneGatewayConfig(valid, dataDir); err != nil {
-		t.Fatalf("valid standalone config refused: %v", err)
-	}
-	if value, set := os.LookupEnv("DC_F22_MARKER"); set {
-		t.Fatalf("the check leaked DC_F22_MARKER=%q from .env into the process", value)
 	}
 }

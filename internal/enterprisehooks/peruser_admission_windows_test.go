@@ -90,7 +90,7 @@ func TestWindowsStandalonePerUserAdmissionSelectsOnlyAdmissibleImages(t *testing
 	if got, reason := windowsStandalonePerUserManagedExecutable(home, "hermes"); got != hermes {
 		t.Fatalf("hermes = %q (%s), want %q", got, reason, hermes)
 	}
-	// WIN-F27: an image this token cannot read (a folder on its path left
+	// An image this token cannot read (a folder on its path left
 	// with an older release's owner-only permissions) is reported as
 	// unreadable with the way forward, not as missing.
 	if err := os.Remove(hermes); err != nil {

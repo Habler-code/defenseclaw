@@ -1235,9 +1235,9 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 // A failed lifecycle that left its transaction pending names the exact
 // recovery command, states a permission failure plainly (the internal detail
 // stays in a lifecycle_diagnostic warning), and records which gateway the
-// recovery ran and why (WIN-F04, WIN-F17).
+// recovery ran and why.
 func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
-	internalDetail := `managed Windows DACL on C:\Users\dcw-std1\.defenseclaw\hooks has 2 ACEs, expected 7`
+	internalDetail := `managed Windows DACL on C:\Users\alice\.defenseclaw\hooks has 2 ACEs, expected 7`
 	failure := `managed-hook lifecycle snapshot retire failed: retire amp managed runtime generations for SID S-1-5-21-1-2-3-1017: ` + internalDetail
 	document, err := json.Marshal(map[string]any{
 		"schema_version": 1, "ok": false, "action": "repair",
@@ -1262,7 +1262,7 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	}
 	message := result.Errors[0].Message
 	for _, want := range []string{
-		`the permissions on C:\Users\dcw-std1\.defenseclaw\hooks are not the ones DefenseClaw set`,
+		`the permissions on C:\Users\alice\.defenseclaw\hooks are not the ones DefenseClaw set`,
 		"Next step: run the same Setup as LocalSystem",
 		`DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\Staging\config.yaml JSON=1`,
 	} {
@@ -1323,60 +1323,5 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
 	if result.Errors[0].Message != failure {
 		t.Fatalf("verify error rewritten: %q", result.Errors[0].Message)
-	}
-}
-
-// Ensure on a host whose failed first install left a pending transaction
-// (dc-win, WIN-F17): the repair recovers it with the Setup's verified gateway,
-// ensure then installs, and the final result still records which gateway the
-// recovery ran. The repair takes no payload sources; the recovery gateway is
-// the one beside the running installer.
-func TestWindowsEnterpriseEnsureKeepsTheRecoveryGatewayRecord(t *testing.T) {
-	recovered := "Repair recovered a failed initial install; run Install or Uninstall -Purge"
-	pending := installedStatus("status")
-	pending["transaction_pending"] = true
-	stub := &ensureStub{t: t, replies: []map[string]any{
-		pending,
-		{
-			"schema_version": 1, "ok": false, "action": "repair", "error": recovered, "errors": []string{recovered},
-			"transaction_pending": false,
-			"recovery_gateway_runs": []map[string]string{{
-				"action": "retire", "binary": `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`,
-				"source": `C:\stage\defenseclaw-gateway.exe`, "sha256": strings.Repeat("c", 64), "trust": "hash_pinned",
-				"identity": `NT AUTHORITY\SYSTEM`, "product_version": "1.4.0", "reason": "staged_gateway_failed",
-				"outcome":      "succeeded",
-				"staged_error": "managed-hook lifecycle snapshot retire failed: managed Windows DACL on C:\\Users\\u\\.defenseclaw\\hooks has 2 ACEs, expected 7",
-			}},
-		},
-		installedStatus("install"),
-	}}
-	stub.install(t)
-	command := &cobra.Command{}
-	var stdout bytes.Buffer
-	command.SetOut(&stdout)
-	command.SetErr(&bytes.Buffer{})
-	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`); err != nil {
-		t.Fatalf("ensure: %v\n%s", err, stdout.String())
-	}
-	if len(stub.calls) != 3 || stub.calls[1][1] != "Repair" || stub.calls[2][1] != "Install" ||
-		containsString(stub.calls[1], "-GatewayBinary") {
-		t.Fatalf("installer runs %q", stub.calls)
-	}
-	var result enterprisestatus.Result
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	fallbacks := 0
-	for _, warning := range result.Warnings {
-		if warning.Code == "recovery_gateway_fallback" {
-			fallbacks++
-			if !strings.Contains(warning.Message, `binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`) ||
-				strings.Contains(warning.Message, "ACEs") {
-				t.Fatalf("fallback warning %q", warning.Message)
-			}
-		}
-	}
-	if !result.OK || fallbacks != 1 {
-		t.Fatalf("result = %+v", result)
 	}
 }

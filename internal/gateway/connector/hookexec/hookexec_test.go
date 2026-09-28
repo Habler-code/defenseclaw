@@ -1911,7 +1911,7 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 		t.Fatalf("stderr = %q, want stable unregistered-SID diagnostic", errb.String())
 	}
 
-	// WIN-F46: the Windows standalone hook says the account is not
+	// The Windows standalone hook says the account is not
 	// enrolled instead of "gateway unreachable", and still blocks.
 	out.Reset()
 	errb.Reset()

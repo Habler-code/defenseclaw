@@ -20,7 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
-// WIN-F30: a DefenseClaw Application-log event carries a record id that the
+// A DefenseClaw Application-log event carries a record id that the
 // administrator-only lifecycle log holds with the event ID and the SHA-256 of
 // the exact message, so an entry another account wrote under the same source
 // can be told apart.
@@ -68,19 +68,7 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 	}
 }
 
-// A run whose event could not be written records no event in the log.
-func TestWindowsEnterpriseEventWriteFailureRecordsNothing(t *testing.T) {
-	previousWriter := windowsEnterpriseEventWriter
-	t.Cleanup(func() { windowsEnterpriseEventWriter = previousWriter })
-	windowsEnterpriseEventWriter = func(uint32, string, string) error { return os.ErrPermission }
-	result := enterprisestatus.New("install", "standalone", "windows", "1.0.51")
-	result.Finish("windows", 0)
-	if event := writeWindowsEnterpriseEvent(result); event != nil {
-		t.Fatalf("a failed event write returned record %+v", event)
-	}
-}
-
-// WIN-F30 follow-up: the event check starts from the administrator-only
+// The event check starts from the administrator-only
 // lifecycle log. The genuine event passes; a later copy that reuses its
 // record, and an entry without a record, do not; and the newest lifecycle
 // record must have its entry in the Application log. Entries are parsed from

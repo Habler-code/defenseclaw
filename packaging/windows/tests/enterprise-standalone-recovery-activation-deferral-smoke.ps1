@@ -3,7 +3,7 @@
 
 #Requires -Version 5.1
 
-# Function-level regression for WIN-F34. A standard account moved its own
+# Function-level regression test. A standard account moved its own
 # ~\.defenseclaw aside; the installed guardian could no longer publish full
 # coverage, a repair failed, and its rollback failed the same way, leaving a
 # pending transaction and every DefenseClaw service stopped. Each later

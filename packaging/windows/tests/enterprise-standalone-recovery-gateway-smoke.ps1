@@ -3,7 +3,7 @@
 
 #Requires -Version 7.0
 
-# Function-level regression for WIN-F17. Recovering a pending transaction
+# Function-level regression test. Recovering a pending transaction
 # runs the managed-hook lifecycle restore and retire with the transaction's
 # staged gateway. When that gateway fails (a release whose retire refuses
 # state it cannot repair), no newer Setup could finish the recovery. A
@@ -55,7 +55,7 @@ $failures = & $module {
     $script:TestLocalSystem = $true
     $script:TestUntrustedSource = ''
     $script:TestVersions = @{}
-    $relaxedHooks = 'managed Windows DACL on C:\Users\dcw-std1\.defenseclaw\hooks has 2 ACEs, expected 7'
+    $relaxedHooks = 'managed Windows DACL on C:\Users\alice\.defenseclaw\hooks has 2 ACEs, expected 7'
 
     function Assert-DefenseClawAdministrator {
     }

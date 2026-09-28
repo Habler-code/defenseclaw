@@ -22,7 +22,7 @@ func stubCursorMachinePolicyPublished(t *testing.T, published bool) {
 	windowsCursorMachinePolicyPublished = func() bool { return published }
 }
 
-// WIN-F39: a user with only the native Cursor Agent CLI (a build folder
+// A user with only the native Cursor Agent CLI (a build folder
 // under %LOCALAPPDATA%\cursor-agent\versions, no package.json) at a reviewed
 // build gets a Cursor row, so the guardian publishes Cursor's machine hooks
 // file; the Secure Client enumerator still ignores the Agent CLI.

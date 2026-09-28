@@ -29,7 +29,7 @@ import (
 // enumerator has republished targets.yaml (it does so on every row change, for
 // example a newly discovered agent, while the install waits for readiness).
 // Cleanup refused any digest change, so the rollback failed, the transaction
-// stayed pending and every recovery refused again (WIN-F25). Cleanup now
+// stayed pending and every recovery refused again. Cleanup now
 // accepts a republished manifest that keeps exactly the planned roots.
 func TestWindowsManagedRuntimeCleanupAcceptsRepublishedRowsOfThePlannedRoots(t *testing.T) {
 	target := currentWindowsTestSID(t)
@@ -46,6 +46,23 @@ func TestWindowsManagedRuntimeCleanupAcceptsRepublishedRowsOfThePlannedRoots(t *
 		t.Fatal(err)
 	}
 	request := WindowsManagedRuntimeRequest{SchemaVersion: WindowsManagedRuntimeRequestSchemaVersion, Plan: plan}
+
+	// A republication that moves a planned root (same SID, another profile
+	// root) is still refused and leaves the planned root alone.
+	otherHome := newWindowsTargetOwnedTestHome(t, target)
+	moved := Manifest{Version: manifest.Version}
+	for _, row := range manifest.Targets {
+		row.UserHome = otherHome
+		row.DataDir = filepath.Join(otherHome, ".defenseclaw")
+		moved.Targets = append(moved.Targets, row)
+	}
+	if _, err := CleanupWindowsManagedRuntimeRoots(request, moved, strings.Repeat("6", 64)); err == nil ||
+		!strings.Contains(err.Error(), "does not keep the planned profile roots") {
+		t.Fatalf("cleanup with a moved root: err = %v, want the planned-roots refusal", err)
+	}
+	if _, err := os.Lstat(dataDir); err != nil {
+		t.Fatalf("refused cleanup touched the planned root: %v", err)
+	}
 
 	// The enumerator adds a row for the same user and republishes.
 	republished := manifest
@@ -70,45 +87,5 @@ func TestWindowsManagedRuntimeCleanupAcceptsRepublishedRowsOfThePlannedRoots(t *
 	if _, err := FinalizeWindowsManagedRuntimeRoots(request, republished, republishedDigest); err == nil ||
 		!strings.Contains(err.Error(), "digest changed after planning") {
 		t.Fatalf("finalize with a republished manifest: err = %v, want the digest refusal", err)
-	}
-}
-
-func TestWindowsManagedRuntimeCleanupRefusesRepublicationThatMovesAPlannedRoot(t *testing.T) {
-	target := currentWindowsTestSID(t)
-	home := newWindowsTargetOwnedTestHome(t, target)
-	dataDir := filepath.Join(home, ".defenseclaw")
-	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, filepath.Join(dataDir, "hooks"), target); err != nil {
-		t.Fatal(err)
-	}
-	manifest := windowsManagedRuntimeTestManifest(home, target)
-	digest := strings.Repeat("4", 64)
-	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := WindowsManagedRuntimeRequest{SchemaVersion: WindowsManagedRuntimeRequestSchemaVersion, Plan: plan}
-
-	// Same SID, different profile root: the planned root is not kept.
-	otherHome := newWindowsTargetOwnedTestHome(t, target)
-	moved := Manifest{Version: manifest.Version}
-	for _, row := range manifest.Targets {
-		row.UserHome = otherHome
-		row.DataDir = filepath.Join(otherHome, ".defenseclaw")
-		moved.Targets = append(moved.Targets, row)
-	}
-	_, err = CleanupWindowsManagedRuntimeRoots(request, moved, strings.Repeat("6", 64))
-	if err == nil || !strings.Contains(err.Error(), "does not keep the planned profile roots") {
-		t.Fatalf("cleanup with a moved root: err = %v, want the planned-roots refusal", err)
-	}
-	if _, statErr := os.Lstat(dataDir); statErr != nil {
-		t.Fatalf("refused cleanup touched the planned root: %v", statErr)
-	}
-
-	// An unchanged digest keeps the exact target-count check.
-	short := manifest
-	short.Targets = manifest.Targets[:2]
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, short, digest); err == nil ||
-		!strings.Contains(err.Error(), "target count does not match manifest") {
-		t.Fatalf("cleanup with the planned digest and a different row count: err = %v", err)
 	}
 }

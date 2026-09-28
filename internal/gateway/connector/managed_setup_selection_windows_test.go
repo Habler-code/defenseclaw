@@ -116,7 +116,7 @@ func TestManagedSetupSelectionRefusesUnknownContractsAndUnprotectedConnectors(t 
 	}
 }
 
-// WIN-F34: a standard user moved their own ~\.defenseclaw aside, so the
+// A standard user moved their own ~\.defenseclaw aside, so the
 // guardian's runtime-only OpenCode row found neither the protected contract
 // lock nor a setup receipt and could never republish the contract. The
 // guardian's managed selection receipt is the authority that re-establishes

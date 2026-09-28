@@ -169,7 +169,7 @@ func TestWindowsEnterpriseEnsureUpgradesAfterFinishingAPendingTransaction(t *tes
 	}
 }
 
-// WIN-F34: a pending repair transaction whose restored release cannot be
+// A pending repair transaction whose restored release cannot be
 // reactivated. Recovery leaves it stopped and the repair fails on purpose;
 // ensure then upgrades to this Setup's release in the same invocation. A
 // repair that fails for any other reason is reported, not followed.

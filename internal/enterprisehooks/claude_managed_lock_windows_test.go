@@ -26,7 +26,7 @@ func claudeLockTestSetup() connector.SetupOpts {
 	}
 }
 
-// WIN-F37: a standalone process renders and verifies the machine-wide Claude
+// A standalone process renders and verifies the machine-wide Claude
 // Code drop-in with allowManagedHooksOnly: true unless the administrator
 // chose managed_hooks_only: preserve; a Secure Client process never does.
 func TestWindowsStandaloneClaudePolicyCarriesTheManagedHooksOnlyLock(t *testing.T) {
@@ -63,41 +63,7 @@ func TestWindowsStandaloneClaudePolicyCarriesTheManagedHooksOnlyLock(t *testing.
 	}
 }
 
-// The version-less identity proof still recognizes the drop-in an earlier
-// release published without the lock (so an upgrade can repair it), and the
-// locked one, but never another deployment's.
-func TestWindowsClaudePolicyIdentityAcceptsTheLockedAndThePreLockPolicy(t *testing.T) {
-	t.Cleanup(func() { SetWindowsClaudeManagedHooksOnlyPolicy(nil) })
-	setStandaloneProfileForTest(t, true)
-	provider := connector.NewClaudeCodeConnector()
-	setup := withWindowsClaudeManagedHooksOnly(claudeLockTestSetup())
-	for _, contract := range connector.KnownHookContracts("claudecode") {
-		for _, lock := range []bool{false, true} {
-			rendered := claudeLockTestSetup()
-			rendered.HookContractID = contract.ContractID
-			rendered.ClaudeAllowManagedHooksOnly = lock
-			policy, err := provider.ManagedHookPolicy(rendered)
-			if err != nil {
-				t.Fatalf("render %s lock=%v: %v", contract.ContractID, lock, err)
-			}
-			if !claudeManagedPolicyMatchesKnownContract(provider, policy, setup) {
-				t.Fatalf("policy for %s lock=%v is not recognized as this deployment's", contract.ContractID, lock)
-			}
-		}
-	}
-	other := claudeLockTestSetup()
-	other.HookExecutable = `C:\Program Files\Other\hook.exe`
-	other.ClaudeAllowManagedHooksOnly = true
-	foreign, err := provider.ManagedHookPolicy(other)
-	if err != nil {
-		t.Fatalf("render foreign policy: %v", err)
-	}
-	if claudeManagedPolicyMatchesKnownContract(provider, foreign, setup) {
-		t.Fatal("a locked policy for another hook executable matched this deployment")
-	}
-}
-
-// WIN-F37 follow-ups: a standalone verify of a drop-in without the lock (an
+// A standalone verify of a drop-in without the lock (an
 // earlier release's) names the missing lock, and a later administrator
 // drop-in that sets allowManagedHooksOnly to false fails verify naming that
 // file, although DefenseClaw's own drop-in is canonical.

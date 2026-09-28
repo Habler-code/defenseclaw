@@ -158,7 +158,7 @@ try {
                     $errors += "hook guardian state is not fresh: updated_at $stamp is stale (older than 5m0s)"
                 }
                 if ($Failures -ne 0) {
-                    $errors += 'last guardian reconcile failed for dcw-std1/codex: marker'
+                    $errors += 'last guardian reconcile failed for alice/codex: marker'
                 }
                 $report = [ordered]@{
                     ok = $Ok
