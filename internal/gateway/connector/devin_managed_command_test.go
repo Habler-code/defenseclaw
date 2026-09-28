@@ -122,6 +122,9 @@ func TestDevinManagedCommandOnlyForUnixStandalone(t *testing.T) {
 	if got := devinManagedHookCommand("windows", managedOpts); got != "" {
 		t.Fatalf("Windows must keep its Devin command, got %q", got)
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the Linux and macOS commands take an absolute Unix path, which is not absolute on Windows")
+	}
 	if got := devinManagedHookCommand("darwin", managedOpts); !strings.Contains(got, "hook --connector devin --enterprise-managed") {
 		t.Fatalf("macOS standalone command = %q", got)
 	}
