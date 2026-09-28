@@ -85,10 +85,11 @@ else
         (cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
             go build -trimpath -buildvcs=false -ldflags "$3" -o "$ROOT/$INSTALL_BIN/$1" "$2")
     }
-    version_flags="-s -w -X main.version=${VERSION}"
+    COMMIT="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+    version_flags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}"
     build defenseclaw-gateway ./cmd/defenseclaw "$version_flags"
     build defenseclaw-hook ./cmd/defenseclaw-hook "$version_flags"
-    build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "-s -w"
+    build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"
     build defenseclaw-acp ./cmd/defenseclaw-acp "$version_flags"
 fi
 

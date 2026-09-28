@@ -376,6 +376,17 @@ def test_enterprise_required_needs_every_enterprise_gate() -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="bash step")
+def test_latest_go_quiet_startup_check_is_advisory() -> None:
+    jobs = _jobs()
+    job = jobs["quiet-startup-latest-go"]
+    assert job["continue-on-error"] is True
+    (setup,) = [step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/setup-go@")]
+    assert setup["with"] == {"go-version": "stable"}
+    (step,) = [step for step in job["steps"] if step.get("run") == "make check-quiet-startup"]
+    assert step["env"]["GOTOOLCHAIN"] == "local"
+    assert "quiet-startup-latest-go" not in jobs["enterprise-required"]["needs"]
+
+
 def test_enterprise_required_passes_only_when_every_gate_succeeded() -> None:
     passing = dict.fromkeys(ENTERPRISE_GATES, "success")
     result = _run_enterprise_required(passing)
@@ -427,6 +438,12 @@ def test_macos_lifecycle_leg_runs_the_darwin_packages_from_the_checkout() -> Non
     assert step["if"] == "runner.os == 'macOS'"
     assert "continue-on-error" not in step and "working-directory" not in step
     run = step["run"]
+    # The runner's TMPDIR is under /var -> /private/var, and the Claude Code
+    # settings reader refuses a file under a linked parent: the step points
+    # TMPDIR at a link-free folder before the first go test.
+    tmpdir = run.index('TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"')
+    assert run.index("export TMPDIR") > tmpdir
+    assert run.index("go test") > run.index("export TMPDIR")
     assert "go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/gateway/connector/...\n" in run
     assert "for pkg in internal/gateway internal/cli; do\n" in run
     assert 'go test -count=1 -timeout 20m -run "$pattern" "./$pkg"\n' in run

@@ -739,7 +739,12 @@ func TestClaudeCode_ComponentAndWatchTargetsIncludeRecursiveAncestorAgents(t *te
 }
 
 func TestClaudeCode_ComponentAndWatchTargetsIncludeEffectiveAutoMemory(t *testing.T) {
-	root := t.TempDir()
+	// The settings reader refuses a file under a linked parent, and the
+	// default macOS temporary folder is under /var -> /private/var.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	configDir := filepath.Join(root, "claude-home")
 	project := filepath.Join(root, "project")
 	memory := filepath.Join(root, "custom-memory")

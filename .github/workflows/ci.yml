@@ -722,6 +722,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The runner's default TMPDIR is under /var, a symbolic link to
+          # /private/var, and the Claude Code settings reader refuses a file
+          # under a linked parent. Test fixtures go in a link-free folder.
+          mkdir -p "$RUNNER_TEMP/go-tmp"
+          TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
+          export TMPDIR
           go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/gateway/connector/...
           unix_tests() { # unix_tests <test files...>: a -run pattern for their Test functions
             local file names=()
@@ -995,6 +1001,28 @@ jobs:
             [ "$result" = success ] || status=1
           done
           exit "$status"
+
+  quiet-startup-latest-go:
+    # Advisory: the gates above build with go.mod's Go, which a dependency's
+    # start-up warning about a newer toolchain never reaches. This job builds
+    # with the newest stable Go, the way a release host that upgraded its Go
+    # would, and reports such a warning without gating merges.
+    name: Quiet Start-up (latest Go, advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: stable
+      - name: The shipped binaries start without stderr output on the latest Go
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+        run: make check-quiet-startup
 
   python-audit:
     name: Python Dependency Audit
