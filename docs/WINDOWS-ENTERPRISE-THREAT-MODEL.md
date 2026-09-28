@@ -447,7 +447,10 @@ not an administrator authority even though it is a machine service.
    coexistence check refuse to run beside an enterprise deployment: while the
    `DefenseClawGateway` service exists, their `install.ps1`, their Setup
    install, upgrade, and repair actions, and their gateway `start`, `restart`,
-   and foreground run all refuse. A production deployment also owns
+   and foreground run all refuse. A per-user gateway already running from
+   such a release checks every five seconds and stops itself. Setup rollback
+   and interrupted-operation recovery leave it stopped and disable logon
+   auto-start. A production deployment also owns
    `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1`. It never
    changes a value that Group Policy or another administrator already set, and
    Uninstall, including the `Uninstall -Purge` exact-scope recovery that runs
