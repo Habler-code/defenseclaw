@@ -167,6 +167,9 @@ rest also reach per-user installs.
   `requiredMinimumVersion` to 2.1.154 in its own `managed-settings.d`
   drop-in. An administrator's value wins; `enterprise policy show|verify`
   report the floor, and `connectors.claudecode.version_floor` controls it.
+  Claude Code reads the setting only from 2.1.163, so this floor stops no
+  build older than that
+  ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)).
 
 ### Changed
 

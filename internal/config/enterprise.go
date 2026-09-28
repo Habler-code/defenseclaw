@@ -129,9 +129,10 @@ type EnterpriseConnectorPolicy struct {
 	// VersionFloor is valid only in connectors.claudecode (validation
 	// refuses it in default and in any other connector). It controls
 	// DefenseClaw's requiredMinimumVersion drop-in
-	// (managed-settings.d/00-defenseclaw-version-floor.json), which makes
-	// Claude Code builds older than the lowest verified hook contract refuse
-	// to start. enforce (default) writes it while no administrator source
+	// (managed-settings.d/00-defenseclaw-version-floor.json), which sets the
+	// lowest verified hook contract as the minimum. Claude Code reads the
+	// setting only from 2.1.163, so older builds ignore it. enforce
+	// (default) writes it while no administrator source
 	// sets requiredMinimumVersion; report only reports; off does neither.
 	// It does not inherit from default.
 	VersionFloor string `mapstructure:"version_floor" yaml:"version_floor,omitempty"`

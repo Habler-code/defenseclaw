@@ -798,7 +798,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
-	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now())
+	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), enterpriseHookPerUserEnrolled(manifest, machinePolicy))
 	return run, nil
 }
 
