@@ -45,7 +45,12 @@ func TestOpenCodeManagedPluginContract(t *testing.T) {
 	if err != nil {
 		t.Skip("node is not installed")
 	}
-	root := t.TempDir()
+	// Node reports the plugin by its resolved path, and on macOS the
+	// temporary folder is under the /var symlink; name it the same way.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	plugin := filepath.Join(root, "share", "opencode", "defenseclaw.js")
 	writeFile(t, plugin, string(OpenCodeManagedPlugin()))
 	// OpenCode loads the plugin as an ES module; tell node the same.
