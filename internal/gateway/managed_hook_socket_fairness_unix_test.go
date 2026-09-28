@@ -334,7 +334,14 @@ func TestManagedHookSocketRateLimitsOneCallerWithoutSlowingAnother(t *testing.T)
 		return peercred.Credentials{}, errors.New("unknown test caller")
 	}
 	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
-	socket, _ := startTestHookSocketServer(t)
+	socket, api := startTestHookSocketServer(t)
+	// Small budgets keep the flood well past uid 7001's limit even when the
+	// race detector slows every request down, and leave uid 7002's paced
+	// calls (at most 10 a second) inside theirs.
+	const testRate, testBurst = 20, 20
+	api.hookCallerLimits.mu.Lock()
+	api.hookCallerLimits.rate, api.hookCallerLimits.burst, api.hookCallerLimits.inFlight = testRate, testBurst, 8
+	api.hookCallerLimits.mu.Unlock()
 	clientDir := shortGatewaySocketDir(t)
 	var dialed atomic.Int64
 	clientAs := func(prefix string, timeout time.Duration) *http.Client {
@@ -351,7 +358,8 @@ func TestManagedHookSocketRateLimitsOneCallerWithoutSlowingAnother(t *testing.T)
 	}
 
 	const floodFor = 1500 * time.Millisecond
-	deadline := time.Now().Add(floodFor)
+	floodStart := time.Now()
+	deadline := floodStart.Add(floodFor)
 	flood := clientAs("a-", 5*time.Second)
 	var admitted, limited, limitedWithReason, failed atomic.Int64
 	var wg sync.WaitGroup
@@ -393,18 +401,20 @@ func TestManagedHookSocketRateLimitsOneCallerWithoutSlowingAnother(t *testing.T)
 			slowest = elapsed
 		}
 		otherCalls++
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	wg.Wait()
+	elapsed := time.Since(floodStart)
 	t.Logf("uid 7001: admitted=%d limited=%d failed=%d; uid 7002: calls=%d slowest=%s",
 		admitted.Load(), limited.Load(), failed.Load(), otherCalls, slowest)
 	if limited.Load() == 0 || limitedWithReason.Load() != limited.Load() {
 		t.Fatalf("uid 7001's flood was not rate limited with a clear reason (limited=%d with reason=%d)",
 			limited.Load(), limitedWithReason.Load())
 	}
-	// Burst plus the sustained rate over the flood, with slack for timing.
-	if max := int64(hookCallerBurst + hookCallerRate*2 + 20); admitted.Load() > max {
-		t.Fatalf("uid 7001 was admitted %d times in %s, want at most %d", admitted.Load(), floodFor, max)
+	// Burst plus the sustained rate over the measured flood, with slack for
+	// timing.
+	if max := int64(testBurst) + int64(testRate*elapsed.Seconds()) + 10; admitted.Load() > max {
+		t.Fatalf("uid 7001 was admitted %d times in %s, want at most %d", admitted.Load(), elapsed, max)
 	}
 	if otherCalls == 0 || slowest > time.Second {
 		t.Fatalf("uid 7002 calls=%d slowest=%s during the flood", otherCalls, slowest)

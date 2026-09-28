@@ -1583,8 +1583,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	if !strings.EqualFold(a.connectorName(), "openclaw") {
 		verdict.Action = guardrailActionBlock
 		verdict.WouldBlock = true
-		verdict.Reason = appendVerdictReason(verdict.Reason,
-			"human approval unsupported on this connector surface; failing closed")
+		verdict.Reason = appendVerdictReason(verdict.Reason, approvalUnsupportedNote)
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "connector="+a.connectorName())
 		}
@@ -1596,8 +1595,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 
 	verdict.Action = guardrailActionBlock
 	verdict.WouldBlock = true
-	verdict.Reason = appendVerdictReason(verdict.Reason,
-		"human approval requires native OpenClaw approval; failing closed")
+	verdict.Reason = appendVerdictReason(verdict.Reason, approvalNativeOpenClawNote)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "surface="+req.ApprovalSurface)
 	}

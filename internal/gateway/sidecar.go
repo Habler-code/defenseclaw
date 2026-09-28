@@ -5617,7 +5617,7 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	if cfg.StandaloneEnterprise() {
 		switch fleetMode {
 		case "enabled", "on", "true":
-			return !isLoopbackGatewayHost(cfg.Gateway.Host)
+			return !gatewayHostIsThisMachine(cfg.Gateway.Host)
 		}
 		return false
 	}
@@ -5681,6 +5681,22 @@ func isLoopbackGatewayHost(host string) bool {
 		return ip.IsLoopback()
 	}
 	return false
+}
+
+// gatewayHostIsThisMachine reports whether dialing host reaches a listener
+// on this machine: a loopback host, or an unspecified (bind-all) address
+// such as 0.0.0.0 or ::, which a dial also sends to the local host. The
+// managed standalone profile refuses both for the fleet dial.
+func gatewayHostIsThisMachine(host string) bool {
+	if isLoopbackGatewayHost(host) {
+		return true
+	}
+	h := strings.TrimSpace(strings.ToLower(host))
+	if len(h) >= 2 && h[0] == '[' && h[len(h)-1] == ']' {
+		h = h[1 : len(h)-1]
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsUnspecified()
 }
 
 // verifyHookScriptsOnDisk checks that every hook script the connector

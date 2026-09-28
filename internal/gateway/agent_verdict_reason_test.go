@@ -5,10 +5,12 @@ package gateway
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -75,6 +77,71 @@ func TestAgentVerdictReasonNamesDefenseClawPolicyAndTheRule(t *testing.T) {
 	}
 }
 
+// A local rule merged with an AI Defense or judge verdict: the merged
+// reason names the other lane's reason too, so the rule-only wording would
+// drop the reason that decided (and could blame an alert-only rule). Such a
+// reason keeps its display text.
+func TestAgentVerdictReasonKeepsAMergedLaneReason(t *testing.T) {
+	useAgentVerdictProfile(t, true, false)
+	for _, source := range []string{
+		certMarkerReason + "; Cisco AI Defense: prompt injection detected",
+		certMarkerReason + "; judge-injection: instruction override",
+		"matched ordered safety rule: CHAIN-1; judge-exfil: upload of a credential",
+	} {
+		display := agentDisplayReason(source, redaction.SinkPolicyDefault)
+		if got := agentVerdictReason("block", source, display, redaction.SinkPolicyDefault); got != display {
+			t.Fatalf("merged reason %q rewritten to %q", source, got)
+		}
+	}
+	// The approval fallback's note is not another verdict: the rule decided.
+	source := certMarkerReason + "; " + approvalUnsupportedNote
+	display := agentDisplayReason(source, redaction.SinkPolicyDefault)
+	if got := agentVerdictReason("block", source, display, redaction.SinkPolicyDefault); got != orgBlockWording {
+		t.Fatalf("approval fallback reason = %q, want %q", got, orgBlockWording)
+	}
+}
+
+// A rule from a loaded rule pack keeps its title: the pack author wrote it,
+// unlike a scanner title that can carry matched text.
+func TestAgentVerdictReasonNamesALoadedRulePackTitle(t *testing.T) {
+	const connectorName = "agent-verdict-title-pack"
+	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "default"))
+	added := false
+	for index := range pack.RuleFiles {
+		if pack.RuleFiles[index].Category != "command" {
+			continue
+		}
+		pack.RuleFiles[index].Rules = append(pack.RuleFiles[index].Rules, guardrail.RuleDefYAML{
+			ID:         "CERT-S3-MARKER-BLOCK",
+			Pattern:    `(?i)\bcert-s3-marker-block\b`,
+			Title:      "Certification marker (block)",
+			Severity:   "HIGH",
+			Confidence: 0.99,
+		})
+		added = true
+		break
+	}
+	if !added {
+		t.Fatal("the default pack has no command rule file")
+	}
+	if err := ApplyConnectorRulePackOverrides(connectorName, pack); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
+
+	useAgentVerdictProfile(t, true, false)
+	display := agentDisplayReason(certMarkerReason, redaction.SinkPolicyDefault)
+	want := "DefenseClaw blocked this action under your organization's policy (rule CERT-S3-MARKER-BLOCK: Certification marker (block)). Contact your administrator if you need it allowed."
+	if got := agentVerdictReason("block", certMarkerReason, display, redaction.SinkPolicyDefault); got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	// A title the pack does not have stays in the audit only.
+	other := "matched: CERT-S3-MARKER-BLOCK:secret value 1234"
+	if got := agentVerdictReason("block", other, agentDisplayReason(other, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault); strings.Contains(got, "secret value") {
+		t.Fatalf("a title outside the loaded pack reached the agent: %q", got)
+	}
+}
+
 func TestAgentVerdictReasonKeepsSecureClientWording(t *testing.T) {
 	useAgentVerdictProfile(t, false, true)
 	display := agentDisplayReason(certMarkerReason, redaction.SinkPolicyRedact)
@@ -114,6 +181,7 @@ func TestAgentMatchedRulesNamesRulesByID(t *testing.T) {
 		{"matched: " + builtIn, "rule " + builtInID + ": " + builtInTitle},
 		{"matched: A-1:first, second part, B.2:other, A-1:again", "rules A-1, B.2"},
 		{"matched: A-1:x; human approval unsupported on this connector surface; failing closed", "rule A-1"},
+		{"matched: A-1:x; Cisco AI Defense: blocked", ""},
 		{"matched: A-1:x; matched ordered safety rule: CHAIN-1, CHAIN-2", "rules A-1, CHAIN-1, CHAIN-2"},
 		{"matched ordered safety rule: CHAIN-1", "rule CHAIN-1"},
 		{"matched: bad id:x", ""},

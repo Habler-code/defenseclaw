@@ -68,6 +68,10 @@ func TestGatewayShouldConnect_ManagedStandaloneNeedsExplicitRemoteFleet(t *testi
 		{"explicit_enabled_loopback", "", "127.0.0.1", "enabled", false},
 		{"explicit_enabled_ipv6_loopback", "", "::1", "enabled", false},
 		{"explicit_enabled_empty_host", "", "", "enabled", false},
+		// A bind-all address reaches a listener on this machine too.
+		{"explicit_enabled_unspecified_ipv4", "", "0.0.0.0", "enabled", false},
+		{"explicit_enabled_unspecified_ipv6", "", "::", "enabled", false},
+		{"explicit_enabled_unspecified_ipv6_bracketed", "", "[::]", "enabled", false},
 		{"auto_remote_needs_explicit_enable", "", "10.0.0.5", "auto", false},
 		{"openclaw_connector_loopback", "openclaw", "127.0.0.1", "", false},
 		{"explicit_disabled_remote", "", "10.0.0.5", "disabled", false},

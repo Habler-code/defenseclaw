@@ -316,7 +316,7 @@ func (a *APIServer) serveUserScoped(
 	next http.Handler,
 	mark func(context.Context) context.Context,
 ) {
-	release := a.admitHookCaller(w, identity, route)
+	release := a.admitHookCaller(w, identity, route, r.URL.Path)
 	if release == nil {
 		return
 	}

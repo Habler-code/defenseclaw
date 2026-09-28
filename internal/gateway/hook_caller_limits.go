@@ -128,10 +128,28 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), ok, logNow b
 	}, true, false
 }
 
-// admitHookCaller applies the per-caller limits to one request. It returns
-// the release function to defer, or nil after answering 429.
-func (a *APIServer) admitHookCaller(w http.ResponseWriter, identity, route string) func() {
-	release, ok, logNow := a.hookCallerLimits.acquire(identity)
+// hookCallerTelemetryBudget suffixes the budget key of a caller's OTLP
+// export. A burst of telemetry batches from the user's agents must not use
+// up the budget that user's hooks need: a refused hook request denies the
+// tool call, while an exporter retries.
+const hookCallerTelemetryBudget = "|otlp"
+
+// hookCallerBudgetKey is the limiter key for one request of identity: OTLP
+// ingest paths get their own budget, every other route shares the caller's.
+func hookCallerBudgetKey(identity, path string) string {
+	if isUnscopedOTLPEndpointPath(path) {
+		return identity + hookCallerTelemetryBudget
+	}
+	if _, _, ok := parseOTLPPathToken(path); ok {
+		return identity + hookCallerTelemetryBudget
+	}
+	return identity
+}
+
+// admitHookCaller applies the per-caller limits to one request for path. It
+// returns the release function to defer, or nil after answering 429.
+func (a *APIServer) admitHookCaller(w http.ResponseWriter, identity, route, path string) func() {
+	release, ok, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, path))
 	if ok {
 		return release
 	}

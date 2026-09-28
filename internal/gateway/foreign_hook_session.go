@@ -87,8 +87,26 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(decision)
 }
 
-// foreignHookAuditReasonLimit bounds the reason an audit row repeats.
-const foreignHookAuditReasonLimit = 2048
+// foreignHookAuditReasonLimit bounds the reason an audit row repeats, and
+// foreignHookAuditFieldLimit each finding field (the session store clips
+// the same fields to 512 bytes). The caller sends these values, so an
+// enrolled user must not be able to write rows of any size.
+const (
+	foreignHookAuditReasonLimit = 2048
+	foreignHookAuditFieldLimit  = 512
+)
+
+// clipForeignHookAuditField drops control characters and bounds value to
+// limit bytes on a rune boundary.
+func clipForeignHookAuditField(value string, limit int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
+	return truncateToRuneBoundary(value, limit)
+}
 
 // auditForeignHookSessionDenial writes one connector-hook audit row for a
 // tool call the foreign-hook guard denies, when the exchange records a
@@ -124,22 +142,19 @@ func (a *APIServer) auditForeignHookSessionDenial(
 		if finding.Allowed || finding.Path == "" {
 			continue
 		}
-		extra["file"] = finding.Path
+		extra["file"] = clipForeignHookAuditField(finding.Path, foreignHookAuditFieldLimit)
 		if finding.Scope != "" {
-			extra["scope"] = finding.Scope
+			extra["scope"] = clipForeignHookAuditField(finding.Scope, foreignHookAuditFieldLimit)
 		}
 		if finding.Digest != "" {
-			extra["digest"] = finding.Digest
+			extra["digest"] = clipForeignHookAuditField(finding.Digest, foreignHookAuditFieldLimit)
 		}
 		if finding.Reason != "" {
-			extra["finding_reason"] = finding.Reason
+			extra["finding_reason"] = clipForeignHookAuditField(finding.Reason, foreignHookAuditFieldLimit)
 		}
 		break
 	}
-	reason := decision.Reason
-	if len(reason) > foreignHookAuditReasonLimit {
-		reason = reason[:foreignHookAuditReasonLimit]
-	}
+	reason := clipForeignHookAuditField(decision.Reason, foreignHookAuditReasonLimit)
 	_ = a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
 		Connector:  connectorName,
 		Event:      "foreign_hook_session",

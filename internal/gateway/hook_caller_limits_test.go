@@ -79,18 +79,47 @@ func TestAdmitHookCallerAnswersRateLimited(t *testing.T) {
 	api := &APIServer{}
 	api.hookCallerLimits = hookCallerLimiter{rate: 1, burst: 1}
 	first := httptest.NewRecorder()
-	release := api.admitHookCaller(first, "1001", "/api/v1/inspect/tool")
+	release := api.admitHookCaller(first, "1001", "/api/v1/inspect/tool", "/api/v1/inspect/tool")
 	if release == nil {
 		t.Fatal("first request refused")
 	}
 	release()
 	refused := httptest.NewRecorder()
-	if api.admitHookCaller(refused, "1001", "/api/v1/inspect/tool") != nil {
+	if api.admitHookCaller(refused, "1001", "/api/v1/inspect/tool", "/api/v1/inspect/tool") != nil {
 		t.Fatal("second request inside one second admitted")
 	}
 	if refused.Code != http.StatusTooManyRequests || refused.Header().Get("Retry-After") == "" ||
 		!strings.Contains(refused.Body.String(), managedHookReasonRateLimited) {
 		t.Fatalf("refusal = %d %v %q", refused.Code, refused.Header(), refused.Body.String())
+	}
+}
+
+// A user's OTLP export has its own budget: a telemetry burst that uses up
+// the export budget must not refuse that user's next hook request, which
+// would deny the tool call.
+func TestHookCallerTelemetryDoesNotUseTheHookBudget(t *testing.T) {
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{rate: 1, burst: 2}
+	for _, path := range []string{"/v1/logs", "/v1/traces", "/otlp/codex/tok/v1/metrics"} {
+		release := api.admitHookCaller(httptest.NewRecorder(), "1001", "otlp", path)
+		if release != nil {
+			release()
+		}
+	}
+	refused := httptest.NewRecorder()
+	if api.admitHookCaller(refused, "1001", "otlp", "/v1/logs") != nil {
+		t.Fatal("premise: the telemetry burst used up the export budget")
+	}
+	for i := 0; i < 2; i++ {
+		hook := httptest.NewRecorder()
+		release := api.admitHookCaller(hook, "1001", "/api/v1/codex/hook", "/api/v1/codex/hook")
+		if release == nil {
+			t.Fatalf("hook request %d refused after a telemetry burst: %d %s", i, hook.Code, hook.Body.String())
+		}
+		release()
+	}
+	if got := hookCallerBudgetKey("1001", "/api/v1/inspect/tool"); got != "1001" {
+		t.Fatalf("hook budget key = %q", got)
 	}
 }
 

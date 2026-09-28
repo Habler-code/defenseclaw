@@ -104,4 +104,35 @@ func TestForeignHookSessionDenialsAreAudited(t *testing.T) {
 	if denials != 2 {
 		t.Fatalf("foreign-hook denial rows = %d, want 2 (one per denied call)", denials)
 	}
+
+	// The caller sends the finding fields: an oversized request still
+	// writes a bounded row.
+	huge := strings.Repeat("x", 40<<10)
+	flood := map[string]any{
+		"key":           map[string]any{"connector": "claudecode", "session": "flood-session", "process": "flood-process"},
+		"session_start": true,
+		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: " + huge,
+			"findings": []map[string]any{{"connector": "claudecode", "scope": huge, "path": "/repo/" + huge, "digest": huge, "reason": huge}}},
+	}
+	if status := post("/api/v1/foreign-hook-session/claudecode", flood); status != http.StatusOK {
+		t.Fatalf("oversized session exchange = %d", status)
+	}
+	row := waitForAuditRow(t, store, "oversized foreign-hook denial", func(event audit.Event) bool {
+		extra, _ := event.Structured["extra"].(map[string]any)
+		file, _ := extra["file"].(string)
+		return event.Structured["event"] == "foreign_hook_session" && strings.HasPrefix(file, "/repo/x")
+	})
+	rowExtra, _ := row.Structured["extra"].(map[string]any)
+	for _, key := range []string{"file", "scope", "digest", "finding_reason"} {
+		value, _ := rowExtra[key].(string)
+		if value == "" || len(value) > foreignHookAuditFieldLimit {
+			t.Fatalf("audit field %s has %d bytes, want 1..%d", key, len(value), foreignHookAuditFieldLimit)
+		}
+	}
+	if reason := auditStringValue(row.Structured["reason"]); len(reason) > foreignHookAuditReasonLimit {
+		t.Fatalf("audit reason has %d bytes, want at most %d", len(reason), foreignHookAuditReasonLimit)
+	}
+	if data, _ := json.Marshal(row.Structured); len(data) > 8<<10 {
+		t.Fatalf("oversized request wrote a %d-byte audit row", len(data))
+	}
 }

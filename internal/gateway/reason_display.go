@@ -51,7 +51,7 @@ func trustedBuiltInFindingLabel(label string) bool {
 	for _, category := range defaultRuleCategories {
 		for _, rule := range category.Rules {
 			base := rule.ID + ":" + rule.Title
-			if label == base || label == base+" (obfuscated)" {
+			if label == base || label == base+obfuscatedFindingLabelSuffix {
 				return true
 			}
 		}
@@ -108,8 +108,8 @@ var agentRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
 // like a broken hook, and users (and the model) went looking in their own
 // agent settings. The message says DefenseClaw made the decision under the
 // organization's policy (standalone enterprise) or DefenseClaw policy
-// (per-user), and names the rules by ID; a compiled-in rule keeps its
-// title. The audit record keeps the full source reason.
+// (per-user), and names the rules by ID; a compiled-in or rule-pack rule
+// keeps its title. The audit record keeps the full source reason.
 //
 // Other actions and any other reason (a configured block message, a
 // foreign-hook or AI Defense verdict) keep displayReason. Secure Client
@@ -147,13 +147,55 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 // appends to a reason (agent_hook_chain.go).
 const agentOrderedRulePrefix = "matched ordered safety rule: "
 
+// The notes a human-approval fallback appends to a confirm it turns into a
+// block (inspect.go). The rule that asked for the confirmation still
+// decided.
+const (
+	approvalUnsupportedNote      = "human approval unsupported on this connector surface; failing closed"
+	approvalNativeOpenClawNote   = "human approval requires native OpenClaw approval; failing closed"
+	obfuscatedFindingLabelSuffix = " (obfuscated)"
+)
+
+// activeRulePackLabel reports whether id and title are a rule of a loaded
+// rule pack (the global generation or a connector's). That title is the
+// pack author's static text, which the agent may show, unlike a scanner's
+// title, which can carry matched text.
+func activeRulePackLabel(id, title string) bool {
+	id = strings.ToUpper(strings.TrimSpace(id))
+	title = strings.TrimSpace(strings.TrimSuffix(title, obfuscatedFindingLabelSuffix))
+	if id == "" || title == "" {
+		return false
+	}
+	ruleCategoriesMu.RLock()
+	defer ruleCategoriesMu.RUnlock()
+	if allRuleGeneration != nil {
+		if _, ok := allRuleGeneration.ruleIdentityTitles[id][title]; ok {
+			return true
+		}
+	}
+	for _, generation := range connectorRuleGenerations {
+		if generation == nil {
+			continue
+		}
+		if _, ok := generation.ruleIdentityTitles[id][title]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // agentMatchedRules names the rules of a "matched: <rule-id>:<title>, ..."
 // reason, and of any ordered-chain note appended to it: "rule ID" or
-// "rules ID1, ID2". A title from the compiled-in catalog is kept ("rule ID:
-// Title"); any other title (a rule pack's, or a scanner's, which can carry
-// matched text) is left to the audit record. It returns "" for any other
-// reason.
+// "rules ID1, ID2". A title from the compiled-in catalog or from a loaded
+// rule pack is kept ("rule ID: Title"); any other title (a scanner's, which
+// can carry matched text) is left to the audit record. It returns "" for any
+// other reason, and for a reason that also carries another verdict's text
+// (an AI Defense or judge reason merged after the local match): naming only
+// the local rule would drop the reason that decided.
 func agentMatchedRules(reason string) string {
+	for _, note := range []string{approvalUnsupportedNote, approvalNativeOpenClawNote} {
+		reason = strings.ReplaceAll(reason, "; "+note, "")
+	}
 	var items []string
 	seen := make(map[string]bool)
 	add := func(id, item string) {
@@ -172,7 +214,7 @@ func agentMatchedRules(reason string) string {
 					continue
 				}
 				item := id
-				if trustedBuiltInFindingLabel(label) {
+				if trustedBuiltInFindingLabel(label) || activeRulePackLabel(id, title) {
 					item = id + ": " + title
 				}
 				add(id, item)
@@ -181,6 +223,8 @@ func agentMatchedRules(reason string) string {
 			for _, id := range strings.Split(strings.TrimPrefix(part, agentOrderedRulePrefix), ", ") {
 				add(id, id)
 			}
+		default:
+			return ""
 		}
 	}
 	switch len(items) {
