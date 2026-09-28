@@ -16,7 +16,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
+	"strings"
 	"testing"
 )
 
@@ -47,4 +49,22 @@ func TestDarwinDefaultResolverFindsCurrentUser(t *testing.T) {
 	if _, err := Default(context.Background()).LookupUser("dc-no-such-user-7f3a"); !IsNotFound(err) {
 		t.Fatalf("missing account error = %v, want ErrNotFound", err)
 	}
+}
+
+// DirectoryConfigured was hard-coded true on macOS, so on an unbound Mac a
+// deleted local account whose source was not recorded as local was kept
+// for good (MAC-F42). It now follows this Mac's search policy.
+func TestDarwinDirectoryConfiguredFollowsTheSearchPolicy(t *testing.T) {
+	output, err := exec.Command(darwinDSCL, "-plist", "/Search", "-read", "/", "SearchPath", "CSPSearchPath", "NSPSearchPath").Output()
+	if err != nil {
+		t.Skipf("dscl: %v", err)
+	}
+	want := ParseDSCLSearchPolicyDirectoryConfigured(output)
+	if got := DirectoryConfigured(); got != want {
+		t.Fatalf("DirectoryConfigured() = %v, but the search policy says %v:\n%s", got, want, output)
+	}
+	if !want && !strings.Contains(string(output), "/Local/Default") {
+		t.Fatalf("an unbound search policy must list /Local/Default:\n%s", output)
+	}
+	t.Logf("directory configured: %v", want)
 }

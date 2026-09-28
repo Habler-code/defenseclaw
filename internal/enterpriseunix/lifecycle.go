@@ -895,6 +895,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.initialManifest(account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if l.opts.Action == ActionRepair {
+		// The guardian and the enumerator are stopped: neither reads or
+		// rewrites the manifest while deleted accounts leave it.
+		l.revokeDeletedAccounts(ctx)
+	}
 	if env.GOOS == "linux" {
 		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
 			r.AddWarning("selinux_relabel", err.Error())

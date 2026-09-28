@@ -190,3 +190,97 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 		t.Fatalf("reason %q must name the untrusted home", recorded[0].Reason)
 	}
 }
+
+// MAC-F42: repair runs `enterprise hooks revoke-gone`, which removes the
+// targets of a deleted local account at once (and forgets its miss count
+// and source), keeps a directory account a lookup outage could explain,
+// and leaves an administrator-published manifest alone.
+func TestRevokeGoneCommandRemovesDeletedAccountsTargets(t *testing.T) {
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: 1501, GID: 1501, Home: "/home/alice", Shell: "/bin/bash"},
+	}}
+	f := newStandaloneFixture(t, resolver)
+	origLoader, origResolver, origLocal, origDirectory, origWriter, origRoot := enterpriseHooksEnumerateConfigLoader, enterpriseHooksEnumerateResolver,
+		enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured, enterpriseHooksEnumerateManifestWriter, enterpriseHooksRevokeGoneRootCheck
+	t.Cleanup(func() {
+		enterpriseHooksEnumerateConfigLoader, enterpriseHooksEnumerateResolver = origLoader, origResolver
+		enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured = origLocal, origDirectory
+		enterpriseHooksEnumerateManifestWriter, enterpriseHooksRevokeGoneRootCheck = origWriter, origRoot
+	})
+	current := standaloneTestConfig(f.dataDir)
+	enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) { return current, nil }
+	enterpriseHooksEnumerateResolver = func(context.Context) unixidentity.Resolver { return resolver }
+	enterpriseHooksEnumerateLocalAccounts = func(context.Context) (map[string]int, error) { return map[string]int{"alice": 1501}, nil }
+	enterpriseHooksEnumerateDirectoryConfigured = func() bool { return true }
+	enterpriseHooksRevokeGoneRootCheck = func() error { return nil }
+	enterpriseHooksEnumerateManifestWriter = func(path string, m enterprisehooks.Manifest) (bool, error) {
+		data, err := enterprisehooks.MarshalUnixTargetsManifest(m)
+		if err != nil {
+			return false, err
+		}
+		return true, os.WriteFile(path, data, 0o600)
+	}
+	enabled := true
+	row := func(user string, uid int) enterprisehooks.ManifestTarget {
+		return enterprisehooks.ManifestTarget{User: user, UserHome: "/home/" + user, UID: &uid, GID: &uid, Connector: "opencode", AgentVersion: "1.0.0", Enabled: &enabled}
+	}
+	data, err := enterprisehooks.MarshalUnixTargetsManifest(enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		row("alice", 1501), row("bob", 1234401103), row("carol", 1502),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.manifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := enterpriseHookEnumeratorStatePath(f.manifest)
+	if err := enterprisehooks.SaveUnixEnumeratorState(statePath, &enterprisehooks.UnixEnumeratorState{
+		Misses:  map[string]int{"carol\x00opencode": 1},
+		Sources: map[string]string{"alice": "files", "bob": "directory", "carol": "files"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := func() enterpriseHooksRevokeGoneReport {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := runEnterpriseHooksRevokeGone(context.Background(), &stdout, io.Discard, enterpriseHooksRevokeGoneOptions{manifest: f.manifest, jsonOut: true}); err != nil {
+			t.Fatal(err)
+		}
+		var report enterpriseHooksRevokeGoneReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatalf("%s: %v", stdout.String(), err)
+		}
+		return report
+	}
+	report := run()
+	if !report.Changed || strings.Join(report.Revoked, ",") != "carol/opencode" || len(report.Kept) != 1 || !strings.HasPrefix(report.Kept[0], "bob: ") {
+		t.Fatalf("report = %+v", report)
+	}
+	manifest, err := enterprisehooks.LoadManifest(f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 2 || manifest.Targets[0].User != "alice" || manifest.Targets[1].User != "bob" {
+		t.Fatalf("manifest = %+v", manifest.Targets)
+	}
+	state := enterprisehooks.LoadUnixEnumeratorState(statePath)
+	if _, ok := state.Misses["carol\x00opencode"]; ok || state.Sources["carol"] != "" || state.Sources["bob"] != "directory" {
+		t.Fatalf("state = %+v", state)
+	}
+	// Nothing left to revoke: the manifest is not rewritten.
+	if report := run(); report.Changed || len(report.Revoked) != 0 {
+		t.Fatalf("second run = %+v", report)
+	}
+	// An administrator-published manifest is never edited.
+	current.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
+	resolver.accounts = map[string]unixidentity.Account{}
+	if report := run(); !report.Idle || report.Changed {
+		t.Fatalf("manifest mode = %+v", report)
+	}
+	if manifest, err := enterprisehooks.LoadManifest(f.manifest); err != nil || len(manifest.Targets) != 2 {
+		t.Fatalf("manifest mode edited the manifest: %+v %v", manifest, err)
+	}
+	if err := runEnterpriseHooksRevokeGone(context.Background(), io.Discard, io.Discard, enterpriseHooksRevokeGoneOptions{manifest: "targets.yaml"}); err == nil {
+		t.Fatal("a relative manifest path must be refused")
+	}
+}

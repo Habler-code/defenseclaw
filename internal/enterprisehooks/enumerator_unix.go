@@ -242,26 +242,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	if enrollment.UIDMin > 0 {
 		uidMin = enrollment.UIDMin
 	}
-	var local map[string]int
-	localKnown := false
-	if opts.LocalAccounts != nil {
-		if accounts, err := opts.LocalAccounts(); err == nil {
-			local, localKnown = accounts, true
-		} else {
-			logfSafely(opts.Logger, "directory", fmt.Sprintf("local account database unreadable; account sources are unknown this cycle: %v", err))
-		}
-	}
-	directoryConfigured := opts.DirectoryConfigured == nil || opts.DirectoryConfigured()
-	// sourceOf classifies a resolved account; "" when it cannot tell.
-	sourceOf := func(account unixidentity.Account) string {
-		if !localKnown {
-			return ""
-		}
-		if uid, ok := local[account.Name]; ok && uid == account.UID {
-			return unixSourceFiles
-		}
-		return unixSourceDirectory
-	}
+	sources := newUnixAccountSources(opts.LocalAccounts, opts.DirectoryConfigured, opts.State.Sources, opts.Logger)
 	// upperBound is the highest uid enrolled for account. login.defs
 	// UID_MAX describes the local useradd range: directory accounts (SSSD
 	// id-mapping from 200000, FreeIPA ranges, systemd-homed 60001-60513)
@@ -271,7 +252,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		if enrollment.UIDMax > 0 {
 			return enrollment.UIDMax
 		}
-		if sourceOf(account) == unixSourceDirectory {
+		if sources.sourceOf(account) == unixSourceDirectory {
 			return 0
 		}
 		return uidMax
@@ -299,9 +280,21 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	for _, prev := range previous {
 		previousUsers[strings.TrimSpace(prev.User)] = struct{}{}
 	}
-	for _, candidate := range candidates {
-		listed[candidate.account.Name] = struct{}{}
+	logGoneLocally := func(userName string) {
+		logfSafely(opts.Logger, userName, "no longer in the local account database; a cached lookup still resolves it, so it counts as not found")
 	}
+	resolvedCandidates := candidates[:0]
+	for _, candidate := range candidates {
+		name := candidate.account.Name
+		listed[name] = struct{}{}
+		if _, enrolled := previousUsers[name]; enrolled && sources.goneLocally(name) {
+			missing[name] = struct{}{}
+			logGoneLocally(name)
+			continue
+		}
+		resolvedCandidates = append(resolvedCandidates, candidate)
+	}
+	candidates = resolvedCandidates
 	for _, prev := range previous {
 		userName := strings.TrimSpace(prev.User)
 		if _, ok := listed[userName]; ok || userName == "" {
@@ -310,6 +303,9 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		listed[userName] = struct{}{}
 		account, err := opts.Resolver.LookupUser(userName)
 		switch {
+		case err == nil && sources.goneLocally(userName):
+			missing[userName] = struct{}{}
+			logGoneLocally(userName)
 		case err == nil:
 			candidates = append(candidates, unixCandidate{account: account})
 		case unixidentity.IsNotFound(err):
@@ -328,19 +324,14 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	resolvedSource := map[string]string{}
 	directoryAnswered := false
 	for _, candidate := range candidates {
-		source := sourceOf(candidate.account)
+		source := sources.sourceOf(candidate.account)
 		resolvedSource[candidate.account.Name] = source
 		if source == unixSourceDirectory && !systemdLocalUID(candidate.account.UID) {
 			directoryAnswered = true
 		}
 	}
 	definitiveMiss := func(user string) bool {
-		if localKnown {
-			if _, stillLocal := local[user]; stillLocal {
-				return false // the local database still has it: lookups are failing
-			}
-		}
-		return !directoryConfigured || opts.State.Sources[user] == unixSourceFiles || directoryAnswered
+		return sources.definitiveMiss(user, directoryAnswered)
 	}
 	filtered := map[string]struct{}{}
 	include := stringSet(enrollment.IncludeUsers)
@@ -615,6 +606,191 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		targets = []ManifestTarget{}
 	}
 	return Manifest{Version: 1, Targets: targets}, report, nil
+}
+
+// unixAccountSources tells a local account from a directory account and
+// decides whether a "no such user" answer is definitive. The enumerator and
+// RevokeGoneUnixTargets share it.
+type unixAccountSources struct {
+	local               map[string]int
+	localKnown          bool
+	directoryConfigured bool
+	// recorded is UnixEnumeratorState.Sources: where each enrolled user
+	// was last seen.
+	recorded map[string]string
+}
+
+func newUnixAccountSources(localAccounts func() (map[string]int, error), directoryConfigured func() bool, recorded map[string]string, logger EnumerationLogger) unixAccountSources {
+	sources := unixAccountSources{recorded: recorded}
+	if localAccounts != nil {
+		if accounts, err := localAccounts(); err == nil {
+			sources.local, sources.localKnown = accounts, true
+		} else {
+			logfSafely(logger, "directory", fmt.Sprintf("local account database unreadable; account sources are unknown this cycle: %v", err))
+		}
+	}
+	sources.directoryConfigured = directoryConfigured == nil || directoryConfigured()
+	return sources
+}
+
+// sourceOf classifies a resolved account; "" when it cannot tell.
+func (s unixAccountSources) sourceOf(account unixidentity.Account) string {
+	if !s.localKnown {
+		return ""
+	}
+	if uid, ok := s.local[account.Name]; ok && uid == account.UID {
+		return unixSourceFiles
+	}
+	return unixSourceDirectory
+}
+
+// goneLocally reports an enrolled local account that the local account
+// database no longer lists. A lookup can still resolve it for a while: a
+// long-running process on macOS keeps answering from its directory cache
+// for minutes after the record is deleted, as nscd can on Linux. That
+// answer must neither keep the account enrolled nor reclassify it as a
+// directory account, which made every later "no such user" count as a
+// possible directory outage, so the row was never revoked.
+func (s unixAccountSources) goneLocally(user string) bool {
+	if !s.localKnown || s.recorded[user] != unixSourceFiles {
+		return false
+	}
+	_, listed := s.local[user]
+	return !listed
+}
+
+// definitiveMiss reports whether a "no such user" answer for user proves
+// the account is gone. directoryAnswered is set when a directory account
+// resolved in the same pass.
+func (s unixAccountSources) definitiveMiss(user string, directoryAnswered bool) bool {
+	if s.localKnown {
+		if _, stillLocal := s.local[user]; stillLocal {
+			return false // the local database still has it: lookups are failing
+		}
+	}
+	return !s.directoryConfigured || s.recorded[user] == unixSourceFiles || directoryAnswered
+}
+
+// UnixRevokeGoneOptions configures RevokeGoneUnixTargets; the fields mean
+// what they mean in UnixEnumerateOptions.
+type UnixRevokeGoneOptions struct {
+	ExistingManifestPath string
+	Resolver             unixidentity.Resolver
+	LocalAccounts        func() (map[string]int, error)
+	DirectoryConfigured  func() bool
+	State                *UnixEnumeratorState
+	Logger               EnumerationLogger
+}
+
+// UnixRevokeGoneReport is what RevokeGoneUnixTargets decided.
+type UnixRevokeGoneReport struct {
+	Rows int `json:"rows"`
+	// Revoked lists the removed rows as user/connector.
+	Revoked []string `json:"revoked,omitempty"`
+	// Kept explains, per account, why the rows of an account that did not
+	// resolve stay.
+	Kept []string `json:"kept,omitempty"`
+}
+
+// RevokeGoneUnixTargets returns the published manifest without the rows of
+// accounts that no longer exist. The enumerator removes such a row after
+// UnixRevokeAfterMisses cycles; an administrator's repair runs this so a
+// deleted account's target is removed at once instead of failing the host
+// for another 10 to 15 minutes. "No longer exist" is the enumerator's
+// definitive miss: a failed lookup, or a "no such user" answer that an
+// unreachable directory could also give, keeps the rows. It never writes.
+func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Manifest, UnixRevokeGoneReport, error) {
+	report := UnixRevokeGoneReport{}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if opts.Resolver == nil {
+		return Manifest{}, report, errors.New("enterprise hooks: revoke deleted accounts: no account resolver")
+	}
+	if opts.State == nil {
+		opts.State = &UnixEnumeratorState{Version: 1}
+	}
+	if opts.State.Misses == nil {
+		opts.State.Misses = map[string]int{}
+	}
+	if opts.State.Sources == nil {
+		opts.State.Sources = map[string]string{}
+	}
+	path := strings.TrimSpace(opts.ExistingManifestPath)
+	manifest, err := LoadManifest(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Manifest{Version: 1, Targets: []ManifestTarget{}}, report, nil
+		}
+		return Manifest{}, report, fmt.Errorf("enterprise hooks: revoke deleted accounts: the manifest %s does not load, so it is kept unchanged: %w", path, err)
+	}
+	sources := newUnixAccountSources(opts.LocalAccounts, opts.DirectoryConfigured, opts.State.Sources, opts.Logger)
+	var users []string
+	seen := map[string]struct{}{}
+	for _, target := range manifest.Targets {
+		user := strings.TrimSpace(target.User)
+		if _, dup := seen[user]; dup || user == "" {
+			continue
+		}
+		seen[user] = struct{}{}
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	missing := map[string]struct{}{}
+	directoryAnswered := false
+	for _, user := range users {
+		if err := ctx.Err(); err != nil {
+			return Manifest{}, report, err
+		}
+		account, err := opts.Resolver.LookupUser(user)
+		switch {
+		case err == nil && sources.goneLocally(user):
+			missing[user] = struct{}{}
+		case err == nil:
+			if sources.sourceOf(account) == unixSourceDirectory && !systemdLocalUID(account.UID) {
+				directoryAnswered = true
+			}
+		case unixidentity.IsNotFound(err):
+			missing[user] = struct{}{}
+		default:
+			reason := err.Error()
+			if len(reason) > 200 {
+				reason = reason[:200]
+			}
+			report.Kept = append(report.Kept, fmt.Sprintf("%s: the account lookup failed, so its targets stay: %s", user, reason))
+		}
+	}
+	gone := map[string]struct{}{}
+	for _, user := range users {
+		if _, ok := missing[user]; !ok {
+			continue
+		}
+		if sources.definitiveMiss(user, directoryAnswered) {
+			gone[user] = struct{}{}
+			continue
+		}
+		report.Kept = append(report.Kept, fmt.Sprintf("%s: account not found, but the directory could not be confirmed reachable, so its targets stay", user))
+	}
+	targets := make([]ManifestTarget, 0, len(manifest.Targets))
+	for _, target := range manifest.Targets {
+		user := strings.TrimSpace(target.User)
+		if _, ok := gone[user]; ok {
+			report.Revoked = append(report.Revoked, user+"/"+strings.ToLower(strings.TrimSpace(target.Connector)))
+			delete(opts.State.Misses, unixRowKey(user, target.Connector))
+			logfSafely(opts.Logger, user, fmt.Sprintf("account no longer exists; revoking (%s, %s)", user, target.Connector))
+			continue
+		}
+		targets = append(targets, target)
+	}
+	for user := range gone {
+		delete(opts.State.Sources, user)
+	}
+	if manifest.Version == 0 {
+		manifest.Version = 1
+	}
+	manifest.Targets = targets
+	report.Rows = len(targets)
+	return manifest, report, nil
 }
 
 func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrollment config.EnterpriseEnrollmentConfig, homeRoots []string) ([]unixCandidate, bool) {

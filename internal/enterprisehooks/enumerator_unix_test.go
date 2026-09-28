@@ -936,3 +936,202 @@ func TestEnumerateUnixExcludeAndExemptAcceptUIDs(t *testing.T) {
 		t.Fatalf("skipped = %v", report.Skipped)
 	}
 }
+
+// MAC-F42: after `dscl . -delete` a long-running enumerator on macOS kept
+// resolving the deleted account from its directory cache while the local
+// node no longer listed it. The account stayed a candidate (no miss was
+// counted) and was reclassified as a directory account, so after the
+// enumerator restarted every "no such user" counted as a possible
+// directory outage and the row was never revoked.
+func TestEnumerateUnixRevokesADeletedLocalAccountThatACachedLookupStillResolves(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "Users")
+	manifestPath := filepath.Join(root, "targets.yaml")
+	writeTestManifest(t, manifestPath,
+		ManifestTarget{User: "dcm-f1", UserHome: filepath.Join(homes, "dcm-f1"), UID: intPointer(505), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+		ManifestTarget{User: "dcm-std1", UserHome: filepath.Join(homes, "dcm-std1"), UID: intPointer(502), GID: intPointer(20), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+	)
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"dcm-f1": unixSourceFiles, "dcm-std1": unixSourceFiles}}
+	// The lookup cache still answers for dcm-f1; the local node lists only
+	// dcm-std1 and so does the account listing.
+	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
+		"dcm-f1":   {Name: "dcm-f1", UID: 505, GID: 20, Home: filepath.Join(homes, "dcm-f1"), Shell: "/bin/zsh"},
+		"dcm-std1": {Name: "dcm-std1", UID: 502, GID: 20, Home: filepath.Join(homes, "dcm-std1"), Shell: "/bin/zsh"},
+	}, listed: []string{"dcm-std1"}}
+	opts := UnixEnumerateOptions{
+		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 501, UIDMax: 60000,
+		CheckHome: availableHome, State: state,
+		LocalAccounts:       func() (map[string]int, error) { return map[string]int{"dcm-std1": 502}, nil },
+		DirectoryConfigured: func() bool { return true },
+	}
+	cfg := enumeratorConfig("opencode")
+	for cycle := 1; cycle <= UnixRevokeAfterMisses; cycle++ {
+		// A restart reloads the persisted state before every cycle.
+		statePath := filepath.Join(root, "state.json")
+		if err := SaveUnixEnumeratorState(statePath, state); err != nil {
+			t.Fatal(err)
+		}
+		state = LoadUnixEnumeratorState(statePath)
+		opts.State = state
+		manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		users := manifestUsers(manifest)
+		if !users["dcm-std1"] {
+			t.Fatalf("cycle %d: the remaining account lost its row", cycle)
+		}
+		if wantDeleted := cycle < UnixRevokeAfterMisses; users["dcm-f1"] != wantDeleted {
+			t.Fatalf("cycle %d: deleted account present=%v, want %v (misses=%v, sources=%v, report=%+v)", cycle, users["dcm-f1"], wantDeleted, state.Misses, state.Sources, report)
+		}
+		if source := state.Sources["dcm-f1"]; source == unixSourceDirectory {
+			t.Fatalf("cycle %d: a cached lookup reclassified the deleted local account as a directory account", cycle)
+		}
+		writeTestManifest(t, manifestPath, manifest.Targets...)
+	}
+	if _, ok := state.Sources["dcm-f1"]; ok {
+		t.Fatalf("a revoked user's source must be forgotten: %v", state.Sources)
+	}
+}
+
+// A user whose account is not in the local database but resolves is a
+// directory account; the rule above must not revoke it.
+func TestEnumerateUnixKeepsADirectoryAccountAbsentFromTheLocalDatabase(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	manifestPath := filepath.Join(root, "targets.yaml")
+	uid := 1234401103
+	writeTestManifest(t, manifestPath,
+		ManifestTarget{User: "alice", UserHome: filepath.Join(homes, "alice"), UID: intPointer(uid), GID: intPointer(uid), Connector: "opencode", AgentVersion: "1.0.0", HomeInode: 42},
+	)
+	state := &UnixEnumeratorState{Version: 1, Misses: map[string]int{}, Sources: map[string]string{"alice": unixSourceDirectory}}
+	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: uid, GID: uid, Home: filepath.Join(homes, "alice"), Shell: "/bin/bash"},
+	}}
+	opts := UnixEnumerateOptions{
+		ExistingManifestPath: manifestPath, Resolver: resolver, HomeRoots: []string{homes}, UIDMin: 1000, UIDMax: 60000,
+		CheckHome: availableHome, State: state,
+		LocalAccounts:       func() (map[string]int, error) { return map[string]int{"root": 0}, nil },
+		DirectoryConfigured: func() bool { return true },
+	}
+	for cycle := 1; cycle <= UnixRevokeAfterMisses+1; cycle++ {
+		manifest, _, err := EnumerateUnix(context.Background(), enumeratorConfig("opencode"), connector.NewDefaultRegistry(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !manifestUsers(manifest)["alice"] {
+			t.Fatalf("cycle %d: a resolving directory account was revoked", cycle)
+		}
+		writeTestManifest(t, manifestPath, manifest.Targets...)
+	}
+}
+
+// MAC-F42: `enterprise macos repair` said done but kept the target of a
+// deleted account, which failed verify and reconcile until the enumerator
+// revoked it. Repair revokes a definitively deleted account at once and
+// keeps any account a directory outage could explain.
+func TestRevokeGoneUnixTargetsRemovesOnlyDefinitivelyDeletedAccounts(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, "targets.yaml")
+	row := func(user string, uid int, conn string) ManifestTarget {
+		return ManifestTarget{User: user, UserHome: "/Users/" + user, UID: intPointer(uid), GID: intPointer(20), Connector: conn, AgentVersion: "1.0.0", HomeInode: 42}
+	}
+	writeTestManifest(t, manifestPath,
+		row("carol", 1500, "opencode"), row("carol", 1500, "amp"), // deleted local account
+		row("dave", 1501, "opencode"),        // deleted, cached lookup still answers
+		row("alice", 1234401103, "opencode"), // directory account, not found
+		row("erin", 1502, "opencode"),        // lookup times out
+		row("frank", 1503, "opencode"),       // still exists
+		row("gina", 1234401104, "opencode"),  // directory account that resolves
+	)
+	state := &UnixEnumeratorState{Version: 1,
+		Misses:  map[string]int{unixRowKey("carol", "opencode"): 1, unixRowKey("frank", "opencode"): 1},
+		Sources: map[string]string{"carol": unixSourceFiles, "dave": unixSourceFiles, "alice": unixSourceDirectory, "erin": unixSourceFiles, "frank": unixSourceFiles, "gina": unixSourceDirectory},
+	}
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{
+			"dave":  {Name: "dave", UID: 1501, GID: 20, Home: "/Users/dave"},
+			"frank": {Name: "frank", UID: 1503, GID: 20, Home: "/Users/frank"},
+		},
+		transient: map[string]bool{"erin": true},
+	}
+	local := map[string]int{"frank": 1503}
+	opts := UnixRevokeGoneOptions{
+		ExistingManifestPath: manifestPath, Resolver: resolver, State: state,
+		LocalAccounts:       func() (map[string]int, error) { return local, nil },
+		DirectoryConfigured: func() bool { return true },
+	}
+	manifest, report, err := RevokeGoneUnixTargets(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := manifestUsers(manifest)
+	if users["carol"] || users["dave"] {
+		t.Fatalf("deleted local accounts kept: %v (report %+v)", users, report)
+	}
+	for _, name := range []string{"alice", "erin", "frank", "gina"} {
+		if !users[name] {
+			t.Fatalf("%s was revoked: %v (report %+v)", name, users, report)
+		}
+	}
+	if got := strings.Join(report.Revoked, ","); got != "carol/opencode,carol/amp,dave/opencode" {
+		t.Fatalf("revoked = %q", got)
+	}
+	kept := strings.Join(report.Kept, "\n")
+	if !strings.Contains(kept, "alice: account not found, but the directory could not be confirmed reachable") || !strings.Contains(kept, "erin: the account lookup failed") {
+		t.Fatalf("kept = %q", kept)
+	}
+	if _, ok := state.Misses[unixRowKey("carol", "opencode")]; ok {
+		t.Fatalf("a revoked row's miss count must go: %v", state.Misses)
+	}
+	if _, ok := state.Sources["carol"]; ok {
+		t.Fatalf("a revoked user's source must go: %v", state.Sources)
+	}
+	if state.Misses[unixRowKey("frank", "opencode")] != 1 {
+		t.Fatalf("an unrelated miss count changed: %v", state.Misses)
+	}
+
+	// A directory account resolving proves the directory answers, so a
+	// directory account's "no such user" then counts, as in the enumerator.
+	resolver.accounts["gina"] = unixidentity.Account{Name: "gina", UID: 1234401104, GID: 20, Home: "/Users/gina"}
+	writeTestManifest(t, manifestPath, manifest.Targets...)
+	manifest, report, err = RevokeGoneUnixTargets(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if users := manifestUsers(manifest); users["alice"] || !users["gina"] || !users["erin"] {
+		t.Fatalf("directory answering: %v (report %+v)", users, report)
+	}
+
+	// On a host with no directory, every "no such user" is definitive.
+	writeTestManifest(t, manifestPath, row("hank", 1600, "opencode"))
+	state.Sources["hank"] = unixSourceDirectory
+	opts.DirectoryConfigured = func() bool { return false }
+	manifest, _, err = RevokeGoneUnixTargets(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 0 {
+		t.Fatalf("no directory configured: kept %v", manifestUsers(manifest))
+	}
+
+	// The local database unreadable: a directory account's miss is not
+	// corroborated.
+	writeTestManifest(t, manifestPath, row("ivan", 1234401105, "opencode"))
+	state.Sources["ivan"] = unixSourceDirectory
+	opts.LocalAccounts = func() (map[string]int, error) { return nil, errors.New("dscl timed out") }
+	opts.DirectoryConfigured = func() bool { return true }
+	manifest, _, err = RevokeGoneUnixTargets(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manifestUsers(manifest)["ivan"] {
+		t.Fatal("a directory account was revoked while the local account database was unreadable")
+	}
+
+	// No manifest yet: nothing to do.
+	opts.ExistingManifestPath = filepath.Join(root, "missing.yaml")
+	if manifest, report, err = RevokeGoneUnixTargets(context.Background(), opts); err != nil || len(manifest.Targets) != 0 || len(report.Revoked) != 0 {
+		t.Fatalf("missing manifest: %+v %+v %v", manifest, report, err)
+	}
+}

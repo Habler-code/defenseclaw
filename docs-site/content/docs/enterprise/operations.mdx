@@ -237,7 +237,7 @@ equivalent). It does not wait for the enumerator.
 
 | OS | Target manifest | Notes |
 | --- | --- | --- |
-| Linux | `/etc/defenseclaw/hook-guardian/targets.yaml` | A user is removed after 3 enumerator cycles in a row that report "no such user" (about 15 minutes). A directory outage does not remove anyone |
+| Linux | `/etc/defenseclaw/hook-guardian/targets.yaml` | A deleted user is removed at the third enumerator cycle in a row that reports "no such user" (10 to 15 minutes), or at once by `repair`. A directory outage does not remove anyone |
 | macOS | `/opt/cisco/defenseclaw/etc/hook-guardian/targets.yaml` | Same as Linux |
 | Windows | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml` | The guardian writes a user's hooks only while that user has an active (connected) session. Rows for a signed-out or disconnected user wait |
 

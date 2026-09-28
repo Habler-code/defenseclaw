@@ -13,7 +13,11 @@
 package unixidentity
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
+	"errors"
+	"io"
 	"strings"
 )
 
@@ -73,6 +77,49 @@ func ParseNSSwitchDirectoryConfigured(content string) bool {
 		return false
 	}
 	return false
+}
+
+// ParseDSCLSearchPolicyDirectoryConfigured reports whether the macOS Open
+// Directory search policy, as printed by `dscl -plist /Search -read /
+// SearchPath CSPSearchPath NSPSearchPath`, names a node other than the
+// local ones (/Local/..., /BSD/local). A Mac bound to Active Directory or
+// LDAP lists that node (for example "/Active Directory/CORP/All Domains"
+// or "/LDAPv3/ldap.example.com"). Output that does not parse, or that
+// names no node, reports true: a lookup may then reach a directory.
+func ParseDSCLSearchPolicyDirectoryConfigured(output []byte) bool {
+	decoder := xml.NewDecoder(bytes.NewReader(output))
+	key := ""
+	nodes := 0
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return true
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || (start.Name.Local != "key" && start.Name.Local != "string") {
+			continue
+		}
+		var text string
+		if err := decoder.DecodeElement(&text, &start); err != nil {
+			return true
+		}
+		text = strings.TrimSpace(text)
+		if start.Name.Local == "key" {
+			key = text
+			continue
+		}
+		if !strings.HasSuffix(key, "SearchPath") || text == "" {
+			continue
+		}
+		nodes++
+		if !strings.HasPrefix(text, "/Local/") && text != "/BSD/local" {
+			return true
+		}
+	}
+	return nodes == 0
 }
 
 // parseLocalPasswd returns name → uid for the entries of a passwd(5) file.

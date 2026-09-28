@@ -39,3 +39,76 @@ func TestParseLocalPasswdAndDSCL(t *testing.T) {
 		t.Fatalf("parseDSCLLocalAccounts = %v", dscl)
 	}
 }
+
+// macOS: the enumerator assumed every Mac may be bound to a directory, so a
+// deleted local account whose source was not recorded as local was never
+// revoked on an unbound Mac (MAC-F42). The search policy decides it.
+func TestParseDSCLSearchPolicyDirectoryConfigured(t *testing.T) {
+	plist := func(entries string) []byte {
+		return []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+` + entries + `</dict>
+</plist>
+`)
+	}
+	localOnly := `	<key>dsAttrTypeStandard:CSPSearchPath</key>
+	<array>
+		<string>/Local/Default</string>
+	</array>
+	<key>dsAttrTypeStandard:NSPSearchPath</key>
+	<array>
+		<string>/Local/Default</string>
+	</array>
+	<key>dsAttrTypeStandard:SearchPath</key>
+	<array>
+		<string>/Local/Default</string>
+	</array>
+	<key>dsAttrTypeStandard:SearchPolicy</key>
+	<array>
+		<string>dsAttrTypeStandard:NSPSearchPath</string>
+	</array>
+`
+	for name, tc := range map[string]struct {
+		output []byte
+		want   bool
+	}{
+		"unbound Mac (macOS 15 default)": {plist(localOnly), false},
+		"BSD flat files": {plist(`	<key>dsAttrTypeStandard:SearchPath</key>
+	<array>
+		<string>/Local/Default</string>
+		<string>/BSD/local</string>
+	</array>
+`), false},
+		"Active Directory": {plist(`	<key>dsAttrTypeStandard:CSPSearchPath</key>
+	<array>
+		<string>/Local/Default</string>
+		<string>/Active Directory/CORP/All Domains</string>
+	</array>
+	<key>dsAttrTypeStandard:SearchPath</key>
+	<array>
+		<string>/Local/Default</string>
+		<string>/Active Directory/CORP/All Domains</string>
+	</array>
+`), true},
+		"LDAP only in the automatic path": {plist(`	<key>dsAttrTypeStandard:NSPSearchPath</key>
+	<array>
+		<string>/Local/Default</string>
+		<string>/LDAPv3/ldap.example.com</string>
+	</array>
+	<key>dsAttrTypeStandard:SearchPath</key>
+	<array>
+		<string>/Local/Default</string>
+	</array>
+`), true},
+		"no search path":     {plist(""), true},
+		"not a plist":        {[]byte("No such key: SearchPath\n"), true},
+		"empty output":       {nil, true},
+		"truncated document": {plist(localOnly)[:200], true},
+	} {
+		if got := ParseDSCLSearchPolicyDirectoryConfigured(tc.output); got != tc.want {
+			t.Errorf("%s: ParseDSCLSearchPolicyDirectoryConfigured = %v, want %v", name, got, tc.want)
+		}
+	}
+}

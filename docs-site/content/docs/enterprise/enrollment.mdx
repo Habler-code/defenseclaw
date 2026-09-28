@@ -345,9 +345,34 @@ avoid lookups.
   a deleted user's rows.
 - **Excluded user.** Removed on the next cycle.
 - **Deleted user (Linux and macOS).** Only a definitive "no such user"
-  answer counts. A directory outage, a timeout or an unreachable server
-  never removes anyone. A row is removed after 3 consecutive definitive
-  misses, about 15 minutes at the five-minute cycle.
+  answer counts. For an account last seen in the local account database
+  (`/etc/passwd`, or the macOS local directory node), that is the account
+  no longer being listed there, even while a cached lookup still resolves
+  it. For a directory account, another directory account must resolve in
+  the same cycle. On a host that looks up accounts in no directory (Linux
+  `nsswitch.conf` lists only local sources; the macOS search policy lists
+  only `/Local/Default`), every "no such user" answer is definitive. A
+  directory outage, a timeout or an unreachable server never removes
+  anyone.
+
+  The enumerator counts one miss per cycle and removes the user's rows at
+  the third consecutive definitive miss. At the five-minute cycle that is
+  10 to 15 minutes after the account is deleted, or sooner when the
+  enumerator restarts, because it runs a cycle when it starts. Until then
+  `status` and `verify` report the user's targets as pending or failed
+  (`target account "<name>" does not exist`), `reconcile` fails, and
+  `security_complete` is false. To remove them at once, run
+  `enterprise linux repair` or `enterprise macos repair` as root. Repair
+  removes the targets of accounts that no longer exist and lists them in its
+  result (`deleted_account_targets_removed`). An account that a directory
+  outage could explain keeps its targets (`deleted_account_targets_kept`).
+
+  On macOS, check that the account record is gone:
+  `dscl . -read /Users/<name>` must report `eDSRecordNotFound`. When
+  `sysadminctl -deleteUser` or `dscl . -delete` reports a permission error,
+  the home folder can be removed while the record stays. The account then
+  still exists, so its targets stay pending (`user home ... is not available`)
+  and nothing is revoked.
 - **Disabled row (Windows).** An existing disabled row stays disabled
   across cycles.
 - **Agent removed from the config.** Its per-user rows are removed on the

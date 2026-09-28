@@ -45,9 +45,23 @@ func platformLocalAccounts(ctx context.Context) (map[string]int, error) {
 	return parseDSCLLocalAccounts(string(result.stdout)), nil
 }
 
-// platformDirectoryConfigured cannot cheaply tell whether this Mac is
-// bound to a directory, so it assumes it may be.
-func platformDirectoryConfigured() bool { return true }
+// platformDirectoryConfigured reads the Open Directory search policy: a
+// Mac whose search path lists only local nodes answers every lookup from
+// its local directory, so "no such user" is definitive for every account,
+// as it is on a Linux host whose nsswitch.conf lists only files. A Mac
+// bound to a directory, or one whose policy cannot be read, may reach a
+// directory.
+func platformDirectoryConfigured() bool {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return true
+	}
+	result, err := runTrustedCommand(context.Background(), darwinDSCL,
+		[]string{"-plist", "/Search", "-read", "/", "SearchPath", "CSPSearchPath", "NSPSearchPath"})
+	if err != nil || result.exitCode != 0 {
+		return true
+	}
+	return ParseDSCLSearchPolicyDirectoryConfigured(result.stdout)
+}
 
 // platformLocalUserLister lists local accounts with `dscl . -list /Users
 // UniqueID`, then resolves each through os/user for home and group data.

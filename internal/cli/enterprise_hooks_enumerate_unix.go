@@ -83,6 +83,122 @@ func init() {
 	flags.BoolVar(&enterpriseHooksEnumerateOpts.dryRun, "dry-run", false, "print the manifest instead of publishing it")
 	_ = flags.MarkHidden("descriptor")
 	enterpriseHooksCmd.AddCommand(enterpriseHooksEnumerateCmd)
+
+	revokeFlags := enterpriseHooksRevokeGoneCmd.Flags()
+	revokeFlags.StringVar(&enterpriseHooksRevokeGoneOpts.manifest, "manifest", "", "absolute path of the guardian targets.yaml to maintain")
+	revokeFlags.BoolVar(&enterpriseHooksRevokeGoneOpts.jsonOut, "json", false, "print the result as JSON")
+	enterpriseHooksCmd.AddCommand(enterpriseHooksRevokeGoneCmd)
+}
+
+// `enterprise hooks revoke-gone` is the immediate form of the enumerator's
+// revocation of deleted accounts. The enumerator removes a deleted
+// account's targets after enterprisehooks.UnixRevokeAfterMisses cycles, and
+// until then the guardian reports each as a failed target, so verify and
+// reconcile fail for the whole host. `enterprise linux|macos repair` runs
+// this while the guardian and the enumerator are stopped.
+
+type enterpriseHooksRevokeGoneOptions struct {
+	manifest string
+	jsonOut  bool
+}
+
+var enterpriseHooksRevokeGoneOpts = enterpriseHooksRevokeGoneOptions{}
+
+var enterpriseHooksRevokeGoneCmd = &cobra.Command{
+	Use:          "revoke-gone",
+	Short:        "Internal: remove the targets of accounts that no longer exist (run by repair)",
+	Hidden:       true,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		return runEnterpriseHooksRevokeGone(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), enterpriseHooksRevokeGoneOpts)
+	},
+}
+
+type enterpriseHooksRevokeGoneReport struct {
+	enterprisehooks.UnixRevokeGoneReport
+	Manifest string `json:"manifest"`
+	Changed  bool   `json:"changed"`
+	Idle     bool   `json:"idle,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// enterpriseHooksRevokeGoneRootCheck is replaceable in unprivileged tests.
+var enterpriseHooksRevokeGoneRootCheck = func() error {
+	if euid := os.Geteuid(); euid != 0 {
+		return fmt.Errorf("enterprise hooks revoke-gone: run as root (euid=%d)", euid)
+	}
+	return nil
+}
+
+func runEnterpriseHooksRevokeGone(ctx context.Context, stdout, stderr io.Writer, opts enterpriseHooksRevokeGoneOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	manifestPath := filepath.Clean(strings.TrimSpace(opts.manifest))
+	if strings.TrimSpace(opts.manifest) == "" || !filepath.IsAbs(manifestPath) {
+		return errors.New("enterprise hooks revoke-gone: --manifest must be an absolute path")
+	}
+	if !enterpriseHooksStandaloneUnixActive() {
+		return errors.New("enterprise hooks revoke-gone: available only in the standalone enterprise profile")
+	}
+	if err := enterpriseHooksRevokeGoneRootCheck(); err != nil {
+		return err
+	}
+	current, err := enterpriseHooksEnumerateConfigLoader()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks revoke-gone: load managed config: %w", err)
+	}
+	if !current.StandaloneEnterprise() {
+		return errors.New("enterprise hooks revoke-gone: the managed config is not the standalone profile")
+	}
+	report := enterpriseHooksRevokeGoneReport{Manifest: manifestPath}
+	if strings.EqualFold(strings.TrimSpace(current.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+		report.Idle = true
+		report.Reason = "enterprise.enrollment.mode is manifest; the administrator publishes targets"
+	} else {
+		statePath := enterpriseHookEnumeratorStatePath(manifestPath)
+		state := enterprisehooks.LoadUnixEnumeratorState(statePath)
+		manifest, result, err := enterprisehooks.RevokeGoneUnixTargets(ctx, enterprisehooks.UnixRevokeGoneOptions{
+			ExistingManifestPath: manifestPath,
+			Resolver:             unixidentity.NewCachingResolver(enterpriseHooksEnumerateResolver(ctx)),
+			LocalAccounts: func() (map[string]int, error) {
+				return enterpriseHooksEnumerateLocalAccounts(ctx)
+			},
+			DirectoryConfigured: enterpriseHooksEnumerateDirectoryConfigured,
+			State:               state,
+			Logger: func(subject, reason string) {
+				fmt.Fprintf(stderr, "[hook-enumerator] %s: %s\n", subject, reason)
+			},
+		})
+		if err != nil {
+			return err
+		}
+		report.UnixRevokeGoneReport = result
+		if len(result.Revoked) > 0 {
+			if report.Changed, err = enterpriseHooksEnumerateManifestWriter(manifestPath, manifest); err != nil {
+				return err
+			}
+			if err := enterprisehooks.SaveUnixEnumeratorState(statePath, state); err != nil {
+				fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
+			}
+		}
+	}
+	if opts.jsonOut {
+		return json.NewEncoder(stdout).Encode(report)
+	}
+	switch {
+	case report.Idle:
+		fmt.Fprintf(stdout, "idle: %s\n", report.Reason)
+	case len(report.Revoked) == 0:
+		fmt.Fprintln(stdout, "no targets of deleted accounts")
+	default:
+		fmt.Fprintf(stdout, "removed the targets of accounts that no longer exist: %s\n", strings.Join(report.Revoked, ", "))
+	}
+	for _, kept := range report.Kept {
+		fmt.Fprintf(stdout, "kept %s\n", kept)
+	}
+	return nil
 }
 
 type enterpriseHooksEnumerateReport struct {
