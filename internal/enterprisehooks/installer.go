@@ -200,6 +200,13 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// the guard existed, or edited) fails and the guardian re-renders it.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 	}
+	if standalonePerUserRepair(uid) {
+		// Install renders some hooks for the guardrail mode (Cursor's action
+		// command differs from its observe command). Without the mode here
+		// the presence check looked for the other rendering, so every cycle
+		// after a switch to action repaired the row again.
+		setupOpts.GuardrailMode = strings.TrimSpace(opts.GuardrailMode)
+	}
 	if setupOpts.AgentVersion == "" {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
 	}
@@ -406,6 +413,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// user, and let Setup write the file itself.
 		var ownedHookConfigs []string
 		if standalonePerUserRepair(uid) {
+			// Refuse a contract the install cannot meet before creating any
+			// folder, so a refused install leaves the home as it was.
+			if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+				return err
+			}
 			if err := withOwnerCredentials(uid, gid, func() error {
 				var prepareErr error
 				ownedHookConfigs, prepareErr = prepareOwnedHookConfigParents(home, conn.Name(), paths, uid)

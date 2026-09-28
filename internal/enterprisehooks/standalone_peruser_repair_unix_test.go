@@ -294,18 +294,30 @@ func TestStandaloneVerifyAcceptsAFreshInstallOfEachConnector(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	setStandaloneProfileForTest(t, true)
+	both := []string{"observe", "action"}
 	for _, c := range []struct {
 		name, version, config string
 		modes                 []string
 	}{
 		{"hermes", "0.9.0", ".hermes/config.yaml", []string{"observe"}},
-		{"openhands", "1.16.0", "", []string{"observe", "action"}},
-		{"kiro", "2.24.1", "", []string{"observe", "action"}},
+		{"hermes", "0.19.0", ".hermes/config.yaml", both},
+		{"openhands", "1.16.0", "", both},
+		{"kiro", "2.24.1", "", both},
 		{"copilot", "1.0.3", "", []string{"observe"}},
+		{"copilot", "1.0.20", "", both},
 		{"devin", "2026.1.2", ".config/devin/config.json", []string{"observe"}},
+		{"devin", "3000.4.25", ".config/devin/config.json", both},
 		{"amp", "0.0.170", "", []string{"observe"}},
+		{"amp", "0.0.1785334300", "", both},
 		{"opencode", "1.2.0", "", []string{"observe"}},
-		{"antigravity", "1.2.11", "", []string{"observe", "action"}},
+		{"opencode", "1.18.31", "", both},
+		{"antigravity", "1.2.11", "", both},
+		// Cursor renders a different command in action mode; codex and
+		// claudecode have per-user rows where machine policy does not cover
+		// a user.
+		{"cursor", "2.4.1", "", both},
+		{"codex", "0.145.0", "", both},
+		{"claudecode", "2.1.220", "", both},
 	} {
 		for _, mode := range c.modes {
 			home := standaloneOpenHandsHome(t)
@@ -324,6 +336,46 @@ func TestStandaloneVerifyAcceptsAFreshInstallOfEachConnector(t *testing.T) {
 			}
 			if _, err := Verify(context.Background(), opts); err != nil {
 				t.Fatalf("%s %s: verify right after the install: %v", c.name, mode, err)
+			}
+		}
+	}
+}
+
+// One home with every per-user connector installed follows a guardrail
+// mode switch both ways: after the reinstall for the new mode, Verify
+// passes for every connector, so the guardian's next cycle repairs nothing
+// (a Cursor row in action mode used to be repaired on every cycle).
+func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := standaloneOpenHandsHome(t)
+	t.Setenv("HOME", home)
+	for _, config := range []string{".hermes/config.yaml", ".config/devin/config.json"} {
+		path := filepath.Join(home, config)
+		mustMkdir(t, filepath.Dir(path), 0o700)
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	connectors := []struct{ name, version string }{
+		{"hermes", "0.19.0"}, {"openhands", "1.16.0"}, {"kiro", "2.24.1"}, {"copilot", "1.0.20"},
+		{"devin", "3000.4.25"}, {"amp", "0.0.1785334300"}, {"opencode", "1.18.31"},
+		{"antigravity", "1.2.11"}, {"cursor", "2.4.1"}, {"codex", "0.145.0"}, {"claudecode", "2.1.220"},
+	}
+	for _, mode := range []string{"observe", "action", "observe"} {
+		for _, c := range connectors {
+			opts := openHandsStandaloneOptions(home, mode)
+			opts.ConnectorName, opts.AgentVersion = c.name, c.version
+			if _, err := Install(context.Background(), opts); err != nil {
+				t.Fatalf("%s %s: install: %v", c.name, mode, err)
+			}
+		}
+		for _, c := range connectors {
+			opts := openHandsStandaloneOptions(home, mode)
+			opts.ConnectorName, opts.AgentVersion = c.name, c.version
+			if _, err := Verify(context.Background(), opts); err != nil {
+				t.Fatalf("%s after switching to %s: verify: %v", c.name, mode, err)
 			}
 		}
 	}

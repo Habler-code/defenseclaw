@@ -312,3 +312,21 @@ func mustMkdir(t *testing.T, dir string, mode os.FileMode) {
 		t.Fatal(err)
 	}
 }
+
+// An install the hook contract refuses (a new Kiro enrollment below the
+// certified floor) leaves the home as it was: the missing ~/.kiro folders
+// are created only once the install can go ahead.
+func TestStandaloneKiroRefusedInstallCreatesNoFolders(t *testing.T) {
+	skipIfRoot(t)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	opts := kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")
+	opts.AllowMissingHookConfigRepair = false
+	if _, err := Install(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "below the certified minimum") {
+		t.Fatalf("install below the floor = %v, want the certified-minimum refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".kiro")); !os.IsNotExist(err) {
+		t.Fatalf("a refused install created ~/.kiro (err=%v)", err)
+	}
+}

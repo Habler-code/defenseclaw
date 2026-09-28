@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -423,6 +424,22 @@ func UnixAgentSearchDirs(home string) []string {
 	return append(unixUserAgentBinDirs(home, false), unixMachineAgentBinDirs()...)
 }
 
+// UnixAgentSearchDirsFor is UnixAgentSearchDirs for account uid. In the
+// standalone profile it leaves out a machine directory outside the home
+// that unixPathTrustedFor does not admit for uid, as discovery does, so the
+// per-user worker never finds an agent there that another account could
+// have replaced.
+func UnixAgentSearchDirsFor(home string, uid int) []string {
+	dirs := unixUserAgentBinDirs(home, false)
+	for _, dir := range unixMachineAgentBinDirs() {
+		if StandaloneUnix() && !unixPathTrustedFor(dir, uid) {
+			continue
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
 // unixAgentDiscoveryDirs adds, for the per-user worker, the bin directories
 // found by reading the home: the npm prefix in ~/.npmrc and each installed
 // Node of nvm, fnm, asdf and mise.
@@ -569,23 +586,83 @@ func unixDiscoveryCandidateTrusted(home, path string) bool {
 	return unixPathTrustedFor(resolved, uid)
 }
 
+// darwinAdminGroupGID is the macOS admin group. Its members can already act
+// as root through sudo, so a folder they may write (/Applications,
+// root:admin 0775, or a Homebrew prefix an administrator owns) lets no
+// account change a path that it could not change as root anyway.
+const darwinAdminGroupGID = 80
+
+// unixPathTrustAdminGroup returns the group whose write access
+// unixPathTrustedFor accepts, and whether there is one: the admin group on
+// macOS, none on Linux (Linuxbrew and similar shared prefixes stay strict).
+// A seam for tests.
+var unixPathTrustAdminGroup = func() (uint32, bool) {
+	return darwinAdminGroupGID, runtime.GOOS == "darwin"
+}
+
+// unixAdminGroupMember reports whether account uid is a member of group
+// gid. A seam for tests.
+var unixAdminGroupMember = func(uid, gid uint32) bool {
+	account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		return false
+	}
+	groups, err := account.GroupIds()
+	if err != nil {
+		return false
+	}
+	want := strconv.FormatUint(uint64(gid), 10)
+	for _, group := range groups {
+		if group == want {
+			return true
+		}
+	}
+	return false
+}
+
+// UnixPathTrustedFor is unixPathTrustedFor for callers outside this package.
+func UnixPathTrustedFor(path string, uid int) bool { return unixPathTrustedFor(path, uid) }
+
 // unixPathTrustedFor resolves path one element at a time, following
 // symbolic links as the kernel does, and admits it only when every
 // directory it passes through, every link it follows and the final entry
 // are owned by root or uid, and no directory or final entry is writable by
 // group or others. No other account can then change what path names
-// between the check and its use.
+// between the check and its use. On macOS an element of the admin group
+// that others cannot write is also admitted when root, uid or an admin
+// member owns it (unixPathTrustAdminGroup).
 func unixPathTrustedFor(path string, uid int) bool {
 	if !filepath.IsAbs(path) {
 		return false
 	}
 	const maxLinks = 40
-	trustedOwner := func(info os.FileInfo) bool {
+	adminGID, adminGroup := unixPathTrustAdminGroup()
+	adminMembers := map[uint32]bool{}
+	adminMember := func(owner uint32) bool {
+		member, seen := adminMembers[owner]
+		if !seen {
+			member = unixAdminGroupMember(owner, adminGID)
+			adminMembers[owner] = member
+		}
+		return member
+	}
+	// trusted checks the owner and, for a directory or final entry
+	// (checkMode), the write bits.
+	trusted := func(info os.FileInfo, checkMode bool) bool {
 		st, ok := info.Sys().(*syscall.Stat_t)
-		return ok && (st.Uid == 0 || int64(st.Uid) == int64(uid))
+		if !ok {
+			return false
+		}
+		ownerTrusted := st.Uid == 0 || int64(st.Uid) == int64(uid)
+		perm := info.Mode().Perm()
+		if ownerTrusted && (!checkMode || perm&0o022 == 0) {
+			return true
+		}
+		return adminGroup && st.Gid == adminGID && (!checkMode || perm&0o002 == 0) &&
+			(ownerTrusted || adminMember(st.Uid))
 	}
 	root, err := os.Lstat("/")
-	if err != nil || !trustedOwner(root) || root.Mode().Perm()&0o022 != 0 {
+	if err != nil || !trusted(root, true) {
 		return false
 	}
 	current := "/"
@@ -605,10 +682,13 @@ func unixPathTrustedFor(path string, uid int) bool {
 		}
 		next := filepath.Join(current, name)
 		info, err := os.Lstat(next)
-		if err != nil || !trustedOwner(info) {
+		if err != nil {
 			return false
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
+			if !trusted(info, false) {
+				return false
+			}
 			links++
 			target, err := os.Readlink(next)
 			if err != nil || target == "" || links > maxLinks {
@@ -620,7 +700,7 @@ func unixPathTrustedFor(path string, uid int) bool {
 			pending = append(strings.Split(target, "/"), pending...)
 			continue
 		}
-		if info.Mode().Perm()&0o022 != 0 {
+		if !trusted(info, true) {
 			return false
 		}
 		if len(pending) > 0 && !info.IsDir() {

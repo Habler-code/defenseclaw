@@ -14,12 +14,29 @@ import (
 	"testing"
 )
 
+// trustChainTestDir is trustedTestDir for the path-trust tests, which need
+// every ancestor to refuse group and other writes: a checkout made with a
+// group-writable umask (002, the default for Ubuntu users) cannot model the
+// owner-only chain they check.
+func trustChainTestDir(t *testing.T) string {
+	t.Helper()
+	dir := trustedTestDir(t)
+	for ancestor := filepath.Dir(dir); ; ancestor = filepath.Dir(ancestor) {
+		if info, err := os.Stat(ancestor); err == nil && info.Mode().Perm()&0o022 != 0 {
+			t.Skipf("%s is group- or world-writable; the path-trust tests need an owner-only chain", ancestor)
+		}
+		if ancestor == filepath.Dir(ancestor) {
+			return dir
+		}
+	}
+}
+
 // sharedAgentPrefix lays out a machine prefix outside home with a devin CLI
 // that leaves a marker when it runs and a codex package.json, and makes it
 // the only machine prefix discovery searches.
 func sharedAgentPrefix(t *testing.T, home string) (prefix, marker string) {
 	t.Helper()
-	prefix = trustedTestDir(t)
+	prefix = trustChainTestDir(t)
 	previous := machinePrefixes
 	machinePrefixes = func() []string { return []string{prefix} }
 	t.Cleanup(func() { machinePrefixes = previous })
@@ -44,7 +61,7 @@ func TestDiscoverUnixAgentVersionSkipsSharedPrefixesOthersCanWrite(t *testing.T)
 	if os.Geteuid() == 0 {
 		t.Skip("ownership checks need a non-root test account")
 	}
-	home := trustedTestDir(t)
+	home := trustChainTestDir(t)
 	prefix, marker := sharedAgentPrefix(t, home)
 
 	if version, reason := DiscoverUnixAgentVersion(context.Background(), home, "devin", true); version != "2026.2.3" {
@@ -92,7 +109,7 @@ func TestDiscoverUnixAgentVersionRunsNoCandidateOwnedByAnotherAccount(t *testing
 	if os.Geteuid() == 0 {
 		t.Skip("ownership checks need a non-root test account")
 	}
-	home := trustedTestDir(t)
+	home := trustChainTestDir(t)
 	prefix, marker := sharedAgentPrefix(t, home)
 	previous := unixDiscoveryUID
 	// The prefix belongs to the test account; discover as another account.
@@ -144,7 +161,7 @@ func TestUnixPathTrustedForFollowsLinksAndChecksEveryElement(t *testing.T) {
 		t.Skip("ownership checks need a non-root test account")
 	}
 	uid := os.Geteuid()
-	dir := trustedTestDir(t)
+	dir := trustChainTestDir(t)
 	file := filepath.Join(dir, "real", "tool")
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		t.Fatal(err)
@@ -196,4 +213,97 @@ func TestUnixPathTrustedForFollowsLinksAndChecksEveryElement(t *testing.T) {
 	if unixPathTrustedFor(filepath.Join(dir, "loop-a"), uid) {
 		t.Fatal("a link loop was trusted")
 	}
+}
+
+// On macOS /Applications is root:admin 0775 and a Homebrew prefix belongs to
+// the administrator who installed it (admin group, group-writable). The
+// admin group can already act as root through sudo, so an element of that
+// group that others cannot write is admitted when root, the target or an
+// admin member owns it; a world-writable element or a non-member owner is
+// still refused, and Linux stays strict.
+func TestUnixPathTrustedForAdmitsTheMacOSAdminGroup(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("ownership checks need a non-root test account")
+	}
+	uid, gid := os.Geteuid(), uint32(os.Getegid())
+	dir := trustedTestDir(t)
+	app := filepath.Join(dir, "Applications", "Agent.app", "Contents", "MacOS")
+	if err := os.MkdirAll(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "Applications"), 0o775); err != nil {
+		t.Fatal(err)
+	}
+	tool := filepath.Join(app, "agent")
+	if err := os.WriteFile(tool, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if unixPathTrustedFor(tool, uid+1) {
+		t.Fatal("premise: a group-writable folder another account owns is refused without the admin rule")
+	}
+
+	previousGroup, previousMember := unixPathTrustAdminGroup, unixAdminGroupMember
+	t.Cleanup(func() { unixPathTrustAdminGroup, unixAdminGroupMember = previousGroup, previousMember })
+	// The test account's own group stands in for macOS admin, and the test
+	// account for an administrator who installed the app.
+	unixPathTrustAdminGroup = func() (uint32, bool) { return gid, true }
+	member := true
+	unixAdminGroupMember = func(owner, group uint32) bool { return member && int(owner) == uid && group == gid }
+	if !unixPathTrustedFor(tool, uid+1) {
+		t.Fatal("an admin-group install another admin owns was refused")
+	}
+	member = false
+	if unixPathTrustedFor(tool, uid+1) {
+		t.Fatal("a group-writable folder owned by a non-member was trusted")
+	}
+	member = true
+	if err := os.Chmod(filepath.Join(dir, "Applications"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if unixPathTrustedFor(tool, uid+1) {
+		t.Fatal("a world-writable folder was trusted")
+	}
+}
+
+// The standalone per-user worker's PATH leaves out a machine bin directory
+// another account could change, as discovery does, so connector setup never
+// finds an agent there; the Secure Client guardian's PATH is unchanged.
+func TestUnixAgentSearchDirsForLeavesOutMachineDirsOthersCanChange(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("ownership checks need a non-root test account")
+	}
+	uid := os.Geteuid()
+	prefix := trustChainTestDir(t)
+	bin := filepath.Join(prefix, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previous := machinePrefixes
+	machinePrefixes = func() []string { return []string{prefix} }
+	t.Cleanup(func() { machinePrefixes = previous; SetStandaloneUnix(false) })
+	home := filepath.Join(t.TempDir(), "alice")
+
+	SetStandaloneUnix(true)
+	if dirs := UnixAgentSearchDirsFor(home, uid); !containsString(dirs, bin) {
+		t.Fatalf("a machine dir only root and the user can change was left out: %v", dirs)
+	}
+	if dirs := UnixAgentSearchDirsFor(home, uid+1); containsString(dirs, bin) {
+		t.Fatalf("a machine dir another account owns stayed on the worker PATH: %v", dirs)
+	}
+	if dirs := UnixAgentSearchDirsFor(home, uid+1); !containsString(dirs, filepath.Join(home, ".local", "bin")) {
+		t.Fatalf("the user's own bin dir was left out: %v", dirs)
+	}
+	SetStandaloneUnix(false)
+	if dirs := UnixAgentSearchDirsFor(home, uid+1); !containsString(dirs, bin) {
+		t.Fatalf("outside the standalone profile the machine dirs changed: %v", dirs)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

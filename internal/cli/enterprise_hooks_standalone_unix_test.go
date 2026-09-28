@@ -1161,7 +1161,7 @@ func TestStandaloneReconcileMachinePolicyRowsOnlyRecordEnrollment(t *testing.T) 
 // worker could not find an agent discovery had just found in ~/.local/bin.
 // System directories stay first.
 func TestEnterpriseHookWorkerPathIncludesDiscoveryDirsAfterSystemDirs(t *testing.T) {
-	path := enterpriseHookWorkerPath("/home/alice")
+	path := enterpriseHookWorkerPath("/home/alice", 1000)
 	parts := strings.Split(path, ":")
 	if len(parts) < 3 || parts[0] != "/usr/bin" || parts[1] != "/bin" {
 		t.Fatalf("worker PATH = %q", path)
