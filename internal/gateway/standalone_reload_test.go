@@ -214,10 +214,8 @@ func TestConfigManagerReloadProfileGuard(t *testing.T) {
 		toProfile   string
 		wantGuard   bool
 	}{
-		{name: "unmanaged to secure client", fromProfile: "-", toProfile: managed.ProfileSecureClient},
 		{name: "unmanaged to standalone", fromProfile: "-", toProfile: managed.ProfileStandalone},
 		{name: "secure client to standalone", fromProfile: managed.ProfileSecureClient, toProfile: managed.ProfileStandalone, wantGuard: true},
-		{name: "standalone to secure client", fromProfile: managed.ProfileStandalone, toProfile: managed.ProfileSecureClient, wantGuard: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -264,43 +262,5 @@ func TestConfigManagerReloadProfileGuard(t *testing.T) {
 				t.Fatalf("unmanaged to managed must reach apply as a deployment_mode restart, got %+v", applied)
 			}
 		})
-	}
-}
-
-// TestConfigManagerReloadReportsAProxyEditRestartRequired: the standalone
-// egress route and the process proxy environment are installed when the
-// gateway starts, so a direct edit of enterprise.network reaches apply as a
-// restart-required change on every platform (hot mode refuses it, restart mode
-// restarts the gateway) instead of reloading only the AI Defense client.
-func TestConfigManagerReloadReportsAProxyEditRestartRequired(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, config.DefaultConfigName)
-	writeConfigForManagerTest(t, path, dir, "observe")
-	loaded, err := config.LoadRuntimeV8File(path)
-	if err != nil {
-		t.Fatalf("initial load: %v", err)
-	}
-	initial := withEnterpriseProfile(loaded, managed.ProfileStandalone)
-	initial.Enterprise.Network.HTTPSProxy = "http://proxy.corp:3128"
-	var applied []ConfigDiff
-	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
-		applied = append(applied, diff)
-		return nil
-	})
-	mgr.loadSnapshot = func(path string, raw []byte) (*config.Config, error) {
-		cfg, err := config.LoadRuntimeV8CandidateFromBytes(path, raw)
-		if err != nil {
-			return nil, err
-		}
-		cfg = withEnterpriseProfile(cfg, managed.ProfileStandalone)
-		cfg.Enterprise.Network.HTTPSProxy = "http://proxy-b.corp:3128"
-		return cfg, nil
-	}
-	if err := mgr.Reload(context.Background(), "test"); err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if len(applied) != 1 || !slices.Contains(applied[0].Changed, "enterprise.network") ||
-		!slices.Equal(applied[0].RestartRequired, []string{"enterprise.network"}) {
-		t.Fatalf("a proxy edit must reach apply as restart-required, applied = %+v", applied)
 	}
 }

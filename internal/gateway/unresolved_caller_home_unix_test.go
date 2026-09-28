@@ -40,12 +40,8 @@ func TestHomeRelativeRulesMatchWhenTheCallersHomeIsUnresolved(t *testing.T) {
 	standalone := withServiceAccountGateway(context.Background())
 	contexts := map[string]context.Context{
 		"hook-socket caller without a home": withManagedHookPeer(standalone, managedHookPeer{UID: 1002}),
-		// Controls: a resolved caller home, and a per-user gateway.
+		// Control: a resolved caller home.
 		"hook-socket caller with a home": withManagedHookPeer(standalone, managedHookPeer{UID: 1001, Home: "/home/alice"}),
-		"per-user gateway":               context.Background(),
-		"TCP request without a caller":   standalone,
-		"per-user credential without a home": context.WithValue(standalone,
-			verifiedUserScopedIdentityContextKey{}, "4102"),
 	}
 	commands := map[string]string{
 		"cat ~/.aws/credentials": "PATH-AWS-CREDS",

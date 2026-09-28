@@ -20,9 +20,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// On the RHEL standalone host one user whose Devin version had no verified
-// hook contract left 3 of 18 guardian targets failed, and the gateway
-// reported the guardrail as "starting" with enforcement off for every user.
+// One user whose Devin version had no verified hook contract left 3 of 18
+// guardian targets failed, and the gateway reported the guardrail as
+// "starting" with enforcement off for every user.
 // In the standalone profile per-user failures are reported, not fatal; the
 // Secure Client view keeps requiring a complete record.
 func TestStandaloneGuardianCoverageIsolatesPerUserFailures(t *testing.T) {

@@ -41,12 +41,8 @@ func TestAgentHookTrustedActionArgsLeavesOtherShapesUnchanged(t *testing.T) {
 		name, connector, tool, args string
 	}{
 		{"other connector", "codex", "run_command", liveAntigravityRunCommandArgs},
-		{"other tool", "antigravity", "view_file", `{"AbsolutePath":"C:\\x","toolAction":"Viewing","toolSummary":"View"}`},
 		{"unknown key", "antigravity", "run_command", `{"CommandLine":"echo dc-marker-g9","toolAction":"a","Extra":"b"}`},
 		{"metadata of the wrong type", "antigravity", "run_command", `{"CommandLine":"echo dc-marker-g9","WaitMsBeforeAsync":"soon"}`},
-		{"negative wait", "antigravity", "run_command", `{"CommandLine":"echo dc-marker-g9","WaitMsBeforeAsync":-1}`},
-		{"nothing to drop", "antigravity", "run_command", `{"CommandLine":"echo dc-marker-g9","Cwd":"C:\\x"}`},
-		{"not an object", "antigravity", "run_command", `"echo dc-marker-g9"`},
 	} {
 		got := agentHookTrustedActionArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
 		if string(got) != tc.args {

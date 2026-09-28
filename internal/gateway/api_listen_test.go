@@ -19,11 +19,14 @@ package gateway
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // TestIsAddrInUse confirms a genuine double-bind is classified as
@@ -141,6 +144,14 @@ func TestHeldAPIPortFailsRunForSecureClient(t *testing.T) {
 	})
 	inheritedAPIListener = func() (net.Listener, bool, error) { return nil, false, nil }
 	apiListenRetryBudget = 200 * time.Millisecond
+	// A runtime descriptor that names a hook socket does not make a Secure
+	// Client gateway bind one.
+	socket := filepath.Join(t.TempDir(), "hook.sock")
+	restoreDescriptor := loadStandaloneRuntimeDescriptor
+	t.Cleanup(func() { loadStandaloneRuntimeDescriptor = restoreDescriptor })
+	loadStandaloneRuntimeDescriptor = func(string) (*managed.RuntimeDescriptor, error) {
+		return &managed.RuntimeDescriptor{Profile: managed.ProfileStandalone, HookSocket: socket}, nil
+	}
 
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: t.TempDir()}
@@ -163,5 +174,8 @@ func TestHeldAPIPortFailsRunForSecureClient(t *testing.T) {
 	}
 	if snap := health.Snapshot().API; snap.State != StateError || snap.Details["hook_socket"] != nil {
 		t.Fatalf("API health = %+v, want error without a hook socket", snap)
+	}
+	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatalf("a hook socket was created outside the standalone profile: %v", err)
 	}
 }

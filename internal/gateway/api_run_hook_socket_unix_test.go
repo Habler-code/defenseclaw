@@ -205,32 +205,6 @@ func TestStandaloneHookSocketServesWhileTheAPIPortIsHeld(t *testing.T) {
 	_ = again.Close()
 }
 
-// TestNonStandaloneHeldAPIPortStillFailsRun pins the unchanged behavior
-// outside the standalone profile: no hook socket, and a held API port ends
-// Run with an error after the bind budget.
-func TestNonStandaloneHeldAPIPortStillFailsRun(t *testing.T) {
-	holder, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer holder.Close()
-	socket, health, runErr, _ := runHookSocketTestServer(t, false, holder.Addr().String())
-	select {
-	case err := <-runErr:
-		if err == nil {
-			t.Fatal("Run returned nil with the API port held")
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Run kept running with the API port held outside the standalone profile")
-	}
-	if snap := health.Snapshot().API; snap.State != StateError {
-		t.Fatalf("API health = %+v, want error", snap)
-	}
-	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
-		t.Fatalf("a hook socket was created outside the standalone profile: %v", err)
-	}
-}
-
 // TestSecondStandaloneGatewayLeavesTheLiveHookSocketAlone: a second gateway
 // under the same account must neither take over nor delete the hook socket
 // a live gateway serves. With the API port held as well it gives up, the

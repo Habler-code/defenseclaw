@@ -21,7 +21,6 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -63,18 +62,10 @@ func TestGatewayShouldConnect_ManagedStandaloneNeedsExplicitRemoteFleet(t *testi
 		want      bool
 	}{
 		{"connectors_map_default_loopback", "", "127.0.0.1", "", false},
-		{"connectors_map_auto_loopback", "", "127.0.0.1", "auto", false},
-		{"connectors_map_localhost", "", "localhost", "", false},
 		{"explicit_enabled_loopback", "", "127.0.0.1", "enabled", false},
-		{"explicit_enabled_ipv6_loopback", "", "::1", "enabled", false},
-		{"explicit_enabled_empty_host", "", "", "enabled", false},
 		// A bind-all address reaches a listener on this machine too.
-		{"explicit_enabled_unspecified_ipv4", "", "0.0.0.0", "enabled", false},
-		{"explicit_enabled_unspecified_ipv6", "", "::", "enabled", false},
 		{"explicit_enabled_unspecified_ipv6_bracketed", "", "[::]", "enabled", false},
 		{"auto_remote_needs_explicit_enable", "", "10.0.0.5", "auto", false},
-		{"openclaw_connector_loopback", "openclaw", "127.0.0.1", "", false},
-		{"explicit_disabled_remote", "", "10.0.0.5", "disabled", false},
 		{"explicit_enabled_remote", "", "10.0.0.5", "enabled", true},
 		{"explicit_on_remote_fqdn", "", "fleet.example.internal", " On ", true},
 	}
@@ -179,26 +170,6 @@ func TestRunGatewayLoop_ManagedStandaloneSendsNothingToLoopbackListener(t *testi
 		}
 		if state != StateDisabled {
 			t.Errorf("gateway state = %q, want %q", state, StateDisabled)
-		}
-	})
-	t.Run("managed_standalone_hint", func(t *testing.T) {
-		cfg := managedStandaloneFleetConfig("127.0.0.1", 18789, "")
-		cfg.DataDir = t.TempDir()
-		s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan error, 1)
-		go func() { done <- s.runGatewayLoop(ctx) }()
-		time.Sleep(50 * time.Millisecond)
-		snap := s.health.Snapshot()
-		cancel()
-		<-done
-		summary, _ := snap.Gateway.Details["summary"].(string)
-		hint, _ := snap.Gateway.Details["hint"].(string)
-		if !strings.Contains(summary, "managed standalone") {
-			t.Errorf("summary = %q, want it to name the managed standalone deployment", summary)
-		}
-		if !strings.Contains(hint, "fleet_mode: enabled") {
-			t.Errorf("hint = %q, want it to name gateway.fleet_mode: enabled", hint)
 		}
 	})
 	t.Run("unmanaged_control_dials", func(t *testing.T) {

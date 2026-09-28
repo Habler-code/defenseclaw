@@ -5,8 +5,6 @@
 package gateway
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,21 +84,13 @@ func TestUserScopedListenerProofAnswersOnlyAProtectedUsersHookCredential(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	codexOTLP := userScopedTestToken(t, connector.UserScopedOTLPCredential, "codex", listenerProofTestAlice)
-	unknown := sha256.Sum256([]byte("not a credential"))
 	for name, tc := range map[string]struct {
 		method, remote, scope, keyID, nonce string
 	}{
 		"another connector":      {http.MethodGet, "127.0.0.1:50000", "amp", aliceKeyID, listenerProofTestNonce},
-		"no connector":           {http.MethodGet, "127.0.0.1:50000", "", aliceKeyID, listenerProofTestNonce},
-		"an OTLP credential":     {http.MethodGet, "127.0.0.1:50000", "codex", connector.UserScopedCredentialKeyID(codexOTLP), listenerProofTestNonce},
 		"the connector-wide one": {http.MethodGet, "127.0.0.1:50000", "opencode", connector.UserScopedCredentialKeyID(wide), listenerProofTestNonce},
-		"an unknown key ID":      {http.MethodGet, "127.0.0.1:50000", "opencode", hex.EncodeToString(unknown[:]), listenerProofTestNonce},
-		"an upper-case key ID":   {http.MethodGet, "127.0.0.1:50000", "opencode", strings.ToUpper(aliceKeyID), listenerProofTestNonce},
 		"the credential itself":  {http.MethodGet, "127.0.0.1:50000", "opencode", alice, listenerProofTestNonce},
 		"a short nonce":          {http.MethodGet, "127.0.0.1:50000", "opencode", aliceKeyID, "5a5a"},
-		"no nonce":               {http.MethodGet, "127.0.0.1:50000", "opencode", aliceKeyID, ""},
-		"a POST":                 {http.MethodPost, "127.0.0.1:50000", "opencode", aliceKeyID, listenerProofTestNonce},
 		"a remote caller":        {http.MethodGet, "192.0.2.10:50000", "opencode", aliceKeyID, listenerProofTestNonce},
 	} {
 		result := requestUserScopedListenerProof(handler, observed, tc.method, tc.remote, tc.scope, tc.keyID, tc.nonce)

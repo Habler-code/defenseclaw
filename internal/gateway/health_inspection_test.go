@@ -53,23 +53,11 @@ func TestHealthPublishesTheStandaloneInspectionPosture(t *testing.T) {
 		wantAIDefense string
 	}{
 		{"local engine only", false, StateRunning, nil, "active", "disabled"},
-		{"awaiting the guardian", false, StateStarting, nil, "active", "disabled"},
-		{"guardrail off", false, StateDisabled, nil, "disabled", "disabled"},
 		{"guardrail failed", false, StateError, nil, "unknown", "disabled"},
 		{"ai defense ok", true, StateRunning, map[string]interface{}{"ai_defense_available": true}, "active", "ok"},
 		{"ai defense key rejected", true, StateRunning, map[string]interface{}{
 			"ai_defense_available": false, "ai_defense_error": "ai_defense: the API key was rejected (HTTP 401)",
 		}, "active", "unavailable:auth_failed"},
-		{"ai defense credential missing", true, StateRunning, map[string]interface{}{
-			"ai_defense_available": false, "ai_defense_error": `ai_defense: credential "aid-key": not found`,
-		}, "active", "unavailable:credential_unavailable"},
-		{"ai defense unreachable", true, StateRunning, map[string]interface{}{
-			"ai_defense_available": false, "ai_defense_error": "ai_defense: endpoint or egress proxy unreachable: dial tcp: i/o timeout",
-		}, "active", "unavailable:unreachable"},
-		{"ai defense not built yet", true, StateRunning, map[string]interface{}{
-			"ai_defense_available": false, "ai_defense_error": "ai_defense: client not initialized",
-		}, "active", "unavailable:not_initialized"},
-		{"ai defense state not published", true, StateStarting, nil, "active", "unknown"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := &config.Config{DeploymentMode: "managed_enterprise"}

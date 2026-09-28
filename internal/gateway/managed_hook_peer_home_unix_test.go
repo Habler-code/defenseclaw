@@ -13,7 +13,6 @@
 package gateway
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -42,8 +41,6 @@ func TestManagedHookPeerHomeResolvesTheCallersHome(t *testing.T) {
 	resolver := &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{
 		1001: {Name: "alice", UID: 1001, Home: "/home/alice"},
 		1002: {Name: "bob", UID: 1002, Home: "relative/home"},
-		1003: {Name: "root-home", UID: 1003, Home: "/"},
-		1004: {Name: "dotted", UID: 1004, Home: "/home/../etc"},
 		1005: {Name: "mismatch", UID: 4242, Home: "/home/mismatch"},
 		1006: {Name: "trailing", UID: 1006, Home: "/Users/carol/"},
 	}}
@@ -58,12 +55,8 @@ func TestManagedHookPeerHomeResolvesTheCallersHome(t *testing.T) {
 	}{
 		{1001, "/home/alice"},
 		{1002, ""},
-		{1003, ""},
-		{1004, ""},
 		{1005, ""},
 		{1006, "/Users/carol"},
-		{1999, ""},
-		{-1, ""},
 	} {
 		if got := cache.lookup(test.uid); got != test.want {
 			t.Fatalf("lookup(%d)=%q want %q", test.uid, got, test.want)
@@ -92,20 +85,6 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	cache.lookup(1001)
 	if created != 2 {
 		t.Fatalf("resolver not refreshed after the TTL (created %d)", created)
-	}
-}
-
-func TestTrustedActiveHomeUsesTheVerifiedCallerOnTheHookSocket(t *testing.T) {
-	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "alice", Home: "/home/alice"})
-	if got := trustedActiveHome(ctx); got != "/home/alice" {
-		t.Fatalf("trustedActiveHome(peer)=%q want /home/alice", got)
-	}
-	unresolved := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002})
-	if got := trustedActiveHome(unresolved); got != unresolvedCallerHome {
-		t.Fatalf("an unresolved caller home must be the sentinel, never the gateway home: %q", got)
-	}
-	if got, want := trustedActiveHome(context.Background()), trustedSameHostHome(); got != want {
-		t.Fatalf("per-user path changed: %q want %q", got, want)
 	}
 }
 

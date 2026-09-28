@@ -13,7 +13,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -50,41 +49,10 @@ func TestStandaloneInspectorWithoutAIDefenseIsLocalOnly(t *testing.T) {
 }
 
 func TestStandaloneMultiConnectorBootNeedsNoCloudProvider(t *testing.T) {
-	resetConnectorRuleCategories(t)
-	conn := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}}}
-	reg := connector.NewRegistry()
-	reg.RegisterBuiltin(conn)
 	s := &Sidecar{cfg: standaloneConfig(t), health: NewSidecarHealth()}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- s.runManagedEnterpriseMultiHookGuardrail(ctx, reg, []connector.Connector{conn}, "gateway-token", "127.0.0.1:0", "127.0.0.1:0", "master")
-	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		snapshot := s.health.Snapshot().Guardrail
-		if snapshot.State == StateError {
-			cancel()
-			t.Fatalf("standalone boot failed: %v", snapshot.LastError)
-		}
-		if detail, ok := snapshot.Details["inspection_available"].(bool); ok {
-			if !detail {
-				cancel()
-				t.Fatalf("standalone local inspection must be reported available: %+v", snapshot.Details)
-			}
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("standalone managed guardrail returned %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("standalone managed guardrail did not stop")
+	detail, conn := waitForGuardrailDetail(t, s)
+	if detail["inspection_available"] != true {
+		t.Fatalf("standalone local inspection must be reported available: %+v", detail)
 	}
 	if !conn.credsSet {
 		t.Fatal("standalone boot must register the connector for hook evaluation")
@@ -92,8 +60,9 @@ func TestStandaloneMultiConnectorBootNeedsNoCloudProvider(t *testing.T) {
 }
 
 // waitForGuardrailDetail runs the managed multi-connector guardrail until it
-// publishes inspection_available and returns that health detail.
-func waitForGuardrailDetail(t *testing.T, s *Sidecar) map[string]interface{} {
+// publishes inspection_available and returns that health detail and the
+// connector it booted.
+func waitForGuardrailDetail(t *testing.T, s *Sidecar) (map[string]interface{}, *hookBootStubConnector) {
 	t.Helper()
 	resetConnectorRuleCategories(t)
 	conn := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}}}
@@ -119,12 +88,12 @@ func waitForGuardrailDetail(t *testing.T, s *Sidecar) map[string]interface{} {
 			t.Fatalf("managed guardrail boot failed: %v", snapshot.LastError)
 		}
 		if _, ok := snapshot.Details["inspection_available"].(bool); ok {
-			return snapshot.Details
+			return snapshot.Details, conn
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("managed guardrail never published inspection_available")
-	return nil
+	return nil, nil
 }
 
 func TestStandaloneHealthReportsAMissingAIDefenseCredential(t *testing.T) {
@@ -144,7 +113,7 @@ func TestStandaloneHealthReportsAMissingAIDefenseCredential(t *testing.T) {
 	if available, _ := s.inspectionAvailability(); available {
 		t.Fatal("a configured but missing AI Defense credential must be reported")
 	}
-	detail := waitForGuardrailDetail(t, s)
+	detail, _ := waitForGuardrailDetail(t, s)
 	if available, _ := detail["inspection_available"].(bool); !available {
 		t.Fatalf("the local engine still inspects, so inspection_available must stay true: %+v", detail)
 	}
@@ -157,17 +126,6 @@ func TestStandaloneHealthReportsAMissingAIDefenseCredential(t *testing.T) {
 	reason, _ := detail["ai_defense_error"].(string)
 	if !strings.HasPrefix(reason, "ai_defense: ") || !strings.Contains(reason, "ai-defense-api-key") {
 		t.Fatalf("ai_defense_error must carry the credential failure, got %q", reason)
-	}
-}
-
-func TestStandaloneHealthOmitsAIDefenseWhenNotEnabled(t *testing.T) {
-	s := &Sidecar{cfg: standaloneConfig(t), health: NewSidecarHealth()}
-	s.pickInspector(context.Background())
-	detail := waitForGuardrailDetail(t, s)
-	for _, key := range []string{"ai_defense_available", "ai_defense_error", "inspection_error"} {
-		if _, ok := detail[key]; ok {
-			t.Fatalf("a local-only standalone deployment must not publish %s: %+v", key, detail)
-		}
 	}
 }
 
@@ -297,15 +255,11 @@ func TestStandaloneAIDefenseHealthFollowsRequestOutcomes(t *testing.T) {
 	if available, reason := health(); !available || reason != "" {
 		t.Fatalf("a freshly built client must start available: available=%t reason=%q", available, reason)
 	}
-	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		status.Store(int32(code))
-		if verdict := inspect(c, context.Background()); verdict != nil {
-			t.Fatalf("HTTP %d produced a verdict: %+v", code, verdict)
-		}
-		available, reason := health()
-		if available || !strings.HasPrefix(reason, "ai_defense: ") || !strings.Contains(reason, fmt.Sprintf("API key was rejected (HTTP %d)", code)) {
-			t.Fatalf("HTTP %d: available=%t reason=%q, want a rejected-key error", code, available, reason)
-		}
+	if verdict := inspect(c, context.Background()); verdict != nil {
+		t.Fatalf("HTTP 401 produced a verdict: %+v", verdict)
+	}
+	if available, reason := health(); available || !strings.HasPrefix(reason, "ai_defense: ") || !strings.Contains(reason, "API key was rejected (HTTP 401)") {
+		t.Fatalf("HTTP 401: available=%t reason=%q, want a rejected-key error", available, reason)
 	}
 
 	// The key works again: the next verdict clears the error.

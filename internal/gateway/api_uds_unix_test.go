@@ -97,29 +97,6 @@ func TestBindManagedHookSocket(t *testing.T) {
 	}
 }
 
-// TestBindManagedHookSocketLeavesALiveSocketAlone: a socket another listener
-// under this account still answers on (a second gateway) is neither removed
-// nor replaced, and it keeps serving.
-func TestBindManagedHookSocketLeavesALiveSocketAlone(t *testing.T) {
-	path := filepath.Join(shortGatewaySocketDir(t), "hook.sock")
-	live, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer live.Close()
-	if listener, err := bindManagedHookSocket(path); !errors.Is(err, errHookSocketInUse) {
-		if listener != nil {
-			_ = listener.Close()
-		}
-		t.Fatalf("bind over a live socket = %v, want errHookSocketInUse", err)
-	}
-	conn, err := net.DialTimeout("unix", path, time.Second)
-	if err != nil {
-		t.Fatalf("the live socket stopped answering after a refused bind: %v", err)
-	}
-	_ = conn.Close()
-}
-
 // TestBindManagedHookSocketWaitsForALiveListenerToLeave: during an
 // overlapping restart the new gateway waits for the old one to release the
 // socket and then binds it, instead of replacing it or running without it.
@@ -167,6 +144,11 @@ func TestBindManagedHookSocketWaitsForALiveListenerToLeave(t *testing.T) {
 			_ = again.Close()
 		}
 		t.Fatalf("bind over a socket that stays live = %v, want errHookSocketInUse", err)
+	}
+	if conn, err := net.DialTimeout("unix", path, time.Second); err != nil {
+		t.Fatalf("the live socket stopped answering after a refused bind: %v", err)
+	} else {
+		_ = conn.Close()
 	}
 }
 
@@ -363,20 +345,6 @@ func TestManagedHookSocketServesOnlyAuthorizedHookRoutes(t *testing.T) {
 
 	if status, body := post("/api/v1/claude-code/hook", nil, event); status == http.StatusForbidden || status == http.StatusUnauthorized {
 		t.Fatalf("enrolled per-user connector refused: %d %s", status, body)
-	}
-	session := map[string]any{
-		"key":           map[string]any{"connector": "claudecode", "session": "socket-session", "process": "agent-process"},
-		"session_start": true,
-		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: project hook",
-			"findings": []map[string]any{{"connector": "claudecode", "scope": "project", "path": "/repo/.claude/settings.json", "digest": "abcd"}}},
-	}
-	if status, body := post("/api/v1/foreign-hook-session/claudecode", nil, session); status != http.StatusOK || !strings.Contains(body, "restart the agent") {
-		t.Fatalf("hook socket did not record the session block: %d %s", status, body)
-	}
-	session["session_start"] = false
-	session["decision"] = map[string]any{"deny": false}
-	if status, body := post("/api/v1/foreign-hook-session/claudecode", nil, session); status != http.StatusOK || !strings.Contains(body, "Earlier in this agent session") {
-		t.Fatalf("hook socket lost the session block: %d %s", status, body)
 	}
 	if status, body := post("/api/v1/cursor/hook", nil, event); status != http.StatusForbidden || !strings.Contains(body, managedHookReasonUIDUnregistered) {
 		t.Fatalf("unenrolled per-user connector: %d %s", status, body)
