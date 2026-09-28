@@ -764,7 +764,15 @@ t_install_reconciles_existing_state() {
   assert_contains "${body}" 'Rescue tree cleanup is DEFERRED to after wait_for_launchd_running' \
     "managed bundle defers guardrail rescue-tree cleanup until after gateway startup verifies"
   assert_contains "${body}" "-name 'guardrail.old-*'" \
-    "managed bundle sweeps ALL prior-run rescue trees at once after successful verification"
+    "managed bundle sweeps stale rescue trees after successful verification"
+  # Concurrent-run safety: a run whose own wait_for_launchd_running
+  # hasn't finished yet must NOT have its rescue tree wiped by another
+  # run that verified first. The sweep filters by encoded PID so
+  # trees owned by an active install.sh survive intact.
+  assert_contains "${body}" '/bin/kill -0 "${_rescue_pid}"' \
+    "managed bundle preserves rescue trees whose encoded PID is still an active install.sh"
+  assert_contains "${body}" 'preserving concurrent-run rescue tree' \
+    "managed bundle logs when a concurrent-run rescue tree is preserved"
   assert_contains "${body}" 'prior-run rescue trees preserved under ${POLICIES_DST}/guardrail.old-*' \
     'managed bundle names the rescue-tree location in the wait-for-launchd die so operators can roll back'
 

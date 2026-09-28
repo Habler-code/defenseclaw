@@ -1204,15 +1204,37 @@ fi
 # Verified live: the gateway is running with the freshly-published
 # rule packs. Only now is it safe to delete the rescue tree(s) —
 # earlier deletion would strand the operator without a rollback path
-# if startup panicked on the new packs. Clean THIS run's rescue tree
-# plus any stale `.old-*` trees left behind by prior invocations that
-# never reached verification (--skip-launchd, aborted run, doubly-
-# broken swap+rollback). find is used rather than a shell glob so
-# `nullglob` state doesn't matter and unmatched patterns are silent.
+# if startup panicked on the new packs.
+#
+# Filter the sweep to trees whose encoded PID is NOT currently alive
+# so a concurrent install.sh whose own `wait_for_launchd_running`
+# hasn't finished yet keeps its rescue tree at `.old-<its-pid>-<its-ts>`.
+# Without this filter, whichever run finishes first would wipe every
+# other in-flight run's rescue.
+#
+# find is used rather than a shell glob so `nullglob` state doesn't
+# matter and unmatched patterns are silent. The rescue tree name
+# format is `guardrail.old-<pid>-<utc-timestamp>` (see the swap block
+# above), so the PID is the first `-`-delimited field after the
+# `guardrail.old-` prefix.
 if [[ -n "${_guardrail_old:-}" ]]; then
-  find "${POLICIES_DST}" -mindepth 1 -maxdepth 1 -type d -name 'guardrail.old-*' \
-    -exec rm -rf -- {} + 2>/dev/null || true
-  unset _guardrail_old
+  while IFS= read -r _rescue; do
+    [[ -n "${_rescue}" ]] || continue
+    _rescue_base="$(/usr/bin/basename -- "${_rescue}")"
+    _rescue_pid="${_rescue_base#guardrail.old-}"
+    _rescue_pid="${_rescue_pid%%-*}"
+    # A tree owned by THIS process is always safe to clean — we've
+    # just verified our own startup. Only other-PID trees need the
+    # liveness check.
+    if [[ "${_rescue_pid}" != "$$" ]] \
+        && [[ "${_rescue_pid}" =~ ^[0-9]+$ ]] \
+        && /bin/kill -0 "${_rescue_pid}" 2>/dev/null; then
+      log "  preserving concurrent-run rescue tree ${_rescue} (pid ${_rescue_pid} still active)"
+      continue
+    fi
+    rm -rf -- "${_rescue}" 2>/dev/null || true
+  done < <(/usr/bin/find "${POLICIES_DST}" -mindepth 1 -maxdepth 1 -type d -name 'guardrail.old-*' 2>/dev/null)
+  unset _guardrail_old _rescue _rescue_base _rescue_pid
 fi
 
 # ---- per-user hook wiring (multi-user, via hook guardian) --------------
