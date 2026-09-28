@@ -39,10 +39,14 @@ func Analyze(input Input) (facts Facts) {
 		}
 	}()
 
-	return analyze(input)
+	return analyze(input, "", nil)
 }
 
-func analyze(input Input) Facts {
+// analyze computes the facts of input. twinCommand, when set, replaces the
+// raw command text before it is parsed, and capture, when set, receives the
+// runtime-expanded redirect targets of that parse
+// (analyzeWithRedirectTargets).
+func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Facts {
 	base := newParseOutput(DialectNone, 1)
 	base.status = StatusNotApplicable
 	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(
@@ -181,6 +185,9 @@ func analyze(input Input) Facts {
 		startID = base.nextID
 	}
 	if command != "" && len(argv) == 0 {
+		if twinCommand != "" {
+			command = twinCommand
+		}
 		dialect, ambiguous := chooseRawCommandDialect(
 			input.Tool,
 			dialectHint,
@@ -190,6 +197,9 @@ func analyze(input Input) Facts {
 			base.markAmbiguous(IssueConflictingSources)
 		}
 		parsed := parseCommandAs(command, dialect, startID, 0)
+		if capture != nil {
+			*capture = parsed.redirectTargets
+		}
 		parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
 		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)

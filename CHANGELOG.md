@@ -102,16 +102,23 @@ gated on it, so they apply to per-user installs too.
   (`> ~/out.txt`, `> "$HOME/out.txt"`, `> out-*.txt`) made the whole
   command's parse partial, so a CEL command rule fell back to its regex and
   a CRITICAL match was recorded as detection-only (allowed in action mode),
-  while the same command writing to an absolute path was blocked. When the
-  expanded redirect target is the only unknown part of a command, the rule
-  engine now evaluates CEL rules on the command without that redirect. A
+  while the same command writing to an absolute path was blocked. When such
+  a target is the only unknown part of a command and can only name a file
+  (it starts with `~` or `$HOME/`, or only a filename pattern expands), the
+  rule engine now analyzes the same command with a static stand-in target,
+  including any wrapped commands (`sudo`, `env`, `sh -c`), and evaluates
+  CEL rules on that analysis without the stand-in's redirect and path. A
   match there is proof for a block, provided the rule cannot depend on the
-  dropped redirect (it does not negate, compare or `all()` over
-  `redirects`, and does not read `parse` or `argv_complete`) and has no
+  dropped redirect and path (it does not negate, compare or `all()` over
+  `redirects`, `paths`, `artifacts` or `archive_lineages`, and does not read
+  `parse`, `argv_complete` or a lineage's `authoritative`) and has no
   built-in code prerequisite. A non-match still leaves the regex fallback
-  to decide, as before. Commands chained with `&&` or `||`, and commands
-  with an expanding argument or program name, are unchanged. This is rule
-  engine behavior, so it applies to every profile that uses the local
+  to decide, as before. Nearly all built-in rules have a code prerequisite,
+  so this covers custom and marker rules; the built-in rules still record a
+  match on such a command as detection-only (tracked in #925). Commands
+  chained with `&&` or `||`, commands with an expanding argument or program
+  name, and other parameter targets such as `> $OUT` are unchanged. This is
+  rule engine behavior, so it applies to every profile that uses the local
   engine, per-user installs included.
 - **Agents say that DefenseClaw policy made a block.** A block or
   confirmation by a policy rule reached the agent as `matched:

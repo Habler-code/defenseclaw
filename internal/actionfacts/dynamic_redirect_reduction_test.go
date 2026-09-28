@@ -18,25 +18,44 @@ package actionfacts
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
+
+const staticRedirectTarget = "/var/tmp/dc-static-target.txt"
 
 func TestDynamicRedirectTargetReduction(t *testing.T) {
 	tests := []struct {
 		name    string
 		command string
+		// static is the same command with every runtime-expanded target
+		// replaced by staticRedirectTarget; the view must equal its complete
+		// analysis without that target's redirects and paths.
+		static  string
 		reduced bool
 		// kept is the number of static redirects left on the first command.
 		kept int
+		// programs are the view's commands, in order.
+		programs []string
 	}{
-		{name: "tilde target", command: "echo dccert-block-marker > ~/dccert-x.txt", reduced: true},
-		{name: "HOME target", command: "echo dccert-block-marker > $HOME/dccert-x.txt", reduced: true},
-		{name: "quoted HOME append", command: `echo dccert-block-marker >> "$HOME/dccert-x.txt"`, reduced: true},
-		{name: "glob target", command: "echo dccert-block-marker > dccert-*.txt", reduced: true},
-		{name: "static stderr kept", command: "echo dccert-block-marker 2>/dev/null > ~/dccert-x.txt", reduced: true, kept: 1},
-		{name: "pipeline", command: "echo dccert-block-marker | cat > ~/dccert-x.txt", reduced: true},
+		{name: "tilde target", command: "echo dccert-block-marker > ~/dccert-x.txt", static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "HOME target", command: "echo dccert-block-marker > $HOME/dccert-x.txt", static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "braced HOME target", command: "echo dccert-block-marker > ${HOME}/dccert-x.txt", static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "quoted HOME append", command: `echo dccert-block-marker >> "$HOME/dccert-x.txt"`, static: "echo dccert-block-marker >> " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "quoted HOME then path", command: `echo dccert-block-marker > "$HOME"/dccert-x.txt`, static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "glob target", command: "echo dccert-block-marker > dccert-*.txt", static: "echo dccert-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "static stderr kept", command: "echo dccert-block-marker 2>/dev/null > ~/dccert-x.txt", static: "echo dccert-block-marker 2>/dev/null > " + staticRedirectTarget, reduced: true, kept: 1, programs: []string{"echo"}},
+		{name: "pipeline", command: "echo dccert-block-marker | cat > ~/dccert-x.txt", static: "echo dccert-block-marker | cat > " + staticRedirectTarget, reduced: true, programs: []string{"echo", "cat"}},
+		// A complete analysis expands these wrappers; the view has their
+		// child commands, as the static-target form does.
+		{name: "shell wrapper", command: "bash -c 'echo hi' > ~/x.txt", static: "bash -c 'echo hi' > " + staticRedirectTarget, reduced: true, programs: []string{"bash", "echo"}},
+		{name: "sudo wrapper", command: "sudo systemctl status sshd > ~/x.txt", static: "sudo systemctl status sshd > " + staticRedirectTarget, reduced: true, programs: []string{"sudo", "systemctl"}},
 
 		{name: "complete action", command: "echo dccert-block-marker > /tmp/dccert-x.txt"},
+		{name: "any parameter", command: "echo dccert-block-marker > $OUT"},
+		{name: "parameter directory", command: "echo dccert-block-marker > $OUT/dccert-x.txt"},
+		{name: "HOME with an operator", command: "echo dccert-block-marker > ${HOME:-/tmp}/dccert-x.txt"},
+		{name: "substitution in the target", command: "echo dccert-block-marker > ~/$(id -un).txt"},
 		{name: "expanding argument", command: "echo $MARKER > /tmp/dccert-x.txt"},
 		{name: "expanding argument and target", command: "echo dccert-block-marker $SUFFIX > ~/dccert-x.txt"},
 		{name: "expanding program", command: "$ECHO dccert-block-marker > ~/dccert-x.txt"},
@@ -47,6 +66,9 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 		{name: "descriptor copy", command: "echo dccert-block-marker 2>&1 > ~/dccert-x.txt"},
 		{name: "prefix assignment", command: "MARKER=1 echo dccert-block-marker > ~/dccert-x.txt"},
 		{name: "command substitution", command: "echo $(id -un) > ~/dccert-x.txt"},
+		{name: "wrapped target", command: "bash -lc 'echo dccert-block-marker > ~/dccert-x.txt'"},
+		{name: "env wrapper", command: "env A=1 echo hi > ~/x.txt"},
+		{name: "placeholder text in the command", command: "echo " + dynamicRedirectPlaceholderPrefix + "1 > ~/x.txt"},
 	}
 	for _, test := range tests {
 		for _, home := range []string{"/home/alice", ""} {
@@ -60,7 +82,7 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 				}
 				facts := Analyze(input)
 				before := Analyze(input)
-				reduced, ok := facts.DynamicRedirectTargetReduction()
+				reduced, ok := DynamicRedirectTargetReduction(input, facts)
 				if ok != test.reduced {
 					t.Fatalf("reduced = %t, want %t; parse=%+v commands=%+v",
 						ok, test.reduced, facts.Parse, facts.Commands)
@@ -82,34 +104,70 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 				if !reduced.EnforcementEligible() {
 					t.Fatalf("view is not enforcement eligible: %+v", reduced.Commands)
 				}
-				if len(reduced.Commands) != len(facts.Commands) {
-					t.Fatalf("view has %d commands, action %d", len(reduced.Commands), len(facts.Commands))
-				}
-				for index, command := range reduced.Commands {
-					if !command.ArgvComplete ||
-						!reflect.DeepEqual(command.Argv, facts.Commands[index].Argv) {
-						t.Fatalf("command %d argv changed: %+v", index, command)
+				var programs []string
+				for _, command := range reduced.Commands {
+					programs = append(programs, command.Program)
+					if !command.ArgvComplete {
+						t.Fatalf("view command is not complete: %+v", command)
 					}
 					for _, redirect := range command.Redirects {
 						if redirect.Expands || redirect.Target == "" {
-							t.Fatalf("command %d kept a dynamic redirect: %+v", index, command.Redirects)
+							t.Fatalf("view kept a dynamic redirect: %+v", command.Redirects)
 						}
 					}
+				}
+				if !reflect.DeepEqual(programs, test.programs) {
+					t.Fatalf("view programs = %v, want %v", programs, test.programs)
+				}
+				if !reflect.DeepEqual(reduced.Commands[0].Argv, facts.Commands[0].Argv) {
+					t.Fatalf("first command argv changed: %v, action %v", reduced.Commands[0].Argv, facts.Commands[0].Argv)
 				}
 				if got := len(reduced.Commands[0].Redirects); got != test.kept {
 					t.Fatalf("first command kept %d redirects, want %d", got, test.kept)
 				}
-				if !reflect.DeepEqual(reduced.Paths, facts.Paths) ||
-					!reflect.DeepEqual(reduced.DataFlows, facts.DataFlows) ||
-					!reflect.DeepEqual(reduced.Network, facts.Network) {
-					t.Fatal("view changed path, data-flow or network facts")
+				if mentionsString(reflect.ValueOf(reduced), dynamicRedirectPlaceholderPrefix, 0) {
+					t.Fatalf("view carries a placeholder: %+v", reduced)
 				}
-				for _, path := range reduced.Paths {
-					if path.Value == "" {
-						t.Fatalf("view invented a path for a dropped target: %+v", reduced.Paths)
-					}
+
+				// The view is what a complete analysis of the same command
+				// with a static target derives, without that target.
+				staticInput := input
+				staticInput.Command = test.static
+				static := Analyze(staticInput)
+				if !static.Authoritative() {
+					t.Fatalf("static form is not complete: %+v", static.Parse)
+				}
+				want := withoutRedirectTarget(static, staticRedirectTarget)
+				got := withoutRedirectTarget(reduced, staticRedirectTarget)
+				if !reflect.DeepEqual(got.Commands, want.Commands) ||
+					!reflect.DeepEqual(got.Paths, want.Paths) ||
+					!reflect.DeepEqual(got.DataFlows, want.DataFlows) ||
+					!reflect.DeepEqual(got.Network, want.Network) {
+					t.Fatalf("view differs from the static-target analysis:\nview   %+v\nstatic %+v", got, want)
 				}
 			})
 		}
 	}
+}
+
+// withoutRedirectTarget drops target's redirects and path facts.
+func withoutRedirectTarget(facts Facts, target string) Facts {
+	out := facts
+	out.Commands = cloneCommands(facts.Commands)
+	for index := range out.Commands {
+		kept := []RedirectFact{}
+		for _, redirect := range out.Commands[index].Redirects {
+			if redirect.Target != target {
+				kept = append(kept, redirect)
+			}
+		}
+		out.Commands[index].Redirects = kept
+	}
+	out.Paths = []PathFact{}
+	for _, path := range facts.Paths {
+		if path.Value != target && !strings.HasPrefix(path.Value, dynamicRedirectPlaceholderPrefix) {
+			out.Paths = append(out.Paths, path)
+		}
+	}
+	return out
 }

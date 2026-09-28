@@ -231,3 +231,75 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 		}
 	}
 }
+
+// A rule that negates over commands or operations must decide on the facts
+// a complete analysis derives. The first view of a runtime-expanded
+// redirect target kept the partial parse's commands, which had skipped
+// wrapper expansion (sudo, sh -c) and the redirect's write operation, and
+// only reset argv_complete: so `sudo systemctl status sshd > ~/x.txt` had no
+// systemctl child and was blocked by a rule that allows it with any static
+// target. The view is now the complete analysis of a static-target twin.
+func TestTrustedActionRedirectReductionDecidesNegationOnCompleteFacts(t *testing.T) {
+	const connector = "redirect-reduction-negation-test"
+	const write = "defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE"
+	installRedirectReductionRules(t, connector,
+		redirectReductionRule("CUSTOM-SUDO-NOT-SYSTEMCTL", `a^`,
+			`f.commands.exists(c, c.program == "sudo") && !f.commands.exists(c, c.program == "systemctl")`),
+		redirectReductionRule("CUSTOM-BASH-NOT-GIT", `a^`,
+			`f.commands.exists(c, c.program == "bash") && !f.commands.exists(c, c.program == "git")`),
+		redirectReductionRule("CUSTOM-ECHO-WITHOUT-WRITE", `a^`,
+			`f.commands.exists(c, c.program == "echo") && !f.commands.exists(c, `+write+` in c.operations)`),
+	)
+	tests := []struct {
+		name    string
+		command string
+		// blocked lists the rules that block; every other rule is absent.
+		blocked []string
+	}{
+		{name: "sudo systemctl, tilde target", command: "sudo systemctl status sshd > ~/x.txt"},
+		{name: "sudo systemctl, static target", command: "sudo systemctl status sshd > /tmp/x.txt"},
+		{name: "sudo systemctl, no redirect", command: "sudo systemctl status sshd"},
+		{name: "sudo id, tilde target", command: "sudo id > ~/x.txt", blocked: []string{"CUSTOM-SUDO-NOT-SYSTEMCTL"}},
+		{name: "bash git, tilde target", command: "bash -c 'git status' > ~/x.txt"},
+		{name: "bash git, static target", command: "bash -c 'git status' > /tmp/x.txt"},
+		{name: "echo, tilde target", command: "echo hi > ~/x.txt"},
+		{name: "echo, HOME target", command: "echo hi > $HOME/x.txt"},
+		{name: "echo, no redirect", command: "echo hi", blocked: []string{"CUSTOM-ECHO-WITHOUT-WRITE"}},
+	}
+	for _, test := range tests {
+		for _, home := range []string{"/home/alice", ""} {
+			t.Run(test.name+"/home="+home, func(t *testing.T) {
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: actionfacts.Input{
+						Tool:        "shell",
+						Command:     test.command,
+						CWD:         "/home/alice/project",
+						ActiveHome:  home,
+						DialectHint: actionfacts.DialectPOSIX,
+					},
+					LegacyText:         test.command,
+					Connector:          connector,
+					EnforcementCapable: true,
+				})
+				want := map[string]bool{}
+				for _, id := range test.blocked {
+					want[id] = true
+				}
+				for _, id := range []string{"CUSTOM-SUDO-NOT-SYSTEMCTL", "CUSTOM-BASH-NOT-GIT", "CUSTOM-ECHO-WITHOUT-WRITE"} {
+					finding := findingWithID(findings, id)
+					blocks := finding != nil && finding.contributesToEnforcement()
+					if blocks != want[id] || (finding != nil && !blocks) {
+						t.Errorf("%s: finding=%v blocks=%t, want blocks=%t; findings=%v", id, finding != nil, blocks, want[id], FindingStrings(findings))
+					}
+				}
+				wantAction := guardrailActionAllow
+				if len(test.blocked) > 0 {
+					wantAction = guardrailActionBlock
+				}
+				if verdict := buildVerdict(findings, "tool_call"); verdict.Action != wantAction {
+					t.Errorf("verdict = %q, want %q; findings=%v", verdict.Action, wantAction, FindingStrings(findings))
+				}
+			})
+		}
+	}
+}

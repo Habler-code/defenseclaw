@@ -82,6 +82,33 @@ func TestRedirectReductionSafe(t *testing.T) {
 			false,
 		},
 		{"argv_complete", `f.commands.exists(c, c.argv_complete)`, false},
+		{
+			"positive path",
+			marker + ` && f.paths.exists(p, p.value.startsWith("/etc/"))`,
+			true,
+		},
+		{
+			"no path anywhere",
+			marker + ` && !f.paths.exists(p, p.value.startsWith("/etc/"))`,
+			false,
+		},
+		{"every path", `f.paths.all(p, p.absolute)`, false},
+		{"no artifact", marker + ` && !f.artifacts.exists(a, a.value != "")`, false},
+		{
+			"no archive lineage",
+			marker + ` && !f.archive_lineages.exists(l, l.identity != "")`,
+			false,
+		},
+		{
+			"authoritative lineage",
+			`f.archive_lineages.exists(l, l.authoritative)`,
+			false,
+		},
+		{
+			"negation over child commands",
+			`f.commands.exists(c, c.program == "sudo") && !f.commands.exists(c, c.program == "systemctl")`,
+			true,
+		},
 		{"parse status", marker + ` && f.parse.status == ` + parseStatusComplete, false},
 	}
 	for _, test := range tests {

@@ -24,19 +24,25 @@ import (
 )
 
 // RedirectReductionSafe reports whether a match of this expression on the
-// view returned by actionfacts.Facts.DynamicRedirectTargetReduction also holds
-// for the whole action, whose commands still carry the runtime-expanded
-// redirections the view dropped.
+// view returned by actionfacts.DynamicRedirectTargetReduction also holds for
+// the whole action, whose runtime-expanded redirect targets the view left
+// out.
 //
-// The view differs from the action only in each command's redirects (the
-// action has more), in argv_complete, and in the parse result. An expression
-// is safe when it reads neither argv_complete nor parse, and reads redirects
-// only as the range of an exists() reached from the root through &&, || and
-// exists() or all() predicates alone: more redirections can then only keep a
-// match. Any other use of redirects (under !, ==, !=, in, or as the range of
-// all()) could turn a match off with more redirections, so it is unsafe.
-// Negation elsewhere, for example over argv, is unaffected: the view keeps
-// those facts unchanged.
+// The view is the complete analysis of a static-target twin of the action
+// without the twin's placeholder redirects and paths. Compared with the
+// action it lacks redirects and paths (the action has more, and so may have
+// more artifacts and archive lineages built from them), and it is complete
+// where the action is not (argv_complete, parse, and a lineage's
+// authoritative flag). An expression is safe when it reads none of
+// argv_complete, parse and authoritative, and reads redirects, paths,
+// artifacts and archive_lineages only as the range of an exists() reached
+// from the root through &&, || and exists() or all() predicates alone: more
+// of them can then only keep a match. Any other use (under !, ==, !=, in, or
+// as the range of all()) could turn a match off, so it is unsafe. The other
+// facts, including commands, operations, wrappers, network and data flows,
+// are those of a complete analysis; negation over them is unaffected, except
+// for facts only the target's real path could produce, which the view never
+// has.
 func (p *Program) RedirectReductionSafe() bool {
 	return p != nil && p.redirectReductionSafe
 }
@@ -46,7 +52,8 @@ func redirectReductionSafe(ast *cel.Ast) bool {
 		return false
 	}
 	// monotone is true while every operator between the root and expr keeps
-	// a true result true when a command gains redirections.
+	// a true result true when the action gains redirects, paths, artifacts
+	// or archive lineages.
 	var visit func(expr celast.Expr, monotone bool) bool
 	visit = func(expr celast.Expr, monotone bool) bool {
 		switch expr.Kind() {
@@ -55,9 +62,9 @@ func redirectReductionSafe(ast *cel.Ast) bool {
 		case celast.SelectKind:
 			selected := expr.AsSelect()
 			switch selected.FieldName() {
-			case "parse", "argv_complete":
+			case "parse", "argv_complete", "authoritative":
 				return false
-			case "redirects":
+			case "redirects", "paths", "artifacts", "archive_lineages":
 				if !monotone {
 					return false
 				}

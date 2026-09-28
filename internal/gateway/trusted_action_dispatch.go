@@ -137,15 +137,16 @@ func dispatchTrustedAction(
 
 	// A partial action whose only uncertainty is a runtime-expanded redirect
 	// target ("> ~/out.txt", "> $HOME/out.txt") still has a static, provable
-	// argv. Semantic rules run on a view without those redirects, but only a
-	// match counts there, and only for a rule that match cannot depend on the
-	// dropped redirects (redirectReductionCandidate). A non-match or a skipped
-	// rule never suppresses its legacy fallback, which, like every recovery
-	// lane below, still sees the whole action.
+	// argv. Semantic rules run on the complete analysis of a static-target
+	// twin without those redirects, but only a match counts there, and only
+	// for a rule that match cannot depend on the dropped redirect and path
+	// facts (redirectReductionCandidate). A non-match or a skipped rule never
+	// suppresses its legacy fallback, which, like every recovery lane below,
+	// still sees the whole action.
 	semanticFacts := facts
 	redirectReduced := false
 	if !facts.Authoritative() {
-		reduced, ok := facts.DynamicRedirectTargetReduction()
+		reduced, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts)
 		if !ok {
 			var fallbackTelemetry trustedActionTelemetry
 			findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -365,7 +366,7 @@ func dispatchTrustedAction(
 }
 
 // redirectReductionCandidate reports whether a match of candidate on the view
-// from actionfacts.Facts.DynamicRedirectTargetReduction may stand for the
+// from actionfacts.DynamicRedirectTargetReduction may stand for the
 // whole action. The expression must be one that more redirects cannot turn
 // off (semantic.Program.RedirectReductionSafe), and the owner must have no
 // code-owned prerequisite: those are Go checks written for complete facts
