@@ -167,6 +167,10 @@ nothing.
 `status` and `verify` also name every agent the enumerator found installed
 but could not enroll (`hook_contract_unverified`, `agent_unprotected`); see
 [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled).
+The text output prints each one as a `warning <code>: <message>` line (status)
+or an `error` line (verify); `--json` lists them under `warnings` or `errors`.
+Cursor's machine hooks file is published only while a user is enrolled for
+Cursor; see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
 `include_groups` and `exclude_groups` apply on Windows as described there.
 
 Uninstall revokes every per-user enrollment first. Once it has committed,
