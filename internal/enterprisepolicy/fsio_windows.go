@@ -179,9 +179,13 @@ func openCodePluginLoadable(_ Options, path string) (bool, error) {
 		if ace == nil || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 			continue
 		}
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		case windows.ACCESS_DENIED_ACE_TYPE, 0x6, 0xA, 0xC: // denied, denied object, denied callback (object)
 			denied = true
 			continue
+		default:
+			return false, fmt.Errorf("%s has an unsupported ACE type 0x%x", path, ace.Header.AceType)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
