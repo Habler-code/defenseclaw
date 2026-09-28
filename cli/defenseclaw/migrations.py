@@ -21,7 +21,9 @@ after stopping the gateway, so migrations always execute the new release's
 code. Two kinds of steps exist:
 
 * ``CONFIG_MIGRATIONS`` moves ``config.yaml`` from ``config_version`` N to
-  N+1. New keys only need loader defaults; renames and removals need a step.
+  N+1. New keys need only the schema entry and loader defaults; renames and
+  removals need a step (see "Changing the config schema" in
+  docs/RELEASE_RUNBOOK.md for everything a version bump touches).
 * ``MIGRATIONS`` is the frozen 0.x chain. It imports installs older than the
   0.8.5 schema-v8 hard cut and never grows.
 
@@ -371,6 +373,10 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
     environment_path = os.path.join(data_dir, ".env")
     _assert_observability_v8_upgrade_quiesced(data_dir)
+    # 0.4.x and 0.5.0 wrote guardrail.*_enforcement_enabled, which v8 rejects.
+    # The step that strips them is keyed 0.5.0 but first shipped in 0.6.0, so
+    # the chain skips it for an install at 0.5.0. It is idempotent.
+    _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
     prepared = _prepare_observability_v8_migration(
         data_dir=data_dir,
         config_path=config_path,
@@ -419,6 +425,13 @@ def _preflight_observability_v8(
     source = _read_observability_v8_upgrade_source(config_path)
     if source is None:
         return
+    # The real migration strips these first (see _migrate_observability_v8).
+    try:
+        stripped, removed = _strip_legacy_guardrail_enforcement_keys(source.decode("utf-8"))
+    except UnicodeDecodeError:
+        removed = []
+    if removed:
+        source = stripped.encode("utf-8")
     environment = _observability_v8_upgrade_environment(environment_path)
     migration = convert_v7_observability_to_v8(
         source,
@@ -2050,6 +2063,35 @@ _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS: tuple[str, ...] = (
 )
 
 
+def _strip_legacy_guardrail_enforcement_keys(text: str) -> tuple[str, list[str]]:
+    """Return ``text`` without the guardrail.*_enforcement_enabled lines, and which were removed."""
+
+    block_match = _find_top_level_block(text, "guardrail")
+    if not block_match:
+        return text, []
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    new_body = block_match.group("body")
+
+    removed: list[str] = []
+    for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
+        # Delete the whole line carrying the legacy key (with its
+        # terminator). The pattern accepts any value form (quoted /
+        # unquoted bool, optional inline comment) and any leading
+        # indentation the operator chose. ``(?:\r?\n|$)`` removes the
+        # CRLF terminator with the line (no orphaned ``\r`` left behind)
+        # and also matches a final key line with no trailing newline.
+        pattern = re.compile(
+            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*(?:\r?\n|$)",
+            flags=re.MULTILINE,
+        )
+        new_body, count = pattern.subn("", new_body)
+        if count:
+            removed.append(key)
+    return text[:body_start] + new_body + text[body_end:], removed
+
+
 def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     """Drop legacy guardrail.*_enforcement_enabled keys from config.yaml.
 
@@ -2082,36 +2124,8 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     if text is None:
         return
 
-    block_match = _find_top_level_block(text, "guardrail")
-    if not block_match:
-        return
-
-    body_start = block_match.start("body")
-    body_end = block_match.end("body")
-    body = block_match.group("body")
-
-    removed: list[str] = []
-    new_body = body
-    for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
-        # Delete the whole line carrying the legacy key (with its
-        # terminator). The pattern accepts any value form (quoted /
-        # unquoted bool, optional inline comment) and any leading
-        # indentation the operator chose. ``(?:\r?\n|$)`` removes the
-        # CRLF terminator with the line (no orphaned ``\r`` left behind)
-        # and also matches a final key line with no trailing newline.
-        pattern = re.compile(
-            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*(?:\r?\n|$)",
-            flags=re.MULTILINE,
-        )
-        new_body, count = pattern.subn("", new_body)
-        if count:
-            removed.append(key)
-
+    new_text, removed = _strip_legacy_guardrail_enforcement_keys(text)
     if not removed:
-        return
-
-    new_text = text[:body_start] + new_body + text[body_end:]
-    if new_text == text:
         return
 
     if not _atomic_write_text(cfg_path, new_text):
@@ -3407,7 +3421,9 @@ def migrate(
 
     ``from_version`` is the DefenseClaw version that wrote the data. It only
     matters for installs older than 0.8.5, whose chain position the config
-    alone cannot tell; without it the 0.x cursor is used, if present.
+    alone cannot tell, and only when the install has no 0.x migration cursor:
+    the cursor records which steps actually ran (a step that failed on an
+    earlier upgrade is retried), so it wins over a version number.
 
     ``check`` changes nothing: it reports the pending steps and raises
     :class:`ConfigTooNewError` for a config from a newer release, and
@@ -3483,7 +3499,46 @@ def migrate(
             f"{config_path} is at config_version {reached} after migrating; expected {CURRENT_CONFIG_VERSION}"
         )
     _refresh_local_observability_bundle(data_dir, __version__)
+    if version < _FIRST_V8_CONFIG_VERSION:
+        _select_windows_agents(data_dir)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _select_windows_agents(data_dir: str) -> None:
+    """Record the agent executables a 0.x Windows install's connectors run.
+
+    On Windows the gateway runs an agent such as codex.exe only from a
+    setup-selected, hashed executable, which 0.x never recorded, so the first
+    1.x gateway start would refuse the imported connectors. The selection is
+    what ``defenseclaw setup`` records. An agent that is not installed is
+    reported, not fatal: its connector then needs ``defenseclaw setup``.
+    """
+
+    if os.name != "nt":
+        return
+    from defenseclaw import config as config_module
+    from defenseclaw.agent_selection import record_setup_agent_selections, setup_agent_selection_connectors
+
+    try:
+        connectors = setup_agent_selection_connectors(config_module.load(data_dir=data_dir).active_connectors())
+        if not connectors:
+            # Nothing to select, so no receipt: the installer starts the new
+            # gateway only to seal one.
+            return
+        selections, errors = record_setup_agent_selections(data_dir, connectors)
+        if errors and selections:
+            # A failed probe records nothing; keep the agents that were found.
+            selections, retry_errors = record_setup_agent_selections(data_dir, list(selections))
+            if retry_errors:
+                errors.update(retry_errors)
+                selections = {}
+    except Exception as exc:  # noqa: BLE001 - the gateway start reports what it needs
+        ux.warn(f"could not record the agent executables for the imported connectors: {exc}", indent="    ")
+        return
+    for name, selection in sorted(selections.items()):
+        ux.ok(f"selected {selection.executable} for the {name} connector", indent="    ")
+    for name, detail in sorted(errors.items()):
+        ux.warn(f"no {name} executable to select ({detail}); run 'defenseclaw setup {name}'", indent="    ")
 
 
 def _tighten_group_writable(ctx: MigrationContext, paths: list[str]) -> None:

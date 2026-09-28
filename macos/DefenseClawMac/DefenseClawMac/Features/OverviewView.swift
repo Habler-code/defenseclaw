@@ -327,7 +327,7 @@ struct OverviewView: View {
                         runGatewayLifecycle("start")
                     }
                     .controlSize(.small)
-                    .disabled(!appState.installationMutationsAllowed)
+                    .disabled(!appState.installationMutationsAllowed || appState.gatewayStartupInProgress)
                 }
             }
         }

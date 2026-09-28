@@ -205,3 +205,21 @@ def test_downloads_under_a_staging_name_are_checked_by_their_release_name() -> N
         args = call.split()
         if not args[0].startswith('"${STAGING}/'):
             assert len(args) == 2, f"verify {call} needs the release asset name"
+
+
+def test_both_installers_bootstrap_the_same_pinned_uv() -> None:
+    posix = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    posix_version = re.search(r'readonly UV_VERSION="([0-9.]+)"', posix)
+    windows_version = re.search(r'\$UvVersion = "([0-9.]+)"', windows)
+    assert posix_version and windows_version
+    assert posix_version.group(1) == windows_version.group(1)
+    # The unpinned astral.sh installer script must never come back.
+    assert "astral.sh/uv/install" not in posix and "astral.sh/uv/install" not in windows
+    digests = dict(re.findall(r"^\s+(uv-[a-z0-9_-]+\.tar\.gz)\) echo ([0-9a-f]{64}) ;;$", posix, re.M))
+    assert set(digests) == {
+        "uv-aarch64-apple-darwin.tar.gz",
+        "uv-x86_64-unknown-linux-musl.tar.gz",
+        "uv-aarch64-unknown-linux-musl.tar.gz",
+    }
+    assert re.search(r'\$UvZipSha256 = "[0-9a-f]{64}"', windows)

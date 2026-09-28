@@ -234,6 +234,8 @@ def test_installed_cosign_checks_the_release_signature_first(
 
     calls = log.read_text().splitlines()
     assert any(call.startswith("verify-blob --bundle ") for call in calls)
+    # Nothing but the installer and checksums.txt, so the installer can remove the dir.
+    assert not list((tmp_path / "tmp").glob("*/checksums.txt.bundle"))
     assert any("--certificate-oidc-issuer https://token.actions.githubusercontent.com" in call for call in calls)
     if verify_rc == 0:
         assert rc == 0 and len(execs) == 1
@@ -462,3 +464,66 @@ def test_shim_output_survives_a_console_that_cannot_encode_it(
     monkeypatch.setattr(upgrade_shim, "_latest_version", lambda repo: "1.2.0")
 
     assert upgrade_shim.run(["upgrade"]) == 0
+
+
+def test_an_installer_that_cannot_start_is_an_error_not_a_traceback(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.1")))
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix")
+    monkeypatch.setattr(upgrade_shim.os, "chdir", lambda path: None)
+
+    def execv(path: str, argv: list[str]) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(upgrade_shim.os, "execv", execv)
+
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 1
+    assert "could not run" in capsys.readouterr().err
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_the_signer_pattern_escapes_the_repository_name(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    release = _release_dir(tmp_path, "1.0.1")
+    (release / "checksums.txt.bundle").write_text("{}")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(release))
+    monkeypatch.setenv(upgrade_shim.REPO_ENV, "acme+corp/defense.claw")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(upgrade_shim, "_cosign", lambda: "/usr/bin/cosign")
+
+    def run(argv, **_kwargs):
+        seen.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "run", run)
+
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 0
+    pattern = seen[0][seen[0].index("--certificate-identity-regexp") + 1]
+    assert pattern.startswith("^https://github\\.com/acme\\+corp/defense\\.claw/")
+
+
+def test_the_update_notice_lookup_swallows_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("no network stack")
+
+    uncaught: list[object] = []
+    monkeypatch.setattr(upgrade_shim, "_latest_from_redirect", broken)
+    # An exception escaping the thread would print a traceback through this hook.
+    monkeypatch.setattr(threading, "excepthook", uncaught.append)
+
+    assert update_notice._lookup_latest() == ""
+    assert uncaught == []
+
+
+def test_a_download_without_cosign_says_the_signature_was_not_checked(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    upgrade_shim._verify_release_signature("cisco-ai-defense/defenseclaw", "1.0.1", None, str(tmp_path), "")
+
+    assert "checked against checksums.txt only" in capsys.readouterr().out

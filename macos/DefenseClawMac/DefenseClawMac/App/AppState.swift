@@ -1086,6 +1086,8 @@ final class AppState {
         // keep any previously known release rather than clearing it.
         guard let release = await updater.latestRelease() else {
             lastCheckFailed = true
+            // Try again in about 15 minutes rather than waiting out the 6h.
+            lastUpdateCheckTime = Date().timeIntervalSince1970 - 6 * 3600 + 15 * 60
             return
         }
         lastCheckFailed = false
@@ -1172,21 +1174,30 @@ final class AppState {
             return
         }
         let appPath = Bundle.main.bundlePath
-        guard UpdateChecker.canReplaceBundle(atPath: appPath) else {
+        // Only another version replaces the app; this version installs the runtime alone.
+        guard version == UpdateChecker.currentVersion || UpdateChecker.canReplaceBundle(atPath: appPath) else {
             installerState = .failed(
                 version: version,
-                detail: "DefenseClaw can't replace itself at \(appPath). Move it to your Applications folder, reopen it from there, and try again."
+                detail: "DefenseClaw can't replace itself at \(appPath): this account can't write the app or its folder. Update it from the DMG, or move it to a folder you can write to and reopen it from there."
             )
             return
         }
 
         installerState = .downloading(version: version)
         let installer: URL
+        let signatureVerified: Bool
         do {
-            installer = try await updater.fetchInstaller(version: version)
+            (installer, signatureVerified) = try await updater.fetchInstaller(version: version)
         } catch {
             installerState = .failed(version: version, detail: error.localizedDescription)
             return
+        }
+        if !signatureVerified {
+            notify(
+                title: "DefenseClaw \(version): signature not checked",
+                body: "cosign 2.0 or later is not installed, so the release signature was not verified. The download was checked against the release's SHA-256 checksums.",
+                id: "installer-unsigned-\(Date().timeIntervalSince1970)"
+            )
         }
 
         installerState = .running(version: version)

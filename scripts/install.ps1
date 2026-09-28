@@ -83,10 +83,13 @@ $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runt
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
 $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
-$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" })
+# defenseclaw-hook.exe reads its data dir from the state file beside it, never
+# from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
+$HookState = "defenseclaw-hook-state.json"
+$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($HookState)
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", "previous", "previous.new", ".repair", ".staging", ".failed-*",
-    "installer", "logs", ".install.lock", "backups", ".rollback-hold")
+    "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
     "opencode", "amp", "omnigent", "kiro", "none")
@@ -134,9 +137,13 @@ function Test-SamePath([string]$Entry, [string]$Path) {
 
 function Remove-Tree([string]$Path) {
     # Antivirus and the search indexer hold freshly written files for a moment,
-    # so a delete that fails is retried for up to 30 seconds.
+    # so a delete that fails is retried for up to 30 seconds. Windows PowerShell
+    # cannot delete below MAX_PATH (a venv's bundled data goes deeper under a
+    # long profile path), so a failed attempt retries through the \\?\ path.
     for ($attempt = 1; Test-Path -LiteralPath $Path; $attempt++) {
         try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop } catch {
+            try { [IO.Directory]::Delete("\\?\" + [IO.Path]::GetFullPath($Path), $true) } catch { }
+            if (-not (Test-Path -LiteralPath $Path)) { return }
             if ($attempt -ge 30) { throw }
             Start-Sleep -Seconds 1
         }
@@ -155,6 +162,37 @@ function New-InstallDirectory([string]$Path) {
     $acl = Get-Acl -LiteralPath $Path
     $acl.SetAccessRuleProtection($true, $true)
     Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Repair-DataOwner {
+    # An elevated 0.x installer left its connector backups, and the agent
+    # configs its connectors wrote (such as ~\.codex\config.toml), owned by
+    # the Administrators group; the 1.x gateway refuses to manage those unless
+    # its user owns them. icacls changes only the owner: Set-Acl would also
+    # mark the SACL protected, which a replacement file cannot reproduce. This
+    # runs after the snapshot, so a rollback puts the old owners back.
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $admins = New-Object Security.Principal.SecurityIdentifier "S-1-5-32-544"
+    $items = @()
+    $backups = Join-Path $DataDir "connector_backups"
+    if (Test-Path -LiteralPath $backups -PathType Container) {
+        $items += @(Get-Item -LiteralPath $backups -Force) + @(Get-ChildItem -LiteralPath $backups -Recurse -Force -ErrorAction SilentlyContinue)
+    }
+    try {
+        $lock = Get-Content -Raw -LiteralPath (Join-Path $DataDir "hook_contract_lock.json") -ErrorAction Stop | ConvertFrom-Json
+        foreach ($entry in @($lock.connectors.PSObject.Properties | ForEach-Object { $_.Value })) {
+            foreach ($path in @($entry.locations.hook_config_paths)) {
+                if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+                $items += @(Get-Item -LiteralPath $path -Force) + @(Get-Item -LiteralPath (Split-Path $path) -Force)
+            }
+        }
+    } catch { }
+    foreach ($item in $items) {
+        try { $owner = (Get-Acl -LiteralPath $item.FullName).GetOwner([Security.Principal.SecurityIdentifier]) } catch { continue }
+        if ($owner -ne $admins) { continue }
+        & icacls.exe $item.FullName /setowner "*$($user.Value)" /C /Q *> $null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "Could not take ownership of $($item.FullName)" }
+    }
 }
 
 function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {
@@ -265,6 +303,55 @@ function ConvertTo-ProcessArgument([string]$Value) {
     return '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
 }
 
+# uv, when it is missing: a pinned release, checked against this digest (from
+# the release's .sha256 file) before anything runs. Bump them together.
+$UvVersion = "0.12.13"
+$UvZipSha256 = "a86c9dc7bad9b03f388583b7187c05fe9951c2e0d392217e8fd43d97787f6ec2"
+
+function Install-Uv {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("defenseclaw-uv-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $tmp | Out-Null
+    try {
+        $zip = Join-Path $tmp "uv.zip"
+        if (-not (Save-Url "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip" $zip)) { return "" }
+        if ((Get-Sha256 $zip) -ne $UvZipSha256) { Write-Err "The uv download does not match its pinned checksum"; return "" }
+        Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tmp "uv") -Force
+        New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+        foreach ($name in @("uv.exe", "uvx.exe", "uvw.exe")) {
+            $file = Join-Path $tmp "uv\$name"
+            if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination (Join-Path $BinDir $name) -Force }
+        }
+        $uv = Join-Path $BinDir "uv.exe"
+        if (Test-Path -LiteralPath $uv) { return $uv }
+        return ""
+    } catch {
+        Write-Err $_.Exception.Message
+        return ""
+    } finally {
+        Invoke-Quietly { Remove-Tree $tmp }
+    }
+}
+
+function Get-Cosign {
+    # cosign 2.0 or later if it is installed, else "". A -CosignPath that is
+    # not one stops the install rather than silently skipping the check.
+    $cosign = if ($CosignPath) { $CosignPath } else {
+        [string](Get-Command cosign.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+    }
+    if ($cosign -and (Test-Path -LiteralPath $cosign) -and (Get-NativeOutput $cosign @("version")) -match 'GitVersion:\s*v?(\d+)\.' -and [int]$Matches[1] -ge 2) {
+        return $cosign
+    }
+    if ($CosignPath) { Die "-CosignPath $CosignPath is not cosign 2.0 or later; nothing was changed" }
+    return ""
+}
+
+function Test-ReleaseSignature([string]$Cosign, [string]$Bundle, [string]$Checksums) {
+    # 0 when checksums.txt carries this repository's Release workflow signature.
+    $signer = "^https://github\.com/" + [regex]::Escape($Repo) + "/\.github/workflows/release\.yaml@refs/heads/main$"
+    return Invoke-Native $Cosign @("verify-blob", "--bundle", $Bundle, "--certificate-identity-regexp", $signer,
+        "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", $Checksums) -Quiet
+}
+
 function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     # Download that release's installer, verify it, and run it (-Version, or
     # an unstamped copy from the source tree). Named like the directories of
@@ -280,6 +367,16 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
         if (-not (Save-Url "$base/checksums.txt" "$tmp\checksums.txt")) { Die "Release $ReleaseVersion has no checksums.txt" }
         if ((Get-ListedSha256 "$tmp\checksums.txt" "install.ps1") -ne (Get-Sha256 "$tmp\install.ps1")) {
             Die "install.ps1 for $ReleaseVersion does not match its checksums.txt"
+        }
+        # With cosign, the installer about to run is checked like the assets it installs.
+        $cosign = Get-Cosign
+        if ($cosign) {
+            if (-not (Save-Url "$base/checksums.txt.bundle" "$tmp\checksums.txt.bundle")) {
+                Die "Release $ReleaseVersion has no checksums.txt.bundle to verify with cosign"
+            }
+            if ((Test-ReleaseSignature $cosign "$tmp\checksums.txt.bundle" "$tmp\checksums.txt") -ne 0) {
+                Die "The release signature on the checksums.txt of $ReleaseVersion did not verify"
+            }
         }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
         # Start the child on this console rather than through the pipeline, so its
@@ -408,15 +505,26 @@ function Get-GatewayProcess {
 }
 
 function Stop-Gateway {
-    # Stop the running gateway with its own (the old) binary; kill it as a last resort.
+    # Stop the running gateway with its own (the old) binary; kill it as a last
+    # resort. Wait for the process itself, not its pid file: a gateway removes
+    # the file before it exits, and while it runs Windows will not let the
+    # migration replace the config it holds open.
     $process = Get-GatewayProcess
     if (-not $process) { return $true }
-    Invoke-Native $process.Path @("stop") -Quiet | Out-Null
-    for ($waited = 0; (Get-GatewayProcess) -and $waited -lt 30; $waited++) {
-        Start-Sleep -Seconds 1
-        if ($waited -eq 15) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+    $image = $process.Path
+    Invoke-Native $image @("stop") -Quiet | Out-Null
+    if (-not $process.WaitForExit(15000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        [void]$process.WaitForExit(15000)
     }
-    return -not (Get-GatewayProcess)
+    # Its watchdog runs the same binary; nothing of this install may keep running.
+    for ($waited = 0; $waited -lt 10; $waited++) {
+        $left = @(Get-ProcessesUnder @($image) | Where-Object { $_.ExecutablePath -eq $image })
+        if (-not $left.Count) { break }
+        if ($waited -eq 5) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
+        Start-Sleep -Seconds 1
+    }
+    return $process.HasExited -and -not (Get-GatewayProcess)
 }
 
 function Start-Gateway {
@@ -595,6 +703,20 @@ function Write-Shim([string]$Name, [string]$Target) {
     Move-Path "$path.new" $path
 }
 
+function Write-HookState {
+    $root = [IO.Path]::GetFullPath($BinDir).TrimEnd('\')
+    $state = [ordered]@{
+        schema_version = 1; install_kind = "powershell-windows"; install_scope = "user"
+        install_root = $root; command_dir = $root; data_root = [IO.Path]::GetFullPath($DataDir).TrimEnd('\')
+    }
+    $path = Join-Path $BinDir $HookState
+    $text = ($state | ConvertTo-Json -Compress) + "`n"
+    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
+    [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
+    if (Test-Path -LiteralPath $path) { Remove-Aside $path }
+    Move-Path "$path.new" $path
+}
+
 function Copy-BinDir([string]$To) {
     New-Item -ItemType Directory -Path $To -Force | Out-Null
     foreach ($name in $ManagedFiles) {
@@ -675,8 +797,10 @@ function Install-New {
         if (Test-Path -LiteralPath $target) { Write-Shim $name $target }
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
+    Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
+        if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0") { Repair-DataOwner }
         $migrateArgs = @("migrate", "--yes")
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
         $env:DEFENSECLAW_GATEWAY_BIN = Join-Path $BinDir "defenseclaw-gateway.exe"
@@ -767,12 +891,29 @@ function Save-Live([string]$Slot) {
 function Restore-Live([string]$Slot) {
     # Make $Slot the live install again (the inverse of Save-Live).
     Restore-BinDir (Join-Path $Slot "bin")
+    Restore-LiveTree $Slot
+    Restore-ExternalConfig $Slot
+}
+
+function Restore-LiveTree([string]$Slot) {
+    # Move $Slot's data, venv and installer back into place. Alone it undoes a
+    # Save-Live that failed part-way: that one only copied the binaries.
     foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction SilentlyContinue)) {
         Move-Path $entry.FullName (Join-Path $DataDir $entry.Name)
     }
-    if (Test-Path -LiteralPath (Join-Path $Slot "venv")) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
-    if (Test-Path -LiteralPath (Join-Path $Slot "installer")) { Move-Path (Join-Path $Slot "installer") $InstallerDir }
-    Restore-ExternalConfig $Slot
+    if ((Test-Path -LiteralPath (Join-Path $Slot "venv")) -and -not (Test-Path -LiteralPath $Venv)) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
+    if ((Test-Path -LiteralPath (Join-Path $Slot "installer")) -and -not (Test-Path -LiteralPath $InstallerDir)) {
+        Move-Path (Join-Path $Slot "installer") $InstallerDir
+    }
+}
+
+function Move-LiveTo([string]$Slot) {
+    # Move what Restore-Live brought in from $Slot back into it. Only valid
+    # while the install it replaced is set aside in full elsewhere.
+    New-Item -ItemType Directory -Path (Join-Path $Slot "data") -Force | Out-Null
+    foreach ($entry in Get-DataEntries) { Move-Path $entry.FullName (Join-Path $Slot "data\$($entry.Name)") }
+    if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Slot "venv") 60 }
+    if (Test-Path -LiteralPath $InstallerDir) { Move-Path $InstallerDir (Join-Path $Slot "installer") }
 }
 
 function Resume-InterruptedRun {
@@ -796,19 +937,46 @@ function Resume-InterruptedRun {
         }
     }
     $hold = Join-Path $DataDir ".rollback-hold"
-    if (Test-Path -LiteralPath $hold) {
+    # A hold is deleted by renaming it first, so a half-deleted one is never read.
+    Remove-Tree "$hold.done"
+    $restart = (Read-Text (Join-Path $hold "GATEWAY_WAS_RUNNING")) -eq "true"
+    if (Test-Path -LiteralPath (Join-Path $hold "ROLLED_BACK")) {
+        # The rollback itself had finished; only renaming its hold was left.
+        # START_AFTER is its own decision; previous\ may be half deleted.
+        Write-Warn "An earlier rollback was interrupted; finishing it"
+        $restart = $restart -or (Read-Text (Join-Path $hold "START_AFTER")) -eq "true"
+        Remove-Tree $Previous
+        Move-Path $hold $Previous
+    } elseif (Test-Path -LiteralPath $hold) {
         Write-Warn "An earlier rollback was interrupted; restoring the install it started from"
         [void](Stop-Gateway)
         if (Test-Path -LiteralPath (Join-Path $hold "STASHED")) {
-            # The live install was set aside in full, so anything live now came from previous\.
-            New-Item -ItemType Directory -Path (Join-Path $Previous "data") -Force | Out-Null
-            foreach ($entry in Get-DataEntries) { Move-Path $entry.FullName (Join-Path $Previous "data\$($entry.Name)") }
-            if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Previous "venv") 60 }
-            if (Test-Path -LiteralPath $InstallerDir) { Move-Path $InstallerDir (Join-Path $Previous "installer") }
+            # The live install was set aside in full, so anything live now came
+            # from previous\, unless the undo had already returned it (RETURNED).
+            $returned = Join-Path $hold "RETURNED"
+            if (-not (Test-Path -LiteralPath $returned)) {
+                Move-LiveTo $Previous
+                Set-Content -LiteralPath $returned -Value "" -Encoding Ascii
+            }
+            Restore-Live $hold
+        } else {
+            # Setting it aside stopped part-way; the live binaries were only copied.
+            Restore-LiveTree $hold
         }
-        Restore-Live $hold
-        Remove-Tree $hold
+        Remove-Hold $hold
+    } else {
+        $restart = $false
     }
+    if ($restart -and -not (Get-GatewayProcess) -and (Start-Gateway) -notin @(0, 3)) {
+        Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+    }
+}
+
+function Remove-Hold([string]$Hold) {
+    # The rename makes the hold vanish at once: recovery must never find a
+    # half-deleted one and read its markers.
+    Move-Path $Hold "$Hold.done"
+    Remove-Tree "$Hold.done"
 }
 
 function Save-Installer {
@@ -846,34 +1014,45 @@ function Complete-Swap {
     Write-Ok "Installed DefenseClaw $Ver"
 }
 
-function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning) {
+function Switch-WithPrevious([string]$Current, [bool]$GatewayWasRunning, [bool]$StartAfter) {
     # Exchange the live install and previous\ by renaming, so a second
     # -Rollback rolls forward again. Each half undoes itself on failure.
+    # Returns 0 when swapped, 1 when the current install is back in place, 2
+    # when it could not be put back (the next run of the installer recovers it).
     $hold = Join-Path $DataDir ".rollback-hold"
     New-InstallDirectory $hold
-    try { Save-Live $hold } catch {
-        Write-Err $_.Exception.Message
-        Invoke-Quietly { Restore-Live $hold }
-        Invoke-Quietly { Remove-Tree $hold }
-        Write-Err "Could not set the current install aside; nothing was changed"
-        return $false
-    }
-    Set-Content -LiteralPath (Join-Path $hold "STASHED") -Value "" -Encoding Ascii
+    # First, so recovery from any later point knows the version and gateway state.
     Set-Content -LiteralPath (Join-Path $hold "VERSION") -Value $Current -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $hold "GATEWAY_WAS_RUNNING") -Value ([string]$GatewayWasRunning).ToLowerInvariant() -Encoding Ascii
+    try { Save-Live $hold } catch {
+        Write-Err $_.Exception.Message
+        try { Restore-LiveTree $hold } catch {
+            Write-Err "Could not set the current install aside or put it back; run the installer again to recover it"
+            return 2
+        }
+        Invoke-Quietly { Remove-Hold $hold }
+        Write-Err "Could not set the current install aside; nothing was changed"
+        return 1
+    }
+    Set-Content -LiteralPath (Join-Path $hold "STASHED") -Value "" -Encoding Ascii
     try { Restore-Live $Previous } catch {
         Write-Err $_.Exception.Message
-        Invoke-Quietly { Save-Live $Previous }
-        Invoke-Quietly { Restore-Live $hold }
-        Invoke-Quietly { Remove-Tree $hold }
+        # Restore-Live only copies previous\bin, so returning the rest restores previous\.
+        # RETURNED tells an interrupted run's recovery that previous\ is whole again.
+        try { Move-LiveTo $Previous; Set-Content -LiteralPath (Join-Path $hold "RETURNED") -Value "" -Encoding Ascii; Restore-Live $hold } catch {
+            Write-Err "Could not restore the previous install or put the current one back; run the installer again to recover it"
+            return 2
+        }
+        Invoke-Quietly { Remove-Hold $hold }
         Write-Err "Could not restore the previous install; the current one is back in place"
-        return $false
+        return 1
     }
     # Its data was written after the upgrade being undone: a later upgrade keeps it.
+    Set-Content -LiteralPath (Join-Path $hold "START_AFTER") -Value ([string]$StartAfter).ToLowerInvariant() -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $hold "ROLLED_BACK") -Value (Get-Date -Format "yyyyMMddTHHmmss") -Encoding Ascii
     Remove-Tree $Previous
     Move-Path $hold $Previous
-    return $true
+    return 0
 }
 
 # -- First install ------------------------------------------------------------
@@ -961,8 +1140,10 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $startAfter = $wasRunning -or (Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")) -eq "true"
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
-    if (-not (Switch-WithPrevious $current $wasRunning)) {
-        if ($wasRunning) { [void](Start-Gateway) }
+    $swapped = @(Switch-WithPrevious $current $wasRunning $startAfter)[-1]
+    if ($swapped -ne 0) {
+        # 1: the swap undid itself, so this install is back and may run again.
+        if ($swapped -eq 1 -and $wasRunning) { [void](Start-Gateway) }
         Die "Rollback failed part-way; see $($Run.Log)"
     }
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
@@ -1120,13 +1301,9 @@ function Invoke-Install {
     $env:UV_NO_CONFIG = "1"
     $Uv = [string](Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
     if (-not $Uv) {
-        Write-Info "Installing uv (Python package manager)"
-        $env:UV_INSTALL_DIR = $BinDir
-        $env:UV_NO_MODIFY_PATH = "1"
-        $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
-        & (Join-Path $PSHOME $shell) -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex" *> $null
-        $Uv = Join-Path $BinDir "uv.exe"
-        if (-not (Test-Path -LiteralPath $Uv)) { Die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry" }
+        Write-Info "Installing uv $UvVersion (Python package manager)"
+        $Uv = Install-Uv
+        if (-not $Uv) { Die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry" }
     }
 
     New-InstallDirectory $Staging
@@ -1137,16 +1314,13 @@ function Invoke-Install {
 
     Write-Info "Downloading and verifying release assets"
     if (-not (Get-Asset "checksums.txt" (Join-Path $Staging "checksums.txt"))) { Die "Could not get checksums.txt for $Ver" }
-    $cosign = if ($CosignPath) { $CosignPath } else {
-        [string](Get-Command cosign.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
-    }
-    if ($cosign -and (Test-Path -LiteralPath $cosign) -and (Get-NativeOutput $cosign @("version")) -match 'GitVersion:\s*v?(\d+)\.' -and [int]$Matches[1] -ge 2) {
+    $cosign = Get-Cosign
+    if ($cosign) {
         $bundle = Join-Path $Staging "checksums.txt.bundle"
         if (Get-Asset "checksums.txt.bundle" $bundle) {
-            $signer = "^https://github\.com/" + $Repo.Replace(".", "\.") + "/\.github/workflows/release\.yaml@refs/heads/main$"
-            $verified = Invoke-Native $cosign @("verify-blob", "--bundle", $bundle, "--certificate-identity-regexp", $signer,
-                "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", (Join-Path $Staging "checksums.txt")) -Quiet
-            if ($verified -ne 0) { Die "The release signature on checksums.txt did not verify; nothing was changed" }
+            if ((Test-ReleaseSignature $cosign $bundle (Join-Path $Staging "checksums.txt")) -ne 0) {
+                Die "The release signature on checksums.txt did not verify; nothing was changed"
+            }
             Write-Ok "Release signature verified"
         } elseif (-not $Local) {
             # Every published release carries the bundle; a missing one is not a
@@ -1225,7 +1399,14 @@ function Invoke-Install {
         Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
     }
     $startRc = 0
-    $startNew = $WasRunning -or ($Setup -and (Test-ConnectorConfigured))
+    # A 0.x import leaves the agent executables its connectors run in a receipt
+    # (see defenseclaw migrate) that the gateway must seal within minutes, so
+    # the new gateway starts once even if the old one was stopped, and stops
+    # again. The old gateway was not running, so that start is not a health
+    # gate for the install.
+    $sealOnly = -not $WasRunning -and -not $Setup -and $PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0" -and
+        (Test-Path -LiteralPath (Join-Path $DataDir "agent_selection.json"))
+    $startNew = $WasRunning -or $sealOnly -or ($Setup -and (Test-ConnectorConfigured))
     if ($startNew -and -not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) {
         # 0.x gateways ran on defaults without a config; 1.x needs one.
         $startNew = $false
@@ -1233,7 +1414,13 @@ function Invoke-Install {
     }
     if ($startNew) {
         $startRc = Start-Gateway
-        if ($startRc -ne 0 -and $startRc -ne 3) {
+        if ($sealOnly) {
+            [void](Stop-Gateway)
+            if ($startRc -ne 0 -and $startRc -ne 3) {
+                Write-Warn "The $Ver gateway did not start (see above); fix what it reports, then run 'defenseclaw-gateway start'"
+                $startRc = 0
+            }
+        } elseif ($startRc -ne 0 -and $startRc -ne 3) {
             Write-Err "The $Ver gateway did not become healthy; restoring $previousLabel"
             [void](Stop-Gateway)
             Restore-Snapshot
@@ -1286,7 +1473,7 @@ try {
     # holding only the installer and checksums.txt.
     $launchDir = if ($RunAsFile) { Split-Path -Parent $PSCommandPath } else { "" }
     if ($launchDir -and (Split-Path -Leaf $launchDir) -match '^defenseclaw-(upgrade|rollback)-[a-z0-9_]+$' -and
-        -not @(Get-ChildItem -LiteralPath $launchDir -Force | Where-Object { $_.Name -notin @("install.ps1", "checksums.txt") }).Count) {
+        -not @(Get-ChildItem -LiteralPath $launchDir -Force | Where-Object { $_.Name -notin @("install.ps1", "checksums.txt", "checksums.txt.bundle") }).Count) {
         Set-Location -LiteralPath $env:SystemRoot
         [Environment]::CurrentDirectory = $env:SystemRoot
         Invoke-Quietly { Remove-Tree $launchDir }

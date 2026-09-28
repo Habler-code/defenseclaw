@@ -141,7 +141,11 @@ def _lookup_latest() -> str:
     repo = os.environ.get(REPO_ENV) or DEFAULT_REPO
 
     def lookup() -> None:
-        tag = _latest_from_redirect(repo, "HEAD", _TIMEOUT_SECONDS)
+        # A notice is best effort: nothing from the network may reach the terminal.
+        try:
+            tag = _latest_from_redirect(repo, "HEAD", _TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001
+            return
         if tag:
             found.append(tag)
 

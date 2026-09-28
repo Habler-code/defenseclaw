@@ -250,6 +250,19 @@ upgrade_lane() {
     assert_healthy
     assert_data_kept
     [[ "$(cat "${DC_HOME}/previous/VERSION" 2>/dev/null)" == "${from}" ]] || fail "previous/VERSION is not ${from}"
+    if [[ "${name}" == upgrade-previous && "$(id -u)" != 0 ]]; then
+        log "${name}: a rollback that cannot restore the previous install puts the current one back"
+        chmod 000 "${DC_HOME}/previous/bin/defenseclaw-gateway"
+        if bash "${DC_HOME}/installer/install.sh" --rollback --yes; then
+            fail "a rollback whose previous gateway cannot be read succeeded"
+        fi
+        chmod 755 "${DC_HOME}/previous/bin/defenseclaw-gateway"
+        assert_versions "${TARGET}"
+        assert_healthy
+        assert_data_kept
+        [[ ! -e "${DC_HOME}/.rollback-hold" ]] || fail "the failed rollback left .rollback-hold behind"
+        [[ "$(cat "${DC_HOME}/previous/VERSION" 2>/dev/null)" == "${from}" ]] || fail "the failed rollback changed previous/"
+    fi
     log "${name}: defenseclaw rollback"
     local copies
     copies="$(installer_copies)"
@@ -258,6 +271,11 @@ upgrade_lane() {
     assert_versions "${from}"
     assert_healthy
     assert_data_kept
+    if [[ "${name}" == upgrade-previous ]]; then
+        # As if the rollback had stopped just before renaming its hold to previous/.
+        log "${name}: the next run finishes a rollback interrupted at its last step"
+        mv "${DC_HOME}/previous" "${DC_HOME}/.rollback-hold"
+    fi
     log "${name}: roll forward again"
     # After rolling back to 0.8.x the 1.x installer is only in previous/.
     local forward="${DC_HOME}/installer/install.sh"
@@ -335,7 +353,11 @@ lane_drills() {
     local broken="${ROOT}/broken-assets" archive stage
     rm -rf "${broken}"
     cp -R "${ASSETS}" "${broken}"
-    archive="$(cd "${broken}" && ls defenseclaw-*-"$(uname -s | tr '[:upper:]' '[:lower:]')"-*.tar.gz | head -1)"
+    # The one this host installs: the asset dir may hold every platform's.
+    local arch
+    case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; *) arch=arm64 ;; esac
+    archive="defenseclaw-${TARGET}-$(uname -s | tr '[:upper:]' '[:lower:]')-${arch}.tar.gz"
+    [[ -f "${broken}/${archive}" ]] || { fail "no ${archive} in ${ASSETS}"; return 1; }
     stage="${ROOT}/broken-stage"
     rm -rf "${stage}"; mkdir -p "${stage}"
     tar -xzf "${broken}/${archive}" -C "${stage}"

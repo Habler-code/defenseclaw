@@ -20,13 +20,12 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import re
+import stat
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-
 from defenseclaw import migrations
 from defenseclaw.commands.cmd_migrate import migrate_cmd
 from defenseclaw.migrations import ConfigTooNewError, MigrationError, migrate
@@ -311,3 +310,110 @@ def test_check_skips_the_v8_preflight_when_earlier_0x_steps_come_first(
     result = migrate(str(data_dir), from_version="0.7.2", check=True, gateway_binary="/staged/defenseclaw-gateway")
 
     assert result.applied[0].startswith("0.x import 0.8.0:")
+
+
+def test_only_a_0x_import_selects_the_windows_agents(data_dir: Path, recorded: list[str], monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(migrations, "_select_windows_agents", calls.append)
+    _write_config(data_dir, "config_version: 7\n")
+
+    migrate(str(data_dir), from_version="0.8.4")
+    migrate(str(data_dir))
+
+    assert calls == [str(data_dir)]
+
+
+def test_windows_agent_selection_keeps_the_agents_it_found(data_dir: Path, monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+
+    from defenseclaw import agent_selection, config
+
+    monkeypatch.setattr(
+        config,
+        "load",
+        lambda **_kwargs: SimpleNamespace(active_connectors=lambda: ["codex", "hermes"]),
+    )
+    requests: list[list[str]] = []
+
+    def record(_data_dir, connectors):
+        requests.append(list(connectors))
+        found = {"codex": SimpleNamespace(executable=r"C:\codex\codex.exe")}
+        return found, ({} if requests[1:] else {"hermes": "not installed"})
+
+    monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
+    monkeypatch.setattr(os, "name", "nt")
+
+    migrations._select_windows_agents(str(data_dir))
+
+    assert requests == [["codex", "hermes"], ["codex"]]
+    out = capsys.readouterr().out
+    assert r"selected C:\codex\codex.exe for the codex connector" in out
+    assert "run 'defenseclaw setup hermes'" in out
+
+
+def test_v8_preflight_converts_without_the_retired_0_5_0_keys(data_dir: Path, monkeypatch) -> None:
+    body = b"config_version: 7\nguardrail:\n  mode: observe\n  codex_enforcement_enabled: true\n  claudecode_enforcement_enabled: false\n"
+    # Bytes, so Windows does not translate the newlines.
+    config = data_dir / "config.yaml"
+    config.write_bytes(body)
+    converted: list[bytes] = []
+
+    class StopError(Exception):
+        pass
+
+    def convert(source, *_args, **_kwargs):
+        converted.append(source)
+        raise StopError
+
+    monkeypatch.setattr(migrations, "convert_v7_observability_to_v8", convert)
+    ctx = migrations.MigrationContext(openclaw_home="", data_dir=str(data_dir), from_version="", to_version="1.0.0")
+
+    with pytest.raises(StopError):
+        migrations._preflight_observability_v8(ctx, str(data_dir / "scratch"))
+
+    assert converted == [b"config_version: 7\nguardrail:\n  mode: observe\n"]
+    assert config.read_bytes() == body
+
+
+def test_windows_agent_selection_reports_nothing_when_the_retry_fails(data_dir: Path, monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+
+    from defenseclaw import agent_selection, config
+
+    monkeypatch.setattr(
+        config,
+        "load",
+        lambda **_kwargs: SimpleNamespace(active_connectors=lambda: ["codex", "hermes"]),
+    )
+    calls: list[list[str]] = []
+
+    def record(_data_dir, connectors):
+        calls.append(list(connectors))
+        found = {"codex": SimpleNamespace(executable=r"C:\\codex\\codex.exe")}
+        return found, ({"hermes": "not installed"} if len(calls) == 1 else {"codex": "changed while probing"})
+
+    monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
+    monkeypatch.setattr(os, "name", "nt")
+
+    migrations._select_windows_agents(str(data_dir))
+
+    out = capsys.readouterr().out
+    assert "selected" not in out
+    assert "run 'defenseclaw setup codex'" in out
+    assert "run 'defenseclaw setup hermes'" in out
+
+
+def test_windows_agent_selection_writes_no_receipt_without_a_native_agent(data_dir: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from defenseclaw import agent_selection, config
+
+    monkeypatch.setattr(config, "load", lambda **_kwargs: SimpleNamespace(active_connectors=lambda: ["openclaw"]))
+    monkeypatch.setattr(
+        agent_selection,
+        "record_setup_agent_selections",
+        lambda *_args: pytest.fail("nothing to select, so no receipt"),
+    )
+    monkeypatch.setattr(os, "name", "nt")
+
+    migrations._select_windows_agents(str(data_dir))

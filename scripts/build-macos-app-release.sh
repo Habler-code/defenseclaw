@@ -275,6 +275,12 @@ if [[ "${MACOS_REQUIRE_NOTARIZATION:-false}" == "true" && "${VERIFICATION_STATUS
     echo "MACOS_REQUIRE_NOTARIZATION=true but the app was not notarized" >&2
     exit 1
 fi
+# The checks above leave only these two; a Developer ID signed but
+# unnotarized app is never published (the verifier accepts only these).
+case "${VERIFICATION_STATUS}" in
+    notarized|unverified) ;;
+    *) echo "unexpected macOS verification status: ${VERIFICATION_STATUS}" >&2; exit 1 ;;
+esac
 
 ZIP_ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64.zip"
 DMG_ARTIFACT="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64.dmg"

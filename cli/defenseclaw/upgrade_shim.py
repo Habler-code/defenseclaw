@@ -229,18 +229,26 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
             os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
         )
         ps_args = [_powershell_flag(arg) for arg in args]
-        subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
-            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-            cwd=workdir,
-        )
+        try:
+            subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                cwd=workdir,
+            )
+        except OSError as exc:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise ShimError(f"could not start {powershell}: {exc}") from None
         print("  → The installer continues in a new window.")
         return 0
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
     sys.stdout.flush()
     sys.stderr.flush()
-    os.chdir(workdir)
-    os.execv(bash, [bash, path, *args])
+    try:
+        os.chdir(workdir)
+        os.execv(bash, [bash, path, *args])
+    except OSError as exc:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise ShimError(f"could not run {bash}: {exc}") from None
     return 0  # pragma: no cover - execv does not return
 
 
@@ -301,6 +309,8 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
 
     cosign = _cosign()
     if cosign is None:
+        if not local_dir:
+            print("  ! cosign 2.0 or later is not installed; the installer is checked against checksums.txt only")
         return
     bundle = os.path.join(workdir, "checksums.txt.bundle")
     if local_dir:
@@ -310,9 +320,7 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
         shutil.copyfile(source, bundle)
     else:
         _download(f"https://github.com/{repo}/releases/download/{version}/checksums.txt.bundle", bundle)
-    signer = (
-        "^https://github\\.com/" + repo.replace(".", "\\.") + "/\\.github/workflows/release\\.yaml@refs/heads/main$"
-    )
+    signer = "^https://github\\.com/" + re.escape(repo) + "/\\.github/workflows/release\\.yaml@refs/heads/main$"
     try:
         result = subprocess.run(  # noqa: S603 - fixed verifier, arguments built from constants and paths
             [
@@ -333,6 +341,12 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ShimError(f"could not run cosign to verify release {version}: {exc}") from None
+    finally:
+        # The installer removes its launch dir only when it holds nothing else.
+        try:
+            os.remove(bundle)
+        except OSError:
+            pass
     if result.returncode != 0:
         raise ShimError(f"the release signature on checksums.txt for {version} did not verify")
 
@@ -409,7 +423,7 @@ def _latest_from_redirect(repo: str, method: str, timeout: float) -> str | None:
     except urllib.error.HTTPError as exc:
         if exc.code in (301, 302, 303, 307, 308):
             location = exc.headers.get("Location", "")
-    except (urllib.error.URLError, OSError):
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
         return None
     tag = location.rstrip("/").rsplit("/tag/", 1)[-1] if "/tag/" in location else ""
     tag = tag.removeprefix("v")
@@ -424,7 +438,7 @@ def _latest_from_api(repo: str, timeout: float) -> str | None:
     try:
         with urllib.request.urlopen(request, timeout=timeout, context=_tls_context()) as response:  # noqa: S310
             tag = str(json.load(response).get("tag_name", "")).removeprefix("v")
-    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, AttributeError):
         return None
     return tag if _VERSION.match(tag) else None
 

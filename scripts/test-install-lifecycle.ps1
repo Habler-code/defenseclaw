@@ -20,12 +20,17 @@
 
 .DESCRIPTION
       powershell -File scripts\test-install-lifecycle.ps1 -Assets DIR [-PreviousAssets DIR]
-          [-Lanes "fresh setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"] [-Root DIR] [-Keep]
+          [-Lanes "fresh setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"]
+          [-CodexExe PATH] [-Root DIR] [-Keep]
 
     upgrade-previous and shim need -PreviousAssets (an older 1.x release); the
     other lanes start from it when it is given, else from -Assets. The policy
     lane sets the HKLM DisableSelfUpdate policy for its duration, so it needs
-    an elevated shell.
+    an elevated shell. upgrade-0.X.Y needs -CodexExe, a Codex CLI codex.exe:
+    0.x configures the codex connector, and 1.x on Windows runs Codex only
+    from an installed codex.exe that it has selected. Unless Codex is already
+    installed, the lane puts it in the real %LOCALAPPDATA%\Programs\OpenAI\Codex\bin
+    for its duration.
 
     Every lane runs with its own USERPROFILE, LOCALAPPDATA, APPDATA and TEMP,
     -NoPersistPath, and the gateway on a free port, so it never touches the
@@ -40,6 +45,7 @@ param(
     [string]$PreviousAssets = "",
     [string]$Lanes = "fresh",
     [string]$Root = "",
+    [string]$CodexExe = "",
     [switch]$Keep
 )
 
@@ -49,6 +55,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $Assets = (Resolve-Path -LiteralPath $Assets).ProviderPath
 if ($PreviousAssets) { $PreviousAssets = (Resolve-Path -LiteralPath $PreviousAssets).ProviderPath }
+if ($CodexExe) { $CodexExe = (Resolve-Path -LiteralPath $CodexExe).ProviderPath }
 if (-not $Root) { $Root = Join-Path ([IO.Path]::GetTempPath()) ("dc-lifecycle-" + [guid]::NewGuid().ToString("N").Substring(0, 8)) }
 New-Item -ItemType Directory -Path $Root -Force | Out-Null
 # Real path: DefenseClaw refuses a data dir reached through a junction.
@@ -56,6 +63,8 @@ $Root = (Get-Item -LiteralPath $Root).FullName
 # Windows PowerShell 5.1 runs the installer, as for users and `defenseclaw
 # upgrade`, even when this test runs in PowerShell 7.
 $PowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+# PowerShell 7, if installed, resolved before the lanes narrow PATH.
+$Pwsh = [string](Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
 $Tools = Join-Path $Root "tools"
 New-Item -ItemType Directory -Path $Tools -Force | Out-Null
 $uv = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -87,6 +96,15 @@ function Get-ExeOutput([string]$File, [string[]]$Arguments = @()) {
     return ((& $File @Arguments 2>&1) | ForEach-Object { "$_" }) -join "`n"
 }
 
+# A venv's bundled data goes deeper than MAX_PATH under a lane root, which
+# Windows PowerShell's Remove-Item cannot delete; retry through the \\?\ path.
+function Remove-TreeLong([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop } catch {
+        [IO.Directory]::Delete("\\?\" + [IO.Path]::GetFullPath($Path), $true)
+    }
+}
+
 function Write-Log([string]$Message) { Write-Host ""; Write-Host "[lifecycle] $Message" -ForegroundColor White }
 function Fail([string]$Message) { Write-Host "[lifecycle] FAIL: $Message" -ForegroundColor Red; $script:Failures++ }
 function Check([bool]$Condition, [string]$Message) { if (-not $Condition) { Fail $Message } }
@@ -100,7 +118,7 @@ function Enter-Lane([string]$Name) {
         $env:USERPROFILE = $LaneHome
         $gateway = Join-Path $LaneHome ".local\bin\defenseclaw-gateway.exe"
         if (Test-Path -LiteralPath $gateway) { [void](Invoke-Exe $gateway @("stop") -Quiet) }
-        Remove-Item -LiteralPath $Lane -Recurse -Force
+        Remove-TreeLong $Lane
     }
     # Laid out like a real profile: .NET resolves the known folders from
     # USERPROFILE and answers "" when they are missing, which sends caches
@@ -369,6 +387,18 @@ function Test-UpgradePrevious {
     Assert-DataKept
     Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $from) "previous\VERSION is not $from"
 
+    Write-Log "a rollback that cannot restore the previous install puts the current one back"
+    $blocked = Join-Path $DcHome "previous\bin\defenseclaw-gateway.exe"
+    & icacls.exe $blocked /deny "*S-1-1-0:(R)" | Out-Null
+    try {
+        Check ((Invoke-Installer (Join-Path $DcHome "installer\install.ps1") @("-Rollback", "-Yes")) -ne 0) "a rollback whose previous gateway cannot be read succeeded"
+    } finally { & icacls.exe $blocked /remove:d "*S-1-1-0" | Out-Null }
+    Assert-Versions $Target
+    Assert-Healthy
+    Assert-DataKept
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".rollback-hold"))) "the failed rollback left .rollback-hold behind"
+    Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $from) "the failed rollback changed previous\"
+
     Write-Log "defenseclaw rollback --yes (detached installer)"
     $launchDirs = Get-LaunchDirCount
     $code = Invoke-Exe (Join-Path $Bin "defenseclaw.cmd") @("rollback", "--yes")
@@ -380,6 +410,9 @@ function Test-UpgradePrevious {
     Assert-Healthy
     Assert-DataKept
 
+    # As if the rollback had stopped just before renaming its hold to previous\.
+    Write-Log "the next run finishes a rollback interrupted at its last step"
+    Move-Item -LiteralPath (Join-Path $DcHome "previous") -Destination (Join-Path $DcHome ".rollback-hold")
     Write-Log "roll forward with install.ps1 -Rollback"
     Check ((Invoke-Installer (Join-Path $DcHome "installer\install.ps1") @("-Rollback", "-Yes")) -eq 0) "roll forward failed"
     Assert-Versions $Target
@@ -393,6 +426,16 @@ function Test-UpgradePrevious {
 # is put back afterwards.
 function Test-UpgradeLegacy([string]$From) {
     Enter-Lane "upgrade-$From"
+    if (-not $CodexExe) { Fail "upgrade-$From needs -CodexExe"; return }
+    # DefenseClaw selects Codex from where its installer puts it, in the real
+    # profile's Known Folder (not the lane's LOCALAPPDATA). An existing Codex
+    # there is used as it is; one this lane adds is removed afterwards.
+    $codex = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\OpenAI\Codex\bin\codex.exe"
+    $placedCodex = -not (Test-Path -LiteralPath $codex)
+    if ($placedCodex) {
+        New-Item -ItemType Directory -Path (Split-Path $codex) -Force | Out-Null
+        Copy-Item -LiteralPath $CodexExe -Destination $codex
+    }
     $pathRaw = Get-UserPathRaw
     $pathKind = Get-UserPathKind
     try {
@@ -400,7 +443,18 @@ function Test-UpgradeLegacy([string]$From) {
         Invoke-WebRequest -UseBasicParsing -OutFile $legacy `
             -Uri "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$From/scripts/install.ps1"
         Write-Log "install $From with its own install.ps1"
-        Check ((Invoke-Installer $legacy @("-Version", $From, "-Yes", "-NoOpenclaw")) -eq 0) "install of $From failed"
+        # Under Windows PowerShell 5.1 the 0.x installers stop on the progress
+        # uv now writes to stderr, so they run under PowerShell 7 when present.
+        $shell = if ($Pwsh) { $Pwsh } else { $PowerShell }
+        # 0.x resolved its dependencies live; resolve as of the release date, as
+        # its users did (today's newest packages may no longer build on Windows).
+        $published = (Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/cisco-ai-defense/defenseclaw/releases/tags/$From").published_at
+        $env:UV_EXCLUDE_NEWER = ([datetime]$published).ToUniversalTime().ToString("s", [Globalization.CultureInfo]::InvariantCulture) + "Z"
+        try {
+            $code = Invoke-Exe $shell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $legacy, "-Version", $From, "-Yes", "-NoOpenclaw")
+        } finally { Remove-Item Env:UV_EXCLUDE_NEWER -ErrorAction SilentlyContinue }
+        Check ($code -eq 0) "install of $From failed ($code)"
+        if ($code -ne 0) { return }
         if (-not (Initialize-Gateway)) { return }
         Assert-Versions $From
         Write-Log "upgrade $From -> $Target"
@@ -426,6 +480,15 @@ function Test-UpgradeLegacy([string]$From) {
         Assert-DataKept
     } finally {
         Set-UserPath $pathRaw $pathKind
+        if ($placedCodex) {
+            Stop-Lane
+            # The gateway's Codex app-server outlives it. Deleting a running
+            # image only marks it for deletion, and the next lane would find a
+            # codex.exe that cannot be opened.
+            Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $codex } |
+                ForEach-Object { $_.Kill(); [void]$_.WaitForExit(10000) }
+            Remove-Item -LiteralPath $codex -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -476,10 +539,16 @@ function Test-FilesInUse {
             [IO.File]::AppendAllText((Join-Path $Zip "defenseclaw-hook.exe"), "rebuilt")
         }
     }
-    # A hook waiting for its payload, as an agent runs it.
+    # A hook waiting for its payload, as an agent runs it. The hook ignores
+    # the environment it is given and takes its data dir from the state file
+    # beside it: without the lane's there, it would find no install and exit.
+    $state = Get-Content -Raw -LiteralPath (Join-Path $Bin "defenseclaw-hook-state.json") -ErrorAction SilentlyContinue | ConvertFrom-Json
+    Check ($state -and [IO.Path]::GetFullPath($state.data_root) -eq [IO.Path]::GetFullPath($DcHome)) "defenseclaw-hook-state.json does not bind the hook to $DcHome"
     $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
     Start-Sleep -Seconds 2
-    Check (-not $hook.HasExited) "defenseclaw-hook.exe did not stay running"
+    if ($hook.HasExited) {
+        Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
+    }
     Write-Log "install $Target while defenseclaw-hook.exe runs"
     Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
     Assert-Versions $Target
@@ -616,7 +685,8 @@ function Test-SetupImport {
         Copy-Item -LiteralPath (Join-Path $setupRoot "bin\defenseclaw-gateway.exe") -Destination (Join-Path $setupRoot "bin\defenseclaw-startup.exe")
         Copy-Item -LiteralPath (Join-Path $setupRoot "bin\defenseclaw-hook.exe") -Destination (Join-Path $hookRuntime "defenseclaw-hook.exe")
         Get-ChildItem -LiteralPath $Bin -Force | Remove-Item -Force
-        Remove-Item -LiteralPath (Join-Path $DcHome ".venv"), (Join-Path $DcHome "installer") -Recurse -Force
+        Remove-TreeLong (Join-Path $DcHome ".venv")
+        Remove-TreeLong (Join-Path $DcHome "installer")
         Set-Content -LiteralPath (Join-Path $cache "DefenseClawSetup-x64.exe") -Value "setup" -Encoding Ascii
         Set-Content -LiteralPath (Join-Path $hookRuntime "hook-runtime-state.json") -Value '{"schema_version":2,"status":"active"}' -Encoding Ascii
         [ordered]@{
@@ -703,7 +773,7 @@ try {
         $gateway = Join-Path $laneHome ".local\bin\defenseclaw-gateway.exe"
         if (Test-Path -LiteralPath $gateway) { $env:USERPROFILE = $laneHome; [void](Invoke-Exe $gateway @("stop") -Quiet) }
     }
-    if ($Keep) { Write-Host "kept $Root" } else { Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($Keep) { Write-Host "kept $Root" } else { try { Remove-TreeLong $Root } catch { Write-Host "could not remove ${Root}: $($_.Exception.Message)" } }
 }
 if ($script:Failures) {
     Write-Host "[lifecycle] $($script:Failures) check(s) failed" -ForegroundColor Red

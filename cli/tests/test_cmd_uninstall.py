@@ -224,6 +224,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 "defenseclaw-hook.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
+                "defenseclaw-hook-state.json",
             ),
         )
         self.assertEqual(plan.managed_venv, os.path.join(plan.data_dir, ".venv"))

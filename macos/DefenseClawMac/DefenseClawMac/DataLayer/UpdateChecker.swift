@@ -41,6 +41,7 @@ enum InstallerFetchError: Error, Equatable, LocalizedError {
     case checksumMismatch
     case stagingFailed(String)
     case signatureInvalid
+    case signatureTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -58,6 +59,8 @@ enum InstallerFetchError: Error, Equatable, LocalizedError {
             "Could not save the verified installer: \(reason)"
         case .signatureInvalid:
             "The release signature on checksums.txt did not verify with cosign; refusing to run the installer."
+        case .signatureTimedOut:
+            "cosign did not finish verifying the release signature; refusing to run the installer."
         }
     }
 }
@@ -192,8 +195,9 @@ actor UpdateChecker {
     // MARK: - Installer
 
     /// Download `version`'s install.sh and checksums.txt, verify the script's
-    /// SHA-256, and stage both in a private directory. Returns install.sh.
-    func fetchInstaller(version: String) async throws -> URL {
+    /// SHA-256, and stage both in a private directory. Returns install.sh and
+    /// whether cosign also verified the release signature.
+    func fetchInstaller(version: String) async throws -> (script: URL, signatureVerified: Bool) {
         guard Self.isReleaseVersion(version) else { throw InstallerFetchError.invalidVersion(version) }
         guard !Self.isNewer(Self.minimumInstallerVersion, than: version) else {
             throw InstallerFetchError.unsupportedVersion(version)
@@ -209,7 +213,7 @@ actor UpdateChecker {
         // With cosign installed, check the release signature before trusting
         // checksums.txt, as `defenseclaw upgrade` does. Every release carries
         // the bundle, so a missing one is refused too.
-        guard let cosign = Self.installedCosign() else { return script }
+        guard let cosign = Self.installedCosign() else { return (script, false) }
         let directory = script.deletingLastPathComponent()
         do {
             let bundle = try await Self.download("checksums.txt.bundle", version: version, session: session)
@@ -219,7 +223,7 @@ actor UpdateChecker {
             try? FileManager.default.removeItem(at: directory)
             throw error
         }
-        return script
+        return (script, true)
     }
 
     /// cosign 2.0 or later where Homebrew and manual installs put it; a GUI
@@ -252,11 +256,18 @@ actor UpdateChecker {
             "--certificate-identity-regexp", signer,
             "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
             directory.appendingPathComponent("checksums.txt").path,
-        ])
+        ], timeout: 120)
+        guard !result.timedOut else { throw InstallerFetchError.signatureTimedOut }
         guard result.status == 0 else { throw InstallerFetchError.signatureInvalid }
     }
 
-    private nonisolated static func run(_ executable: String, _ arguments: [String]) -> (status: Int32, output: String) {
+    /// Run a tool and collect its output; one that outlives `timeout` seconds
+    /// is terminated and reported as timed out.
+    private nonisolated static func run(
+        _ executable: String,
+        _ arguments: [String],
+        timeout: TimeInterval = 30
+    ) -> (status: Int32, output: String, timedOut: Bool) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -266,11 +277,21 @@ actor UpdateChecker {
         do {
             try process.run()
         } catch {
-            return (-1, "")
+            return (-1, "", false)
+        }
+        let expired = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            if finished.wait(timeout: .now() + timeout) == .timedOut {
+                expired.signal()
+                process.terminate()
+            }
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+        finished.signal()
+        let timedOut = expired.wait(timeout: .now()) == .success
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self), timedOut)
     }
 
     nonisolated static func isReleaseVersion(_ version: String) -> Bool {
@@ -377,9 +398,12 @@ actor UpdateChecker {
     /// holding it must be writable — a mounted disk image or an App
     /// Translocation mount is not.
     nonisolated static func canReplaceBundle(atPath path: String) -> Bool {
-        FileManager.default.isWritableFile(
-            atPath: URL(fileURLWithPath: path).deletingLastPathComponent().path
-        )
+        // The installer moves the bundle aside, so both it and its folder
+        // must be writable (it refuses the update otherwise).
+        FileManager.default.isWritableFile(atPath: path)
+            && FileManager.default.isWritableFile(
+                atPath: URL(fileURLWithPath: path).deletingLastPathComponent().path
+            )
     }
 
     /// The version of the bundle now on disk at `path`, read from Info.plist

@@ -257,14 +257,36 @@ struct UpdateCheckerVerificationTests {
 
     private static func detectsReplaceableBundleLocations() {
         withTemporaryDirectory { parent in
-            let bundle = parent.appendingPathComponent("DefenseClawMac.app").path
-            expect(UpdateChecker.canReplaceBundle(atPath: bundle), "a bundle in a writable folder can be replaced")
+            let bundle = parent.appendingPathComponent("DefenseClawMac.app", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
+            } catch {
+                fail("could not create the bundle fixture: \(error)")
+            }
+            expect(UpdateChecker.canReplaceBundle(atPath: bundle.path), "a writable bundle in a writable folder can be replaced")
+            if geteuid() != 0 {
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: NSNumber(value: Int16(0o500))],
+                    ofItemAtPath: bundle.path
+                )
+                expect(
+                    !UpdateChecker.canReplaceBundle(atPath: bundle.path),
+                    "a bundle its user cannot write (installed by another account) cannot be replaced"
+                )
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: NSNumber(value: Int16(0o700))],
+                    ofItemAtPath: bundle.path
+                )
+            }
             let readOnly = parent.appendingPathComponent("ReadOnly", isDirectory: true)
             do {
                 try FileManager.default.createDirectory(
-                    at: readOnly,
-                    withIntermediateDirectories: false,
-                    attributes: [.posixPermissions: NSNumber(value: Int16(0o500))]
+                    at: readOnly.appendingPathComponent("DefenseClawMac.app", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: NSNumber(value: Int16(0o500))],
+                    ofItemAtPath: readOnly.path
                 )
             } catch {
                 fail("could not create the read-only fixture: \(error)")

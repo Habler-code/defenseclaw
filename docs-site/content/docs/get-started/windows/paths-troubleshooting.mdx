@@ -33,7 +33,6 @@ intact when diagnosing a problem.
 | `%USERPROFILE%\.defenseclaw\hooks\` | Generated hook assets, runtime state, and connector-scoped credential sidecars. | **Never edit, print, or copy credentials.** Reconcile with setup/doctor. |
 | `%USERPROFILE%\.defenseclaw\backups\` | Managed connector/upgrade recovery material and timestamped `config.yaml.before-redaction-*` pre-change policy backups. | Do not restore or delete manually; they may contain credential-bearing or unredacted policy state. |
 | `%USERPROFILE%\.defenseclaw\quarantine\` | DefenseClaw-owned quarantined skills/plugins and provenance. | Use `skill restore` or `plugin restore`; do not drag files back. |
-| `%USERPROFILE%\.defenseclaw\.upgrade-receipts\` | Private automatic-upgrade admission/recovery receipts when used. | Inspect metadata only; do not edit receipt JSON. |
 | `%USERPROFILE%\.defenseclaw\gateway.pid`, `watchdog.pid` | Protected process identity records, not bare kill instructions. | Do not delete while a process may be running. |
 | `%USERPROFILE%\.defenseclaw\gateway.jsonl` | Optional JSONL destination only when explicitly configured there. | Not a default log; manage through observability configuration. |
 | `%CODEX_HOME%\managed_config.toml` | Effective native Windows Codex hook policy. Default home is `%USERPROFILE%\.codex`. | Do not edit DefenseClaw-managed hooks; use setup/remove. |
@@ -61,7 +60,7 @@ not a user-facing rollback directory.
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR`,
 `OMNIGENT_CONFIG_HOME`, and `HERMES_HOME` are the connector
 configuration overrides honored by their respective implementations. Set them
-to absolute, normalized native Windows paths before initial Setup or connector
+to absolute, normalized native Windows paths before installation or connector
 setup. The installer validates and records them; reparse ancestors are refused.
 Antigravity, Cursor, and Devin publish no equivalent public
 configuration-home override. Antigravity's global hook path is fixed at
@@ -286,9 +285,10 @@ residue automatically.
   </Accordion>
   <Accordion title="An upgrade is interrupted">
     Run `defenseclaw upgrade` (or the install command) again after closing the
-    TUI and other DefenseClaw commands. The installer is safe to re-run; a
-    failed attempt has already restored the previous install. To go back a
-    version, run `defenseclaw rollback`.
+    TUI and other DefenseClaw commands. An attempt that failed has already put
+    the previous install back; if one was cut off (a closed window, power
+    loss), the next run first restores the install it was replacing, then
+    carries on. To go back a version on purpose, run `defenseclaw rollback`.
   </Accordion>
   <Accordion title="The TUI renders poorly or cannot redraw">
     Prefer a current native Windows console host and resize to at least 80×24.
@@ -311,7 +311,7 @@ residue automatically.
 Complete this without real secrets or destructive tools:
 
 - Open a new native PowerShell or cmd window and confirm `defenseclaw` and
-  `defenseclaw-gateway` resolve from the product `bin` directory.
+  `defenseclaw-gateway` resolve from `%USERPROFILE%\.local\bin`.
 - Run `defenseclaw version`; require the CLI and gateway generation to agree.
 - Run `defenseclaw-gateway status`, `defenseclaw status`, and
   `defenseclaw guardrail status`; require every intended supported

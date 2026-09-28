@@ -2,7 +2,9 @@
 
 A release is one run of the Release workflow. Installed clients upgrade by
 running the latest release's installer, so nothing else has to be updated
-between versions.
+between versions. The one exception is a single run after the first 1.x
+release, which points 0.8.8–0.8.10 upgrades at it (see "One-time: move
+0.8.8–0.8.10 upgrades to 1.x" below).
 
 ## Cut a release
 
@@ -26,15 +28,37 @@ between versions.
 Releases build for Linux (`amd64`, `arm64`), macOS on Apple Silicon (`arm64`;
 Intel Macs are unsupported), and Windows (`amd64`).
 
+The macOS app is signed with Developer ID and notarized when all five Apple
+secrets (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`,
+`MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, `MACOS_NOTARY_ISSUER_ID`) are
+set in the `release` environment. Without them the run fails, because
+`install.sh` would put an ad-hoc signed app, which runs without administrator
+mode, on users' Macs. To publish such an app anyway (a fork, a test), run with
+`-f allow_unnotarized_macos_app=true`.
+
 To try a release on real machines before users see it, run the workflow with
 `draft: true` and download the draft's assets (`gh release download X.Y.Z`).
-Check them against the signed checksum list before running anything:
+Use disposable test machines or VMs, not anyone's working install: an
+unpublished release has not been through users yet. Check the assets against
+the signed checksum list before running anything:
 
 ```bash
 cosign verify-blob --bundle checksums.txt.bundle \
   --certificate-identity https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
-sha256sum --check --ignore-missing checksums.txt
+sha256sum --check --ignore-missing checksums.txt   # macOS: shasum -a 256 --check --ignore-missing checksums.txt
+```
+
+On Windows (PowerShell, with `cosign.exe` on PATH):
+
+```powershell
+cosign verify-blob --bundle checksums.txt.bundle `
+  --certificate-identity https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main `
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+Get-Content checksums.txt | ForEach-Object {
+  $hash, $name = -split $_
+  if ((Test-Path $name) -and (Get-FileHash -Algorithm SHA256 $name).Hash -ne $hash) { throw "$name does not match checksums.txt" }
+}
 ```
 
 Then install them with `install.sh --local DIR` or `install.ps1 -Local DIR`,
@@ -89,9 +113,26 @@ which hands off to the latest `install.sh`. It does not need to run again.
 
 ## Changing the config schema
 
-A new `config.yaml` key only needs a default in the loaders. Renaming or
-removing a key needs one step in `CONFIG_MIGRATIONS`
-(`cli/defenseclaw/migrations.py`), a bump of `CURRENT_CONFIG_VERSION`
-(`cli/defenseclaw/config.py`) and of `MaxSupportedConfigVersion` in the Go
-config package. Audit database changes are forward-only migrations applied by
-the gateway at startup.
+`config.yaml` is validated against the closed schema
+`schemas/config/v8/defenseclaw-config.schema.json` (every object sets
+`additionalProperties: false`), by both the gateway and the CLI.
+
+- **A new key:** add it to that schema and give it a default in the Python
+  (`cli/defenseclaw/config.py`) and Go (`internal/config`) loaders. No
+  migration is needed. An older release with the same `config_version`
+  rejects the key, so do not write it by default while downgrading to such a
+  release must still work.
+- **Renaming, removing or re-shaping a key:** prefer adding a new key and
+  reading the old one. A `config_version` bump is a larger change: one step in
+  `CONFIG_MIGRATIONS` (`cli/defenseclaw/migrations.py`, keyed by the old
+  version; the runner writes the new version), `CURRENT_CONFIG_VERSION`
+  (`cli/defenseclaw/config.py`), `MaxSupportedConfigVersion`
+  (`internal/config/observability_v8_types.go`), the schema's
+  `config_version` `const`, and every place that still expects exactly 8
+  (`git grep -nE '!= 8|== 8' -- cli/defenseclaw internal`). Do not touch Go's
+  `CurrentConfigVersion` (7), the legacy decoder. `defenseclaw migrate --check`
+  does not validate these steps, so test that a migrated file loads in both
+  loaders.
+- **Audit database changes** are forward-only migrations the gateway applies
+  at startup (`internal/audit/store.go`, and the judge-body and inventory
+  stores); never edit or reorder an existing one.

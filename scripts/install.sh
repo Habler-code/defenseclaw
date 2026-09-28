@@ -58,7 +58,7 @@ case "$(basename "${SELF_TMP}")" in
     *) SELF_TMP="" ;;
 esac
 if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
-        ! -name install.sh ! -name checksums.txt -print -quit 2>/dev/null)" ]]; then
+        ! -name install.sh ! -name checksums.txt ! -name checksums.txt.bundle -print -quit 2>/dev/null)" ]]; then
     SELF_TMP=""
 fi
 [[ -z "${SELF_TMP}" ]] || trap 'rm -rf "${SELF_TMP}"' EXIT
@@ -69,7 +69,7 @@ readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # Data-dir entries that are install machinery, not user data.
-readonly NOT_DATA=".venv previous previous.new .repair .rollback-hold .staging .failed-* installer logs .install.lock backups"
+readonly NOT_DATA=".venv previous previous.new .repair .rollback-hold .rollback-hold.done .staging .failed-* installer logs .install.lock backups"
 readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none"
 
 if [[ -t 1 ]] || [[ "${FORCE_COLOR:-}" == "1" ]]; then
@@ -293,6 +293,19 @@ run_release_installer() {
         || die "Release ${version} has no checksums.txt"
     [[ "$(awk '$2=="install.sh"||$2=="*install.sh"{print $1}' "${tmp}/checksums.txt")" == "$(sha256_of "${tmp}/install.sh")" ]] \
         || die "install.sh for ${version} does not match its checksums.txt"
+    # With cosign, the installer about to run is checked like the assets it installs.
+    local major
+    major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
+    if [[ "${major:-0}" =~ ^[0-9]+$ && "${major:-0}" -ge 2 ]]; then
+        curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt.bundle" \
+            "https://github.com/${REPO}/releases/download/${version}/checksums.txt.bundle" \
+            || die "Release ${version} has no checksums.txt.bundle to verify with cosign"
+        cosign verify-blob --bundle "${tmp}/checksums.txt.bundle" \
+            --certificate-identity-regexp "^https://github\.com/${REPO//./\\.}/\.github/workflows/release\.yaml@refs/heads/main$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${tmp}/checksums.txt" >/dev/null 2>&1 \
+            || die "The release signature on ${version}'s checksums.txt did not verify"
+    fi
     [[ -z "${SELF_TMP}" ]] || rm -rf "${SELF_TMP}"
     exec bash "${tmp}/install.sh" "$@"
 }
@@ -311,6 +324,8 @@ if ! is_version "${VERSION}"; then
         is_version "${VERSION}" || die "No defenseclaw-X.Y.Z-py3-none-any.whl in ${LOCAL_DIR}"
     elif [[ "${ROLLBACK}" != true ]]; then
         target="${TARGET_VERSION:-$(latest_release)}"
+        version_lt "${target}" 1.0.0 \
+            && die "DefenseClaw ${target} predates this installer; see https://github.com/${REPO}/releases/tag/${target}"
         run_release_installer "${target}" ${FORWARD[@]+"${FORWARD[@]}"}
     fi
 fi
@@ -389,7 +404,17 @@ if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
     for candidate in "${DEFENSECLAW_APP_PATH:-}" /Applications/DefenseClawMac.app "${HOME}/Applications/DefenseClawMac.app"; do
         [[ -n "${candidate}" && -d "${candidate}" ]] || continue
         if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${candidate}/Contents/Info.plist" 2>/dev/null)" == com.cisco.defenseclaw.macos ]]; then
-            APP_PATH="${candidate}"; break
+            if [[ -w "${candidate}" && -w "$(dirname "${candidate}")" ]]; then
+                APP_PATH="${candidate}"
+            elif [[ "${candidate}" == "${DEFENSECLAW_APP_PATH:-}" \
+                && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${candidate}/Contents/Info.plist" 2>/dev/null)" != "${VERSION}" ]]; then
+                # Asked for by name (the app's own Update runs this), so a CLI
+                # update alone would leave the app offering the same update.
+                die "${candidate} is not writable by $(id -un); nothing was changed (update it from the DMG)"
+            else
+                warn "${candidate} is not writable by $(id -un); leaving the app as it is (update it from the DMG)"
+            fi
+            break
         fi
     done
 fi
@@ -407,9 +432,18 @@ if [[ "${ROLLBACK}" == true ]]; then
         || die "Rollback cancelled; nothing was changed"
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
+    # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
+    restart="${was_running}"
+    [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
-    swap_with_previous || die "Rollback failed part-way; see ${LOG}"
-    if [[ "${was_running}" == true ]] || [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]]; then
+    swapped=0
+    swap_with_previous || swapped=$?
+    if [[ "${swapped}" -ne 0 ]]; then
+        # 1: the swap undid itself, so this install is back and may run again.
+        [[ "${swapped}" -eq 1 && "${was_running}" == true ]] && { start_gateway || true; }
+        die "Rollback failed part-way; see ${LOG}"
+    fi
+    if [[ "${restart}" == true ]]; then
         start_gateway && restart_openclaw \
             || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     fi
@@ -436,10 +470,9 @@ has curl || [[ -n "${LOCAL_DIR}" ]] || die "curl is required"
 # Never pick up uv settings (overrides, indexes) from a project in the cwd.
 export UV_NO_CONFIG=1
 if ! has uv; then
-    info "Installing uv (Python package manager)"
-    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh >/dev/null \
-        || die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry"
-    export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+    info "Installing uv ${UV_VERSION} (Python package manager)"
+    install_uv || die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry"
+    export PATH="${BIN_DIR}:${PATH}"
     has uv || die "uv was installed but is not on PATH"
 fi
 
@@ -617,6 +650,40 @@ exit ${START_RC}
 # ── Snapshot, swap, restore ──────────────────────────────────────────────────
 # Defined outside main() is fine: bash parses the whole file before main runs.
 
+# uv, when it is missing: a pinned release, checked against the digests below
+# (from the release's .sha256 files) before anything runs. Bump them together.
+readonly UV_VERSION="0.12.13"
+uv_sha256() {
+    case "$1" in
+        uv-aarch64-apple-darwin.tar.gz) echo 7e6ddb9316acc00f2296c82ff4d99977870ee34b2f0ddcae9444d714db9364ed ;;
+        uv-x86_64-unknown-linux-musl.tar.gz) echo 4e2bfd0c9007b1032a50e539e965fd0a6037d87ad93ae1580d220a92d4c94098 ;;
+        uv-aarch64-unknown-linux-musl.tar.gz) echo f44bc1037a17889fe562fffd2002d4ed108e499fbe68b4f022af244dc7b8244f ;;
+    esac
+}
+install_uv() {
+    local target tmp asset
+    case "${OS}/${ARCH}" in
+        darwin/arm64) target=aarch64-apple-darwin ;;
+        linux/amd64) target=x86_64-unknown-linux-musl ;;
+        linux/arm64) target=aarch64-unknown-linux-musl ;;
+        *) return 1 ;;
+    esac
+    asset="uv-${target}.tar.gz"
+    tmp="$(mktemp -d)" || return 1
+    if curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/${asset}" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${asset}" \
+        && [[ "$(sha256_of "${tmp}/${asset}")" == "$(uv_sha256 "${asset}")" ]] \
+        && tar -xzf "${tmp}/${asset}" -C "${tmp}" \
+        && mkdir -p "${BIN_DIR}" \
+        && cp "${tmp}/uv-${target}/uv" "${tmp}/uv-${target}/uvx" "${BIN_DIR}/"; then
+        chmod 755 "${BIN_DIR}/uv" "${BIN_DIR}/uvx"
+        rm -rf "${tmp}"
+        return 0
+    fi
+    rm -rf "${tmp}"
+    return 1
+}
+
 is_machinery() {
     local name="$1" pattern
     for pattern in ${NOT_DATA}; do
@@ -704,19 +771,53 @@ recover_interrupted_run() {
         fi
     done
     slot="${DEFENSECLAW_HOME}/.rollback-hold"
-    if [[ -d "${slot}" ]]; then
+    # A hold is deleted by renaming it first, so a half-deleted one is never read.
+    rm -rf "${slot}.done"
+    local restart=false origin
+    [[ "$(cat "${slot}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
+    if [[ -f "${slot}/ROLLED_BACK" ]]; then
+        # The rollback itself had finished; only renaming its hold was left.
+        # START_AFTER is its own decision; previous/ may be half deleted.
+        warn "An earlier rollback was interrupted; finishing it"
+        [[ "$(cat "${slot}/START_AFTER" 2>/dev/null)" == true ]] && restart=true
+        rm -rf "${PREVIOUS}" && mv "${slot}" "${PREVIOUS}"
+    elif [[ -d "${slot}" ]]; then
         warn "An earlier rollback was interrupted; restoring the install it started from"
         stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
         if [[ -f "${slot}/STASHED" ]]; then
-            # The live install was fully set aside, so anything live now came from previous/.
-            mkdir -p "${PREVIOUS}/data"
-            while IFS= read -r name; do
-                mv "${DEFENSECLAW_HOME}/${name}" "${PREVIOUS}/data/"
-            done < <(data_entries)
-            if [[ -d "${VENV}" ]]; then mv "${VENV}" "${PREVIOUS}/venv"; fi
-            if [[ -d "${INSTALLER_DIR}" ]]; then mv "${INSTALLER_DIR}" "${PREVIOUS}/installer"; fi
+            # The live install was fully set aside, so anything live now came
+            # from previous/, unless the undo had already returned it (RETURNED).
+            if [[ ! -f "${slot}/RETURNED" ]]; then
+                return_live_to "${PREVIOUS}" && : > "${slot}/RETURNED"
+            fi
+            if [[ -f "${slot}/RETURNED" ]] && unstash "${slot}"; then
+                # Put back an app the rollback had already moved aside, at the
+                # path it came from (none may be there now to detect).
+                origin="${APP_PATH:-$(cat "${slot}/APP_ORIGIN" 2>/dev/null || true)}"
+                if [[ -d "${slot}/DefenseClawMac.app" && -n "${origin}" ]]; then
+                    if [[ -e "${origin}" && ! -e "${PREVIOUS}/DefenseClawMac.app" ]]; then
+                        mv "${origin}" "${PREVIOUS}/DefenseClawMac.app" || true
+                    fi
+                    [[ -e "${origin}" ]] || mv "${slot}/DefenseClawMac.app" "${origin}" || true
+                    # The rest of this run updates or rolls back the app it restored.
+                    [[ -d "${slot}/DefenseClawMac.app" || -n "${APP_PATH}" ]] || APP_PATH="${origin}"
+                fi
+                if [[ -d "${slot}/DefenseClawMac.app" ]]; then
+                    # Both places are taken (the user reinstalled the app): keep this copy.
+                    mkdir -p "${DEFENSECLAW_HOME}/backups" \
+                        && mv "${slot}/DefenseClawMac.app" "${DEFENSECLAW_HOME}/backups/DefenseClawMac-$(cat "${slot}/VERSION" 2>/dev/null || echo unknown)-$(date +%Y%m%dT%H%M%S).app" \
+                        && warn "Kept the app the rollback had set aside in ${DEFENSECLAW_HOME}/backups"
+                fi
+                [[ -d "${slot}/DefenseClawMac.app" ]] || drop_hold "${slot}"
+            fi
+        else
+            # Setting it aside stopped part-way; the live binaries were only copied.
+            unstash_tree "${slot}" && drop_hold "${slot}"
         fi
-        unstash "${slot}" && rm -rf "${slot}"
+    fi
+    [[ ! -e "${slot}" ]] || die "Could not recover an interrupted rollback; ${slot} holds the install it set aside (see ${LOG})"
+    if [[ "${restart}" == true && -z "$(gateway_pid || true)" ]]; then
+        start_gateway || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     fi
 }
 
@@ -820,6 +921,8 @@ start_gateway() {
 
 finish_swap() {
     local tmp
+    # The new install is live: a run killed from here on must not restore the old one.
+    rm -f "${SNAP}/COMPLETE"
     if [[ "${SNAP}" == "${DEFENSECLAW_HOME}/previous.new" && -n "${PREV_VERSION}" ]]; then
         keep_rolled_back_data
         rm -rf "${PREVIOUS}" && mv "${SNAP}" "${PREVIOUS}"
@@ -872,7 +975,7 @@ stash_live() {
 
 # unstash SLOT: make SLOT the live install again (the inverse of stash_live).
 unstash() {
-    local slot="$1" binary link name
+    local slot="$1" binary link
     for binary in ${MANAGED_BINARIES}; do
         if [[ -f "${slot}/bin/${binary}" ]]; then
             cp -p "${slot}/bin/${binary}" "${BIN_DIR}/.${binary}.old" \
@@ -885,36 +988,84 @@ unstash() {
         rm -f "${BIN_DIR:?}/${link}"
         [[ -L "${slot}/bin/${link}" ]] && { cp -P "${slot}/bin/${link}" "${BIN_DIR}/${link}" || return 1; }
     done
+    unstash_tree "${slot}" || return 1
+    restore_external_config "${slot}"
+}
+
+# unstash_tree SLOT: move SLOT's data, venv and installer back into place.
+# Alone it undoes a stash_live that failed part-way: that one only copied
+# the binaries, so the live ones are still in place.
+unstash_tree() {
+    local slot="$1" name
     for name in "${slot}/data"/* "${slot}/data"/.[!.]* "${slot}/data"/..?*; do
         [[ -e "${name}" || -L "${name}" ]] && { mv "${name}" "${DEFENSECLAW_HOME}/" || return 1; }
     done
-    if [[ -d "${slot}/venv" ]]; then mv "${slot}/venv" "${VENV}" || return 1; fi
-    if [[ -d "${slot}/installer" ]]; then mv "${slot}/installer" "${INSTALLER_DIR}" || return 1; fi
-    restore_external_config "${slot}"
+    if [[ -d "${slot}/venv" && ! -e "${VENV}" ]]; then mv "${slot}/venv" "${VENV}" || return 1; fi
+    if [[ -d "${slot}/installer" && ! -e "${INSTALLER_DIR}" ]]; then mv "${slot}/installer" "${INSTALLER_DIR}" || return 1; fi
+}
+
+# return_live_to SLOT: move what unstash brought in from SLOT back into it.
+# Only valid while the install unstash replaced is fully set aside elsewhere.
+# drop_hold HOLD: delete a rollback hold. The rename makes it vanish at once:
+# recovery must never find a half-deleted one and read its markers.
+drop_hold() {
+    mv "$1" "$1.done" && rm -rf "$1.done"
+}
+
+return_live_to() {
+    # Never over or into anything already there: that would be the other install.
+    local slot="$1" name
+    mkdir -p "${slot}/data" || return 1
+    while IFS= read -r name; do
+        [[ ! -e "${slot}/data/${name}" && ! -L "${slot}/data/${name}" ]] || return 1
+        mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
+    done < <(data_entries)
+    if [[ -d "${VENV}" ]]; then [[ ! -e "${slot}/venv" ]] && mv "${VENV}" "${slot}/venv" || return 1; fi
+    if [[ -d "${INSTALLER_DIR}" ]]; then [[ ! -e "${slot}/installer" ]] && mv "${INSTALLER_DIR}" "${slot}/installer" || return 1; fi
 }
 
 swap_with_previous() {
     # Exchange the live install and previous/ by renaming, so a second
     # --rollback rolls forward again. Each half undoes itself on failure.
+    # Returns 1 when the current install is back in place, 2 when it could
+    # not be put back (the next run of the installer finishes the recovery).
     local hold="${DEFENSECLAW_HOME}/.rollback-hold"
     rm -rf "${hold}"
-    if ! stash_live "${hold}"; then
-        unstash "${hold}"; rm -rf "${hold}"
-        err "Could not set the current install aside; nothing was changed"
-        return 1
-    fi
-    : > "${hold}/STASHED"
+    # First, so recovery from any later point knows the version and gateway state.
+    mkdir -p "${hold}" || return 1
     printf '%s\n' "${current}" > "${hold}/VERSION"
     printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
+    if ! stash_live "${hold}"; then
+        if unstash_tree "${hold}"; then
+            drop_hold "${hold}"
+            err "Could not set the current install aside; nothing was changed"
+            return 1
+        fi
+        err "Could not set the current install aside or put it back; re-run the installer to recover it"
+        return 2
+    fi
+    : > "${hold}/STASHED"
     if ! unstash "${PREVIOUS}"; then
-        stash_live "${PREVIOUS}"; unstash "${hold}"; rm -rf "${hold}"
-        err "Could not restore the previous install; the current one is back in place"
-        return 1
+        # unstash only copies previous/bin, so returning the rest restores previous/.
+        # RETURNED tells an interrupted run's recovery that previous/ is whole again.
+        if return_live_to "${PREVIOUS}" && : > "${hold}/RETURNED" && unstash "${hold}"; then
+            drop_hold "${hold}"
+            err "Could not restore the previous install; the current one is back in place"
+            return 1
+        fi
+        err "Could not restore the previous install or put the current one back; re-run the installer to recover it"
+        return 2
     fi
     if [[ -n "${APP_PATH}" && -d "${PREVIOUS}/DefenseClawMac.app" ]]; then
-        mv "${APP_PATH}" "${hold}/DefenseClawMac.app" && mv "${PREVIOUS}/DefenseClawMac.app" "${APP_PATH}" \
-            || warn "Could not swap the macOS app back; it stays at the newer version"
+        printf '%s\n' "${APP_PATH}" > "${hold}/APP_ORIGIN"
+        if mv "${APP_PATH}" "${hold}/DefenseClawMac.app"; then
+            mv "${PREVIOUS}/DefenseClawMac.app" "${APP_PATH}" \
+                || { mv "${hold}/DefenseClawMac.app" "${APP_PATH}"; warn "Could not swap the macOS app back; it stays at the newer version"; }
+        else
+            warn "Could not swap the macOS app back; it stays at the newer version"
+        fi
     fi
+    printf '%s\n' "${restart:-${was_running}}" > "${hold}/START_AFTER"
     date +%Y%m%dT%H%M%S > "${hold}/ROLLED_BACK"
     rm -rf "${PREVIOUS}"
     mv "${hold}" "${PREVIOUS}"
