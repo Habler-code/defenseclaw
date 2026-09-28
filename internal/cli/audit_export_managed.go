@@ -5,7 +5,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -14,8 +13,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// Seams for the managed audit export environment; the platform files set
-// the production values.
+// Seams for the managed administrator environment (audit export and the
+// enterprise policy commands); the platform files set the production values.
 var (
 	auditExportManagedHost = func() bool {
 		_, ok := managedHostWindowsStandalone()
@@ -37,6 +36,18 @@ var (
 // An explicit DEFENSECLAW_CONFIG or DEFENSECLAW_HOME is the operator's
 // choice and is left alone, as is every host without a managed deployment.
 func prepareManagedAuditExportEnvironment() error {
+	return pinManagedAdministratorEnvironment(
+		"audit export",
+		"this host has a managed DefenseClaw deployment; its audit log can be exported only from an elevated Administrator prompt or by the MDM agent",
+	)
+}
+
+// pinManagedAdministratorEnvironment gives a read-only administrator command
+// (command names it in errors) the managed deployment's environment on a
+// standalone managed Windows host, as described above; refusal is the
+// message a standard account gets. Every other host, and an explicit
+// DEFENSECLAW_CONFIG or DEFENSECLAW_HOME, is left alone.
+func pinManagedAdministratorEnvironment(command, refusal string) error {
 	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" ||
 		strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")) != "" {
 		return nil
@@ -45,11 +56,11 @@ func prepareManagedAuditExportEnvironment() error {
 		return nil
 	}
 	if !auditExportCallerIsAdministrator() {
-		return errors.New("audit export: this host has a managed DefenseClaw deployment; its audit log can be exported only from an elevated Administrator prompt or by the MDM agent")
+		return fmt.Errorf("%s: %s", command, refusal)
 	}
 	layout, err := auditExportManagedLayout()
 	if err != nil {
-		return fmt.Errorf("audit export: resolve the managed deployment: %w", err)
+		return fmt.Errorf("%s: resolve the managed deployment: %w", command, err)
 	}
 	for _, entry := range [][2]string{
 		{"DEFENSECLAW_HOME", layout.DataDir},
@@ -60,10 +71,10 @@ func prepareManagedAuditExportEnvironment() error {
 		{connector.WindowsGatewayServiceNameEnv, managed.StandaloneWindowsGatewaySvc},
 	} {
 		if strings.TrimSpace(entry[1]) == "" {
-			return fmt.Errorf("audit export: the managed deployment layout has no %s value", entry[0])
+			return fmt.Errorf("%s: the managed deployment layout has no %s value", command, entry[0])
 		}
 		if err := os.Setenv(entry[0], entry[1]); err != nil {
-			return fmt.Errorf("audit export: set %s: %w", entry[0], err)
+			return fmt.Errorf("%s: set %s: %w", command, entry[0], err)
 		}
 	}
 	return nil

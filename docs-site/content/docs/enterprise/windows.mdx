@@ -203,6 +203,24 @@ yet; it takes the permissions of its folder, so write it to a folder only
 administrators can read. Treat it as sensitive: it can hold prompt and tool
 content.
 
+## Inspect machine policy
+
+Run the policy commands from an elevated Administrator prompt, or as
+LocalSystem from an MDM script. Like `audit export`, they read the managed
+deployment's configuration and need no environment variables:
+
+```powershell title="Elevated Administrator prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy verify
+```
+
+`show` lists each connector's route, lock and coverage; `verify` exits 1
+while coverage is incomplete. With `managed_hooks_only: enforce` (the
+default) the Claude Code drop-in
+`C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` sets
+`allowManagedHooksOnly: true`, so user and project Claude Code hooks do not
+run. Standard accounts are told to use an elevated prompt.
+
 ## Recover a pending transaction
 
 A lifecycle that fails normally rolls back. If the rollback itself cannot
