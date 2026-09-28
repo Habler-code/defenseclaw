@@ -3,7 +3,7 @@
 ## Target identity and review scope
 
 - Repository: `defenseclaw`
-- Baseline commit: `439a01b54632f9a1a13478fda13562693ec2a36f`
+- AVC 5.1.22.3763 signed-payload source commit: `33257f3c4bf06ee364104899eec68f4cf255f660`
 - Review target: the working-tree implementation of native Windows
   managed-enterprise services, lifecycle commands, protected state, per-user
   hook reconciliation, and its certification harness
