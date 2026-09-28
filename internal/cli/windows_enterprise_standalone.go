@@ -670,6 +670,15 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	for _, message := range result.Errors {
 		fmt.Fprintf(output, "  error %s: %s\n", message.Code, message.Message)
 	}
+	// Warnings name what an OK result still leaves undone, such as an
+	// installed agent the enumerator could not enroll. The internal
+	// security-descriptor detail of a lifecycle_diagnostic stays in --json.
+	for _, message := range result.Warnings {
+		if message.Code == "lifecycle_diagnostic" {
+			continue
+		}
+		fmt.Fprintf(output, "  warning %s: %s\n", message.Code, message.Message)
+	}
 	if result.LogPath != "" {
 		fmt.Fprintf(output, "  Log: %s\n", result.LogPath)
 	}
