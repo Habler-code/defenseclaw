@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -625,4 +626,102 @@ func TestSessionStateBlocksWhenTheSessionStartScanStopsOnABudget(t *testing.T) {
 			t.Fatalf("a session whose start scan ran past its deadline stays blocked: %+v", call)
 		}
 	})
+}
+
+func newGatewaySessionHarness(t *testing.T) *sessionHarness {
+	h := newSessionHarness(t)
+	h.now = time.Now().UTC()
+	h.stateDir = filepath.Join(t.TempDir(), "records")
+	return h
+}
+
+func (h *sessionHarness) applyAs(process, session string, start bool, decision GuardDecision) GuardDecision {
+	h.t.Helper()
+	h.process = process
+	return h.apply(session, start, decision)
+}
+
+func sessionRecordCount(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			count++
+		}
+	}
+	return count
+}
+
+// TestGatewaySessionStoreKeepsAdmittingCleanSessions: each new agent process
+// and session writes two records, so the 512-record limit used to refuse
+// every new session of a user after 256 of them within the retention
+// period, and a restart only asked for more records. The oldest clean
+// records now make room.
+func TestGatewaySessionStoreKeepsAdmittingCleanSessions(t *testing.T) {
+	h := newGatewaySessionHarness(t)
+	for i := 0; i < 400; i++ {
+		id := strconv.Itoa(i)
+		if call := h.applyAs("linux::"+id+":1", "s-"+id, true, GuardDecision{}); call.Deny {
+			t.Fatalf("clean session %d denied: %s", i, call.Reason)
+		}
+	}
+	if count := sessionRecordCount(t, h.stateDir); count > sessionDirLimit {
+		t.Fatalf("store holds %d records, over the %d limit", count, sessionDirLimit)
+	}
+	// The newest sessions keep their records.
+	if record := h.record(sessionKindSession, "s-399"); record.Blocked || record.Session != "s-399" {
+		t.Fatalf("newest session record = %+v", record)
+	}
+}
+
+// TestGatewaySessionStoreNeverEvictsABlock: a caller that creates any number
+// of session IDs must not push a blocked session's record out.
+func TestGatewaySessionStoreNeverEvictsABlock(t *testing.T) {
+	h := newGatewaySessionHarness(t)
+	blockedProcess := "linux::900:1"
+	if call := h.applyAs(blockedProcess, "blocked", true, sessionDeny("/r/.claude/settings.json", "ab12")); !call.Deny {
+		t.Fatalf("session with a foreign hook at start not denied: %+v", call)
+	}
+	for i := 0; i < 2*sessionDirLimit; i++ {
+		id := strconv.Itoa(i)
+		if call := h.applyAs("linux::"+id+":2", "flood-"+id, true, GuardDecision{}); call.Deny {
+			t.Fatalf("flood session %d denied: %s", i, call.Reason)
+		}
+	}
+	for kind, id := range map[string]string{sessionKindSession: "blocked", sessionKindProcess: blockedProcess} {
+		if record := h.record(kind, id); !record.Blocked {
+			t.Fatalf("%s record lost its block: %+v", kind, record)
+		}
+	}
+	if call := h.applyAs(blockedProcess, "blocked", false, GuardDecision{}); !call.Deny ||
+		!strings.Contains(call.Reason, "Earlier in this agent session") {
+		t.Fatalf("blocked session allowed after the flood: %+v", call)
+	}
+}
+
+// TestGatewaySessionStoreRefusesOnlyWhenBlocksFillIt: when live blocked
+// records alone fill the store there is nothing to evict, and a new record
+// is refused (the call is denied) rather than dropping a block.
+func TestGatewaySessionStoreRefusesOnlyWhenBlocksFillIt(t *testing.T) {
+	h := newGatewaySessionHarness(t)
+	for i := 0; i < sessionDirLimit/2; i++ {
+		id := strconv.Itoa(i)
+		if call := h.applyAs("linux::"+id+":3", "b-"+id, true, sessionDeny("/r/.claude/settings.json", "cd34")); !call.Deny {
+			t.Fatalf("blocked session %d not denied", i)
+		}
+	}
+	if count := sessionRecordCount(t, h.stateDir); count != sessionDirLimit {
+		t.Fatalf("store holds %d records, want %d blocked records", count, sessionDirLimit)
+	}
+	call := h.applyAs("linux::new:3", "new", true, GuardDecision{})
+	if !call.Deny || !strings.Contains(call.Reason, "cannot verify this agent session's hook record") {
+		t.Fatalf("a store full of blocks admitted a new record: %+v", call)
+	}
+	if count := sessionRecordCount(t, h.stateDir); count != sessionDirLimit {
+		t.Fatalf("a block was evicted: %d records", count)
+	}
 }

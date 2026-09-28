@@ -17,3 +17,7 @@ import "github.com/defenseclaw/defenseclaw/internal/useridentity"
 // userScopedIdentityName names the account a per-user credential is bound
 // to: the SID's account on Windows.
 var userScopedIdentityName = useridentity.NameForID
+
+// userScopedIdentityHome is the profile directory of the account a per-user
+// credential is bound to (the SID's ProfileList entry on Windows), or "".
+var userScopedIdentityHome = useridentity.HomeForID

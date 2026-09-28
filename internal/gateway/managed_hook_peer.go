@@ -67,6 +67,47 @@ func managedHookPeerFromContext(ctx context.Context) (managedHookPeer, bool) {
 	return peer, ok
 }
 
+// managedHookConnPeer carries one hook-socket connection's caller from the
+// accept loop to its requests. The accept loop records only the kernel
+// credentials; the account lookups run once, on the connection's first
+// request, in that connection's goroutine.
+type managedHookConnPeer struct {
+	once    sync.Once
+	resolve func() managedHookPeer
+	peer    managedHookPeer
+}
+
+type managedHookConnPeerContextKey struct{}
+
+func withManagedHookConnPeer(ctx context.Context, resolve func() managedHookPeer) context.Context {
+	return context.WithValue(ctx, managedHookConnPeerContextKey{}, &managedHookConnPeer{resolve: resolve})
+}
+
+func (c *managedHookConnPeer) identity() managedHookPeer {
+	c.once.Do(func() {
+		c.peer = c.resolve()
+		c.resolve = nil
+	})
+	return c.peer
+}
+
+// managedHookRequestPeer is the verified caller of a hook-socket request:
+// the identity already bound to the request, or the connection's caller,
+// resolved on first use.
+func managedHookRequestPeer(ctx context.Context) (managedHookPeer, bool) {
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		return peer, true
+	}
+	if ctx == nil {
+		return managedHookPeer{}, false
+	}
+	conn, ok := ctx.Value(managedHookConnPeerContextKey{}).(*managedHookConnPeer)
+	if !ok || conn == nil {
+		return managedHookPeer{}, false
+	}
+	return conn.identity(), true
+}
+
 // managedHookLedgerTarget is one row of the guardian authorization ledger as
 // the hook socket and the per-user credentials need it. UID is optional: the
 // guardian names users, and a ledger that also records the numeric uid lets
@@ -306,14 +347,16 @@ var managedHookCredentialHeaders = []string{"Authorization", "X-DefenseClaw-Toke
 // host-local, and loopback-only handlers and the loopback-exempt rate
 // limiter must treat it as such), caller-supplied identity and credential
 // headers are removed, and the kernel-verified uid and account name are set
-// as the trusted user identity the correlation layer already honors.
+// as the trusted user identity the correlation layer already honors. The
+// caller's account name and home are resolved here, once per connection.
 func managedHookPeerIdentityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		peer, ok := managedHookPeerFromContext(r.Context())
+		peer, ok := managedHookRequestPeer(r.Context())
 		if !ok {
 			writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonPeerUnverified)
 			return
 		}
+		r = r.WithContext(withManagedHookPeer(r.Context(), peer))
 		r.RemoteAddr = "127.0.0.1:0"
 		for _, header := range managedHookIdentityHeaders {
 			r.Header.Del(header)
@@ -361,13 +404,18 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		if route == "" {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
+		release := a.admitHookCaller(w, strconv.Itoa(peer.UID), route)
+		if release == nil {
+			return
+		}
+		defer release()
 		connectorName, inspect := a.managedHookRouteScope(r)
 		decision := authorizer.decide(peer, connectorName)
 		if !decision.Allow {
 			fmt.Fprintf(os.Stderr,
 				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s\n",
 				peer.UID, connectorName, route, decision.Reason)
-			a.emitHTTPAuthFailure(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, decision.Reason)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, decision.Reason, connectorName)
 			writeManagedHookRefusal(w, decision.Status, decision.Reason)
 			return
 		}

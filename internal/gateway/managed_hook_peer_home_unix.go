@@ -14,6 +14,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"time"
@@ -24,6 +25,15 @@ import (
 // managedHookPeerHomeTTL bounds how long a resolved home is reused, so a
 // moved or recreated account is picked up without restarting the gateway.
 const managedHookPeerHomeTTL = 5 * time.Minute
+
+// managedHookPeerLookupRetry is how long a failed account lookup (a
+// directory timeout or other transient error, not a definitive "no such
+// account") is reused before the next request from that uid asks again. A
+// slow or unreachable directory then costs one lookup per uid per interval
+// instead of one per connection.
+const managedHookPeerLookupRetry = 15 * time.Second
+
+var errManagedHookPeerNoResolver = errors.New("no account resolver")
 
 // managedHookPeerHome resolves the home directory of a kernel-verified
 // hook-socket caller through the platform account database (NSS on Linux,
@@ -58,29 +68,71 @@ type managedHookPeerHomeCache struct {
 	resolvedAt  time.Time
 	newResolver func() unixidentity.Resolver
 	now         func() time.Time
+	// accounts holds one answer per uid. A lookup in flight is shared by
+	// the requests of that uid and never holds up another uid.
+	accounts map[int]*managedHookPeerAccount
+}
+
+type managedHookPeerAccount struct {
+	ready   chan struct{} // closed once account, ok and expires are set
+	account unixidentity.Account
+	ok      bool
+	expires time.Time
 }
 
 // account resolves uid through the cached platform resolver; false when the
-// account is unknown or the answer names a different uid.
+// account is unknown, the lookup failed, or the answer names a different
+// uid. A definitive answer is reused for managedHookPeerHomeTTL, a failed
+// lookup for managedHookPeerLookupRetry.
 func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool) {
 	if uid < 0 {
 		return unixidentity.Account{}, false
 	}
 	c.mu.Lock()
-	if c.resolver == nil || c.now().Sub(c.resolvedAt) > managedHookPeerHomeTTL {
+	now := c.now()
+	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL {
 		c.resolver = c.newResolver()
-		c.resolvedAt = c.now()
+		c.resolvedAt = now
+		c.accounts = nil
 	}
+	if entry := c.accounts[uid]; entry != nil {
+		select {
+		case <-entry.ready:
+			if now.Before(entry.expires) {
+				c.mu.Unlock()
+				return entry.account, entry.ok
+			}
+		default:
+			c.mu.Unlock()
+			<-entry.ready
+			return entry.account, entry.ok
+		}
+	}
+	entry := &managedHookPeerAccount{ready: make(chan struct{})}
+	if c.accounts == nil {
+		c.accounts = make(map[int]*managedHookPeerAccount)
+	}
+	c.accounts[uid] = entry
 	resolver := c.resolver
 	c.mu.Unlock()
-	if resolver == nil {
-		return unixidentity.Account{}, false
+
+	account, err := unixidentity.Account{}, errManagedHookPeerNoResolver
+	if resolver != nil {
+		account, err = resolver.LookupUID(uid)
 	}
-	account, err := resolver.LookupUID(uid)
-	if err != nil || account.UID != uid {
-		return unixidentity.Account{}, false
+	ok := err == nil && account.UID == uid
+	retain := managedHookPeerHomeTTL
+	if err != nil && !unixidentity.IsNotFound(err) {
+		retain = managedHookPeerLookupRetry
 	}
-	return account, true
+	if !ok {
+		account = unixidentity.Account{}
+	}
+	c.mu.Lock()
+	entry.account, entry.ok, entry.expires = account, ok, c.now().Add(retain)
+	c.mu.Unlock()
+	close(entry.ready)
+	return account, ok
 }
 
 // lookup returns the caller's normalized home, or "".

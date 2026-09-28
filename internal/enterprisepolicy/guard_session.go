@@ -598,9 +598,14 @@ func pruneSessionRecords(dir string, now time.Time) {
 	}
 }
 
-// gatewaySessionCapacity expires old gateway records and refuses new ones
-// beyond the per-user limit. It never evicts a live blocked record to make
-// room for a caller that can create arbitrary session IDs.
+// gatewaySessionCapacity expires old gateway records and makes room for
+// newRecords within the per-user limit. Over the limit it evicts the oldest
+// records that do not block: a clean record only holds a snapshot that no
+// enforcement check compares, so dropping it lets nobody around a block. A
+// live blocked record (and one that cannot be read) is never evicted, so a
+// caller that can create any number of session IDs still cannot push a block
+// out; only when such records alone fill the directory is the new record
+// refused.
 func gatewaySessionCapacity(dir string, now time.Time, newRecords int, activePaths ...string) error {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -616,6 +621,11 @@ func gatewaySessionCapacity(dir string, now time.Time, newRecords int, activePat
 	if err != nil {
 		return err
 	}
+	type candidate struct {
+		path string
+		mod  time.Time
+	}
+	var candidates []candidate
 	kept := 0
 	for _, entry := range entries {
 		name := entry.Name()
@@ -644,8 +654,29 @@ func gatewaySessionCapacity(dir string, now time.Time, newRecords int, activePat
 			continue
 		}
 		kept++
+		if !active {
+			candidates = append(candidates, candidate{path, info.ModTime()})
+		}
 	}
-	if kept+newRecords > sessionDirLimit {
+	excess := kept + newRecords - sessionDirLimit
+	if excess <= 0 {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].mod.Before(candidates[j].mod) })
+	for _, entry := range candidates {
+		if excess == 0 {
+			break
+		}
+		record, exists, err := readSessionRecord(entry.path)
+		if err != nil || (exists && record.Blocked && !sessionBlockExpired(record, now)) {
+			continue
+		}
+		if err := os.Remove(entry.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		excess--
+	}
+	if excess > 0 {
 		return fmt.Errorf("session record limit reached")
 	}
 	return nil

@@ -1503,7 +1503,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
+	_ = a.logger.LogEventCtx(r.Context(), a.inspectToolAuditEvent(r, auditAction, req.Tool, auditDetails))
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 
@@ -1534,6 +1534,31 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// hooks fail closed on an unreachable gateway.
 	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	a.writeJSON(w, http.StatusOK, responseVerdict)
+}
+
+// inspectToolAuditEvent is the inspect-tool-* audit row. It names the
+// connector the request was authenticated for (the configured connector when
+// the request carries none), the route, and the caller, so an administrator
+// can attribute direct inspect calls to the account that made them.
+func (a *APIServer) inspectToolAuditEvent(r *http.Request, action, tool, details string) audit.Event {
+	ctx := r.Context()
+	connectorName := authenticatedInspectConnector(ctx)
+	if connectorName == "" {
+		connectorName = a.connectorName()
+	}
+	structured := map[string]any{"route": "/api/v1/inspect/tool"}
+	if connectorName != "" {
+		structured["connector"] = connectorName
+	}
+	auditCallerIdentity(ctx).addTo(structured)
+	return audit.Event{
+		Action:     action,
+		Target:     tool,
+		Details:    details,
+		Severity:   "INFO",
+		Connector:  connectorName,
+		Structured: structured,
+	}
 }
 
 func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *ToolInspectRequest, verdict *ToolInspectVerdict) {
@@ -1604,7 +1629,7 @@ func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdic
 		return v
 	}
 	cp := *v
-	cp.Reason = defaultSinkDisplayReason(v.Reason, policy)
+	cp.Reason = agentVerdictReason(v.Action, v.Reason, defaultSinkDisplayReason(v.Reason, policy), policy)
 	if len(v.DetailedFindings) == 0 {
 		return &cp
 	}

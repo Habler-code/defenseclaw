@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -67,9 +68,10 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		writeManagedHookRefusal(w, http.StatusForbidden, "foreign_hook_session_scope_mismatch")
 		return
 	}
-	digest := sha256.Sum256([]byte(identity))
-	stateDir := filepath.Join(dataDir, "foreign-hook-sessions", fmt.Sprintf("%x", digest[:20]))
-	a.foreignHookSessionMu.Lock()
+	stateDir := foreignHookSessionStateDir(dataDir, identity)
+	// Each identity has its own store, so only that identity's exchanges
+	// are serialized; another account's exchange never waits on this one.
+	unlock := a.foreignHookSessionLocks.lock(stateDir)
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
 		Key:          exchange.Key,
@@ -77,7 +79,84 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		Decision:     exchange.Decision,
 		Now:          time.Now(),
 	})
-	a.foreignHookSessionMu.Unlock()
+	unlock()
+	if decision.Deny {
+		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(decision)
+}
+
+// foreignHookAuditReasonLimit bounds the reason an audit row repeats.
+const foreignHookAuditReasonLimit = 2048
+
+// auditForeignHookSessionDenial writes one connector-hook audit row for a
+// tool call the foreign-hook guard denies, when the exchange records a
+// session block, enforces an earlier one, or denies the call alone, so the
+// administrator sees each denial with the connector, the user and the file,
+// like other blocks, instead of only the guardian's periodic journal
+// summary. The guard's own hook in the agent enforces the decision; this
+// row is its record.
+func (a *APIServer) auditForeignHookSessionDenial(
+	ctx context.Context,
+	connectorName string,
+	exchange enterprisepolicy.SessionExchange,
+	decision enterprisepolicy.GuardDecision,
+) {
+	if a == nil || a.logger == nil {
+		return
+	}
+	block := "call"
+	switch {
+	case strings.Contains(decision.Reason, "cannot verify this agent session's hook record"):
+		block = "session_record_unavailable"
+	case exchange.SessionStart && exchange.Decision.Deny:
+		block = "session_recorded"
+	case !exchange.Decision.Deny:
+		block = "session_enforced"
+	}
+	extra := map[string]string{
+		"guard":         "foreign_hook_session",
+		"session_block": block,
+		"findings":      strconv.Itoa(len(decision.Findings)),
+	}
+	for _, finding := range decision.Findings {
+		if finding.Allowed || finding.Path == "" {
+			continue
+		}
+		extra["file"] = finding.Path
+		if finding.Scope != "" {
+			extra["scope"] = finding.Scope
+		}
+		if finding.Digest != "" {
+			extra["digest"] = finding.Digest
+		}
+		if finding.Reason != "" {
+			extra["finding_reason"] = finding.Reason
+		}
+		break
+	}
+	reason := decision.Reason
+	if len(reason) > foreignHookAuditReasonLimit {
+		reason = reason[:foreignHookAuditReasonLimit]
+	}
+	_ = a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
+		Connector:  connectorName,
+		Event:      "foreign_hook_session",
+		Result:     "ok",
+		Action:     "block",
+		RawAction:  "block",
+		Severity:   "HIGH",
+		Mode:       "action",
+		Reason:     reason,
+		WouldBlock: true,
+		Enforced:   true,
+		Extra:      extra,
+	})
+}
+
+// foreignHookSessionStateDir is the session store of one caller identity.
+func foreignHookSessionStateDir(dataDir, identity string) string {
+	digest := sha256.Sum256([]byte(identity))
+	return filepath.Join(dataDir, "foreign-hook-sessions", fmt.Sprintf("%x", digest[:20]))
 }

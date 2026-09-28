@@ -1,0 +1,176 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
+)
+
+func useAgentVerdictProfile(t *testing.T, standalone, secureClient bool) {
+	t.Helper()
+	previousStandalone, previousManaged := standaloneEnterpriseActive.Load(), managedEnterpriseActive.Load()
+	setStandaloneEnterpriseActive(standalone)
+	SetManagedEnterpriseActive(secureClient)
+	t.Cleanup(func() {
+		setStandaloneEnterpriseActive(previousStandalone)
+		SetManagedEnterpriseActive(previousManaged)
+	})
+}
+
+// A rule-pack rule, whose title the agent surface redacts.
+const certMarkerReason = "matched: CERT-S3-MARKER-BLOCK:Certification marker (block)"
+
+const (
+	orgBlockWording     = "DefenseClaw blocked this action under your organization's policy (rule CERT-S3-MARKER-BLOCK). Contact your administrator if you need it allowed."
+	orgConfirmWording   = "DefenseClaw needs your confirmation for this action under your organization's policy (rule CERT-S3-MARKER-BLOCK)."
+	userBlockWording    = "DefenseClaw policy blocked this action (rule CERT-S3-MARKER-BLOCK)."
+	userConfirmWording  = "DefenseClaw policy needs your confirmation for this action (rule CERT-S3-MARKER-BLOCK)."
+	redactedTokenPrefix = "<redacted"
+)
+
+func TestAgentVerdictReasonNamesDefenseClawPolicyAndTheRule(t *testing.T) {
+	display := agentDisplayReason(certMarkerReason, redaction.SinkPolicyDefault)
+	if !strings.Contains(display, redactedTokenPrefix) {
+		t.Fatalf("precondition: a rule-pack title is redacted on the agent surface, got %q", display)
+	}
+	for _, test := range []struct {
+		name       string
+		standalone bool
+		action     string
+		want       string
+	}{
+		{"standalone block", true, "block", orgBlockWording},
+		{"standalone confirm", true, "confirm", orgConfirmWording},
+		{"per-user block", false, "block", userBlockWording},
+		{"per-user confirm", false, "confirm", userConfirmWording},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			useAgentVerdictProfile(t, test.standalone, false)
+			if got := agentVerdictReason(test.action, certMarkerReason, display, redaction.SinkPolicyDefault); got != test.want {
+				t.Fatalf("got %q\nwant %q", got, test.want)
+			}
+		})
+	}
+
+	useAgentVerdictProfile(t, true, false)
+	for _, action := range []string{"allow", "alert"} {
+		if got := agentVerdictReason(action, certMarkerReason, display, redaction.SinkPolicyDefault); got != display {
+			t.Fatalf("%s reason rewritten to %q", action, got)
+		}
+	}
+	for _, reason := range []string{
+		"enterprise_foreign_hook_blocked: your organization blocks copilot hooks it has not approved",
+		"Blocked by the security team",
+		"",
+	} {
+		if got := agentVerdictReason("block", reason, reason, redaction.SinkPolicyDefault); got != reason {
+			t.Fatalf("non-rule reason %q rewritten to %q", reason, got)
+		}
+	}
+}
+
+func TestAgentVerdictReasonKeepsSecureClientWording(t *testing.T) {
+	useAgentVerdictProfile(t, false, true)
+	display := agentDisplayReason(certMarkerReason, redaction.SinkPolicyRedact)
+	if got := agentVerdictReason("block", certMarkerReason, display, redaction.SinkPolicyRedact); got != display {
+		t.Fatalf("Secure Client block reason changed to %q", got)
+	}
+	// An explicit managed directive or the raw carve-out also keep the text.
+	SetManagedEnterpriseActive(false)
+	if got := agentVerdictReason("block", certMarkerReason, display, redaction.SinkPolicyRedact); got != display {
+		t.Fatalf("managed redaction directive reason changed to %q", got)
+	}
+	if got := agentVerdictReason("block", certMarkerReason, certMarkerReason, redaction.SinkPolicyDefault); got != certMarkerReason {
+		t.Fatalf("carve-out raw reason changed to %q", got)
+	}
+}
+
+func TestAgentMatchedRulesNamesRulesByID(t *testing.T) {
+	var builtIn string
+	var builtInID, builtInTitle string
+	for _, category := range defaultRuleCategories {
+		for _, rule := range category.Rules {
+			if rule.ID != "" && rule.Title != "" && agentRuleIDPattern.MatchString(rule.ID) && !strings.Contains(rule.Title, ", ") {
+				builtInID, builtInTitle = rule.ID, rule.Title
+				builtIn = rule.ID + ":" + rule.Title
+				break
+			}
+		}
+		if builtIn != "" {
+			break
+		}
+	}
+	if builtIn == "" {
+		t.Fatal("no compiled-in rule to test with")
+	}
+	for _, test := range []struct{ reason, want string }{
+		{certMarkerReason, "rule CERT-S3-MARKER-BLOCK"},
+		{"matched: " + builtIn, "rule " + builtInID + ": " + builtInTitle},
+		{"matched: A-1:first, second part, B.2:other, A-1:again", "rules A-1, B.2"},
+		{"matched: A-1:x; human approval unsupported on this connector surface; failing closed", "rule A-1"},
+		{"matched: A-1:x; matched ordered safety rule: CHAIN-1, CHAIN-2", "rules A-1, CHAIN-1, CHAIN-2"},
+		{"matched ordered safety rule: CHAIN-1", "rule CHAIN-1"},
+		{"matched: bad id:x", ""},
+		{"matched:", ""},
+		{"no rule matched", ""},
+	} {
+		if got := agentMatchedRules(test.reason); got != test.want {
+			t.Fatalf("agentMatchedRules(%q) = %q, want %q", test.reason, got, test.want)
+		}
+	}
+}
+
+// TestHookResponsesCarryTheDefenseClawPolicyWording checks every agent
+// surface: Claude Code, Codex, the generic connector hooks and the inspect
+// API the plugin connectors use.
+func TestHookResponsesCarryTheDefenseClawPolicyWording(t *testing.T) {
+	useAgentVerdictProfile(t, true, false)
+	assertWording := func(surface string, value any, want string) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, want) || strings.Contains(text, redactedTokenPrefix) {
+			t.Fatalf("%s response %s\nwant %q and no redaction token", surface, text, want)
+		}
+	}
+
+	claude := claudeCodeResponseFor(claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
+		"block", "block", "CRITICAL", certMarkerReason, []string{"CERT-S3-MARKER-BLOCK"}, "action", true)
+	if claude.Reason != orgBlockWording {
+		t.Fatalf("Claude Code reason = %q", claude.Reason)
+	}
+	assertWording("Claude Code", claude.ClaudeCodeOutput, orgBlockWording)
+	ask := claudeCodeResponseFor(claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
+		"confirm", "confirm", "HIGH", certMarkerReason, nil, "action", false)
+	assertWording("Claude Code ask", ask.ClaudeCodeOutput, orgConfirmWording)
+
+	codex := codexResponseFor("PreToolUse", "block", "block", "CRITICAL", certMarkerReason, nil, "action", true)
+	if codex.Reason != orgBlockWording {
+		t.Fatalf("Codex reason = %q", codex.Reason)
+	}
+	assertWording("Codex", codex.CodexOutput, orgBlockWording)
+
+	copilot := agentHookResponseFor(agentHookRequest{ConnectorName: "copilot", HookEventName: "preToolUse", ToolName: "bash"},
+		"block", "block", "CRITICAL", certMarkerReason, nil, "action", true, connector.HookCapability{})
+	if copilot.Reason != orgBlockWording {
+		t.Fatalf("generic hook reason = %q", copilot.Reason)
+	}
+
+	inspect := (&ToolInspectVerdict{Action: "block", Severity: "CRITICAL", Reason: certMarkerReason}).sanitizeForResponse(false)
+	if inspect.Reason != orgBlockWording {
+		t.Fatalf("inspect API reason = %q", inspect.Reason)
+	}
+	// The source reason stays intact for the audit record.
+	if claude.SourceReason != certMarkerReason || codex.SourceReason != certMarkerReason {
+		t.Fatalf("source reasons changed: %q %q", claude.SourceReason, codex.SourceReason)
+	}
+}

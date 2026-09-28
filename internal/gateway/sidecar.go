@@ -502,6 +502,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// AI Defense failure diagnostics remain sink-redacted in every posture; this
 	// flag must never authorize raw upstream response bytes in gateway logs.
 	setManagedEnterpriseRedactionPosture(cfg.ManagedAIDOnly())
+	setStandaloneEnterpriseActive(cfg.StandaloneEnterprise())
 	setManagedServiceHosted(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
 	return sidecar, nil
@@ -1806,6 +1807,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// managed-enterprise local-agent carve-out and cloud-controlled
 	// per-inspection redaction gate in sync with the committed deployment mode.
 	setManagedEnterpriseRedactionPosture(nextManagedAIDOnly)
+	setStandaloneEnterpriseActive(next.StandaloneEnterprise())
 	setManagedServiceHosted(nextManagedEnterprise)
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
 

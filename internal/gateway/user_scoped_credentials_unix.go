@@ -30,3 +30,16 @@ var userScopedIdentityName = func(identity string) string {
 	}
 	return managedHookPeerName(uid)
 }
+
+// userScopedIdentityHome is the home of the account a per-user credential is
+// bound to, resolved like a hook-socket caller's home, or "".
+var userScopedIdentityHome = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	return managedHookPeerHome(uid)
+}

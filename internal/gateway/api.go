@@ -63,11 +63,17 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health               *SidecarHealth
-	client               *Client
-	store                *audit.Store
-	logger               *audit.Logger
-	foreignHookSessionMu sync.Mutex
+	health *SidecarHealth
+	client *Client
+	store  *audit.Store
+	logger *audit.Logger
+	// foreignHookSessionLocks serializes foreign-hook session exchanges per
+	// caller identity: each identity has its own session store, so callers
+	// never wait on each other's exchanges.
+	foreignHookSessionLocks keyedMutex
+	// hookCallerLimits bounds each verified caller identity's requests on a
+	// standalone gateway (hook socket and per-user credentials).
+	hookCallerLimits hookCallerLimiter
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -1244,6 +1250,9 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"schema_version": acp.SchemaVersion, "schema_sha256": acp.SchemaSHA256,
 			"configured_clients": len(cfg.ACP.Clients), "configured_agents": len(cfg.ACP.Agents),
 			"scoped_token_ready": a.acpScopedTokenReady(),
+		}
+		if cfg.StandaloneEnterprise() {
+			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
 		}
 	}
 	a.writeJSON(w, http.StatusOK, body)
@@ -3606,7 +3615,13 @@ func constantTimeStringMatch(a, b string) bool {
 	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
-func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, _ string, _ gatewaylog.ErrorCode, metricReason string) {
+func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, route string, code gatewaylog.ErrorCode, metricReason string) {
+	a.emitHTTPAuthFailureForConnector(ctx, r, route, code, metricReason, "")
+}
+
+// emitHTTPAuthFailureForConnector is emitHTTPAuthFailure for a refusal that
+// knows the connector route the caller asked for.
+func (a *APIServer) emitHTTPAuthFailureForConnector(ctx context.Context, r *http.Request, route string, _ gatewaylog.ErrorCode, metricReason, connectorName string) {
 	// Ordinary sidecar authentication failures use the canonical compliance
 	// event plus its generated platform-health metric. OTLP receivers own the
 	// more specific telemetry.authentication.failed event, including the inbound
@@ -3617,7 +3632,7 @@ func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, _ 
 		// Target runtime startup guarantees the v8 graph. Missing capability,
 		// collection disablement, or persistence failure cannot revive a legacy
 		// gateway event or Provider metric.
-		a.emitAPIAuthenticationFailureV8(ctx, metricReason)
+		a.emitAPIAuthenticationFailureV8(ctx, metricReason, apiAuthenticationFailureFactsFor(ctx, route, connectorName))
 		return
 	}
 	if r != nil {

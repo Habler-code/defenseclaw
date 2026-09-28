@@ -316,6 +316,11 @@ func (a *APIServer) serveUserScoped(
 	next http.Handler,
 	mark func(context.Context) context.Context,
 ) {
+	release := a.admitHookCaller(w, identity, route)
+	if release == nil {
+		return
+	}
+	defer release()
 	ctx := PromoteSessionIfAuthenticated(r.Context())
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
 	if mark != nil {

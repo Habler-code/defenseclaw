@@ -25,18 +25,34 @@ func TestCodexRequestHelpersResolveHomeAgainstTheVerifiedCaller(t *testing.T) {
 		t.Fatalf("hook-socket request home=%q want /home/alice", got)
 	}
 	unresolved := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002})
-	if got := plain.withTrustedActiveHome(unresolved).resolvedActiveHome(); got != "" {
-		t.Fatalf("an unresolved caller home fell back to %q", got)
+	if got := plain.withTrustedActiveHome(unresolved).resolvedActiveHome(); got != unresolvedCallerHome {
+		t.Fatalf("an unresolved caller home = %q, want the sentinel %q", got, unresolvedCallerHome)
 	}
 	if got, want := plain.withTrustedActiveHome(context.Background()).resolvedActiveHome(), trustedSameHostHome(); got != want {
 		t.Fatalf("per-user handler home=%q want %q", got, want)
 	}
 }
 
-func TestTrustedActiveHomeIsEmptyOffTheHookSocketOnAServiceAccountGateway(t *testing.T) {
+func TestTrustedActiveHomeIsTheSentinelOffTheHookSocketOnAServiceAccountGateway(t *testing.T) {
 	marked := withServiceAccountGateway(context.Background())
-	if got := trustedActiveHome(marked); got != "" {
+	if got := trustedActiveHome(marked); got != unresolvedCallerHome {
 		t.Fatalf("a request off the verified hook socket resolved home %q on a service-account gateway", got)
+	}
+	restoreHome := userScopedIdentityHome
+	userScopedIdentityHome = func(identity string) string {
+		if identity == "4101" {
+			return "/home/carol"
+		}
+		return ""
+	}
+	t.Cleanup(func() { userScopedIdentityHome = restoreHome })
+	bound := context.WithValue(marked, verifiedUserScopedIdentityContextKey{}, "4101")
+	if got := trustedActiveHome(bound); got != "/home/carol" {
+		t.Fatalf("per-user credential caller home=%q, want the bound account's home", got)
+	}
+	unknown := context.WithValue(marked, verifiedUserScopedIdentityContextKey{}, "4102")
+	if got := trustedActiveHome(unknown); got != unresolvedCallerHome {
+		t.Fatalf("per-user credential caller without a home=%q, want the sentinel", got)
 	}
 	peerCtx := withManagedHookPeer(marked, managedHookPeer{UID: 1001, Home: "/home/alice"})
 	if got := trustedActiveHome(peerCtx); got != "/home/alice" {

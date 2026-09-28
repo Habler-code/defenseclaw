@@ -89,16 +89,27 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 	return server, listener, nil
 }
 
+// hookSocketPeerCredentials reads a hook-socket connection's kernel
+// credentials; replaceable by tests.
+var hookSocketPeerCredentials = peercred.FromConn
+
 // managedHookConnContext stamps each accepted hook-socket connection with
 // the peer's kernel credentials. A connection whose credentials cannot be
 // read carries none, and the identity middleware refuses its requests.
+//
+// net/http calls ConnContext in its single accept loop, before the
+// connection gets its own goroutine, so this records only what the kernel
+// reported. The account name and home come from the account database
+// (getent on Linux), which can be slow for directory users; the identity
+// middleware resolves them on the connection's first request, so a slow
+// lookup delays only that caller's connection.
 func managedHookConnContext(ctx context.Context, conn net.Conn) context.Context {
-	credentials, err := peercred.FromConn(conn)
+	credentials, err := hookSocketPeerCredentials(conn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar-api] hook socket peer credentials unavailable: %v\n", err)
 		return ctx
 	}
-	return withManagedHookPeer(ctx, managedHookPeerFor(credentials))
+	return withManagedHookConnPeer(ctx, func() managedHookPeer { return managedHookPeerFor(credentials) })
 }
 
 // managedHookPeerFor builds the verified caller identity from kernel

@@ -101,8 +101,8 @@ func TestTrustedActiveHomeUsesTheVerifiedCallerOnTheHookSocket(t *testing.T) {
 		t.Fatalf("trustedActiveHome(peer)=%q want /home/alice", got)
 	}
 	unresolved := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002})
-	if got := trustedActiveHome(unresolved); got != "" {
-		t.Fatalf("an unresolved caller home must stay empty, not fall back to the gateway home: %q", got)
+	if got := trustedActiveHome(unresolved); got != unresolvedCallerHome {
+		t.Fatalf("an unresolved caller home must be the sentinel, never the gateway home: %q", got)
 	}
 	if got, want := trustedActiveHome(context.Background()), trustedSameHostHome(); got != want {
 		t.Fatalf("per-user path changed: %q want %q", got, want)

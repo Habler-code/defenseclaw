@@ -5691,22 +5691,38 @@ func alertOnlyRuleFindings(findings []RuleFinding) []RuleFinding {
 }
 
 // trustedActiveHome is the home directory action analysis resolves "~" and
-// $HOME against for this request. On the managed standalone hook socket the
-// gateway runs as a service account, so it is the kernel-verified caller's
-// home (empty if unresolved — never the service account's). Everywhere else
-// the gateway runs as the user and its own home is the caller's.
+// $HOME against for this request. A standalone gateway runs as a service
+// account on behalf of many users, so it is the verified caller's home:
+// the kernel-verified hook-socket peer's, or on the TCP API the home of the
+// account a per-user credential is bound to. It is never the service
+// account's own home. When the caller's home cannot be resolved it is
+// unresolvedCallerHome, so home-relative and suffix rules (~/.aws/
+// credentials, ~/.kube/config) still match. Everywhere else the gateway
+// runs as the user and its own home is the caller's.
 func trustedActiveHome(ctx context.Context) string {
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
-		return peer.Home
+		if peer.Home != "" {
+			return peer.Home
+		}
+		return unresolvedCallerHome
 	}
 	if serviceAccountGatewayFromContext(ctx) {
-		// A standalone gateway runs as its service account; a request that
-		// did not arrive on the verified hook socket has no trusted caller
-		// home, and the service account's home is never the caller's.
-		return ""
+		if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+			if home := userScopedIdentityHome(identity); home != "" {
+				return home
+			}
+		}
+		return unresolvedCallerHome
 	}
 	return trustedSameHostHome()
 }
+
+// unresolvedCallerHome stands in for a standalone caller whose home cannot
+// be resolved (a directory lookup that failed, a home of "/", or an
+// unclean home path, or a TCP request with no per-user credential). It is
+// absolute and does not exist, so "~" paths resolve to a path no real file
+// has while keeping the ".aws/credentials"-style suffix the rules match on.
+const unresolvedCallerHome = "/nonexistent-home"
 
 type serviceAccountGatewayContextKey struct{}
 

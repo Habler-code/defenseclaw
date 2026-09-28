@@ -2313,6 +2313,7 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 		rawAction = action
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	additional := genericHookAdditionalContext(req.ConnectorName, rawAction, severity, safeReason, wouldBlock)
 	resp := agentHookResponse{
 		Action:            action,
