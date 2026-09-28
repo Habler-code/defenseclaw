@@ -3789,6 +3789,25 @@
       "security_note": "Local-only socket path override, ignored under managed_enterprise. The helper creates the socket at mode 0660 owned by the gateway's group and re-checks the kernel-supplied peer uid at accept on Linux and macOS; Windows anchors the path to the trusted Program Files IPC directory and gates access with the socket DACL. The protocol is closed: a client can ask for the process table, the connection table, the event stream or DNS and cannot describe any of them, so a compromised gateway gains no reach it did not already have."
     },
     {
+      "name": "DEFENSECLAW_SENSOR_HELPER_TEST_PROCESS",
+      "category": "test_fixture",
+      "purpose": "Turns the sensor-helper test binary into the helper itself when a version test re-runs it to check --version and the flag handling of main().",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-sensor-helper/version_test.go",
+          "description": "Test-only child-process selector for the sensor-helper version tests"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the parent-cancellation native Setup helper subprocess.",

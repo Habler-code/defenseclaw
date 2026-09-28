@@ -918,7 +918,7 @@ func TestUnverifiedHookContractIsVisible(t *testing.T) {
 
 // A guardian target reason names the refused path first and the remedy
 // last; status cut it at 240 bytes, which dropped the remedy (seen on RHEL:
-// "add its directory to DEFENSECLAW_TRUSTED_BIN_P..."). A realistic reason
+// "add its directory to" and the variable name cut short). A realistic reason
 // is kept whole, and an oversized one keeps its remedy clause.
 func TestGuardianTargetReasonKeepsItsRemedy(t *testing.T) {
 	h := newTestHost(t, "linux")
