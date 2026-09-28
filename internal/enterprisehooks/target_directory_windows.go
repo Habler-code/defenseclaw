@@ -216,6 +216,11 @@ func adoptWindowsAccountCreatedDataDir(
 	}
 	reopened, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err == nil {
+		// The reopened object must still be a plain directory the target
+		// owns before its DACL changes: never a junction put in its place.
+		err = validateWindowsGuardianACLHandle(handle, target, true, true, false)
+	}
+	if err == nil {
 		var ok bool
 		ok, err = windowsAccountCreatedDataDirDescriptor(reopened, target)
 		if err == nil && !ok {
@@ -247,6 +252,16 @@ func adoptWindowsAccountCreatedDataDir(
 func windowsAccountCreatedDataDir(path string, descriptor *windows.SECURITY_DESCRIPTOR, target *windows.SID) (bool, error) {
 	if ok, err := windowsAccountCreatedDataDirDescriptor(descriptor, target); err != nil || !ok {
 		return false, err
+	}
+	// The folder itself must be plain: a junction there would have the
+	// checks below read, and the pending proof accept, another folder.
+	root, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if attrs, _ := root.Sys().(*syscall.Win32FileAttributeData); attrs == nil || !root.IsDir() ||
+		attrs.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return false, nil
 	}
 	if _, err := os.Lstat(filepath.Join(path, "hooks")); !errors.Is(err, os.ErrNotExist) {
 		return false, err

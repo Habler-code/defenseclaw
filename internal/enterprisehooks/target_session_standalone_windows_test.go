@@ -8,6 +8,7 @@ package enterprisehooks
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,6 +71,22 @@ func TestStandaloneDeferredPendingProofAndEnrollmentAdoptAnAccountCreatedDataDir
 	target := deferredPendingProofFixture(t, true)
 	sid := currentWindowsTestSID(t)
 	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	// A junction the account made there, to another folder it owns, is not one.
+	elsewhere := filepath.Join(target.UserHome, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, elsewhere, sid)
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", dataDir, elsewhere).CombinedOutput(); err != nil {
+		t.Fatalf("create junction: %v: %s", err, output)
+	}
+	setWindowsTestPathExactOwner(t, dataDir, sid)
+	if err := RequireWindowsEnterpriseDeferredTargetPending(target); err == nil {
+		t.Fatal("the pending proof accepted a junctioned data directory")
+	}
+	if err := os.Remove(dataDir); err != nil {
+		t.Fatal(err)
+	}
 	logs := filepath.Join(dataDir, "logs")
 	if err := os.MkdirAll(logs, 0o700); err != nil {
 		t.Fatal(err)
