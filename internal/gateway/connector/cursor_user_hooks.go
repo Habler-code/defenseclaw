@@ -54,7 +54,18 @@ func cursorOwnedHookCommands(opts SetupOpts) []string {
 }
 
 func legacyCursorNativeHookCommands() []string {
-	binaries := uniqueNonEmptyStrings([]string{
+	binaries := legacyNativeHookBinaries()
+	commands := make([]string, 0, len(binaries))
+	for _, binary := range binaries {
+		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
+	}
+	return commands
+}
+
+// legacyNativeHookBinaries is shared by Cursor and Claude Code migration so
+// both recognize only DefenseClaw's finite installer and legacy locations.
+func legacyNativeHookBinaries() []string {
+	return uniqueNonEmptyStrings([]string{
 		canonicalNativeWindowsHookBinary(),
 		canonicalNativeWindowsInstalledHookBinary(),
 		defenseclawHookBinary(),
@@ -62,11 +73,6 @@ func legacyCursorNativeHookCommands() []string {
 		canonicalNativeWindowsInstalledGatewayBinary(),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
 	})
-	commands := make([]string, 0, len(binaries))
-	for _, binary := range binaries {
-		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
-	}
-	return commands
 }
 
 type cursorHookCommandMatcher map[string]struct{}
