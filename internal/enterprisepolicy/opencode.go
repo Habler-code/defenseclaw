@@ -322,6 +322,22 @@ func (t opencodeTarget) Reconcile(opts Options) (State, error) {
 		if created, err = takeBackPolicyPath(opts, path, &state); err != nil {
 			return state, err
 		}
+		// A config an unprivileged user planted in the folder before
+		// DefenseClaw took it back (Windows ProgramData) stays theirs to
+		// edit, and OpenCode loads it as managed config for every account:
+		// move it aside and publish, as for Copilot.
+		displaced := false
+		for _, name := range []string{"opencode.jsonc", "opencode.json"} {
+			if displaceUntrustedPolicyFile(opts, joinFor(opts, dirFor(opts, path), name), &state) {
+				displaced = true
+			}
+		}
+		if displaced {
+			if path, err = OpenCodeManagedConfigPath(opts); err != nil {
+				return state, err
+			}
+			state.Paths = []string{path}
+		}
 	}
 	current, exists, err := readPolicyFile(opts, path)
 	if err != nil {

@@ -49,13 +49,15 @@ import (
 // the floor in the files does not apply; verify says so.
 //
 // A file under the drop-in name is DefenseClaw's only while its ownership
-// record names it and the file's SHA-256 is the recorded postimage. Any other
-// file there, including the `version-floor` export an administrator deployed
-// (the same bytes DefenseClaw writes), is an administrator source: DefenseClaw
-// reads it and never rewrites, removes or claims it, so it cannot place its
-// own floor there either. A crash between writing the drop-in and saving its
-// record leaves such an unrecorded file; it is then reported as the
-// administrator's and removed only by hand.
+// record names it and the file's SHA-256 is the recorded postimage, or while
+// the record names it and the file is DefenseClaw's rendering of the current
+// floor (a replacement whose record save was interrupted). Any other file
+// there, including the `version-floor` export an administrator deployed (the
+// same bytes DefenseClaw writes) without a record of DefenseClaw's, is an
+// administrator source: DefenseClaw reads it and never rewrites, removes or
+// claims it, so it cannot place its own floor there either. The first write
+// saves the record before the drop-in, so a crash between the two steps
+// never leaves DefenseClaw's floor unrecorded.
 const ClaudeVersionFloorDropInName = "00-defenseclaw-version-floor.json"
 
 const (
@@ -115,7 +117,12 @@ func (s VersionFloorState) Summary() string {
 	case VersionFloorOwnerDefenseClaw:
 		note := ""
 		if s.Overridden != "" {
-			note = fmt.Sprintf("; replaces %s from %s, which is not a version", s.Overridden, s.OverriddenSource)
+			note = fmt.Sprintf("; replaces %s from %s", s.Overridden, s.OverriddenSource)
+			if claudeVersionPattern.MatchString(strings.TrimSpace(s.Overridden)) {
+				note += " until DefenseClaw withdraws its drop-in"
+			} else {
+				note += ", which is not a version"
+			}
 		}
 		return fmt.Sprintf("requiredMinimumVersion %s set by DefenseClaw (%s%s%s), version_floor=%s", s.Value, s.Source, note, ignored, s.Mode)
 	case VersionFloorOwnerAdministrator:
@@ -251,7 +258,8 @@ func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []highe
 		return plan, err
 	}
 	plan.owned = plan.exists && plan.record != nil && plan.record.Path == path &&
-		sha256Hex(plan.current) == plan.record.PostimageSHA256
+		sha256Hex(plan.current) == plan.record.PostimageSHA256 ||
+		claudeFloorAdoptable(plan.record, path, plan.current, plan.exists)
 	for _, source := range sources {
 		if plan.owned && source.name == path {
 			continue
@@ -281,6 +289,43 @@ func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []highe
 		plan.adminOutranks = plan.admin.higher || plan.admin.source == path || claudeDropInSortsAfterFloor(opts, plan.admin.source)
 	}
 	return plan, nil
+}
+
+// claudeFloorAdoptable reports a drop-in that DefenseClaw's record names and
+// that holds DefenseClaw's rendering of the current floor, while the record
+// holds another postimage: DefenseClaw replaced the drop-in (a release that
+// raised the floor) and was stopped before it saved the record. The drop-in
+// is DefenseClaw's. Any other change to it makes it the administrator's.
+func claudeFloorAdoptable(record *ownershipRecord, path string, current []byte, exists bool) bool {
+	if !exists || record == nil || record.Path != path || sha256Hex(current) == record.PostimageSHA256 {
+		return false
+	}
+	floor := ClaudeVersionFloor()
+	if floor == "" {
+		return false
+	}
+	rendered, err := renderClaudeVersionFloor(floor)
+	return err == nil && bytes.Equal(current, rendered)
+}
+
+// adoptClaudeVersionFloor records an adoptable drop-in as DefenseClaw's
+// again, keeping the rest of its record, so publishing, withdrawing and
+// removing it treat it as DefenseClaw's.
+func adoptClaudeVersionFloor(opts Options, path string, state *State) error {
+	record, err := loadRecord(opts, claudeVersionFloorRecord)
+	if err != nil || record == nil {
+		return err
+	}
+	current, exists, err := readPolicyFile(opts, path)
+	if err != nil || !claudeFloorAdoptable(record, path, current, exists) {
+		return err
+	}
+	record.PostimageSHA256 = sha256Hex(current)
+	if err := saveRecord(opts, record); err != nil {
+		return err
+	}
+	state.detail("Claude Code version floor: %s holds DefenseClaw's floor, but the ownership record was not saved when it was written; recorded it again", path)
+	return nil
 }
 
 // claudeDropInSortsAfterFloor reports whether source is a managed-settings.d
@@ -316,6 +361,13 @@ func applyClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPolicy
 	if err != nil {
 		return err
 	}
+	path, err := ClaudeVersionFloorPath(opts)
+	if err != nil {
+		return err
+	}
+	if err := adoptClaudeVersionFloor(opts, path, state); err != nil {
+		return err
+	}
 	// An unreadable higher-precedence source is reported by the inspection;
 	// here it can only lead to a floor that source overrides anyway.
 	higher, _ := claudeHigherSources(opts)
@@ -327,6 +379,14 @@ func applyClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPolicy
 		rendered, err := renderClaudeVersionFloor(plan.floor)
 		if err != nil {
 			return err
+		}
+		if !plan.exists && (plan.record == nil || plan.record.Path != plan.path) {
+			// The first write records the drop-in before writing it: a crash
+			// between the two steps must not leave DefenseClaw's floor looking
+			// like an administrator's file.
+			if err := saveRecord(opts, &ownershipRecord{Connector: claudeVersionFloorRecord, Path: plan.path, PostimageSHA256: sha256Hex(rendered)}); err != nil {
+				return err
+			}
 		}
 		changed, err := publishWithRecord(opts, claudeVersionFloorRecord, plan.path, plan.current, plan.exists, rendered,
 			plan.owned && bytes.Equal(plan.current, rendered), claudeVersionFloorStrip(), state)
@@ -358,6 +418,9 @@ func withdrawClaudeVersionFloor(opts Options, plan claudeFloorPlan, state *State
 func removeClaudeVersionFloor(opts Options, state *State) error {
 	path, err := ClaudeVersionFloorPath(opts)
 	if err != nil {
+		return err
+	}
+	if err := adoptClaudeVersionFloor(opts, path, state); err != nil {
 		return err
 	}
 	return restoreOrStrip(opts, claudeVersionFloorRecord, path, claudeVersionFloorStrip(), true, state)
@@ -479,6 +542,23 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 	}
 	promised := plan.mode == config.ClaudeVersionFloorEnforce && policy.Ownership == config.MachinePolicyOwnershipMerge
 	switch {
+	case plan.effectiveAdmin() && plan.owned && !plan.adminOutranks:
+		// An administrator version in a file that merges before DefenseClaw's
+		// drop-in (set after DefenseClaw wrote it): the drop-in's later value
+		// is the one Claude Code applies until DefenseClaw withdraws it.
+		floor.Owner = VersionFloorOwnerDefenseClaw
+		floor.Source = plan.path
+		floor.Value = claudeVersionFloorFileValue(plan.current)
+		floor.Overridden = claudeFloorValueText(plan.admin.value)
+		floor.OverriddenSource = plan.admin.source
+		message := fmt.Sprintf("Claude Code version floor: %s sets requiredMinimumVersion %s, but DefenseClaw's %s merges after it and replaces it with %s, which is the value Claude Code applies", plan.admin.source, floor.Overridden, plan.path, floor.Value)
+		if policy.Ownership == config.MachinePolicyOwnershipMerge {
+			// Drift: the lifecycle re-applies, which withdraws the drop-in.
+			state.Drift = true
+			state.conflict("%s; the next lifecycle run that applies changes (ensure, repair or reconcile) removes DefenseClaw's drop-in so the administrator's value applies", message)
+		} else {
+			state.detail("%s; with ownership: %s DefenseClaw does not remove it (uninstall does)", message, policy.Ownership)
+		}
 	case plan.effectiveAdmin():
 		floor.Owner = VersionFloorOwnerAdministrator
 		floor.Source = plan.admin.source
@@ -542,7 +622,7 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 	}
 	if plan.ignoredBy != "" && (floor.Owner != VersionFloorOwnerNone || plan.mode != config.ClaudeVersionFloorOff) {
 		floor.IgnoredBy = plan.ignoredBy
-		message := fmt.Sprintf("Claude Code version floor: %s outranks the managed settings files and does not set requiredMinimumVersion; Claude Code builds below %s predate managedSourcesBehavior: merge (%s), read only that source and ignore requiredMinimumVersion in the files, so no floor stops them; add \"requiredMinimumVersion\": %q to %s", plan.ignoredBy, plan.floor, claudeMergeMinimumVersion, plan.floor, plan.ignoredBy)
+		message := fmt.Sprintf("Claude Code version floor: %s outranks the managed settings files and does not set requiredMinimumVersion; Claude Code builds below %s predate managedSourcesBehavior: merge (%s), read only that source and ignore requiredMinimumVersion in the files, so no floor stops them; add \"requiredMinimumVersion\": %q to %s (DefenseClaw's claude-hklm-json, reg, plist and intune-settings-catalog exports include it)", plan.ignoredBy, plan.floor, claudeMergeMinimumVersion, plan.floor, plan.ignoredBy)
 		if promised && policy.HigherPrecedenceSources != config.HigherPrecedenceWarn {
 			state.conflict("%s", message)
 		} else {

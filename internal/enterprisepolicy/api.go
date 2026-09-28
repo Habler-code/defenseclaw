@@ -149,14 +149,7 @@ func retireUnpublished(opts Options, intended, candidates []string) ([]State, er
 // hasOwnershipRecord reports whether DefenseClaw recorded writing
 // connector's machine policy.
 func hasOwnershipRecord(opts Options, connector string) (bool, error) {
-	names := []string{connector}
-	if connector == ConnectorCursor && opts.goos() == "windows" {
-		names = append(names, cursorAdapterRecord)
-	}
-	if connector == ConnectorClaudeCode {
-		names = append(names, claudeVersionFloorRecord)
-	}
-	for _, name := range names {
+	for _, name := range ownershipRecordNames(opts, connector) {
 		path, err := recordPath(opts, name)
 		if err != nil {
 			return false, err
@@ -227,10 +220,21 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 		state, err := target.Verify(opts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		} else if state.Route == RouteMachinePolicy {
+			verifyPublishedFiles(opts, name, &state)
 		}
 		result.States = append(result.States, state)
 	}
-	result.MachinePolicyConnectors = reconciledConnectors(result.States)
+	// A connector whose entries drifted from what a publish writes (a file
+	// mode, a floor drop-in to withdraw) is not in place: the lifecycle
+	// compares this set with the one it recorded and re-applies.
+	var inPlace []State
+	for _, state := range result.States {
+		if !state.Drift {
+			inPlace = append(inPlace, state)
+		}
+	}
+	result.MachinePolicyConnectors = reconciledConnectors(inPlace)
 	return result, errors.Join(errs...)
 }
 

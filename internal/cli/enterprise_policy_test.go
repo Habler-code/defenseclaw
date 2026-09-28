@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -246,5 +247,32 @@ func TestEnterprisePolicyShowsTheClaudeVersionFloor(t *testing.T) {
 	out, err = runPolicyCommand(t, runEnterprisePolicyVerify)
 	if err == nil || !strings.Contains(out, "requiredMinimumVersion not set") || !strings.Contains(out, "DefenseClaw's "+floorPath+" is missing") {
 		t.Fatalf("a missing floor must fail verify: %v\n%s", err, out)
+	}
+}
+
+// The --user section lists connectors in name order, so the output of two
+// accounts can be compared line by line.
+func TestEnterprisePolicyUserReportListsConnectorsInOrder(t *testing.T) {
+	resetEnterprisePolicyFlags(t)
+	names := []string{"opencode", "copilot", "cursor", "claudecode", "devin", "amp", "codex", "kiro"}
+	decisions := map[string]enterprisepolicy.GuardDecision{}
+	for _, name := range names {
+		decisions[name] = enterprisepolicy.GuardDecision{}
+	}
+	report := enterprisePolicyReport{User: &enterprisePolicyUserReport{User: "u", Home: "/home/u", Decisions: decisions}}
+	for i := 0; i < 20; i++ {
+		var out bytes.Buffer
+		if err := writeEnterprisePolicyReport(&out, report); err != nil {
+			t.Fatal(err)
+		}
+		var listed []string
+		for _, line := range strings.Split(out.String(), "\n") {
+			if fields := strings.Fields(line); len(fields) > 1 && strings.HasSuffix(line, "no foreign hooks") {
+				listed = append(listed, fields[0])
+			}
+		}
+		if len(listed) != len(names) || !sort.StringsAreSorted(listed) {
+			t.Fatalf("connectors must be listed in name order: %v", listed)
+		}
 	}
 }

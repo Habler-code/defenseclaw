@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -349,7 +350,14 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		if report.User.Error != "" {
 			fmt.Fprintf(out, "    error: %s\n", report.User.Error)
 		}
-		for name, decision := range report.User.Decisions {
+		// Name order, so two accounts' reports compare line by line.
+		names := make([]string, 0, len(report.User.Decisions))
+		for name := range report.User.Decisions {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			decision := report.User.Decisions[name]
 			if len(decision.Findings) == 0 {
 				fmt.Fprintf(out, "    %-12s no foreign hooks\n", name)
 				continue

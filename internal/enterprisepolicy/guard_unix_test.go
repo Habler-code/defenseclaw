@@ -136,3 +136,96 @@ func TestGuardRecognizesAHomeBehindASymlink(t *testing.T) {
 		t.Fatalf("the home's hook file must be found once, as a user source: %+v", decision)
 	}
 }
+
+// adminOwnedPrograms returns up to n distinct administrator-owned programs
+// named name found in dirs.
+func adminOwnedPrograms(dirs []string, names []string, n int) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, name := range names {
+		for _, dir := range dirs {
+			path := filepath.Join(dir, name)
+			info, err := os.Stat(path)
+			resolved, resolveErr := filepath.EvalSymlinks(path)
+			if err != nil || resolveErr != nil || !info.Mode().IsRegular() || !adminOwnedFile(info) || seen[resolved] {
+				continue
+			}
+			seen[resolved] = true
+			out = append(out, path)
+			if len(out) == n {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// An administrator-owned program is bound by kind only, but a link of the
+// user's own that reaches one (the named file itself, or a folder above
+// it) can be pointed at another, so the approval binds the link targets:
+// retargeting the link changes the digest. Links the OS owns (a merged
+// /bin) do not change how a program is bound.
+func TestGuardDigestBindsUserLinksToAdministratorOwnedPrograms(t *testing.T) {
+	programs := adminOwnedPrograms([]string{"/usr/bin", "/bin"}, []string{"true", "false", "env", "sh", "test"}, 2)
+	if len(programs) < 2 {
+		t.Skip("needs two administrator-owned programs")
+	}
+	req := guardRequest(t, "cursor", config.ForeignHooksRemove)
+	repo := filepath.Dir(req.WorkingDir)
+	writeFile(t, filepath.Join(repo, ".cursor", "hooks.json"), `{"version": 1, "hooks": {"preToolUse": [{"command": "./tool --check"}]}}`)
+	link := filepath.Join(repo, "tool")
+	retarget := func(target string) {
+		t.Helper()
+		_ = os.Remove(link)
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retarget(programs[0])
+	first := digestOf(t, req)
+	if strings.HasPrefix(first.Reason, unapprovableReason) {
+		t.Fatalf("a link to an administrator-owned program stays approvable: %+v", first)
+	}
+	req.Policy.AllowedHooks = []string{first.Digest}
+	if decision := EvaluateForeignHooks(req); decision.Deny {
+		t.Fatalf("the reviewed hook is approved: %+v", decision)
+	}
+	retarget(programs[1])
+	if decision := EvaluateForeignHooks(req); !decision.Deny {
+		t.Fatalf("pointing the approved link at %s must deny: %+v", programs[1], decision)
+	}
+
+	// A folder link above the program is bound the same way.
+	for _, name := range []string{"true", "false", "env", "sh", "test"} {
+		if len(adminOwnedPrograms([]string{"/usr/bin"}, []string{name}, 1)) == 0 || len(adminOwnedPrograms([]string{"/bin"}, []string{name}, 1)) == 0 {
+			continue
+		}
+		writeFile(t, filepath.Join(repo, ".cursor", "hooks.json"), `{"version": 1, "hooks": {"preToolUse": [{"command": "./bin/`+name+`"}]}}`)
+		folder := filepath.Join(repo, "bin")
+		if err := os.Symlink("/usr/bin", folder); err != nil {
+			t.Fatal(err)
+		}
+		req.Policy.AllowedHooks = nil
+		req.Policy.AllowedHooks = []string{digestOf(t, req).Digest}
+		if decision := EvaluateForeignHooks(req); decision.Deny {
+			t.Fatalf("the reviewed hook is approved: %+v", decision)
+		}
+		_ = os.Remove(folder)
+		if err := os.Symlink("/bin", folder); err != nil {
+			t.Fatal(err)
+		}
+		if decision := EvaluateForeignHooks(req); !decision.Deny {
+			t.Fatalf("pointing the approved folder link at /bin must deny: %+v", decision)
+		}
+		break
+	}
+
+	// No user link: the program is bound by kind, whatever links the OS
+	// keeps above it.
+	scan := newGuardScan(req)
+	for _, program := range programs {
+		if state := scan.fileState(program); state != "system" {
+			t.Fatalf("%s: an administrator-owned program reached without a user link is bound by kind only: %q", program, state)
+		}
+	}
+}

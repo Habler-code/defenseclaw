@@ -32,7 +32,10 @@ import (
 // and every file of a plugin directory. A handler whose references cannot
 // all be bound (an unresolvable variable, a file past the size bound, a
 // special or unreadable file, a command past the word bound) cannot be
-// approved at all.
+// approved at all. Words are resolved against the directories below, never
+// through PATH: a program a bare word finds through PATH (bash, node), and
+// a file a command reads on its own (a Makefile for make), is bound by name
+// only, as foreign-hook-guard.mdx documents.
 
 const (
 	// guardReferencedTokenLimit bounds the distinct words one handler
@@ -50,6 +53,9 @@ const (
 	guardReferencedFileLimit = 64 << 20
 	// guardScanHashLimit bounds the bytes hashed across one scan.
 	guardScanHashLimit = 256 << 20
+	// guardLinkHopLimit bounds the symbolic links followed while binding
+	// one referenced path.
+	guardLinkHopLimit = 40
 	// guardPluginTreeLimit and guardPluginTreeDepth bound a plugin
 	// directory's walk; a larger tree cannot be verified (approve its
 	// files instead).
@@ -437,7 +443,10 @@ func unboundState(state string) string {
 // fileState binds one referenced path: its content hash, or what else is
 // there. An administrator-owned file (root-owned and not group or world
 // writable) is bound by kind only, so an OS update of an interpreter does
-// not invalidate approvals; a user cannot replace it.
+// not invalidate approvals; a user cannot change it. A user can point a
+// symbolic link of their own at another administrator-owned file, though,
+// so when the path crosses such a link (the file itself or a folder above
+// it) the link targets are bound as well.
 func (s *guardScan) fileState(path string) string {
 	info, err := os.Stat(path)
 	switch {
@@ -450,6 +459,9 @@ func (s *guardScan) fileState(path string) string {
 	case !info.Mode().IsRegular():
 		return "special:" + info.Mode().Type().String()
 	case adminOwnedFile(info):
+		if targets := userLinkTargets(path); len(targets) > 0 {
+			return "system:links:" + strings.Join(targets, "\x00")
+		}
 		return "system"
 	case info.Size() > guardReferencedFileLimit:
 		return fmt.Sprintf("large:%d", info.Size())
@@ -459,6 +471,52 @@ func (s *guardScan) fileState(path string) string {
 		return "unreadable"
 	}
 	return "sha256:" + sum
+}
+
+// userLinkTargets resolves path one name at a time, as the OS does, and
+// returns the target of each symbolic link it crosses that is not
+// administrator-owned, in order. A link that cannot be read, or past
+// guardLinkHopLimit links, ends the list with "unresolved".
+func userLinkTargets(path string) []string {
+	if !filepath.IsAbs(path) {
+		return nil
+	}
+	var targets []string
+	volume := filepath.VolumeName(path)
+	dest := volume + string(filepath.Separator)
+	rest := strings.Split(filepath.ToSlash(path[len(volume):]), "/")
+	for hops := 0; len(rest) > 0; {
+		name := rest[0]
+		rest = rest[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			dest = filepath.Dir(dest)
+			continue
+		}
+		next := filepath.Join(dest, name)
+		info, err := os.Lstat(next)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			dest = next
+			continue
+		}
+		hops++
+		target, err := os.Readlink(next)
+		if err != nil || hops > guardLinkHopLimit {
+			return append(targets, "unresolved")
+		}
+		if !adminOwnedLink(info) {
+			targets = append(targets, target)
+		}
+		if filepath.IsAbs(target) {
+			volume = filepath.VolumeName(target)
+			dest = volume + string(filepath.Separator)
+			target = target[len(volume):]
+		}
+		rest = append(strings.Split(filepath.ToSlash(target), "/"), rest...)
+	}
+	return targets
 }
 
 // hashFile hashes a regular file (following links, as the agent would)

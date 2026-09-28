@@ -137,8 +137,8 @@ func ensurePolicyDir(opts Options, dir string) ([]string, error) {
 	return created, nil
 }
 
-// reclaimPolicyDirs, clearPolicyFileName and displaceUntrustedPolicyFiles
-// are Windows-only: every unix ancestor must already be root-owned and not
+// reclaimPolicyDirs, clearPolicyFileName, displaceUntrustedPolicyFiles and
+// displaceUntrustedPolicyFile are Windows-only: every unix ancestor must already be root-owned and not
 // group/other-writable, so no unprivileged user can create or occupy a
 // vendor path and there is nothing to take back.
 func reclaimPolicyDirs(Options, string) (policyTakeBack, error) { return policyTakeBack{}, nil }
@@ -146,6 +146,8 @@ func reclaimPolicyDirs(Options, string) (policyTakeBack, error) { return policyT
 func clearPolicyFileName(Options, string) (string, error) { return "", nil }
 
 func displaceUntrustedPolicyFiles(Options, string, string, *State) {}
+
+func displaceUntrustedPolicyFile(Options, string, *State) bool { return false }
 
 // validatePolicyLeafDir is covered on unix by the ancestor walk, which
 // already applies the strict rules to every directory.
@@ -252,6 +254,32 @@ func guardPathCannotExist(err error) bool {
 func adminOwnedFile(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Uid == 0 && info.Mode().Perm()&0o022 == 0
+}
+
+// publishedFileProblem describes how a policy file DefenseClaw published
+// differs from the mode and owner atomicWrite gives it: 0644 (every user's
+// agent must read machine policy), and root-owned when DefenseClaw runs as
+// root. It returns "" when it does not, or when path is not a regular file.
+func publishedFileProblem(opts Options, path string) string {
+	info, err := os.Lstat(platformPath(opts, path))
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	var problems []string
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		problems = append(problems, fmt.Sprintf("mode %04o", perm))
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && os.Geteuid() == 0 && stat.Uid != 0 {
+		problems = append(problems, fmt.Sprintf("owned by uid %d", stat.Uid))
+	}
+	return strings.Join(problems, ", ")
+}
+
+// adminOwnedLink reports a root-owned symbolic link (a link's own mode
+// bits do not matter): a user can replace it only with a link of their own.
+func adminOwnedLink(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == 0
 }
 
 // openGuardAppend opens a user-owned record file for appending without

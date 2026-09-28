@@ -764,3 +764,164 @@ func TestStandaloneOptionsCarryTheVersionFloorMode(t *testing.T) {
 		t.Fatalf("version_floor alone must leave the other claudecode keys at their defaults: %+v", policy)
 	}
 }
+
+// Claude Code builds older than 2.1.242 read only a higher-precedence
+// source (HKLM Settings, the managed preferences plist), and every build the
+// floor is meant to stop is older. So under version_floor: enforce, the
+// exports for those sources carry requiredMinimumVersion at the floor, and a
+// fleet that deploys one of them passes verify without a hand edit. The
+// managed-settings.d hook drop-in never carries the floor.
+func TestClaudeHigherPrecedenceExportsCarryTheVersionFloor(t *testing.T) {
+	wants := map[string]string{
+		"claude-hklm-json":        `"requiredMinimumVersion":"2.1.154"`,
+		"reg":                     `\"requiredMinimumVersion\":\"2.1.154\"`,
+		"plist":                   "<key>requiredMinimumVersion</key>",
+		"intune-settings-catalog": `\"requiredMinimumVersion\":\"2.1.154\"`,
+	}
+	for format, want := range wants {
+		data, err := claudeTarget{}.Export(testOptions(t), format)
+		if err != nil || !strings.Contains(string(data), want) {
+			t.Fatalf("%s export under version_floor: enforce must carry %s: %v\n%s", format, want, err, data)
+		}
+		if format == "plist" && !strings.Contains(string(data), "<string>2.1.154</string>") {
+			t.Fatalf("plist export must set the floor value:\n%s", data)
+		}
+		for _, mode := range []string{config.ClaudeVersionFloorReport, config.ClaudeVersionFloorOff} {
+			opts := testOptions(t)
+			opts.ClaudeVersionFloor = mode
+			data, err := claudeTarget{}.Export(opts, format)
+			if err != nil || strings.Contains(string(data), "requiredMinimumVersion") {
+				t.Fatalf("%s export with version_floor: %s must not set the floor: %v", format, mode, err)
+			}
+		}
+	}
+	if hooks, err := (claudeTarget{}).Export(testOptions(t), "json"); err != nil || strings.Contains(string(hooks), "requiredMinimumVersion") {
+		t.Fatalf("the managed-settings.d hook drop-in export must not carry the floor: %v", err)
+	}
+
+	const source = `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`
+	opts := testOptions(t)
+	exported, err := claudeTarget{}.Export(opts, "claude-hklm-json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withHigherSources(t, higherSource(t, source, string(exported)))
+	reconcileClaude(t, opts)
+	verify, err := claudeTarget{}.Verify(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verify.Covered || len(verify.Conflicts) != 0 || verify.VersionFloor.Owner != VersionFloorOwnerAdministrator || verify.VersionFloor.Value != "2.1.154" {
+		t.Fatalf("an HKLM source deployed from DefenseClaw's export must pass verify: covered=%v %v %+v", verify.Covered, verify.Conflicts, verify.VersionFloor)
+	}
+}
+
+// A crash, or a failed save, between replacing the floor drop-in (a release
+// that raises the floor) and saving its ownership record leaves DefenseClaw's
+// current rendering with a record that holds the previous postimage. The
+// drop-in stays DefenseClaw's: verify reports it as DefenseClaw's, the next
+// pass records it again and withdraws it when an administrator sets the key,
+// and removal deletes it.
+func TestClaudeVersionFloorSurvivesACrashBeforeItsRecordIsSaved(t *testing.T) {
+	previous := sha256Hex([]byte("{\n  \"requiredMinimumVersion\": \"2.1.100\"\n}\n"))
+	for _, next := range []string{"verify", "reconcile", "remove"} {
+		t.Run(next, func(t *testing.T) {
+			withHigherSources(t)
+			opts := testOptions(t)
+			reconcileClaude(t, opts)
+			record, err := loadRecord(opts, claudeVersionFloorRecord)
+			if err != nil || record == nil {
+				t.Fatalf("floor record: %v %v", record, err)
+			}
+			record.PostimageSHA256 = previous
+			if err := saveRecord(opts, record); err != nil {
+				t.Fatal(err)
+			}
+			floorFile := claudeFloorFile(t, opts)
+			switch next {
+			case "verify":
+				verify, err := claudeTarget{}.Verify(opts)
+				if err != nil || verify.VersionFloor.Owner != VersionFloorOwnerDefenseClaw || len(floorConflicts(verify)) != 0 {
+					t.Fatalf("verify must report DefenseClaw's floor: %v %v %+v", err, verify.Conflicts, verify.VersionFloor)
+				}
+			case "reconcile":
+				state := reconcileClaude(t, opts)
+				if state.VersionFloor.Owner != VersionFloorOwnerDefenseClaw || readFile(t, floorFile) != wantClaudeFloorBytes {
+					t.Fatalf("reconcile must keep DefenseClaw's floor: %+v", state.VersionFloor)
+				}
+				if record, err := loadRecord(opts, claudeVersionFloorRecord); err != nil || record == nil || record.PostimageSHA256 != sha256Hex([]byte(wantClaudeFloorBytes)) {
+					t.Fatalf("reconcile must record the floor again: %+v %v", record, err)
+				}
+				writeFile(t, filepath.Join(claudeDir(t, opts), "managed-settings.json"), `{"requiredMinimumVersion": "2.1.200"}`)
+				reconcileClaude(t, opts)
+				if fileExists(floorFile) {
+					t.Fatal("DefenseClaw's floor must be withdrawn once the administrator sets the key")
+				}
+			case "remove":
+				if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
+					t.Fatal(err)
+				}
+				if fileExists(floorFile) {
+					t.Fatal("removal must delete DefenseClaw's floor")
+				}
+			}
+			if next != "verify" {
+				if recorded, _ := ClaudeVersionFloorRecorded(opts); recorded != (next == "reconcile" && fileExists(floorFile)) {
+					t.Fatalf("floor record after %s: %v", next, recorded)
+				}
+			}
+		})
+	}
+}
+
+// An administrator value set after install in a file that merges before
+// DefenseClaw's floor drop-in (managed-settings.json, or a drop-in whose name
+// sorts first) does not apply while the drop-in is there: verify reports the
+// drop-in's value as the effective one and marks the connector as drift, so
+// the lifecycle's ensure re-applies and withdraws the drop-in; then the
+// administrator's value applies and verify passes.
+func TestClaudeVersionFloorAdministratorValueAddedAfterInstall(t *testing.T) {
+	for _, file := range []string{"managed-settings.json", "managed-settings.d/00-admin.json"} {
+		t.Run(file, func(t *testing.T) {
+			withHigherSources(t)
+			opts := publishTestOptions(t)
+			reconcileClaude(t, opts)
+			source := path.Join(claudeDir(t, opts), file)
+			writeFile(t, source, `{"requiredMinimumVersion": "2.1.200"}`)
+
+			verify, err := claudeTarget{}.Verify(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			floor := verify.VersionFloor
+			if floor.Owner != VersionFloorOwnerDefenseClaw || floor.Value != "2.1.154" || floor.Overridden != "2.1.200" || floor.OverriddenSource != source {
+				t.Fatalf("verify must report the drop-in's value as the one in force: %+v", floor)
+			}
+			if verify.Covered || !hasConflict(verify, "merges after it") {
+				t.Fatalf("the overridden administrator value must fail verify: covered=%v %v", verify.Covered, verify.Conflicts)
+			}
+			if summary := floor.Summary(); !strings.Contains(summary, "replaces 2.1.200") || strings.Contains(summary, "not a version") {
+				t.Fatalf("summary: %s", summary)
+			}
+			all, err := VerifyAll(opts, []string{"claudecode"})
+			if err != nil || containsString(all.MachinePolicyConnectors, "claudecode") {
+				t.Fatalf("a drifted connector is not reported in place, so ensure re-applies: %v %v", all.MachinePolicyConnectors, err)
+			}
+
+			// ensure re-applies the machine policy.
+			if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+				t.Fatal(err)
+			}
+			if fileExists(claudeFloorFile(t, opts)) {
+				t.Fatal("re-applying must withdraw DefenseClaw's drop-in")
+			}
+			verify, err = claudeTarget{}.Verify(opts)
+			if err != nil || !verify.Covered || verify.VersionFloor.Owner != VersionFloorOwnerAdministrator || verify.VersionFloor.Value != "2.1.200" {
+				t.Fatalf("after ensure the administrator's value applies and verify passes: %v %v %+v", err, verify.Conflicts, verify.VersionFloor)
+			}
+			if all, err := VerifyAll(opts, []string{"claudecode"}); err != nil || !containsString(all.MachinePolicyConnectors, "claudecode") {
+				t.Fatalf("after ensure the connector is in place: %v %v", all.MachinePolicyConnectors, err)
+			}
+		})
+	}
+}

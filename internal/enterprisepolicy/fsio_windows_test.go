@@ -663,3 +663,56 @@ func TestWindowsCopilotClearsAnObjectPlantedAgainDuringReplacement(t *testing.T)
 		})
 	}
 }
+
+// A regular opencode.json or opencode.jsonc a standard user left in
+// %ProgramData%\opencode before DefenseClaw took the folder back stays
+// editable by that user, and OpenCode loads it as managed config for every
+// account. Reconcile moves it aside, as for Copilot, and publishes
+// DefenseClaw's managed config in its place.
+func TestWindowsOpenCodeMovesAsideAConfigAUserPlanted(t *testing.T) {
+	for _, name := range []string{"opencode.json", "opencode.jsonc"} {
+		t.Run(name, func(t *testing.T) {
+			opts := windowsOpenCodeTestOptions(t)
+			dir := filepath.Join(opts.WindowsProgramData, "opencode")
+			userCreatedDir(t, dir)
+			planted := filepath.Join(dir, name)
+			if err := os.WriteFile(planted, []byte(`{"plugin": ["file:///C:/Users/a/tool.js"]}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ownAs(t, planted, wellKnownSID(t, windows.WinBuiltinUsersSid))
+
+			result, err := PublishWindowsGoOwned(opts, []string{ConnectorOpenCode})
+			if err != nil {
+				t.Fatalf("a planted config must not block OpenCode's machine policy: %v", err)
+			}
+			if len(result.MachinePolicyConnectors) != 1 || result.MachinePolicyConnectors[0] != ConnectorOpenCode {
+				t.Fatalf("OpenCode must be published through machine policy: %+v", result)
+			}
+			requireProtected(t, dir)
+			if name == "opencode.jsonc" {
+				if _, err := os.Lstat(planted); !os.IsNotExist(err) {
+					t.Fatalf("the planted config must no longer be in force: %v", err)
+				}
+			}
+			aside := displacedEntries(t, dir)
+			if len(aside) != 1 || strings.HasSuffix(strings.ToLower(aside[0]), ".json") || strings.HasSuffix(strings.ToLower(aside[0]), ".jsonc") {
+				t.Fatalf("the planted config must be moved aside under a name OpenCode does not load: %v", aside)
+			}
+			owner, sd := descriptorOf(t, filepath.Join(dir, aside[0]))
+			if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || strings.Contains(sd.String(), ";;;BU)") {
+				t.Fatalf("the moved file must be DefenseClaw's and private: %s %s", owner, sd)
+			}
+			config, err := OpenCodeManagedConfigPath(opts)
+			if err != nil || filepath.Base(config) != "opencode.json" {
+				t.Fatalf("managed config path: %s %v", config, err)
+			}
+			body, err := os.ReadFile(config)
+			if err != nil || strings.Contains(string(body), "tool.js") || !strings.Contains(string(body), strings.ReplaceAll(opts.OpenCodePluginPath, `\`, `\\`)) {
+				t.Fatalf("the managed config must be DefenseClaw's alone: %v\n%s", err, body)
+			}
+			if err := validateTrustedFile(config); err != nil {
+				t.Fatalf("the published config must be trusted: %v", err)
+			}
+		})
+	}
+}

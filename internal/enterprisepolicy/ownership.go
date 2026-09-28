@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"sort"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 const ownershipSchemaVersion = 1
@@ -236,6 +238,15 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 	}
 	record.CreatedDirs = appendUnique(record.CreatedDirs, alsoCreated...)
 	changed := !exists || !bytes.Equal(current, rendered)
+	if !changed {
+		// Same bytes, but a mode or owner an agent may not be able to read
+		// through (an administrator's chmod 0600): write it again, which
+		// restores both.
+		if problem := publishedFileProblem(opts, path); problem != "" {
+			changed = true
+			state.detail("restored %s to mode 0644 and administrator ownership (it had %s)", path, problem)
+		}
+	}
 	if changed {
 		created, err := writePolicyFile(opts, path, rendered)
 		record.CreatedDirs = appendUnique(record.CreatedDirs, created...)
@@ -248,6 +259,45 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		return changed, err
 	}
 	return changed, nil
+}
+
+// ownershipRecordNames lists the ownership records connector's machine
+// policy can hold.
+func ownershipRecordNames(opts Options, connector string) []string {
+	names := []string{connector}
+	if connector == ConnectorCursor && opts.goos() == "windows" {
+		names = append(names, cursorAdapterRecord)
+	}
+	if connector == ConnectorClaudeCode {
+		names = append(names, claudeVersionFloorRecord)
+	}
+	return names
+}
+
+// verifyPublishedFiles reports, as drift, each policy file DefenseClaw
+// published for connector (named by an ownership record, and still what
+// DefenseClaw wrote) whose mode or owner changed since: agents may not be
+// able to read it, and the next publish restores it. Only ownership: merge
+// publishes, so only it is checked.
+func verifyPublishedFiles(opts Options, connector string, state *State) {
+	if opts.PolicyFor(connector).Ownership != config.MachinePolicyOwnershipMerge {
+		return
+	}
+	for _, name := range ownershipRecordNames(opts, connector) {
+		record, err := loadRecord(opts, name)
+		if err != nil || record == nil {
+			continue
+		}
+		current, exists, err := readPolicyFile(opts, record.Path)
+		if err != nil || !exists || sha256Hex(current) != record.PostimageSHA256 {
+			continue
+		}
+		if problem := publishedFileProblem(opts, record.Path); problem != "" {
+			state.Drift = true
+			state.conflict("%s has %s; DefenseClaw publishes it with mode 0644, owned by root, so every user's agent can read it; the next lifecycle run that applies changes (ensure, repair or reconcile) restores it", record.Path, problem)
+		}
+	}
+	state.finish()
 }
 
 // restoreOrStrip removes DefenseClaw's content from path. When the file is

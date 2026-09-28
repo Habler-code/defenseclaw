@@ -32,8 +32,11 @@ import (
 // afterwards. So the hook records a snapshot at SessionStart (the hash of
 // the foreign-hook state it found) and, when an unapproved hook or plugin
 // was present then, keeps denying that session's tool calls until the agent
-// restarts, for at most sessionRecordTTL. A hook found later in a session,
-// or a file the scan cannot verify, denies only the call that found it.
+// restarts, for at most sessionRecordTTL. A session-start scan that stops
+// on its file, byte, referenced-path or time budget blocks the same way,
+// because the agent may have loaded a hook from a source the scan never
+// reached. A hook found later in a session, or a file the scan cannot
+// verify, denies only the call that found it.
 //
 // A snapshot is keyed twice: by the agent's session ID from the hook
 // payload, and by the agent process that runs the hook
@@ -41,7 +44,11 @@ import (
 // sessions one process runs (a cleared, compacted or resumed session keeps
 // the hooks the process loaded); the session key covers an agent whose
 // process cannot be named. A restarted agent that resumes a session starts
-// clean; the process that held the old hooks stays blocked.
+// clean; the process that held the old hooks stays blocked. Without a
+// process identity a restart cannot be told from a clear, compact or resume
+// inside the process that loaded the hook, so a blocked session stays
+// blocked through a session start with the same session ID; only a new
+// session ID starts clean.
 //
 // Standalone records live in the gateway's protected data directory, in a
 // namespace chosen from the transport-verified caller uid or SID. The
@@ -165,9 +172,11 @@ const (
 
 // ApplyForeignHookSession combines this invocation's scan with the
 // session's recorded state and returns the decision to enforce:
-//   - a session start that finds an unapproved hook or plugin is recorded
-//     as a block for the session and its agent process, and its message
-//     says the block lasts until the agent restarts;
+//   - a session start that finds an unapproved hook or plugin, or whose
+//     scan stopped on a budget before it checked every source
+//     (GuardDecision.Incomplete), is recorded as a block for the session and
+//     its agent process, and its message says the block lasts until the
+//     agent restarts;
 //   - a call of a session or process blocked earlier is denied, even when
 //     the files are clean now (the agent may still run the hook), until
 //     sessionRecordTTL after the block;
@@ -259,13 +268,13 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	}
 	if sticky == nil && session.exists && session.record.Blocked {
 		// A session start of another agent process (a restarted agent
-		// resuming the session), or of a process that cannot be named,
-		// loaded its hooks from the files the scan just checked, so its
-		// snapshot replaces the session's. Only the same process continuing
-		// keeps the block. The process that held the old hooks stays
-		// blocked through its own record.
-		sameProcessContinuing := key.Process != "" && session.record.Process == key.Process
-		restarted := update.SessionStart && !sameProcessContinuing
+		// resuming the session) loaded its hooks from the files the scan
+		// just checked, so its snapshot replaces the session's. The process
+		// that held the old hooks stays blocked through its own record. The
+		// same process continuing (a clear, compact or resume inside the
+		// agent) keeps the block, and so does a start whose process cannot
+		// be named: it may be the process that loaded the hook.
+		restarted := update.SessionStart && key.Process != "" && session.record.Process != key.Process
 		if restarted {
 			session.exists = false
 		} else {
@@ -284,16 +293,31 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 		return record
 	}
 
-	if decision.Deny && update.SessionStart && hasBlockableFindings(decision) {
+	blockable := hasBlockableFindings(decision)
+	if decision.Deny && update.SessionStart && (blockable || decision.Incomplete) {
+		// The block names the first unapproved hook or plugin; a scan that
+		// stopped on a budget without reaching one names where it stopped
+		// (the last finding).
+		cause, note := Finding{}, sessionBlockNote
+		for _, finding := range decision.Findings {
+			if isBlockableFinding(finding) {
+				cause = finding
+				break
+			}
+		}
+		if !blockable {
+			note = sessionIncompleteNote
+			for _, finding := range decision.Findings {
+				if !finding.Allowed {
+					cause = finding
+				}
+			}
+			cause.Reason = incompleteScanReason + strings.TrimPrefix(cause.Reason, "cannot verify hook file: ")
+		}
 		blocked := func(existing loaded) SessionRecord {
 			record := fresh(existing)
 			record.Blocked, record.BlockedAt = true, stamp
-			for _, finding := range decision.Findings {
-				if isBlockableFinding(finding) {
-					record.Scope, record.Path, record.Digest, record.Reason = finding.Scope, finding.Path, finding.Digest, finding.Reason
-					break
-				}
-			}
+			record.Scope, record.Path, record.Digest, record.Reason = cause.Scope, cause.Path, cause.Digest, cause.Reason
 			return record
 		}
 		for _, entry := range []loaded{process, session} {
@@ -305,7 +329,7 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 				return sessionUnavailableDecision(decision)
 			}
 		}
-		decision.Reason = strings.TrimSpace(decision.Reason) + " " + sessionBlockNote
+		decision.Reason = strings.TrimSpace(decision.Reason) + " " + note
 		return decision
 	}
 
@@ -331,7 +355,11 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 				return sessionUnavailableDecision(decision)
 			}
 		}
-		return stickySessionDecision(decision, key.Connector, *sticky)
+		result := stickySessionDecision(decision, key.Connector, *sticky)
+		if key.Process == "" {
+			result.Reason += " " + sessionUnknownProcessNote
+		}
+		return result
 	}
 
 	if process.path != "" && !process.exists {
@@ -375,6 +403,18 @@ func sessionUnavailableDecision(decision GuardDecision) GuardDecision {
 // sessionBlockNote ends every denial the session state applies to.
 const sessionBlockNote = "The agent can keep running a hook it loaded when the session started, even after the file changes, so DefenseClaw blocks tool calls for the rest of this session: after removing the hook, restart the agent."
 
+// sessionIncompleteNote ends a denial for a session whose start scan stopped
+// on a budget.
+const sessionIncompleteNote = "The agent can keep running a hook it loaded from a file DefenseClaw did not check, so DefenseClaw blocks tool calls for the rest of this session: remove unneeded hook files, then restart the agent."
+
+// sessionUnknownProcessNote ends a session denial when the agent process
+// cannot be named: only a new session ID starts clean then.
+const sessionUnknownProcessNote = "DefenseClaw cannot identify the agent process, so the block also holds when the restarted agent resumes this session: start a new session."
+
+// incompleteScanReason starts the Reason of a block recorded because the
+// session-start scan stopped on a budget.
+const incompleteScanReason = "incomplete scan: "
+
 func unverifiableSessionRecord(key SessionKey, path string, err error) *SessionRecord {
 	return &SessionRecord{
 		Connector: key.Connector,
@@ -388,7 +428,11 @@ func unverifiableSessionRecord(key SessionKey, path string, err error) *SessionR
 // session or agent process was denied for a foreign hook.
 func stickySessionDecision(decision GuardDecision, connector string, record SessionRecord) GuardDecision {
 	var earlier string
+	note := sessionBlockNote
 	switch {
+	case strings.HasPrefix(record.Reason, incompleteScanReason):
+		earlier = "DefenseClaw's hook scan stopped before it checked every hook file (" + strings.TrimPrefix(record.Reason, incompleteScanReason) + ")"
+		note = sessionIncompleteNote
 	case strings.HasPrefix(record.Reason, "cannot verify"):
 		what := strings.TrimPrefix(record.Reason, "cannot verify hook file: ")
 		if record.Path != "" && !strings.Contains(what, record.Path) {
@@ -409,7 +453,7 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 	decision.Deny = true
 	decision.Reason = fmt.Sprintf(
 		"enterprise_foreign_hook_blocked: your organization blocks %s hooks it has not approved, because they can change a tool call after DefenseClaw checks it. Earlier in this agent session %s. %s",
-		connector, earlier, sessionBlockNote,
+		connector, earlier, note,
 	)
 	decision.Findings = append([]Finding{{
 		Connector: connector,

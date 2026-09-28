@@ -173,6 +173,11 @@ type GuardDecision struct {
 	Findings []Finding `json:"findings"`
 	Deny     bool      `json:"deny"`
 	Reason   string    `json:"reason,omitempty"`
+	// Incomplete is set when the scan stopped on its file, byte,
+	// referenced-path or time budget before it reached every source, so a
+	// source the agent loaded may not have been checked. At a session start
+	// it blocks the session (ApplyForeignHookSession).
+	Incomplete bool `json:"incomplete,omitempty"`
 }
 
 func (r GuardRequest) getenv(key string) string {
@@ -1155,7 +1160,9 @@ func EvaluateForeignHooks(req GuardRequest) GuardDecision {
 		return GuardDecision{}
 	}
 	stopAtBlocking := req.StopAtFirstBlocking && req.Policy.ForeignHooks == config.ForeignHooksRemove
-	decision := GuardDecision{Findings: newGuardScan(req).scan(stopAtBlocking)}
+	scan := newGuardScan(req)
+	decision := GuardDecision{Findings: scan.scan(stopAtBlocking)}
+	decision.Incomplete = scan.exceeded != nil
 	var blocking []Finding
 	for _, finding := range decision.Findings {
 		if !finding.Allowed {

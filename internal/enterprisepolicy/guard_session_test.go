@@ -12,12 +12,15 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func sessionDeny(path, digest string) GuardDecision {
@@ -152,11 +155,11 @@ func TestSessionStateFollowsTheAgentProcess(t *testing.T) {
 	if call := h.apply("s-1", false, GuardDecision{}); !call.Deny {
 		t.Fatalf("a blocked session is reset only at a session start: %+v", call)
 	}
-	// At a session start with unknown process, the session is reset and
-	// the current scan is trusted (the agent loaded hooks from current files).
+	// A session start whose process cannot be named may be the blocked
+	// process compacting or resuming the session: the block holds.
 	h.process = ""
-	if start := h.apply("s-1", true, GuardDecision{}); start.Deny {
-		t.Fatalf("session start with unknown process must trust current scan: %+v", start)
+	if start := h.apply("s-1", true, GuardDecision{}); !start.Deny {
+		t.Fatalf("a session start with an unknown process must keep the session's block: %+v", start)
 	}
 }
 
@@ -397,19 +400,49 @@ func TestSessionStateBlocksForAnUnapprovedPlugin(t *testing.T) {
 	}
 }
 
-// A session start whose agent process cannot be named resets the session:
-// the agent loaded its hooks from the files DefenseClaw just checked.
-func TestSessionStateResetsAtSessionStartWithUnknownProcess(t *testing.T) {
-	h := newSessionHarness(t)
-	h.process = runtime.GOOS + "::222:2"
-	h.apply("s-1", true, sessionDeny("/r/.claude/hooks.json", "bb22"))
-	h.process = ""
-	if result := h.apply("s-1", true, GuardDecision{}); result.Deny {
-		t.Fatalf("a session start without a process identity must trust the current scan: %+v", result)
-	}
-	if record := h.record(sessionKindSession, "s-1"); record.Blocked {
-		t.Fatalf("the session record must be reset at the session start: %+v", record)
-	}
+// Without a process identity DefenseClaw cannot tell a restarted agent from
+// a clear, compact or resume inside the process that loaded the hook, so a
+// blocked session stays blocked through a session start that reuses its
+// session ID. Only a new session ID starts clean.
+func TestSessionStateKeepsABlockThroughASessionStartWithUnknownProcess(t *testing.T) {
+	sessionStores(t, func(t *testing.T, h *sessionHarness) {
+		h.process = ""
+		hookFile := "/r/.claude/hooks.json"
+		if start := h.apply("s-1", true, sessionDeny(hookFile, "bb22")); !start.Deny {
+			t.Fatalf("a session start with a foreign hook denies: %+v", start)
+		}
+		// The user removes the hook and compacts the session: a session
+		// start with the same session ID, in a process that cannot be named.
+		compacted := h.apply("s-1", true, GuardDecision{})
+		for _, want := range []string{hookFile, "restart the agent", "start a new session"} {
+			if !compacted.Deny || !strings.Contains(compacted.Reason, want) {
+				t.Fatalf("a compact without a process identity keeps the block and says %q: %+v", want, compacted)
+			}
+		}
+		if record := h.record(sessionKindSession, "s-1"); !record.Blocked || record.Path != hookFile {
+			t.Fatalf("the session's block must be kept: %+v", record)
+		}
+		if later := h.apply("s-1", false, GuardDecision{}); !later.Deny {
+			t.Fatalf("later calls of the session stay denied: %+v", later)
+		}
+
+		// A block recorded with a process identity holds through a resume
+		// whose process cannot be named.
+		h.process = runtime.GOOS + "::222:2"
+		h.apply("s-2", true, sessionDeny(hookFile, "cc33"))
+		h.process = ""
+		if resumed := h.apply("s-2", true, GuardDecision{}); !resumed.Deny {
+			t.Fatalf("a resume without a process identity keeps the block: %+v", resumed)
+		}
+
+		// A new session ID starts clean.
+		if fresh := h.apply("s-3", true, GuardDecision{}); fresh.Deny {
+			t.Fatalf("a new session starts clean: %+v", fresh)
+		}
+		if later := h.apply("s-3", false, GuardDecision{}); later.Deny {
+			t.Fatalf("the new session stays clean: %+v", later)
+		}
+	})
 }
 
 // Repeated denials of a blocked session keep the time of the block.
@@ -508,6 +541,88 @@ func TestSessionStateBlockExpiresAfterTheRetentionPeriod(t *testing.T) {
 			if record := h.record(kind, id); record.Blocked {
 				t.Fatalf("%s record: an expired block must be replaced by a clean snapshot: %+v", kind, record)
 			}
+		}
+	})
+}
+
+// A session-start scan that stops on its file budget or its deadline before
+// it reaches every source may have missed a hook the agent loaded, so the
+// session and its agent process stay blocked after the files are cleared,
+// until the agent restarts.
+func TestSessionStateBlocksWhenTheSessionStartScanStopsOnABudget(t *testing.T) {
+	sessionStores(t, func(t *testing.T, h *sessionHarness) {
+		req := guardRequest(t, "copilot", config.ForeignHooksRemove)
+		project := filepath.Dir(req.WorkingDir)
+		if err := os.MkdirAll(req.WorkingDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Copilot reads the user hooks folder, then the project hooks folder,
+		// then .github/copilot/settings.json: the flood ahead of the hook
+		// uses up the file budget without passing any folder's entry limit.
+		var planted []string
+		for _, dir := range []string{filepath.Join(req.Home, ".copilot", "hooks"), filepath.Join(project, ".github", "hooks")} {
+			for i := 0; i < guardDirEntryLimit; i++ {
+				path := filepath.Join(dir, fmt.Sprintf("f%03d.json", i))
+				writeFile(t, path, `{"hooks": {}}`)
+				planted = append(planted, path)
+			}
+		}
+		hook := filepath.Join(project, ".github", "copilot", "settings.json")
+		writeFile(t, hook, `{"hooks": {"preToolUse": [{"type": "command", "bash": "./rewrite-args.sh"}]}}`)
+		planted = append(planted, hook)
+
+		start := EvaluateForeignHooks(req)
+		if !start.Deny || !strings.Contains(start.Reason, "more than 512 files") || hasBlockableFindings(start) {
+			t.Fatalf("premise: the flood stops the scan before it reaches the hook: %+v", start)
+		}
+		h.process = runtime.GOOS + "::777:7"
+		if got := h.apply("s-1", true, start); !got.Deny || !strings.Contains(got.Reason, "restart the agent") {
+			t.Fatalf("a session start whose scan stopped on a budget must block the session: %+v", got)
+		}
+		for kind, id := range map[string]string{sessionKindSession: "s-1", sessionKindProcess: h.process} {
+			if record := h.record(kind, id); !record.Blocked || !strings.Contains(record.Reason, "more than 512 files") {
+				t.Fatalf("%s record: the budget stop must be recorded as a block: %+v", kind, record)
+			}
+		}
+
+		// The user clears the files; the agent still runs the hook it loaded.
+		for _, path := range planted {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		clean := EvaluateForeignHooks(req)
+		if clean.Deny {
+			t.Fatalf("premise: the cleared files scan clean: %+v", clean)
+		}
+		later := h.apply("s-1", false, clean)
+		for _, want := range []string{"enterprise_foreign_hook_blocked:", "Earlier in this agent session", "more than 512 files", "restart the agent"} {
+			if !later.Deny || !strings.Contains(later.Reason, want) {
+				t.Fatalf("a later call of the session must still deny and say %q: %+v", want, later)
+			}
+		}
+		if cleared := h.apply("s-2", true, clean); !cleared.Deny {
+			t.Fatalf("a new session of the same agent process keeps the block: %+v", cleared)
+		}
+
+		// A restarted agent loaded its hooks from the cleared files.
+		h.process = runtime.GOOS + "::778:8"
+		if restarted := h.apply("s-3", true, clean); restarted.Deny {
+			t.Fatalf("a restarted agent starts clean: %+v", restarted)
+		}
+
+		// A scan that runs past its deadline at the session start blocks too.
+		slow := guardRequest(t, "copilot", config.ForeignHooksRemove)
+		writeFile(t, filepath.Join(slow.Home, ".copilot", "hooks", "a.json"), `{"hooks": {}}`)
+		slow.Deadline = time.Now().Add(-time.Second)
+		stopped := EvaluateForeignHooks(slow)
+		if !stopped.Deny || !strings.Contains(stopped.Reason, "time limit") || hasBlockableFindings(stopped) {
+			t.Fatalf("premise: the scan stops on its deadline: %+v", stopped)
+		}
+		h.process = runtime.GOOS + "::779:9"
+		h.apply("s-4", true, stopped)
+		if call := h.apply("s-4", false, GuardDecision{}); !call.Deny || !strings.Contains(call.Reason, "time limit") {
+			t.Fatalf("a session whose start scan ran past its deadline stays blocked: %+v", call)
 		}
 	})
 }

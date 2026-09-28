@@ -103,6 +103,30 @@ func renderClaudeDropIn(opts Options, policy config.ResolvedConnectorPolicy) ([]
 	return encodeOrdered(doc)
 }
 
+// renderClaudeHigherPrecedence renders DefenseClaw's entries for a source
+// that outranks the managed settings files (HKLM Settings, the managed
+// preferences plist). Claude Code builds older than 2.1.242 read only that
+// source, and every build the version floor is meant to stop is older, so
+// under version_floor: enforce it also carries requiredMinimumVersion at the
+// floor. The managed-settings.d hook drop-in (renderClaudeDropIn) never does:
+// the floor has its own drop-in there.
+func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorPolicy) ([]byte, error) {
+	rendered, err := renderClaudeDropIn(opts, policy)
+	if err != nil || opts.claudeVersionFloorMode() != config.ClaudeVersionFloorEnforce {
+		return rendered, err
+	}
+	floor := ClaudeVersionFloor()
+	if floor == "" {
+		return rendered, nil
+	}
+	doc, err := decodeOrderedObject(rendered)
+	if err != nil {
+		return nil, err
+	}
+	doc.set(claudeVersionFloorKey, floor)
+	return encodeOrdered(doc)
+}
+
 // claudeHandlerIsOwned reports whether a decoded handler is DefenseClaw's.
 func claudeHandlerIsOwned(opts Options, raw any) bool {
 	command := stringField(raw, "command")
@@ -341,7 +365,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 			}
 		default:
 			state.HigherPrecedence = append(state.HigherPrecedence, source.name)
-			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format claude-hklm-json` through it", source.name, claudeMergeMinimumVersion)
+			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format claude-hklm-json` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, claudeMergeMinimumVersion)
 			if policy.HigherPrecedenceSources == config.HigherPrecedenceWarn {
 				state.detail("%s", message)
 				state.HigherPrecedence = state.HigherPrecedence[:len(state.HigherPrecedence)-1]
@@ -476,13 +500,14 @@ func (claudeTarget) Export(opts Options, format string) ([]byte, error) {
 		return exportClaudeVersionFloor(opts)
 	}
 	policy := opts.PolicyFor(claudeConnector)
-	rendered, err := renderClaudeDropIn(opts, policy)
+	if format == "" || format == "json" {
+		return renderClaudeDropIn(opts, policy)
+	}
+	rendered, err := renderClaudeHigherPrecedence(opts, policy)
 	if err != nil {
 		return nil, err
 	}
 	switch format {
-	case "", "json":
-		return rendered, nil
 	case "claude-hklm-json":
 		var compact bytes.Buffer
 		if err := json.Compact(&compact, rendered); err != nil {

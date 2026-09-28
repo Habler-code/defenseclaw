@@ -186,7 +186,13 @@ type State struct {
 	Details          []string `json:"details,omitempty"`
 	Changed          bool     `json:"changed"`
 	Covered          bool     `json:"covered"`
-	LiveVerifiedAt   string   `json:"live_verified_at,omitempty"`
+	// Drift marks DefenseClaw entries that are in place but differ from
+	// what the next publish writes (a policy file mode agents cannot read
+	// through, a Claude Code floor drop-in it must withdraw). A conflict
+	// says what; VerifyAll does not report the connector in place, so the
+	// lifecycle's ensure re-applies.
+	Drift          bool   `json:"drift,omitempty"`
+	LiveVerifiedAt string `json:"live_verified_at,omitempty"`
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
 	// only).
 	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`

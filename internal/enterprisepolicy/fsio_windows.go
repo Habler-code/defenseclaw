@@ -422,6 +422,36 @@ func displaceUntrustedPolicyFiles(opts Options, dir, keep string, state *State) 
 	}
 }
 
+// displaceUntrustedPolicyFile moves aside the regular file at path, in a
+// vendor policy directory under ProgramData that DefenseClaw holds, when an
+// unprivileged principal owns it or may change it: it was planted before
+// DefenseClaw took the directory back, its owner could keep editing it, and
+// the vendor loads it for every user. A file an administrator owns is left
+// for the reader to judge. It reports whether the file was moved.
+func displaceUntrustedPolicyFile(opts Options, path string, state *State) bool {
+	if opts.SkipTrustChecks {
+		return false
+	}
+	dir := filepath.Dir(path)
+	if _, _, ok := programDataRelative(opts, dir); !ok || validateTrustedLeafDir(dir) != nil {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || validateTrustedPolicyFile(opts, path) == nil {
+		return false
+	}
+	note, err := displacePlanted(opts, path)
+	switch {
+	case errors.Is(err, errOwnedByAdministrator):
+		return false
+	case err != nil:
+		state.detail("could not move %s aside: %v", path, err)
+		return false
+	}
+	state.detail("%s", note)
+	return true
+}
+
 // errOwnedByAdministrator marks an object Administrators, LocalSystem or
 // TrustedInstaller owns: an administrator made it, so it is theirs to fix,
 // never DefenseClaw's to remove.
@@ -675,6 +705,14 @@ func openGuardFileFollow(path string) (*os.File, error) {
 // adminOwnedFile is not derived on Windows: every referenced file is bound
 // by content.
 func adminOwnedFile(os.FileInfo) bool { return false }
+
+// publishedFileProblem is "" on Windows: atomicWrite gives a policy file its
+// protected DACL on every write, and mode bits do not apply.
+func publishedFileProblem(Options, string) string { return "" }
+
+// adminOwnedLink is never true on Windows, where no file is bound by kind
+// only (adminOwnedFile).
+func adminOwnedLink(os.FileInfo) bool { return false }
 
 // guardPathCannotExist reports a stat error that means nothing can be at
 // the path: a name no Windows file can have (a command word such as *.tmp
